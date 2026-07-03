@@ -420,13 +420,15 @@ add_library(spect::regularizer ALIAS spect_regularizer)
 # spect_cli: CLI解析库 (ArgumentParser, ConfigParser等)
 # 【T2.1】从SPECT-recon.cpp拆分的CLI解析代码
 # ----------------------------------
-add_library(spect_cli INTERFACE)
-target_include_directories(spect_cli INTERFACE
+add_library(spect_cli STATIC
+  src/cli/ArgumentParser.cpp
+)
+target_include_directories(spect_cli PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(spect_cli INTERFACE spect_core)
+target_link_libraries(spect_cli PUBLIC spect_core)
 # CLI依赖: Filters.h (PSFConf), Regularizers.h (RegConf)
 add_library(spect::cli ALIAS spect_cli)
 
@@ -679,7 +681,12 @@ if(SPECT_BUILD_TESTS)
     tests/test_filters_golden.cpp
     tests/test_regularizers.cpp
     tests/test_golden_recon.cpp
+    tests/common/parser_test_helpers.cpp
     tests/test_interfaces.cpp
+    tests/test_matrix_io.cpp
+    tests/test_compact_symmetry.cpp
+    tests/test_parser.cpp
+    tests/test_multibed_cli.cpp
     tests/test_bed_offsets.cpp
     tests/test_main_auto_mu_map.cpp
     tests/test_main_ctac_ops.cpp

@@ -56,6 +56,7 @@ struct ReconArgs {
     bool configFound = false;     ///< Config file exists
     bool configLoaded = false;    ///< Config file loaded successfully
     std::string algoConfPath;     ///< Algorithm config file path (empty = auto-detect)
+    bool helpRequested = false;    ///< Print usage and exit successfully
     bool dumpConf = false;        ///< Print merged config and exit
 
     // ========== Filtering Options ==========
