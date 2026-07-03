@@ -2,12 +2,13 @@
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
-#include "app/ReconLimits.h"
+#include "core/ReconLimits.h"
 #include "interfaces/ISparseOps.h"
 #include "sparse/SparseOpsBackend.h"
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -208,6 +209,10 @@ void warmCompactChunkResidentDeviceCache(
       if (status == cudaSuccess) {
         registeredChunks.push_back(key);
       } else {
+        std::cerr << "[WARN] cudaHostRegister failed for compact chunk "
+                  << chunk->info.path.string() << ": "
+                  << cudaGetErrorString(status)
+                  << "; continuing with pageable host memory.\n";
         if (valRegistered) {
           cudaHostUnregister(const_cast<float *>(chunk->valuesData()));
         }
@@ -954,10 +959,10 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     double *const *numers, bool reverseChunkOrder,
     CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors) {
-  if (bedCount < 1 || bedCount > spect::app::kMaxBeds) {
+  if (bedCount < 1 || bedCount > spect::core::kMaxBeds) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper supports 1.." +
-        std::to_string(spect::app::kMaxBeds) + " beds.");
+        std::to_string(spect::core::kMaxBeds) + " beds.");
   }
   if (fullProjections == nullptr || smoothedImages == nullptr ||
       numers == nullptr) {

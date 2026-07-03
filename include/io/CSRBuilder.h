@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -51,6 +52,56 @@ inline constexpr CSRValidationLevel kDefaultCSRValidationLevel = CSRValidationLe
 #else
 inline constexpr CSRValidationLevel kDefaultCSRValidationLevel = CSRValidationLevel::Basic;
 #endif
+
+inline uint64_t availablePhysicalMemoryBytes() {
+#ifdef _WIN32
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status))
+        return static_cast<uint64_t>(status.ullAvailPhys);
+    return 0;
+#else
+#if defined(_SC_AVPHYS_PAGES) && defined(_SC_PAGESIZE)
+    const long pages = sysconf(_SC_AVPHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && pageSize > 0)
+        return static_cast<uint64_t>(pages) * static_cast<uint64_t>(pageSize);
+#endif
+    return 0;
+#endif
+}
+
+inline bool shouldRefuseFullCopyCSRLoad(uint64_t fileSizeBytes,
+                                        uint64_t availableMemoryBytes) {
+    return availableMemoryBytes > 0 && fileSizeBytes >= availableMemoryBytes / 2;
+}
+
+inline uint64_t parseCSRByteThreshold(const char *text, uint64_t fallback) {
+    if (text == nullptr || *text == '\0')
+        return fallback;
+    char *end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text)
+        return fallback;
+    uint64_t multiplier = 1;
+    if (*end == 'k' || *end == 'K')
+        multiplier = 1024ull;
+    else if (*end == 'm' || *end == 'M')
+        multiplier = 1024ull * 1024ull;
+    else if (*end == 'g' || *end == 'G')
+        multiplier = 1024ull * 1024ull * 1024ull;
+    return static_cast<uint64_t>(value) * multiplier;
+}
+
+inline uint64_t csrMmapMinBytes() {
+    return parseCSRByteThreshold(std::getenv("SPECT_CSR_MMAP_MIN_BYTES"),
+                                 1ull * 1024ull * 1024ull * 1024ull);
+}
+
+inline bool shouldUseImplicitCSRMap(uint64_t fileSizeBytes,
+                                    uint64_t minBytes = csrMmapMinBytes()) {
+    return fileSizeBytes >= minBytes;
+}
 
 /**
  * @brief 校验 CSR 结构体数据完整性
@@ -159,6 +210,12 @@ inline CSR loadCSRBinary(const std::string &path) {
     f.seekg(0, std::ios::end);
     const uint64_t fileSize = static_cast<uint64_t>(f.tellg());
     f.seekg(0, std::ios::beg);
+    const uint64_t availableMemory = availablePhysicalMemoryBytes();
+    if (shouldRefuseFullCopyCSRLoad(fileSize, availableMemory)) {
+        throw std::runtime_error(
+            "CSR file is too large for full-copy loading: " + path +
+            ". Use -mapCSR on for legacy single-file CSRB inputs.");
+    }
     
     CSRHeader h{};
     f.read(reinterpret_cast<char*>(&h), sizeof(h));

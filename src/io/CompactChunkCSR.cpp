@@ -32,6 +32,8 @@ constexpr uint32_t kChunkCSRMagic = 0x42525343u;
 constexpr uint32_t kChunkCSRVersion = 1u;
 constexpr uint64_t kChunkHeaderBytes = 28ull;
 
+enum class ChunkColIdxValidationMode { Off, Sample, Strict };
+
 template <typename T>
 void readExact(std::istream &in, T *dst, size_t count,
                const std::string &label) {
@@ -86,6 +88,28 @@ uint64_t compactChunkMappedPayloadThresholdBytes() {
 
 bool shouldMapChunkPayload(const CompactChunkCSRInfo &info) {
   return info.fileSizeBytes >= compactChunkMappedPayloadThresholdBytes();
+}
+
+ChunkColIdxValidationMode chunkColIdxValidationMode() {
+  const char *raw = std::getenv("SPECT_CHUNK_VALIDATE");
+  if (raw == nullptr || raw[0] == '\0')
+    return ChunkColIdxValidationMode::Sample;
+  const std::string value = lowerString(raw);
+  if (value == "off" || value == "0" || value == "false")
+    return ChunkColIdxValidationMode::Off;
+  if (value == "strict" || value == "1" || value == "true" ||
+      value == "full")
+    return ChunkColIdxValidationMode::Strict;
+  return ChunkColIdxValidationMode::Sample;
+}
+
+void warnChunkValidationOffOnce() {
+  static bool warned = false;
+  if (!warned) {
+    std::cerr << "[WARN] SPECT_CHUNK_VALIDATE=off disables compact chunk "
+                 "col_idx range validation; user assumes matrix integrity.\n";
+    warned = true;
+  }
 }
 
 class ReadOnlyChunkPayloadMap {
@@ -372,14 +396,37 @@ void loadChunkRowPtr32(const CompactChunkCSRInfo &info, std::istream &in,
 
 void validateChunkColIdxRange(const CompactChunkCSRInfo &info,
                               const uint32_t *colIdx, uint64_t nnz, int cols) {
-  for (uint64_t i = 0; i < nnz; ++i) {
+  const auto mode = chunkColIdxValidationMode();
+  if (mode == ChunkColIdxValidationMode::Off) {
+    warnChunkValidationOffOnce();
+    return;
+  }
+
+  auto validateAt = [&](uint64_t i) {
     if (colIdx[i] >= static_cast<uint32_t>(cols)) {
       std::ostringstream oss;
       oss << "Chunk col_idx out of range in " << info.path.string()
           << " at nnz index " << i << ": " << colIdx[i] << " >= " << cols;
       throw std::runtime_error(oss.str());
     }
+  };
+
+  if (mode == ChunkColIdxValidationMode::Strict || nnz <= 4096) {
+    for (uint64_t i = 0; i < nnz; ++i)
+      validateAt(i);
+    return;
   }
+
+  constexpr uint64_t kSampleHeadCount = 1024;
+  constexpr uint64_t kSampleTargetCount = 100000;
+  for (uint64_t i = 0; i < kSampleHeadCount; ++i)
+    validateAt(i);
+  const uint64_t remaining = nnz - kSampleHeadCount;
+  const uint64_t stride =
+      std::max<uint64_t>(1, remaining / kSampleTargetCount);
+  for (uint64_t i = kSampleHeadCount; i < nnz; i += stride)
+    validateAt(i);
+  validateAt(nnz - 1);
 }
 
 CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,

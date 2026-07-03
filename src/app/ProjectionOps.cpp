@@ -5,6 +5,7 @@
 #include "interfaces/ISparseOps.h"
 
 #include <cmath>
+#include <iostream>
 #include <utility>
 
 namespace spect {
@@ -50,7 +51,12 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
               psfKernels->kz)) {
         if (!(inputHasSignal && isFiniteAllZero(volume)))
           return;
+        std::cerr << "[WARN] CUDA PSF returned finite all-zero output for "
+                     "nonzero input; falling back to CPU separable convolution.\n";
         volume = std::move(original);
+      } else {
+        std::cerr << "[WARN] CUDA PSF unavailable or failed; falling back to "
+                     "CPU separable convolution.\n";
       }
     }
     filters::conv3d_separable_inplace(volume, Nx, Ny, Nz, psfKernels->kx,

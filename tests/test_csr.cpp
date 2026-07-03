@@ -98,6 +98,22 @@ TEST(CSRBinaryLayoutTest, IoCSRHeaderV1Is24Bytes) {
     EXPECT_EQ(sizeof(CSRHeader), 24u);
 }
 
+TEST(CSRBinaryLayoutTest, FullCopyLoadRefusesHalfAvailableMemory) {
+    EXPECT_TRUE(shouldRefuseFullCopyCSRLoad(500, 1000));
+    EXPECT_FALSE(shouldRefuseFullCopyCSRLoad(499, 1000));
+    EXPECT_FALSE(shouldRefuseFullCopyCSRLoad(500, 0));
+}
+
+TEST(CSRBinaryLayoutTest, ImplicitMmapThresholdParsesByteSuffixes) {
+    EXPECT_EQ(parseCSRByteThreshold("2K", 1), 2ull * 1024ull);
+    EXPECT_EQ(parseCSRByteThreshold("3M", 1), 3ull * 1024ull * 1024ull);
+    EXPECT_EQ(parseCSRByteThreshold("4G", 1),
+              4ull * 1024ull * 1024ull * 1024ull);
+    EXPECT_EQ(parseCSRByteThreshold("bad", 7), 7u);
+    EXPECT_TRUE(shouldUseImplicitCSRMap(1024, 1024));
+    EXPECT_FALSE(shouldUseImplicitCSRMap(1023, 1024));
+}
+
 // ============ CSRBinary 保存/加载测试 ============
 
 TEST_F(CSRTest, SaveLoadRoundTrip) {

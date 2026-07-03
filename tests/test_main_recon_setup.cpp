@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "core/BedPathUtils.h"
+
 namespace spect {
 namespace main {
 namespace test {
@@ -51,6 +53,16 @@ TEST(ReconSetupTest, EnsureReconDimsUsesDefaultsWhenMissing) {
   EXPECT_EQ(args.Ny, 200);
   EXPECT_EQ(args.Nz, 200);
   EXPECT_FALSE(warning.empty());
+}
+
+TEST(ReconSetupTest, EnsureReconDimsRejectsMatrixInputWithoutGeometry) {
+  ReconArgs args;
+  args.Nx = 0;
+  args.Ny = 0;
+  args.Nz = 0;
+  args.loadCSRPath = "matrix.csrb";
+
+  EXPECT_THROW((void)ensureReconDims(args), std::runtime_error);
 }
 
 TEST(ReconSetupTest, AdoptReconDimsFromCtacHintWhenNotExplicit) {
@@ -227,6 +239,20 @@ TEST(ReconSetupTest, PrepareBedSetupUsesZeroForNonAdjacentSubsetBeds) {
   EXPECT_EQ(args.Nz, 200);
   ASSERT_EQ(result.warnings.size(), 1u);
   EXPECT_NE(result.warnings[0].find("Non-adjacent beds"), std::string::npos);
+}
+
+TEST(ReconSetupTest, SharedBedPathParserHandlesSeparatorsAndCase) {
+  EXPECT_EQ(spect::core::extractBedNumberFromPath("C:/Scan/BED_12.bin"), 12);
+  EXPECT_EQ(spect::core::extractBedNumberFromPath("case/bed-3.bin"), 3);
+  EXPECT_EQ(spect::core::extractBedNumberFromPath("case/no_bed.bin"), -1);
+
+  std::vector<std::string> paths = {"C:\\scan\\Bed3.bin", "C:\\scan\\Bed1.bin",
+                                    "C:\\scan\\Bed2.bin", "tail.bin"};
+  paths = spect::core::sortPathsByBedOrder(std::move(paths));
+  EXPECT_NE(paths[0].find("Bed1.bin"), std::string::npos);
+  EXPECT_NE(paths[1].find("Bed2.bin"), std::string::npos);
+  EXPECT_NE(paths[2].find("Bed3.bin"), std::string::npos);
+  EXPECT_NE(paths[3].find("tail.bin"), std::string::npos);
 }
 
 } // namespace test

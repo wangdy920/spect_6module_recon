@@ -606,6 +606,9 @@ void ensureProjDomainKernelsLoaded() {
   }
 
   const char *source = R"CU(
+// NVRTC source must be self-contained; host header constants are not visible here.
+static constexpr float kAttenUint16Scale = 65535.0f;
+
 extern "C" __device__ __forceinline__ int mirror_index(int idx, int size) {
   if (size <= 1) {
     return 0;
