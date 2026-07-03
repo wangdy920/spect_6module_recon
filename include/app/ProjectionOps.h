@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ReconConfig.h"
+#include "core/AttenuationConstants.h"
 #include "io/CSRBuilder.h"
 #include <vector>
 

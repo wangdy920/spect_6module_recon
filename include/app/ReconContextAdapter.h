@@ -11,6 +11,7 @@
 #include "app/ReconContext.h"
 #include "app/BedOffsets.h"
 #include "app/ReconConfig.h"  // ReconOpts
+#include "core/AttenuationConstants.h"
 #include "sparse/SparseOpsBackend.h"
 #include <vector>
 
@@ -125,7 +126,7 @@ inline void applyBedAttenFactors(ReconOpts& opts, const ReconContext& ctx,
         }
         
         // Convert to uint16_t format (placeholder - actual CTAC would need full maps)
-        uint16_t attenVal = static_cast<uint16_t>(std::clamp(factor, 0.0, 1.0) * 65535.0);
+        uint16_t attenVal = static_cast<uint16_t>(std::clamp(factor, 0.0, 1.0) * kAttenUint16Scale);
         size_t mapSize = static_cast<size_t>(numAngles) * voxelsPerBed;
         opts.bedAttenFactors[b].resize(mapSize, attenVal);
     }

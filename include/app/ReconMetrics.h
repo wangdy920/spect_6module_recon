@@ -27,7 +27,7 @@ inline double computeForwardProjectionValue(const MatrixType& matrix,
                                             size_t colOffset,
                                             const std::vector<double>& image,
                                             const uint16_t* attPtr) {
-    const double invScale = 1.0 / 65535.0;
+    const double invScale = 1.0 / kAttenUint16Scale;
     double sum = 0.0;
     const size_t r0 = static_cast<size_t>(matrix.row_ptr[static_cast<size_t>(row)]);
     const size_t r1 = static_cast<size_t>(matrix.row_ptr[static_cast<size_t>(row) + 1]);

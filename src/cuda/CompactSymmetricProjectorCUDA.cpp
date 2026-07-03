@@ -2,6 +2,7 @@
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
+#include "app/ReconLimits.h"
 #include "interfaces/ISparseOps.h"
 #include "sparse/SparseOpsBackend.h"
 
@@ -953,9 +954,10 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     double *const *numers, bool reverseChunkOrder,
     CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors) {
-  if (bedCount < 1 || bedCount > 5) {
+  if (bedCount < 1 || bedCount > spect::app::kMaxBeds) {
     throw std::runtime_error(
-        "compact chunk multi-bed CUDA helper supports 1..5 beds.");
+        "compact chunk multi-bed CUDA helper supports 1.." +
+        std::to_string(spect::app::kMaxBeds) + " beds.");
   }
   if (fullProjections == nullptr || smoothedImages == nullptr ||
       numers == nullptr) {

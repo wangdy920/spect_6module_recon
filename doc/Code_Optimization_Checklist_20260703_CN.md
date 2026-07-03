@@ -34,15 +34,15 @@
 | 1.5 | `ArgumentParser` 内直接 `std::exit(0/1)`（`-dumpConf`、部分校验失败），绕过 main 清理与 RAII | `ArgumentParser.h` L445、L1064、L1197、L1416 | **高** | 改为返回错误码/enum，由 `runProgram` 统一 exit |
 | 1.6 | 双轨接口技术债：`IReconstructor`/`ReconstructorFactory`/`IReconRunner` 只有头文件无实现且主路径不用；`ReconContext`+Adapter 已完善但 MainProgram 仍直接用 `ReconArgs`/`ReconOpts`，床位/overlap 逻辑算两遍 | `include/interfaces/IReconstructor.h`、`include/app/ReconRunner.h`、`ReconContext.h` | **高** | 二选一：接入主路径，或标记 deprecated 并从 `SPECT.h` 移出。不要维持两套并行演进 |
 | 1.7 | OSEM/BSREM 之间重复：`isOrderedFullSubset`、`canUseCudaFusedFullSubset*` 两份拷贝；forward AVX2+衰减+多床 offset 逻辑至少 6 处重复 | `src/app/OSEMReconstructor.cpp` L31~93 等、`BSREMReconstructor.cpp` L32~94 等 | **高** | 提取 `app/SubsetUtils.h` 与统一的 `SubsetForwardKernel`/`SubsetBackprojectKernel` |
-| 1.8 | 多床位上限 5 在至少 4 处硬编码（ReconSetup、ArgumentParser、MainProgram、CompactSymmetricProjectorCUDA） | 多处 | 中 | 定义 `constexpr int kMaxBeds = 5` 单点常量 |
+| 1.8 | **已修改（2026-07-03）** | 已完成 | 方案：新增 `include/app/ReconLimits.h` 中 `kMaxBeds=5`；`ArgumentParser`/`ReconSetup`/`MainProgram`/`CompactSymmetricProjectorCUDA` 统一引用 |
 | 1.9 | 硬编码默认值有静默错误风险：`numAngles=72`、`detectorChannels=40`（3 模块时代遗留）、无 hint 时默认 200³ 体素 | `include/cli/ReconArgs.h` L36~38、`src/main/ReconSetup.cpp` L174~184 | 中 | 6 模块数据一律以 metadata/BIN header 为准；缺失时 fail-fast 而非静默回退 |
 | 1.10 | 床位路径解析（`sortPathsByBedOrder`/`extractBedNumberFromPath`）在 CLI 与 ReconSetup 两处重复 | `ArgumentParser.h` L332~365、`ReconSetup.cpp` L50~95 | 中 | 统一到 `app/BedPathUtils` |
 | 1.11 | CUDA chunk stage timing 日志块两处近乎相同（各约 80 行） | `MainProgram.cpp` L2173~2251、L2636~2711 | 中 | 提取 `logCudaChunkTimingSnapshot()` |
 | 1.12 | 全局状态：`g_osemStageTiming`/`g_bsremStageTiming` 非线程安全；`gVerbosity` 全局变量 | `OSEMReconstructor.cpp` L29、`BSREMReconstructor.cpp` L30、`RunLogger.cpp` | 中/低 | timing 经 `StepParams` 传出；verbosity 注入上下文 |
 | 1.13 | 裸指针生命周期靠约定：`ReconOpts` 的 `mask/b_proj/w_proj`；`args.reg.anatomical_image = &sharedAnatomical` 有悬挂风险 | `include/app/ReconConfig.h`、`MainProgram.cpp` L1287 | 中 | `std::span`/`shared_ptr` + 所有权文档 |
-| 1.14 | 死兼容层：`LegacyCompat.h`（内含与 `cli/` 重复的旧 `ConfigParser`/`ReconArgs` 定义，有 ODR 隐患）与 `ReconCompat.h` 均无 src 引用；`RegularizerCompat.h` 仍被生产代码依赖但标注"将移除" | `include/compat/LegacyCompat.h`、`include/app/ReconCompat.h`、`include/regularizer/RegularizerCompat.h` | 中 | 前两者直接删除；`RegularizerCompat` 制定迁移里程碑（MainProgram 改用 `IRegularizer` 工厂） |
+| 1.14 | **已修改（2026-07-03）** | 已完成（部分） | 方案：删除无引用的 `LegacyCompat.h`、`ReconCompat.h`；`RegularizerCompat` 迁移仍待后续 |
 | 1.15 | 错误处理不一致：校验失败混用 `return false+cerr`、`throw`、`exit`；CUDA/compact 失败有时 throw 有时 warn 后继续 | `ArgumentParser.h` vs `ReconSetup.cpp` vs `MainProgram.cpp` | 中 | 定义退出码表（0/1/2）与"可 warn 降级 / 必须 abort"边界清单 |
-| 1.16 | `65535.0` 衰减 uint16 缩放因子散落 10+ 处 | OSEM/BSREM/ProjectionOps/ISparseOps/SparseOpsCUDA | 低 | `constexpr double kAttenUint16Scale = 65535.0` |
+| 1.16 | **已修改（2026-07-03）** | 已完成 | 方案：`include/core/AttenuationConstants.h` 定义 `kAttenUint16Scale`/`kAttenUint16InvScale`；生产路径 OSEM/BSREM/CTAC/ProjectionOps/ISparseOps/SparseOpsCUDA 等已统一 |
 
 ## 2. 系统矩阵 IO 与格式（`src/io/`、`include/io/`、`include/core/`、`tools/`）
 
@@ -51,7 +51,7 @@
 | 2.1 | **已修改（2026-07-03）** | 已完成 | 方案：`core/CSRHeader.h`/`CSRView.h` 标注为 legacy double 草案（非磁盘 CSRB v1）；`io::CSRHeader` 增加 24B `static_assert`；测试区分 LegacyDouble 与 IoCSRBv1 |
 | 2.2 | **已修改（2026-07-03）** | 已完成 | 方案：定义 `kCompactMetadataLegacyBytes=76`/`ExtendedV1=88`/`ExtendedV2=96`；按文件大小强制读取扩展字段，截断或尾部多余字节抛错 |
 | 2.3 | **已修改（2026-07-03）** | 已完成 | 方案：以代码为准修正格式 README 与 `doc/SystemMatrix_6module_compact_vs_CSRB_CN.md`——转换工具只读 `chunk_*.bin`、不展开对称 |
-| 2.4 | 单 chunk ~5GB 默认走 `loadChunkDataCopied` 全量读入（mmap 阈值默认 `uint64_t::max`，即 opt-in 关闭——这是 2026-06-02 benchmark 的有意决策，但 README 未记录该环境变量）；mmap 失败静默 `catch(...)` 回退无日志 | `src/io/CompactChunkCSR.cpp` L79~88、L446~454 | 中 | 文档化 `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 与默认拷贝策略的依据；回退时 logWarn |
+| 2.4 | **已修改（2026-07-03）** | 已完成 | 方案：mmap 回退时 stderr `[WARN]` 含路径与原因；`README.md` 增加 `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 等环境变量表 |
 | 2.5 | 260525 单文件路径：3.7GB `matrix_6module.csrb` 在不加 `-mapCSR` 时默认全量 vector 加载 | `include/io/CSRBuilder.h` L177~184 | **高** | compact-symmetric + 大文件默认启用 `CSRMap`，或强制要求 `-mapCSR` |
 | 2.6 | **已修改（2026-07-03）** | 已完成 | 方案：`buildCSR_from_mat` 与 stream 版均改 uint64 累加，写回 uint32 前校验 `nnz <= UINT32_MAX` 超限抛错（转换工具侧未动，若按 §2a 弃用则无需处理） |
 | 2.7 | **已修改（2026-07-03）** | 已完成 | 方案：两遍 `Mat_VarReadDataLinear` 均检查返回值，失败时释放 matvar/mat 句柄并抛错（消息含变量名与文件路径） |
@@ -79,7 +79,7 @@
 | 3.4 | `VolumeOpsCUDA` 所有 kernel 用默认流、每 pass 后 `cuCtxSynchronize`；`ButterworthCUDA` cuFFT 未绑定 stream | `src/cuda/VolumeOpsCUDA.cpp` L754 等、`ButterworthCUDA.cpp` L287~381 | 中 | 专用 stream + 仅最终 D2H 前同步；`cufftSetStream` |
 | 3.5 | NVRTC 运行时编译：三个模块各自一份 create/compile/log/load 样板；部署需带 nvrtc DLL；首次调用有编译延迟 | `SparseOpsCUDA.cpp`、`VolumeOpsCUDA.cpp`、`ButterworthCUDA.cpp` | 中 | 共用 `CudaNvrtcLoader`；生产构建改 `nvcc -fatbin` 预编译，NVRTC 仅作未知 arch fallback |
 | 3.6 | 从未调用 `cudaSetDevice`，多卡环境永远用 device 0（`CudaConfig.h` 的 `setDevice` 是死代码） | 全 CUDA 模块 | 中 | 启动读 `SPECT_CUDA_DEVICE` 环境变量/CLI |
-| 3.7 | 死 scaffold：`SparseOpsGPU.h`/`CudaProjector.h` 声明的 `DeviceCSR`/`SparseOpsGPU` 无实现、CMake 未编译、且 `name() override` 对应的虚函数不存在 | `include/cuda/SparseOpsGPU.h`、`CudaProjector.h` | 中 | 删除（生产路径是 `getSparseOpsCUDA()`） |
+| 3.7 | **已修改（2026-07-03）** | 已完成 | 方案：删除无实现 scaffold 头 `SparseOpsGPU.h`、`CudaProjector.h` |
 | 3.8 | 错误处理正面：`CUDA_CHECK`/`SPECT_CUSPARSE_CHECK` 等统一抛异常。但析构中 `cudaFree` 不清错、`cudaHostRegister` 失败静默、GPU PSF 路径 `catch(...)` 无信息降级 CPU | `SparseOpsCUDA.cpp` L1254+、`CompactSymmetricProjectorCUDA.cpp` L159~197、L2905~2912 | 中 | 析构 noexcept+清错；降级路径必须记录原因（PSF 静默降级曾与"全零 numerator"事故同域，见 `doc/Full_Project_Physics_Model_Fix_Log_20260606.md` 节点 5） |
 | 3.9 | `CSRView`(double) 路径 `convertCSR` 全量拷到 host 再上传（双倍内存）；`io::CSRView` 已有直传。`uploadDouble` 每次同步转换 | `SparseOpsCUDA.cpp` L1818~1841、L2949~2954 | 中 | 统一走 io::CSRView 直传口径；基础路径补 pinned+async |
 | 3.10 | 硬编码资源参数：blockSize=256、prepared host cache 24GiB 上限（注释假设 64GB 主机）、device cache reserve 6GiB | `SparseOpsCUDA.cpp` L148~164、L3586 等 | 低 | 集中 `CudaLaunchConfig`；预算按 `cudaMemGetInfo`/物理内存比例；把 `SPECT_CUDA_*`、`SPECT_COMPACT_*` 全部环境变量写进 README（目前仅格式 README 记录了 2 个） |
@@ -90,7 +90,7 @@
 | # | 问题 | 严重度 | 建议 |
 |---|------|--------|------|
 | 4.1 | **已修改（2026-07-03）** | 已完成 | 方案：新增可选 gtest（`test_data/6module/260601` 存在时运行）：88B metadata 解析、103680 行公式、Sym90Z 829440 full-row 双射、chunk 目录首块读入 |
-| 4.2 | 无 BIN 投影 + chunk 矩阵的小规模端到端 golden 测试（现有 golden 依赖标准 CSRB） | **高** | 用 toy 90Z metadata + 合成 chunk 做 1-iter MLEM golden，锁定 compact 主路径 |
+| 4.2 | **已修改（2026-07-03）** | 已完成 | 方案：`CompactSymmetryToyMlemOneIterationMatchesExplicitFull`：toy Sym45Z compact vs explicit-full 1-iter MLEM 更新一致 |
 | 4.3 | `tools/convert_6module_sysmat_to_csrb.cpp` 无 gtest 回归 | 中 | 若按 2a 弃用则不补；保留则加最小 2 行 chunk 转换回归 |
 | 4.4 | `test_interfaces.cpp` 84KB 巨型测试文件，IO/parser/compact/multi-bed 混在一起 | 中 | 按域拆分 `test_compact_symmetry.cpp`、`test_parser.cpp` 等 |
 | 4.5 | `test_cuda_scaffold.cpp` 的 ChunkWarmup 用合成小矩阵，无真实几何 CompactChunk 覆盖 | 中 | 与 4.1 合并处理 |
@@ -102,10 +102,35 @@
 | 5.1 | 三种 chunk 格式并存且互不兼容：v2 输出 `chunk_*.bin`（row-wise）、v4 输出 `chunk_*.csrb`、独立 `spect_recon_mlem.cu` 只读 `.bin`、主线只读 `.csrb`。v4 矩阵无法直接喂给独立 MLEM 参考实现 | **高** | 文档化格式矩阵；canonical 定为 v4 `.csrb` + 主线 `-chunkCSRDir`；v2 与独立 MLEM 标注 legacy/reference-only |
 | 5.2 | **已修改（2026-07-03）** | 已完成 | 方案：v4 生成端 `coll_modules` 默认值 1→6，与 v2/硬件一致；启动打印几何/旋转摘要（voxel/pixel/det_y/rotation_sign/sym）；`coll_modules != 6` 时输出显式 WARNING，杜绝静默生成单模块矩阵 |
 | 5.3 | v2/v4 约 55~65% fork 重复：针孔 CAD 坐标（4 针孔×4 层，约 130 行）两份 100% 相同；准直器构建/射线追踪 kernel 大量拷贝。物理常数（`mu_collimator=3.202`、`mu_detector=0.1368`）、准直器盒尺寸、晶体 `pixel_size=1.55`/`gap_size=0.16` 均硬编码在 `main()` | 中 | 若 v4 已验收为唯一生成端：v2 归档删除；几何参数外置为配置文件（与重建端 metadata 同源），CAD 坐标提为共享头/数据文件 |
-| 5.4 | `spect_recon_mlem.cu`（1607 行）与主线功能重复约 70%，逻辑已迁入 `CompactSymmetricProjectorCUDA.cpp`，但作为历史对齐参考仍有价值 | 中 | 标注 deprecated/reference-only，不再并行维护；README 说明其唯一用途是 legacy 数值对齐 |
+| 5.4 | **已修改（2026-07-03）** | 已完成 | 方案：`6module_bak_src/README.md` 标注 `spect_recon_mlem.cu` 为 deprecated/reference-only |
+| 5.7 | **已修改（2026-07-03）** | 已完成 | 方案：同上 README 含 v4 nvcc 编译示例与 v2/v4 参数说明 |
 | 5.5 | 输出数据文件混在源码目录：`recon_iter050.img/.raw/.hdr`、`sensitivity.raw`（约 11MB，是 2026-05-23 legacy 对齐的参考数据） | 低 | 移到 `test_data/share/` 或 `test_data/legacy_ref/`（注意 `test_data/share/` 已有一份同名参考，先核对是否重复） |
 | 5.6 | `mat_convert_bin.m` 硬编码输入文件名，换数据集要改源码 | 低 | 函数化 + 参数 |
-| 5.7 | `6module_bak_src` 不在 CMake 内，编译方式无记录 | 中 | 加可选 CMake target 或在 README 写明 nvcc 编译命令与 v2/v4 参数示例 |
+
+## Loop 执行状态（2026-07-03，Goal 模式）
+
+**模式**：Goal — 非物理模型清单项完成后停止 loop（不启用 30min 周期唤醒）。
+
+**已完成轮次**：
+
+1. §0 工程基线（git / ignore / README）
+2. §1 批 IO/格式：2.1–2.3、2.12、4.1
+3. §2 批：`kMaxBeds`、`kAttenUint16Scale`、mmap 回退日志、4.2 MLEM golden、删除死 scaffold/compat、6module README
+
+**回归**：每轮 `spect_tests` 全量通过。
+
+**Loop 已停止**：剩余非物理项均为**多周级重构或需单独立项**，不适合自动 loop 持续推进：
+
+- §1.1–1.7 主程序/CUDA 架构拆分
+- §2.5/2.9 大文件 mmap 策略、nnz 校验抽样
+- §3.1–3.6/3.8–3.11 CUDA 性能与拆分
+- §4.3–4.5 测试文件拆分
+- §5.1/5.3/5.5/5.6 生成端归档与数据搬迁
+- §7.1 能力矩阵、§7.5 CMake 拆分
+
+**排除（物理模型，本 loop 未触碰）**：§6 全部、§B 物理验证、性能类 CUDA 改动需 share 50-iter 数值签收项。
+
+---
 
 ## 6. 物理模型未完成项（承接 `doc/Full_Project_Physics_Model_Review_20260606.md`，节点 1~9 已修复）
 
@@ -123,7 +148,7 @@
 | # | 问题 | 严重度 | 建议 |
 |---|------|--------|------|
 | 7.1 | 缺一份"当前能力矩阵"：standard vs compact 两条路径对 MLEM/OSEM/BSREM/ADMM、subsets、PSF、CTAC、bProj、multi-bed、CPU/CUDA 的支持情况散落在 5+ 份文档和 CLI 校验代码中，且部分文档（CompactSymmetricBackend_Design v4 的 Phase 1 范围）已过期 | **高** | 新建 `doc/Capability_Matrix_CN.md` 单点维护，按"公式已实现 / 物理已验证 / 真实矩阵 smoke 已通过"三列区分 |
-| 7.2 | 运行时环境变量（`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES`、`SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES`、`SPECT_CUDA_SPMV_ALG`、`SPECT_CUDA_DEVICE` 若实现等）没有统一清单 | 中 | README 增加环境变量表 |
+| 7.2 | **已修改（2026-07-03）** | 已完成（核心项） | 方案：`README.md` 增加 compact/CUDA 环境变量表；完整清单仍可在 `doc/Capability_Matrix_CN.md`（§7.1）中扩展 |
 | 7.3 | **已修改（2026-07-03）** | 已完成 | 方案：`doc/MultiBed_Improvements_Summary.md` CTAC 行改为"一阶平行射线 line-integral 已实现（`-ctacModel`/`-ctacRotSign`）"，注明针孔汇聚射线未建模、per-voxel 旧近似仅供对比 |
 | 7.4 | **已修改（2026-07-03）** | 已完成 | 方案：性能示例改为精确路径 `-chunkCSRDir test_data\6module\260601` |
 | 7.5 | `CMakeLists.txt` 762 行单体（无硬编码绝对路径，依赖 vcpkg/find_package，整体健康） | 低 | 可拆 `cmake/*.cmake`，优先级低 |

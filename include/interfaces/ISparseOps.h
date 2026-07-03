@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "../core/AttenuationConstants.h"
 #include "../core/CSRView.h"
 #include "../core/Types.h"
 #include "../io/CSRTypes.h"
@@ -334,7 +335,7 @@ private:
         const size_t raysPerAngle =
             (ctx.numAngles > 0) ? (static_cast<size_t>(baseRows) / ctx.numAngles)
                                 : 0;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         const int bedCount = std::max(1, ctx.bedCount);
         const bool hasOffsets =
             ctx.bedOffsetVoxels && !ctx.bedOffsetVoxels->empty();
@@ -458,7 +459,7 @@ private:
         const size_t raysPerAngle =
             (ctx.numAngles > 0) ? (static_cast<size_t>(baseRows) / ctx.numAngles)
                                 : 0;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         const int bedCount = std::max(1, ctx.bedCount);
         const bool hasOffsets =
             ctx.bedOffsetVoxels && !ctx.bedOffsetVoxels->empty();
@@ -628,7 +629,7 @@ private:
         const size_t Nvox = static_cast<size_t>(A.cols);
         const size_t raysPerAngle =
             (numAngles > 0) ? (static_cast<size_t>(baseRows) / numAngles) : 0;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
 
         std::memset(norm, 0, Nvox * sizeof(double));
 
@@ -753,7 +754,7 @@ private:
         const size_t raysPerAngle =
             (ctx.numAngles > 0) ? (static_cast<size_t>(baseRows) / ctx.numAngles)
                                 : 0;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         const int bedCount = std::max(1, ctx.bedCount);
         const bool hasOffsets =
             ctx.bedOffsetVoxels && !ctx.bedOffsetVoxels->empty();

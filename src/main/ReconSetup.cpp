@@ -1,5 +1,6 @@
 #include "main/ReconSetup.h"
 
+#include "app/ReconLimits.h"
 #include "io/VolumeLoader.h"
 
 #include <algorithm>
@@ -79,13 +80,14 @@ int extractBedNumberFromPath(const std::string &path) {
 std::vector<int> inferBedNumbers(const std::vector<std::string> &paths) {
   std::vector<int> bedNumbers;
   bedNumbers.reserve(paths.size());
-  std::vector<bool> seen(6, false);
+  std::vector<bool> seen(static_cast<size_t>(spect::app::kMaxBeds) + 1u, false);
   for (size_t idx = 0; idx < paths.size(); ++idx) {
     int bed = extractBedNumberFromPath(paths[idx]);
     if (bed < 0)
       bed = static_cast<int>(idx) + 1;
-    if (bed < 1 || bed > 5)
-      throw std::runtime_error("Bed number must be in fixed range Bed1..Bed5.");
+    if (bed < 1 || bed > spect::app::kMaxBeds)
+      throw std::runtime_error("Bed number must be in fixed range Bed1..Bed" +
+                               std::to_string(spect::app::kMaxBeds) + ".");
     if (seen[static_cast<size_t>(bed)])
       throw std::runtime_error("Duplicate bed number in -dfList.");
     seen[static_cast<size_t>(bed)] = true;
@@ -96,7 +98,7 @@ std::vector<int> inferBedNumbers(const std::vector<std::string> &paths) {
 
 std::vector<int> normalizeFixedBedOverlapTable(
     const std::vector<int> &input, std::vector<std::string> &warnings) {
-  std::vector<int> fixedTable(5, 0);
+  std::vector<int> fixedTable(static_cast<size_t>(spect::app::kMaxBeds), 0);
   if (input.empty())
     return fixedTable;
   if (input.size() == 1) {
@@ -104,7 +106,9 @@ std::vector<int> normalizeFixedBedOverlapTable(
     return fixedTable;
   }
   if (input.size() > fixedTable.size())
-    throw std::runtime_error("-bedOverlap supports at most 5 fixed bed slots.");
+    throw std::runtime_error("-bedOverlap supports at most " +
+                             std::to_string(spect::app::kMaxBeds) +
+                             " fixed bed slots.");
   std::copy(input.begin(), input.end(), fixedTable.begin());
   if (input.size() < fixedTable.size()) {
     warnings.emplace_back(
@@ -202,8 +206,9 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   result.baseNz = args.Nz;
   result.projectionPaths = args.projPaths.empty() ? std::vector<std::string>{args.projPath} : args.projPaths;
   result.bedCount = std::max(1, static_cast<int>(result.projectionPaths.size()));
-  if (result.bedCount > 5)
-    throw std::runtime_error("-dfList supports at most 5 beds.");
+  if (result.bedCount > spect::app::kMaxBeds)
+    throw std::runtime_error("-dfList supports at most " +
+                             std::to_string(spect::app::kMaxBeds) + " beds.");
   args.bedCount = result.bedCount;
 
   const int joints = std::max(0, result.bedCount - 1);

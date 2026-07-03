@@ -5,6 +5,7 @@
 #include "ConfigParser.h"
 #include "ReconArgs.h"
 #include "StringUtils.h"
+#include "app/ReconLimits.h"
 
 #include <algorithm>
 #include <array>
@@ -1574,16 +1575,19 @@ inline bool ArgumentParser::validateArgs(const ReconArgs& args) {
         std::cerr << "Error: Projection data path (-df) is required.\n";
         return false;
     }
-    if (args.projPaths.size() > 5) {
-        std::cerr << "Error: -dfList supports at most 5 beds.\n";
+    if (args.projPaths.size() > static_cast<size_t>(spect::app::kMaxBeds)) {
+        std::cerr << "Error: -dfList supports at most "
+                  << spect::app::kMaxBeds << " beds.\n";
         return false;
     }
-    if (args.bProjPaths.size() > 5) {
-        std::cerr << "Error: -bProjList supports at most 5 beds.\n";
+    if (args.bProjPaths.size() > static_cast<size_t>(spect::app::kMaxBeds)) {
+        std::cerr << "Error: -bProjList supports at most "
+                  << spect::app::kMaxBeds << " beds.\n";
         return false;
     }
-    if (args.bedOverlaps.size() > 5) {
-        std::cerr << "Error: -bedOverlap supports at most 5 fixed bed slots.\n";
+    if (args.bedOverlaps.size() > static_cast<size_t>(spect::app::kMaxBeds)) {
+        std::cerr << "Error: -bedOverlap supports at most "
+                  << spect::app::kMaxBeds << " fixed bed slots.\n";
         return false;
     }
 
@@ -1901,7 +1905,8 @@ inline void ArgumentParser::printUsage() {
 
     std::cout << "=== Data I/O ===\n";
     std::cout << "  -df, -i <path>          Projection MAT or BIN file\n";
-    std::cout << "  -dfList <p1,p2,...>      Multi-bed projection MAT/BIN list, sorted by BedN when present (max 5 beds)\n";
+    std::cout << "  -dfList <p1,p2,...>      Multi-bed projection MAT/BIN list, sorted by BedN when present (max "
+              << spect::app::kMaxBeds << " beds)\n";
     std::cout << "  -loadCSR <path>          Pre-computed CSR binary\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb\n";
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";

@@ -136,7 +136,7 @@ void OSEM_step(const CSR &A, const std::vector<int> &subset_rows,
     const int row = (opts.bedCount > 1) ? (global_row % baseRows) : global_row;
 
     const uint16_t *attPtr = nullptr;
-    const double invScale = 1.0 / 65535.0;
+    const double invScale = 1.0 / kAttenUint16Scale;
     if (!opts.bedAttenFactors.empty()) {
       int angle = 0;
       if (raysPerAngle > 0)
@@ -190,7 +190,7 @@ void OSEM_step(const CSR &A, const std::vector<int> &subset_rows,
   }
 
   std::vector<double> numer(static_cast<size_t>(N), 0.0);
-  const double invScale = 1.0 / 65535.0;
+  const double invScale = 1.0 / kAttenUint16Scale;
   if (!should_use_threadlocal_accum(NvoxLocal, threads)) {
 #pragma omp parallel for num_threads(threads) schedule(dynamic)
     for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(subset_rows.size()); ++idx) {
@@ -410,7 +410,7 @@ void OSEM_step(const io::CSRView &A, const std::vector<int> &subset_rows,
         const int row = (opts.bedCount > 1) ? (global_row % baseRows) : global_row;
 
         const uint16_t *attPtr = nullptr;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         if (!opts.bedAttenFactors.empty()) {
           int angle = 0;
           if (raysPerAngle > 0)
@@ -467,7 +467,7 @@ void OSEM_step(const io::CSRView &A, const std::vector<int> &subset_rows,
     g_osemStageTiming.forwardSeconds +=
         std::chrono::duration<double>(StageClock::now() - stageStart).count();
 
-    const double invScale = 1.0 / 65535.0;
+    const double invScale = 1.0 / kAttenUint16Scale;
     stageStart = StageClock::now();
     if (opts.sparseOps) {
       std::vector<double> ratio(subset_rows.size(), 0.0);

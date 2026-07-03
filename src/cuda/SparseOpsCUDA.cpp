@@ -1,4 +1,5 @@
 #include "sparse/SparseOpsBackend.h"
+#include "core/AttenuationConstants.h"
 #include "cuda/ProjDomainChunked.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
@@ -832,7 +833,7 @@ extern "C" __global__ void compact_bake_atten_values(
   const unsigned long long nvox = plane * static_cast<unsigned long long>(nz);
   const unsigned long long attBase =
       static_cast<unsigned long long>(valid ? fullAngle : 0) * nvox;
-  const float invScale = 1.0f / 65535.0f;
+  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
 
   for (int t = start + static_cast<int>(threadIdx.x); t < end;
        t += static_cast<int>(blockDim.x)) {
@@ -2207,7 +2208,7 @@ inline void buildAttenuatedContiguousSubsetCSR(
   const size_t rows = static_cast<size_t>(rowEnd - rowBegin);
   const size_t raysPerAngle =
       static_cast<size_t>(matrix.rows) / static_cast<size_t>(numAngles);
-  const float invScale = 1.0f / 65535.0f;
+  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
 
   for (size_t localRow = 0; localRow < rows; ++localRow) {
     int angle = 0;
@@ -2252,7 +2253,7 @@ inline void buildAttenuatedContiguousSubsetCSR(
   const size_t rows = static_cast<size_t>(rowEnd - rowBegin);
   const size_t raysPerAngle =
       static_cast<size_t>(matrix.rows) / static_cast<size_t>(numAngles);
-  const float invScale = 1.0f / 65535.0f;
+  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
 
   for (size_t localRow = 0; localRow < rows; ++localRow) {
     int angle = 0;
@@ -2605,7 +2606,7 @@ inline void buildAttenuatedCSR(const io::CSRView &matrix,
 
   const size_t raysPerAngle = static_cast<size_t>(matrix.rows) /
                               static_cast<size_t>(numAngles);
-  const float invScale = 1.0f / 65535.0f;
+  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
   const int parallelThreads =
       getHostParallelThreads(threads, static_cast<uint64_t>(matrix.rows));
 #pragma omp parallel for schedule(static) if(parallelThreads > 1) num_threads(parallelThreads)

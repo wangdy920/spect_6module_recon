@@ -1,5 +1,7 @@
 #include "main/CTACOps.h"
 
+#include "core/AttenuationConstants.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -11,7 +13,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 
 inline uint16_t quantiseFactor(double factor) {
-  const double scaled = std::clamp(factor, 0.0, 1.0) * 65535.0;
+  const double scaled = std::clamp(factor, 0.0, 1.0) * kAttenUint16Scale;
   return static_cast<uint16_t>(std::llround(scaled));
 }
 
@@ -60,7 +62,7 @@ std::vector<uint16_t> computeAttenFactorsPerVoxel(
   validateVolume(muMap, nx, ny, nz, numAngles, "computeAttenFactorsPerVoxel");
 
   const size_t voxels = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
-  std::vector<uint16_t> factors(static_cast<size_t>(numAngles) * voxels, static_cast<uint16_t>(65535));
+  std::vector<uint16_t> factors(static_cast<size_t>(numAngles) * voxels, static_cast<uint16_t>(kAttenUint16Scale));
 #pragma omp parallel for schedule(static) num_threads(threads > 0 ? threads : 1)
   for (ptrdiff_t angle = 0; angle < numAngles; ++angle) {
     for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(voxels); ++idx) {
@@ -84,7 +86,7 @@ std::vector<uint16_t> computeAttenFactorsLineIntegral(
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
   const size_t voxels = plane * static_cast<size_t>(nz);
   std::vector<uint16_t> factors(static_cast<size_t>(numAngles) * voxels,
-                                static_cast<uint16_t>(65535));
+                                static_cast<uint16_t>(kAttenUint16Scale));
 
   // Midpoint-rule ray marching with a half-voxel step. The integral starts at
   // the voxel centre, so roughly half of the emitting voxel's own attenuation
@@ -159,7 +161,7 @@ void applyCTACToCSR(spect::io::CSR &csr, const std::vector<double> &muMap,
       model, muMap, nx, ny, nz, dx, dy, dz, numAngles, rotationSign, threads);
   const size_t voxels = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
   const size_t raysPerAngle = static_cast<size_t>(csr.rows) / static_cast<size_t>(numAngles);
-  const double invScale = 1.0 / 65535.0;
+  const double invScale = kAttenUint16InvScale;
 
 #pragma omp parallel for schedule(static) num_threads(threads > 0 ? threads : 1)
   for (ptrdiff_t row = 0; row < csr.rows; ++row) {
@@ -185,7 +187,7 @@ void applyChangsAC(std::vector<double> &image, const std::vector<double> &muMap,
   for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(voxels); ++idx) {
     double avg = 0.0;
     for (int angle = 0; angle < numAngles; ++angle)
-      avg += static_cast<double>(factors[static_cast<size_t>(angle) * voxels + static_cast<size_t>(idx)]) / 65535.0;
+      avg += static_cast<double>(factors[static_cast<size_t>(angle) * voxels + static_cast<size_t>(idx)]) * kAttenUint16InvScale;
     avg /= static_cast<double>(numAngles);
     if (avg > 0.0)
       image[static_cast<size_t>(idx)] /= avg;

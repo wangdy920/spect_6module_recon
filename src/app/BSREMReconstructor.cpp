@@ -210,7 +210,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
                 : static_cast<size_t>(bed) * static_cast<size_t>(A.cols);
 
         const uint16_t *attPtr = nullptr;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         if (!opts.bedAttenFactors.empty()) {
           int angle = 0;
           if (raysPerAngle > 0)
@@ -275,7 +275,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
               : static_cast<size_t>(bed) * static_cast<size_t>(A.cols);
 
       const uint16_t *attPtr = nullptr;
-      const double invScale = 1.0 / 65535.0;
+      const double invScale = 1.0 / kAttenUint16Scale;
       if (!opts.bedAttenFactors.empty()) {
         int angle = 0;
         if (raysPerAngle > 0)
@@ -366,7 +366,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
                 : static_cast<size_t>(bed) * static_cast<size_t>(A.cols);
 
         const uint16_t *attPtr = nullptr;
-        const double invScale = 1.0 / 65535.0;
+        const double invScale = 1.0 / kAttenUint16Scale;
         if (!opts.bedAttenFactors.empty()) {
           int angle = 0;
           if (raysPerAngle > 0)
@@ -435,7 +435,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
               continue;
 
             const uint16_t *attPtr = nullptr;
-            const double invScale = 1.0 / 65535.0;
+            const double invScale = 1.0 / kAttenUint16Scale;
             if (!opts.bedAttenFactors.empty()) {
               int angle = 0;
               if (raysPerAngle > 0)
@@ -477,7 +477,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
                                                               : static_cast<size_t>(bed) * static_cast<size_t>(A.cols);
 
       const uint16_t *attPtr = nullptr;
-      const double invScale = 1.0 / 65535.0;
+      const double invScale = 1.0 / kAttenUint16Scale;
       if (!opts.bedAttenFactors.empty()) {
         int angle = 0;
         if (raysPerAngle > 0)
@@ -547,7 +547,7 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
             continue;
 
           const uint16_t *attPtr = nullptr;
-          const double invScale = 1.0 / 65535.0;
+          const double invScale = 1.0 / kAttenUint16Scale;
           if (!opts.bedAttenFactors.empty()) {
             int angle = 0;
             if (raysPerAngle > 0)

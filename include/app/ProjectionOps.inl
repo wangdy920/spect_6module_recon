@@ -21,7 +21,7 @@ std::vector<double> computeNormAT_Atten(
   const size_t Nvox = static_cast<size_t>(A.cols);
   std::vector<double> denom(Nvox, 0.0);
   const size_t raysPerAngle = (numAngles > 0) ? (A.rows / numAngles) : 0;
-  const double invScale = 1.0 / 65535.0;
+  const double invScale = 1.0 / kAttenUint16Scale;
 
   if (!should_use_threadlocal_accum(Nvox, threads)) {
 #pragma omp parallel for num_threads(threads) schedule(dynamic)
@@ -224,7 +224,7 @@ std::vector<double> computeSubsetSensitivity(
 
       // Attenuation factors pointer
       const uint16_t* attPtr = nullptr;
-      const double invScale = 1.0 / 65535.0;
+      const double invScale = 1.0 / kAttenUint16Scale;
       if (!opts.bedAttenFactors.empty()) {
         int angle = 0;
         if (raysPerAngle > 0)
@@ -289,7 +289,7 @@ std::vector<double> computeSubsetSensitivity(
       double* local = tls.data() + tid * NvoxLocal;
 
       const uint16_t* attPtr = nullptr;
-      const double invScale = 1.0 / 65535.0;
+      const double invScale = 1.0 / kAttenUint16Scale;
 
 #pragma omp for schedule(dynamic)
       for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(bed_indices[bed].size()); ++i) {

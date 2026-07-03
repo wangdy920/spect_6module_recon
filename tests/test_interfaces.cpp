@@ -1773,6 +1773,37 @@ TEST(IOTest, CompactSymmetryToyNumeratorDenominatorMatchExplicitFull) {
     expectVectorsNear(compactNumer, fullNumer, 1e-12);
 }
 
+TEST(IOTest, CompactSymmetryToyMlemOneIterationMatchesExplicitFull) {
+    const auto meta = makeToySym45ZMeta();
+    const auto compact = makeToyCompactCSR();
+    const auto full = expandCompactToyToFullDense(meta, compact);
+    const std::vector<double> imageInit = {1.0, 1.3, 1.7, 2.1,
+                                             0.8, 1.2, 1.6, 2.0};
+    std::vector<double> projection(static_cast<size_t>(meta.fullRows()), 0.0);
+    for (size_t i = 0; i < projection.size(); ++i) {
+        projection[i] = 2.0 + 0.05 * static_cast<double>((i * 11u + 3u) % 17u);
+    }
+
+    const auto fullDenom = denseDenom(full, static_cast<int>(meta.fullRows()),
+                                      meta.totalVoxels);
+    const auto compactDenom = compactToyDenom(meta, compact);
+    const auto fullNumer = denseNumerator(
+        full, projection, imageInit, static_cast<int>(meta.fullRows()),
+        meta.totalVoxels);
+    const auto compactNumer =
+        compactToyNumerator(meta, compact, projection, imageInit);
+
+    std::vector<double> imageFull(imageInit.size(), 0.0);
+    std::vector<double> imageCompact(imageInit.size(), 0.0);
+    for (size_t i = 0; i < imageInit.size(); ++i) {
+        imageFull[i] = imageInit[i] * fullNumer[i] /
+                       std::max(fullDenom[i], 1e-10);
+        imageCompact[i] = imageInit[i] * compactNumer[i] /
+                          std::max(compactDenom[i], 1e-10);
+    }
+    expectVectorsNear(imageCompact, imageFull, 1e-12);
+}
+
 TEST(IOTest, CompactSymmetryToyZeroPsfIsIdentityAndGaussianCommutesWithD4) {
     const std::vector<double> image = {
         1.0, 2.0, 3.0,

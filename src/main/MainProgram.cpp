@@ -8,6 +8,7 @@
 #include "app/MLEMOptimizer.h"
 #include "app/OSEMReconstructor.h"
 #include "app/ProjectionOps.h"
+#include "app/ReconLimits.h"
 #include "app/ReconMetrics.h"
 #include "cli/ArgumentParser.h"
 #include "core/Masks.h"
@@ -1482,9 +1483,10 @@ int runProgram(int argc, char **argv) {
               ", compactRows=" + std::to_string(compactMeta.totalRows) +
               ", fullRows=" + std::to_string(compactMeta.fullRows()) +
               (compactChunkLayout ? ", matrix=chunkCSRDir)" : ", matrix=loadCSR)"));
-      if (compactChunkLayout && bedCount > 5) {
+      if (compactChunkLayout && bedCount > spect::app::kMaxBeds) {
         throw std::runtime_error(
-            "compact chunk multi-bed CUDA path supports at most 5 beds.");
+            "compact chunk multi-bed CUDA path supports at most " +
+            std::to_string(spect::app::kMaxBeds) + " beds.");
       }
     }
 

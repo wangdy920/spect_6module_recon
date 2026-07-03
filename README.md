@@ -122,6 +122,17 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 - **[CUDA Fusion Summary](doc/CUDA_Fusion_P1_P6_Summary.md)** — P1–P6 implementation report
 - **[CUDA Optimization Log](doc/CUDA_OPT_EXPERIMENT_LOG.md)** — detailed experiment records
 
+## Environment variables (compact / CUDA)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | host RAM–derived | Host-side chunk cache budget (e.g. `24g`) |
+| `SPECT_COMPACT_CHUNK_DEVICE_CACHE_BYTES` | GPU–derived | Device resident chunk cache budget |
+| `SPECT_CUDA_SPMV_ALG` | cuSPARSE default | SpMV algorithm selection when supported |
+
+mmap 失败时会 stderr 输出 `[WARN] compact-chunk mmap failed ... falling back to full copy load`。
+
 ## Build & Run
 
 ### Windows

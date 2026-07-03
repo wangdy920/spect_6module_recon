@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -449,7 +450,10 @@ CompactChunkCSRData loadChunkData(const CompactChunkCSRInfo &info, int cols) {
   }
   try {
     return loadChunkDataMapped(info, cols);
-  } catch (const std::exception &) {
+  } catch (const std::exception &ex) {
+    std::cerr << "[WARN] compact-chunk mmap failed for " << info.path
+              << ": " << ex.what()
+              << "; falling back to full copy load\n";
     return loadChunkDataCopied(info, cols);
   }
 }
