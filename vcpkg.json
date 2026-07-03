@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "spect-recon",
+  "version": "1.0.0",
+  "description": "SPECT Reconstruction Software with MLEM/OSEM/BSREM algorithms",
+  "license": "MIT",
+  "supports": "windows & x64",
+  "dependencies": [
+    "matio",
+    "fftw3",
+    "hdf5",
+    "zlib",
+    "curl",
+    "gtest",
+    "benchmark"
+  ]
+}

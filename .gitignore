@@ -1,0 +1,37 @@
+# ========= IDE / Editor =========
+.vs/
+.vscode/
+
+# ========= Python =========
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ========= Agent working notes (decisions archived in doc/) =========
+.agent/
+
+# ========= Build / cache =========
+build/
+build_*/
+out/
+release/
+recon_output/
+output/
+recon_out/
+cmake_test_discovery_*.json
+CMakeUserPresets.json
+
+# ========= Data (large / generated) =========
+test_data/
+gatedata/
+evaluation/
+castor_v3.2/
+
+# ========= Logs (generated) =========
+*.wall.txt
+
+# ========= OS =========
+.DS_Store
+Thumbs.db
+build_out.txt
+build.bat

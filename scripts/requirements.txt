@@ -1,0 +1,7 @@
+# Python dependencies for repository helper scripts
+numpy
+matplotlib
+
+# Optional (only needed for compare_refactor.py)
+SimpleITK
+
