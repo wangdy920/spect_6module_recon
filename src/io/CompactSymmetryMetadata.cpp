@@ -1,5 +1,6 @@
 #include "io/CompactSymmetryMetadata.h"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -18,6 +19,15 @@ void requirePositive(int value, const char *name) {
     oss << "Compact symmetry metadata has invalid " << name << "=" << value;
     throw std::runtime_error(oss.str());
   }
+}
+
+std::size_t metadataFileSize(const std::string &path) {
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  if (ec) {
+    throw std::runtime_error("Cannot stat compact metadata: " + path);
+  }
+  return static_cast<std::size_t>(size);
 }
 
 } // namespace
@@ -100,6 +110,28 @@ CompactSymmetryMode inferCompactSymmetryMode(
 }
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
+  const std::size_t fileSize = metadataFileSize(path);
+  if (fileSize < kCompactMetadataLegacyBytes) {
+    throw std::runtime_error(
+        "Compact metadata file too small (" + std::to_string(fileSize) +
+        " bytes, expected at least " + std::to_string(kCompactMetadataLegacyBytes) +
+        "): " + path);
+  }
+  if (fileSize > kCompactMetadataLegacyBytes &&
+      fileSize < kCompactMetadataExtendedV1Bytes) {
+    throw std::runtime_error(
+        "Compact metadata has truncated extended header (" +
+        std::to_string(fileSize) + " bytes, expected " +
+        std::to_string(kCompactMetadataLegacyBytes) + " or >= " +
+        std::to_string(kCompactMetadataExtendedV1Bytes) + "): " + path);
+  }
+  if (fileSize > kCompactMetadataExtendedV2Bytes) {
+    throw std::runtime_error(
+        "Compact metadata has unexpected trailing bytes (" +
+        std::to_string(fileSize) + " bytes, max supported " +
+        std::to_string(kCompactMetadataExtendedV2Bytes) + "): " + path);
+  }
+
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     throw std::runtime_error("Cannot open compact metadata: " + path);
@@ -128,12 +160,20 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   meta.use90Sym = use90 != 0;
   meta.useZSym = useZ != 0;
 
-  if (readScalar(in, use45)) {
+  if (fileSize >= kCompactMetadataExtendedV1Bytes) {
+    if (!readScalar(in, use45) || !readScalar(in, meta.symCode) ||
+        !readScalar(in, meta.symmetryOrder)) {
+      throw std::runtime_error(
+          "Compact metadata extended header is truncated: " + path);
+    }
     meta.use45Sym = use45 != 0;
-    (void)readScalar(in, meta.symCode);
-    (void)readScalar(in, meta.symmetryOrder);
-    (void)readScalar(in, meta.roiRadius);
-    (void)readScalar(in, meta.roiSide);
+  }
+
+  if (fileSize >= kCompactMetadataExtendedV2Bytes) {
+    if (!readScalar(in, meta.roiRadius) || !readScalar(in, meta.roiSide)) {
+      throw std::runtime_error(
+          "Compact metadata ROI fields are truncated: " + path);
+    }
   }
 
   if (meta.detNz <= 0) {

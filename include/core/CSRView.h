@@ -1,8 +1,9 @@
 /**
  * @file CSRView.h
- * @brief CSR稀疏矩阵视图 (POD结构，不拥有内存)
- * 
- * 此文件不应包含任何第三方头文件
+ * @brief In-memory double-precision CSR view for ISparseOps (non-owning POD).
+ *
+ * @deprecated Not the same as spect::io::CSRView (float CSRB v1 view).
+ * Kept for spect::CSRView used by CPU/CUDA sparse operator interfaces.
  */
 
 #pragma once

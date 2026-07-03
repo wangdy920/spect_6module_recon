@@ -337,4 +337,17 @@ cmake --build build_cuda_scaffold --target spect_convert_6module_sysmat_to_csrb
 
 内存占用主要是 `row_ptr`，约为 `(rows + 1) * 4 bytes`，不会持有完整 `col_idx/val`。输出仍受当前 CSRB 结构限制：`row_ptr` 是 `uint32`，因此总 `nnz` 必须不超过 `2^32-1`。
 
+## 2026-07-03 补充：转换工具 vs 260601 chunk CSRB 生产路径
+
+| 路径 | 输入 | 输出语义 | 用途 |
+| --- | --- | --- | --- |
+| `-chunkCSRDir`（主线） | `metadata.bin` + `chunk_*.csrb` | compact 行 + 运行时对称展开 | **260601 标准格式** |
+| `spect_convert_6module_sysmat_to_csrb` | `metadata.bin` + **`chunk_*.bin`**（v2 row-wise） | compact 行 CSRB，**不展开对称** | legacy 离线转换；见 §2a 弃用清单 |
+
+格式 README（`test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md`）已按代码行为修正：该工具**不接受** `chunk_*.csrb`，**不会**生成 full-row standard CSRB。
+
+**运行时对称验收**：当前仅 SYM_45Z / SYM_90Z 通过 `validateCompactSymmetricGeometry()` 签收；其余推断模式未生产验收。
+
+**metadata.bin 大小**：76B（260525 legacy）或 88B（260601，含 use45/symCode/symmetryOrder）；读取失败或尾部截断将直接报错。
+
 重要限制：该工具做的是 direct compact row-wise chunk 到 CSRB 的格式转换，不做 45/90/Z 对称的 full expansion。如果 `metadata.bin` 显示 `symmetry_order > 1` 或 `use_z_symmetry=1`，输出 CSRB 仍是 compact 行语义。要在标准 SPECT-recon 中直接配合 full-angle 投影 BIN 使用，应重新生成无对称压缩的系统矩阵；否则需要同步提供行数匹配的 compact 投影，或后续实现专用 compact-symmetric 后端。

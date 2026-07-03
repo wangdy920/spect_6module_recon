@@ -57,5 +57,7 @@ struct CSRHeader {
     uint64_t nnz = 0;
 };
 
+static_assert(sizeof(CSRHeader) == 24, "io::CSRHeader must be 24 bytes (CSRB v1 on disk)");
+
 } // namespace io
 } // namespace spect

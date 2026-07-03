@@ -94,6 +94,10 @@ protected:
     }
 };
 
+TEST(CSRBinaryLayoutTest, IoCSRHeaderV1Is24Bytes) {
+    EXPECT_EQ(sizeof(CSRHeader), 24u);
+}
+
 // ============ CSRBinary 保存/加载测试 ============
 
 TEST_F(CSRTest, SaveLoadRoundTrip) {

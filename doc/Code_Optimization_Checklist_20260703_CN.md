@@ -7,7 +7,7 @@
 - 系统矩阵标准格式为 `test_data\6module\260601`（`metadata.bin` 88B + `chunk_*.csrb`，`-chunkCSRDir` 入口）。
 - 当前保留对 `test_data\6module\260525` 的兼容：小批量对称压缩单文件 CSRB（`matrix_6module.csrb` + 76B metadata，`-loadCSR -compactMeta` 入口）与旧 row-wise `chunk_*.bin`（仅离线转换工具读取）。
 - 项目已完成 3 模块 → 6 模块升级；`6module_bak_src/` 存放系统矩阵生成 CUDA 源（v2/v4）与独立 MLEM 参考实现。
-- 根目录当前**不是 git 仓库**，与 GitHub 已脱钩 4~5 个月。
+- 根目录已恢复 git 版本控制，remote：`https://github.com/wangdy920/spect_6module_recon.git`（分支 `main`）。
 
 严重度定义：**高** = 有正确性/数据风险或严重阻碍维护；**中** = 明确技术债，应排期；**低** = 择机清理。
 
@@ -48,9 +48,9 @@
 
 | # | 问题 | 位置 | 严重度 | 建议 |
 |---|------|------|--------|------|
-| 2.1 | 两套互不兼容的 `CSRHeader`/`CSRView` 定义并存：`include/core/`（32B 头、int64 维、double 值）vs `include/io/CSRTypes.h`（24B 头、uint32 维、float 值，真实 CSRB v1）；`core/CSRHeader.h` 注释与真实格式矛盾，测试测的还是 32B 头 | `include/core/CSRHeader.h`、`include/core/CSRView.h` vs `include/io/CSRTypes.h` | **高** | 废弃 `core/` 旧定义（或明确命名空间隔离 + 标注遗留草案），测试改对齐 24B 真实头 |
-| 2.2 | `metadata.bin` 无 magic/版本/长度校验；76B（260525）与 88B（260601）靠"尾部字段读取失败即忽略"隐式区分，`(void)readScalar` 静默吞错 | `src/io/CompactSymmetryMetadata.cpp` L102~137 | **高** | 增加版本/expected_size 字段；按文件实际大小决定必读字段，读取失败报错 |
-| 2.3 | 转换工具与 README 严重不符：`260601/CompactChunkCSRB_Reconstruction_README_CN.md` 称工具"只接受 `chunk_*.csrb` 并展开对称"，实现只读旧 `chunk_*.bin` 且不展开 | `tools/convert_6module_sysmat_to_csrb.cpp` L66~75、L365~378 vs 格式 README L119~133 | **高** | 以代码为准改文档，或按 README 重写工具；二者必居其一 |
+| 2.1 | **已修改（2026-07-03）** | 已完成 | 方案：`core/CSRHeader.h`/`CSRView.h` 标注为 legacy double 草案（非磁盘 CSRB v1）；`io::CSRHeader` 增加 24B `static_assert`；测试区分 LegacyDouble 与 IoCSRBv1 |
+| 2.2 | **已修改（2026-07-03）** | 已完成 | 方案：定义 `kCompactMetadataLegacyBytes=76`/`ExtendedV1=88`/`ExtendedV2=96`；按文件大小强制读取扩展字段，截断或尾部多余字节抛错 |
+| 2.3 | **已修改（2026-07-03）** | 已完成 | 方案：以代码为准修正格式 README 与 `doc/SystemMatrix_6module_compact_vs_CSRB_CN.md`——转换工具只读 `chunk_*.bin`、不展开对称 |
 | 2.4 | 单 chunk ~5GB 默认走 `loadChunkDataCopied` 全量读入（mmap 阈值默认 `uint64_t::max`，即 opt-in 关闭——这是 2026-06-02 benchmark 的有意决策，但 README 未记录该环境变量）；mmap 失败静默 `catch(...)` 回退无日志 | `src/io/CompactChunkCSR.cpp` L79~88、L446~454 | 中 | 文档化 `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 与默认拷贝策略的依据；回退时 logWarn |
 | 2.5 | 260525 单文件路径：3.7GB `matrix_6module.csrb` 在不加 `-mapCSR` 时默认全量 vector 加载 | `include/io/CSRBuilder.h` L177~184 | **高** | compact-symmetric + 大文件默认启用 `CSRMap`，或强制要求 `-mapCSR` |
 | 2.6 | **已修改（2026-07-03）** | 已完成 | 方案：`buildCSR_from_mat` 与 stream 版均改 uint64 累加，写回 uint32 前校验 `nnz <= UINT32_MAX` 超限抛错（转换工具侧未动，若按 §2a 弃用则无需处理） |
@@ -59,7 +59,7 @@
 | 2.9 | `validateChunkColIdxRange` 每次冷加载对全部 nnz（单 chunk 可达 6e8）线性扫描 | `CompactChunkCSR.cpp` L372~382 | 中 | 抽样校验或用环境变量控制 strict 模式 |
 | 2.10 | **已修改（2026-07-03）** | 已完成 | 方案：`loadCSRBinary` 与 `CSRMap::open` 均校验 `version == 1`，未知版本抛错（消息含实际值与路径） |
 | 2.11 | **已修改（2026-07-03）** | 已完成 | 方案：脚本增加 `--profile 260525\|260601`（默认 260525 保持向后兼容）+ `--rows/--angles/--detz` 等显式覆盖；260601 profile 实测校准为 90 compact 角 × 48 × compact z=24 = 103680 行、90z 模式；260601 无单文件 CSRB 故跳过 matrix nnz 校验（已注明 TODO） |
-| 2.12 | 运行时对称模式实际仅验收 SYM_45Z/SYM_90Z，格式 README 声称支持 none/zonly/180/... | `CompactSymmetryMetadata.cpp` L254~258 vs 格式 README | 中 | README 标注当前验收范围，或补齐其余模式 |
+| 2.12 | **已修改（2026-07-03）** | 已完成 | 方案：格式 README 与 SystemMatrix 文档标注运行时仅验收 SYM_45Z/SYM_90Z |
 
 ### 2a. 260525 格式正式弃用时的删除清单（备查）
 
@@ -89,7 +89,7 @@
 
 | # | 问题 | 严重度 | 建议 |
 |---|------|--------|------|
-| 4.1 | 无针对 `test_data/6module/260601` 真实 chunk 目录的自动化测试：260601 只出现在 CLI 字符串和手工 benchmark 记录中，chunk 相关 gtest 全部是 toy 数据 | **高** | 增加可选 gtest（存在 `test_data/6module/260601` 时启用）：metadata 88B 解析、chunk header/行数公式（`103680 = 90*48*24`）、1-chunk 读入、90Z 映射覆盖 829440 full rows |
+| 4.1 | **已修改（2026-07-03）** | 已完成 | 方案：新增可选 gtest（`test_data/6module/260601` 存在时运行）：88B metadata 解析、103680 行公式、Sym90Z 829440 full-row 双射、chunk 目录首块读入 |
 | 4.2 | 无 BIN 投影 + chunk 矩阵的小规模端到端 golden 测试（现有 golden 依赖标准 CSRB） | **高** | 用 toy 90Z metadata + 合成 chunk 做 1-iter MLEM golden，锁定 compact 主路径 |
 | 4.3 | `tools/convert_6module_sysmat_to_csrb.cpp` 无 gtest 回归 | 中 | 若按 2a 弃用则不补；保留则加最小 2 行 chunk 转换回归 |
 | 4.4 | `test_interfaces.cpp` 84KB 巨型测试文件，IO/parser/compact/multi-bed 混在一起 | 中 | 按域拆分 `test_compact_symmetry.cpp`、`test_parser.cpp` 等 |

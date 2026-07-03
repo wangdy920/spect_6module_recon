@@ -1,8 +1,11 @@
 /**
  * @file CSRHeader.h
- * @brief CSR二进制文件头结构定义
- * 
- * 此文件不应包含任何第三方头文件
+ * @brief Legacy internal double-precision CSR layout (NOT on-disk CSRB v1).
+ *
+ * @deprecated This header describes an in-memory draft used by spect::CSRView
+ * and ISparseOps (int64 row_ptr, double values). It is NOT the CSRB file format.
+ * For binary I/O use spect::io::CSRHeader / spect::io::CSRView in io/CSRTypes.h
+ * (24-byte header, uint32 dimensions, float values).
  */
 
 #pragma once

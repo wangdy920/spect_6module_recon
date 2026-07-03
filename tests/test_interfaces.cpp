@@ -59,14 +59,14 @@ TEST(InterfaceTest, VoxelSize) {
     EXPECT_DOUBLE_EQ(vs.dz, 1.0);
 }
 
-// ============ CSRHeader.h 测试 ============
+// ============ CSRHeader.h — legacy double draft (NOT on-disk CSRB v1) ============
 
-TEST(InterfaceTest, CSRHeaderMagic) {
+TEST(InterfaceTest, LegacyDoubleCSRHeaderMagic) {
     EXPECT_EQ(CSR_MAGIC, 0x43535242);  // 'CSRB'
 }
 
-TEST(InterfaceTest, CSRHeaderSize) {
-    EXPECT_EQ(sizeof(CSRHeader), 32);
+TEST(InterfaceTest, LegacyDoubleCSRHeaderDraftSize) {
+    EXPECT_EQ(sizeof(CSRHeader), 32u);
 }
 
 TEST(InterfaceTest, CSRHeaderValid) {
@@ -1207,6 +1207,130 @@ TEST(IOTest, CompactSymmetryMetadataMissingFileThrows) {
 
     EXPECT_THROW(spect::io::loadCompactSymmetryMetadata(path.string()),
                  std::runtime_error);
+}
+
+TEST(IOTest, IoCSRBv1HeaderIs24Bytes) {
+    EXPECT_EQ(sizeof(spect::io::CSRHeader), 24u);
+    spect::io::CSRHeader header;
+    header.magic = 0x43535242u;
+    header.version = 1;
+    header.rows = 10;
+    header.cols = 20;
+    header.nnz = 100;
+    EXPECT_EQ(header.magic, 0x43535242u);
+    EXPECT_EQ(header.version, 1u);
+}
+
+TEST(IOTest, CompactSymmetryMetadataRejectsTruncatedExtendedHeader) {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_compact_meta_size_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "metadata_truncated.bin";
+
+    {
+        std::vector<char> bytes(spect::io::kCompactMetadataLegacyBytes + 4, 0);
+        std::ofstream out(path, std::ios::binary);
+        ASSERT_TRUE(out);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    EXPECT_THROW(spect::io::loadCompactSymmetryMetadata(path.string()),
+                 std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, CompactSymmetryMetadataRejectsUnexpectedTrailingBytes) {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_compact_meta_size_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "metadata_trailing.bin";
+
+    {
+        std::vector<char> bytes(spect::io::kCompactMetadataExtendedV2Bytes + 4, 0);
+        std::ofstream out(path, std::ios::binary);
+        ASSERT_TRUE(out);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    EXPECT_THROW(spect::io::loadCompactSymmetryMetadata(path.string()),
+                 std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, Real260601MetadataParsesWhenPresent) {
+    const std::filesystem::path metaPath =
+        std::filesystem::path("test_data") / "6module" / "260601" / "metadata.bin";
+    if (!std::filesystem::exists(metaPath)) {
+        GTEST_SKIP() << "test_data/6module/260601 not available";
+    }
+
+    const auto meta =
+        spect::io::loadCompactSymmetryMetadata(metaPath.string());
+    EXPECT_EQ(meta.compactRows(), 90 * 48 * 24);
+    EXPECT_EQ(meta.fullRows(), 360 * 48 * 48);
+    EXPECT_EQ(meta.mode, spect::io::CompactSymmetryMode::Sym90Z);
+    EXPECT_EQ(meta.symCode, 90);
+    EXPECT_EQ(meta.symmetryOrder, 4);
+}
+
+TEST(IOTest, Real260601Sym90ZCoversAllFullProjectionRowsWhenPresent) {
+    const std::filesystem::path metaPath =
+        std::filesystem::path("test_data") / "6module" / "260601" / "metadata.bin";
+    if (!std::filesystem::exists(metaPath)) {
+        GTEST_SKIP() << "test_data/6module/260601 not available";
+    }
+
+    const auto meta =
+        spect::io::loadCompactSymmetryMetadata(metaPath.string());
+    ASSERT_EQ(meta.mode, spect::io::CompactSymmetryMode::Sym90Z);
+
+    std::vector<unsigned char> seen(
+        static_cast<size_t>(meta.fullRows()), 0);
+    size_t duplicateMappings = 0;
+    for (int symId = 0; symId < meta.xySymmetryCount(); ++symId) {
+        for (int zMirror = 0; zMirror < meta.zBranchCount(); ++zMirror) {
+            for (int compactRow = 0; compactRow < meta.totalRows; ++compactRow) {
+                uint64_t fullIndex = 0;
+                ASSERT_TRUE(spect::io::fullProjectionIndexFromCompactRow(
+                    meta, compactRow, symId, zMirror != 0, fullIndex));
+                if (seen[fullIndex] != 0) {
+                    ++duplicateMappings;
+                }
+                seen[fullIndex] = 1;
+            }
+        }
+    }
+    EXPECT_EQ(duplicateMappings, 0u);
+    for (unsigned char value : seen) {
+        EXPECT_EQ(value, 1);
+    }
+}
+
+TEST(IOTest, Real260601ChunkDirectoryReadsWhenPresent) {
+    const std::filesystem::path dir =
+        std::filesystem::path("test_data") / "6module" / "260601";
+    const auto metaPath = dir / "metadata.bin";
+    if (!std::filesystem::exists(metaPath)) {
+        GTEST_SKIP() << "test_data/6module/260601 not available";
+    }
+
+    const auto meta =
+        spect::io::loadCompactSymmetryMetadata(metaPath.string());
+    const auto chunks =
+        spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 1024 * 1024);
+    if (chunks.chunks().empty()) {
+        GTEST_SKIP() << "no chunk_*.csrb files under test_data/6module/260601";
+    }
+
+    EXPECT_EQ(chunks.totalRows(), static_cast<uint64_t>(meta.compactRows()));
+    EXPECT_EQ(chunks.cols(), meta.totalVoxels);
+
+    const auto first = chunks.loadChunk(0);
+    ASSERT_TRUE(first);
+    const auto view = first->view();
+    EXPECT_EQ(view.rows, static_cast<int>(chunks.chunks()[0].rows));
+    EXPECT_EQ(view.cols, meta.totalVoxels);
+    EXPECT_GT(view.nnz, 0u);
 }
 
 TEST(IOTest, CompactSymmetryMapsSixModule90ZFullProjectionRowsOnce) {
