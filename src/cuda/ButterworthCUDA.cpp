@@ -3,6 +3,7 @@
 #if defined(SPECT_BUTTERWORTH_HAVE_CUFFT)
 
 #include "cuda/CudaConfig.h"
+#include "cuda/CudaDriverHelpers.h"
 
 #if CUDA_ENABLED
 
@@ -21,43 +22,9 @@
 namespace spect::filters {
 namespace {
 
-inline void checkCufft(cufftResult status, const char *expr,
-                       const char *file, int line) {
-  if (status != CUFFT_SUCCESS) {
-    throw std::runtime_error(std::string("cuFFT error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr +
-                             " (status=" +
-                             std::to_string(static_cast<int>(status)) + ")");
-  }
-}
-
-#define CUFFT_CHECK(call) checkCufft((call), #call, __FILE__, __LINE__)
-
-inline void checkCuDriver(CUresult status, const char *expr,
-                          const char *file, int line) {
-  if (status != CUDA_SUCCESS) {
-    const char *name = nullptr;
-    const char *message = nullptr;
-    cuGetErrorName(status, &name);
-    cuGetErrorString(status, &message);
-    throw std::runtime_error(std::string("CUDA driver error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr +
-                             " (" + (name ? name : "unknown") + ": " +
-                             (message ? message : "unknown") + ")");
-  }
-}
-
-inline void checkNvrtc(nvrtcResult status, const char *expr,
-                       const char *file, int line) {
-  if (status != NVRTC_SUCCESS) {
-    throw std::runtime_error(std::string("NVRTC error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr +
-                             " (" + nvrtcGetErrorString(status) + ")");
-  }
-}
-
-#define CUDRV_CHECK(call) checkCuDriver((call), #call, __FILE__, __LINE__)
-#define NVRTC_CHECK(call) checkNvrtc((call), #call, __FILE__, __LINE__)
+#define CUFFT_CHECK(call) SPECT_CUFFT_CHECK(call)
+#define CUDRV_CHECK(call) SPECT_CUDRV_CHECK(call)
+#define NVRTC_CHECK(call) SPECT_NVRTC_CHECK(call)
 
 // --- NVRTC kernel: single mask-apply kernel for float R2C/C2R path ---
 

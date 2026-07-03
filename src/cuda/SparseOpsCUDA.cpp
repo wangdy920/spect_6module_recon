@@ -1,5 +1,6 @@
 #include "sparse/SparseOpsBackend.h"
 #include "core/AttenuationConstants.h"
+#include "cuda/CudaDriverHelpers.h"
 #include "cuda/ProjDomainChunked.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
@@ -531,34 +532,6 @@ inline void checkCusparse(cusparseStatus_t status, const char *expr,
 
 #define SPECT_CUSPARSE_CHECK(expr) \
   checkCusparse((expr), #expr, __FILE__, __LINE__)
-
-inline void checkCuDriver(CUresult status, const char *expr,
-                          const char *file, int line) {
-  if (status != CUDA_SUCCESS) {
-    const char *name = nullptr;
-    const char *message = nullptr;
-    cuGetErrorName(status, &name);
-    cuGetErrorString(status, &message);
-    throw std::runtime_error(std::string("CUDA driver error at ") + file +
-                             ":" + std::to_string(line) + " for " + expr +
-                             " (" + (name ? name : "unknown") + ": " +
-                             (message ? message : "unknown") + ")");
-  }
-}
-
-inline void checkNvrtc(nvrtcResult status, const char *expr, const char *file,
-                       int line) {
-  if (status != NVRTC_SUCCESS) {
-    throw std::runtime_error(std::string("NVRTC error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr + " (" +
-                             nvrtcGetErrorString(status) + ")");
-  }
-}
-
-#define SPECT_CUDRV_CHECK(expr) \
-  checkCuDriver((expr), #expr, __FILE__, __LINE__)
-#define SPECT_NVRTC_CHECK(expr) \
-  checkNvrtc((expr), #expr, __FILE__, __LINE__)
 
 struct ProjDomainKernelCache {
   CUmodule module = nullptr;

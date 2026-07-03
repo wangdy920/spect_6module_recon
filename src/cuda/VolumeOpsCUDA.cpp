@@ -3,6 +3,7 @@
 #if CUDA_ENABLED
 
 #include "cuda/CudaConfig.h"
+#include "cuda/CudaDriverHelpers.h"
 
 #include <cuda.h>
 #include <nvrtc.h>
@@ -16,32 +17,6 @@
 
 namespace spect::cuda {
 namespace {
-
-inline void checkCuDriver(CUresult status, const char *expr, const char *file,
-                          int line) {
-  if (status != CUDA_SUCCESS) {
-    const char *name = nullptr;
-    const char *message = nullptr;
-    cuGetErrorName(status, &name);
-    cuGetErrorString(status, &message);
-    throw std::runtime_error(std::string("CUDA driver error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr + " (" +
-                             (name ? name : "unknown") + ": " +
-                             (message ? message : "unknown") + ")");
-  }
-}
-
-inline void checkNvrtc(nvrtcResult status, const char *expr, const char *file,
-                       int line) {
-  if (status != NVRTC_SUCCESS) {
-    throw std::runtime_error(std::string("NVRTC error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr + " (" +
-                             nvrtcGetErrorString(status) + ")");
-  }
-}
-
-#define SPECT_CUDRV_CHECK(call) checkCuDriver((call), #call, __FILE__, __LINE__)
-#define SPECT_NVRTC_CHECK(call) checkNvrtc((call), #call, __FILE__, __LINE__)
 
 struct VolumeKernelCache {
   CUmodule module = nullptr;

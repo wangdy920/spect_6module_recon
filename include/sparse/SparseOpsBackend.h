@@ -73,12 +73,9 @@ inline bool isCudaSparseOpsAvailable() {
 #endif
 }
 
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-const ISparseOps& getSparseOpsCUDA();
-
 namespace cuda {
 struct CompactDeviceRatioParams {
-    int symmetryMode = 0; // 45 or 90
+    int symmetryMode = 0;
     int compactRowBase = 0;
     int compactRaysPerAngle = 0;
     int compactNumAngles = 0;
@@ -111,13 +108,8 @@ struct CompactDeviceBackwardTiming {
     double transformBackwardSeconds = 0.0;
 };
 
-/// Parameters for baking per-angle attenuation factors into compact chunk
-/// matrix values on the device: baked[t] = val[t] * att[fullAngle(row(t)),
-/// unrotatedVoxel(col(t))]. Combines the row->full-angle mapping of
-/// CompactDeviceRatioParams with the voxel mapping of
-/// CompactDeviceTransformParams.
 struct CompactAttenBakeParams {
-    int symmetryMode = 0; // 45 or 90
+    int symmetryMode = 0;
     int compactRowBase = 0;
     int compactRaysPerAngle = 0;
     int compactNumAngles = 0;
@@ -129,6 +121,12 @@ struct CompactAttenBakeParams {
     int nz = 0;
 };
 
+} // namespace cuda
+
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
+const ISparseOps& getSparseOpsCUDA();
+
+namespace cuda {
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
@@ -178,53 +176,6 @@ bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
 
 #if !(defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL))
 namespace cuda {
-struct CompactDeviceRatioParams {
-    int symmetryMode = 0;
-    int compactRowBase = 0;
-    int compactRaysPerAngle = 0;
-    int compactNumAngles = 0;
-    int detNx = 0;
-    int detNz = 0;
-    int compactDetZ = 0;
-    int fullNumAngles = 0;
-    int fullRaysPerAngle = 0;
-    int symId = 0;
-    bool zMirror = false;
-};
-
-struct CompactDeviceRatioTiming {
-    double forwardSeconds = 0.0;
-    double ratioSeconds = 0.0;
-    double backwardSeconds = 0.0;
-};
-
-struct CompactDeviceTransformParams {
-    int symmetryMode = 0;
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-    int symId = 0;
-    bool zMirror = false;
-};
-
-struct CompactDeviceBackwardTiming {
-    double backwardSeconds = 0.0;
-    double transformBackwardSeconds = 0.0;
-};
-
-struct CompactAttenBakeParams {
-    int symmetryMode = 0;
-    int compactRowBase = 0;
-    int compactRaysPerAngle = 0;
-    int compactNumAngles = 0;
-    int fullNumAngles = 0;
-    int symId = 0;
-    bool zMirror = false;
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-};
-
 inline bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>&,
                                         uint64_t = 0) {
     return false;
