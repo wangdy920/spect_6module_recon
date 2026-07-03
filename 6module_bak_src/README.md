@@ -11,6 +11,16 @@
 | `spect_recon_mlem.cu` | **deprecated / reference-only** | 独立 CUDA MLEM，只读 `.bin`；与主线逻辑已迁入 `CompactSymmetricProjectorCUDA.cpp`，保留作 legacy 数值对齐 |
 | `mat_convert_bin.m` | 工具 | MAT → 投影 BIN（函数 `mat_convert_bin(...)`；示例见 `run_mat_convert_bin_example.m`） |
 
+历史 50-iter 输出和 sensitivity 参考已移至 `test_data/legacy_ref/`。它们与
+`test_data/share/` 同名文件哈希不同，因此保留为 2026-05-23 legacy 对齐参考：
+
+| 文件 | SHA256 |
+| --- | --- |
+| `test_data/legacy_ref/recon_iter050.hdr` | `b3a872b4971356846e6eab8af8500326b86e2074d918d8e23316a87e2dd9cec9` |
+| `test_data/legacy_ref/recon_iter050.img` | `1b3bd158d27e48e6702e00e92f5e5944ee2f61a8dbab4e3bb9de1cee404c467c` |
+| `test_data/legacy_ref/recon_iter050.raw` | `2dff471ec72b91cc0efda6eba4781cc548f2de70c8b9f146433d4177df6b0b6f` |
+| `test_data/legacy_ref/sensitivity.raw` | `376cc7eb9dc1a213e4b3f1009ef32cbe08bc90277a4427528b49e8e7789c5ae6` |
+
 ## v4 编译示例（Windows）
 
 ```powershell
