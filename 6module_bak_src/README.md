@@ -9,7 +9,7 @@
 | `spect_sysmat_PSC_6module_24pin_YSO_v4.cu` | **推荐生成端** | 输出 `metadata.bin` + `chunk_*.csrb`（与 `-chunkCSRDir` 一致） |
 | `spect_sysmat_PSC_6module_24pin_YSO_v2.cu` | legacy | 输出 `chunk_*.bin`（row-wise），仅用于旧转换工具 |
 | `spect_recon_mlem.cu` | **deprecated / reference-only** | 独立 CUDA MLEM，只读 `.bin`；与主线逻辑已迁入 `CompactSymmetricProjectorCUDA.cpp`，保留作 legacy 数值对齐 |
-| `mat_convert_bin.m` | 工具 | MAT → 投影 BIN |
+| `mat_convert_bin.m` | 工具 | MAT → 投影 BIN（函数 `mat_convert_bin(...)`；示例见 `run_mat_convert_bin_example.m`） |
 
 ## v4 编译示例（Windows）
 

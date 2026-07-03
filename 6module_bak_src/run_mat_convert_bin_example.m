@@ -1,0 +1,16 @@
+%RUN_MAT_CONVERT_BIN_EXAMPLE Thin wrapper with legacy hardcoded paths.
+%
+% Edit the paths below, then run this script (F5) or:
+%   run('run_mat_convert_bin_example.m')
+
+clc; clear; close all;
+
+input_mat_path  = 'PSC_6module_24pin_10MBq_600s_1.mat';
+output_bin_path = 'PSC_6module_24pin_10MBq_600s_1.bin';
+
+mat_convert_bin(input_mat_path, output_bin_path, ...
+    'VarName', 'matrix', ...
+    'ProjDataColumn', 3, ...
+    'RaysPerAngle2D', [], ...
+    'Sort2DByFirstColumn', false, ...
+    'SortOrder', 'ascend');
