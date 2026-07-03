@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
+#include <filesystem>
 #include <vector>
 
 #include "app/BSREMReconstructor.h"
@@ -12,6 +14,7 @@
 #include "cuda/VolumeOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
 #include "filters/Convolution.h"
+#include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "regularizer/RegularizerCompat.h"
 #include "sparse/SparseOpsCPU.h"
@@ -1161,6 +1164,53 @@ TEST(CudaScaffoldTest, ChunkWarmupRemovesBuildAndPinnedStageForRepeatedMlem) {
       EXPECT_GT(warmSnapshot.h2dChunkCalls, 0u);
     }
     EXPECT_EQ(warmSnapshot.transposeChunkCalls, 0u);
+}
+
+TEST(CudaScaffoldTest, Real260601FirstChunkWarmupForwardMatchesCpuWhenPresent) {
+    if (!spect::cuda::isCudaAvailable()) {
+        GTEST_SKIP() << "No CUDA device available in the current runtime.";
+    }
+
+    const std::filesystem::path dir = "test_data/6module/260601";
+    const std::filesystem::path metaPath = dir / "metadata.bin";
+    if (!std::filesystem::exists(metaPath)) {
+        GTEST_SKIP() << "no 260601 compact chunk metadata under test_data";
+    }
+
+    const auto meta = spect::io::loadCompactSymmetryMetadata(metaPath.string());
+    const auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 0);
+    ASSERT_FALSE(chunks.chunks().empty());
+    const auto chunk = chunks.loadChunk(0);
+    ASSERT_TRUE(chunk);
+    const auto view = chunk->view();
+    ASSERT_GT(view.rows, 0);
+    ASSERT_GT(view.cols, 0);
+
+    ASSERT_TRUE(spect::cuda::warmupResidentMatrixSetCUDA({view}));
+
+    std::vector<float> x(static_cast<size_t>(view.cols), 1.0f);
+    for (size_t i = 0; i < x.size(); ++i) {
+        x[i] = 1.0f + 0.01f * static_cast<float>(i % 13u);
+    }
+    std::vector<float> yCuda(static_cast<size_t>(view.rows), 0.0f);
+    ASSERT_TRUE(spect::cuda::spmvFloatCUDA(view, x.data(), yCuda.data()));
+
+    const std::vector<int> rows = {
+        0,
+        std::min(1, view.rows - 1),
+        view.rows / 2,
+        view.rows - 1,
+    };
+    for (int row : rows) {
+        double yCpu = 0.0;
+        for (uint32_t k = view.row_ptr[row]; k < view.row_ptr[row + 1]; ++k) {
+            yCpu += static_cast<double>(view.val[k]) *
+                    static_cast<double>(x[view.col_idx[k]]);
+        }
+        const double tol = std::max(1e-2, std::fabs(yCpu) * 2e-4);
+        EXPECT_NEAR(static_cast<double>(yCuda[static_cast<size_t>(row)]), yCpu, tol)
+            << "row=" << row;
+    }
 }
 
 TEST(CudaScaffoldTest, ChunkWarmupKeepsRepeatedBsremNumericallyAligned) {
