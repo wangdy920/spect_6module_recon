@@ -17,11 +17,11 @@
 
 | # | 问题 | 位置 | 严重度 | 建议 |
 |---|------|------|--------|------|
-| 0.1 | 根目录无 `.git`，4~5 个月的 compact-symmetric/260601/多床位/RC 打包工作全部无版本控制，一次误删即不可恢复 | 项目根目录 | **高** | 立即 `git init` + 首次提交锁定 baseline，再接回 GitHub remote。提交前先完成 0.2~0.4 的 ignore 清理 |
-| 0.2 | `.gitignore` 未忽略 `__pycache__/`、`*.pyc`；`scripts/__pycache__`、`utils/__pycache__` 实际存在 | `.gitignore`、`scripts/`、`utils/` | 中 | 补 `__pycache__/`、`*.py[cod]`，删除现有 pycache 目录；确认 `test_data/`、`recon_out/`（约 25GB + 2GB）已被 ignore |
-| 0.3 | 根目录残留 CTest 临时产物 `cmake_test_discovery_*.json`（含旧机器路径 `D:\WDY-project\...`）和一次性脚本 `compare_refactor.py` | 项目根目录 | 低 | 删除 json；`compare_refactor.py` 删除或并入 `scripts/`（功能已被 `scripts/compare_recon_metrics.py` 覆盖） |
-| 0.4 | README 指向不存在的目录：`docs/`、`refactor_docs/`、`matlab_ref/`、`original_source_backup/`；Project Status 停留在 2026-03-30，未反映 260601 chunk CSRB / compact-symmetric 现状 | `README.md` 第 5~25、117~123 行 | **高** | 统一文档目录为 `doc/`，删除死链；更新 Status 段为当前能力（chunk CSRB、v28 交替 chunk 顺序、117.6s @ 50 iter 等） |
-| 0.5 | `.agent/CONTINUITY.md` 是最完整的决策/验证记录，但混在工作区且未纳入版本控制策略 | `.agent/` | 低 | 决定入库或 ignore；关键结论（如 v28 为当前主线、mmap/resident cache 已证伪）应沉淀到 `doc/` 正式文档 |
+| 0.1 | **已修改（2026-07-03）** | 已完成 | 方案：`git init` + 首次 baseline 提交（191 文件）；remote `https://github.com/wangdy920/spect_6module_recon.git`，分支 `main` 已推送 |
+| 0.2 | **已修改（2026-07-03）** | 已完成 | 方案：`.gitignore` 补 `__pycache__/`、`*.py[cod]`、`test_data/`、`.agent/`；现有 pycache 目录已不存在 |
+| 0.3 | **已修改（2026-07-03）** | 已完成 | 方案：删除根目录 `cmake_test_discovery_*.json`（2 个）与 `compare_refactor.py` |
+| 0.4 | **已修改（2026-07-03）** | 已完成 | 方案：`README.md` 统一文档目录为 `doc/`，删除 `docs/`/`refactor_docs/`/`matlab_ref/`/`original_source_backup/` 死链；Status 更新为 260601 chunk CSRB、v28、117.6s @ 50 iter、227/227 tests |
+| 0.5 | **已修改（2026-07-03）** | 已完成 | 方案：`.agent/` 纳入 `.gitignore`（工作区笔记不入库）；关键结论已在 `doc/` 正式文档中维护 |
 
 ## 1. 主程序与架构（`src/main/`、`include/cli/`、`include/app/`）
 
