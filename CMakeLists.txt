@@ -493,6 +493,7 @@ add_executable(SPECT_recon
   src/main/CTACOps.cpp
   src/main/MainProgram.cpp
   src/main/MatVarPath.cpp
+  src/main/ReconDataLoader.cpp
   src/main/ReconPreparation.cpp
   src/main/ReconArgsPrinter.cpp
   src/main/ReconSetup.cpp
@@ -663,6 +664,7 @@ if(SPECT_BUILD_TESTS)
     src/main/AutoMuMap.cpp
     src/main/CTACOps.cpp
     src/main/MatVarPath.cpp
+    src/main/ReconDataLoader.cpp
     src/main/ReconPreparation.cpp
     src/main/ReconSetup.cpp
     src/main/RunLogger.cpp
