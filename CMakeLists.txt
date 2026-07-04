@@ -496,6 +496,7 @@ add_executable(SPECT_recon
   src/main/ReconDataLoader.cpp
   src/main/ReconPreparation.cpp
   src/main/ReconArgsPrinter.cpp
+  src/main/ReconLoopHelpers.cpp
   src/main/ReconSetup.cpp
   src/main/RunLogging.cpp
   src/main/RunLogger.cpp
