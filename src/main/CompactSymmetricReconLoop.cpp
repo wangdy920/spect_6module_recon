@@ -1,6 +1,7 @@
 #include "main/CompactSymmetricReconLoop.h"
 
 #include "app/BedOffsets.h"
+#include "app/BsremUpdate.h"
 #include "app/ProjectionOps.h"
 #include "core/Masks.h"
 #include "cuda/CompactSymmetricProjector.h"
@@ -973,47 +974,16 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               image[idx] = value;
             }
           } else {
-            constexpr double maxUpdateFactor = 1.0;
-            constexpr double minUpdateFactor = -0.9;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(opts.threads)
-#endif
-            for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(globalNvox); ++j) {
-              const size_t idx = static_cast<size_t>(j);
-              if (maskPtr && !(*maskPtr)[idx]) {
-                image[idx] = 0.0;
-                continue;
-              }
-              const double sensGlobal = denom[idx];
-              if (!(sensGlobal > eps)) {
-                image[idx] = 0.0;
-                continue;
-              }
-
-              const double kappa = kappaPtr ? (*kappaPtr)[idx] : 1.0;
-              const double termLikelihood = numer[idx] - denom[idx];
-              const double termPenalty =
-                  gradPtr ? bsremBeta * kappa * (*gradPtr)[idx] : 0.0;
-              double denomEff = sensGlobal;
-              if (curvPtr)
-                denomEff += bsremBeta * std::max((*curvPtr)[idx], 0.0);
-
-              double fCurr = image[idx];
-              if (fCurr < eps)
-                fCurr = eps;
-
-              double updateFactor =
-                  bsremAlpha * ((termLikelihood - termPenalty) / denomEff);
-              if (updateFactor > maxUpdateFactor)
-                updateFactor = maxUpdateFactor;
-              if (updateFactor < minUpdateFactor)
-                updateFactor = minUpdateFactor;
-
-              double value = fCurr * (1.0 + updateFactor);
-              if (value < eps)
-                value = opts.nonneg ? 0.0 : eps;
-              image[idx] = value;
-            }
+            BsremUpdateParams updateParams;
+            updateParams.mask = maskPtr;
+            updateParams.gradient = gradPtr;
+            updateParams.curvature = curvPtr;
+            updateParams.kappa = kappaPtr;
+            updateParams.betaScaled = bsremBeta;
+            updateParams.alpha = bsremAlpha;
+            updateParams.nonneg = opts.nonneg;
+            updateParams.threads = opts.threads;
+            applyBsremUpdate(image, numer, denom, denom, updateParams);
           }
           compactTiming.mlemUpdateSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - updateStart)

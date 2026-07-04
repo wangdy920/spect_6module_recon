@@ -7,6 +7,7 @@
 
 #include "app/BSREMOptimizer.h"
 #include "app/BSREMReconstructor.h"
+#include "app/BsremUpdate.h"
 #include "app/IOptimizer.h"
 #include "app/ReconConfig.h"
 #include "cli/ReconArgs.h"
@@ -113,48 +114,6 @@ std::vector<double> updateFactors(const std::vector<double> &before,
   return factors;
 }
 
-std::vector<double> compactLegacyBsremCore(
-    std::vector<double> image, const std::vector<double> &numer,
-    const std::vector<double> &denom, const std::vector<double> *gradPtr,
-    double bsremBeta, const std::vector<double> *curvPtr,
-    const std::vector<double> *kappaPtr, double bsremAlpha, bool nonneg) {
-  constexpr double maxUpdateFactor = 1.0;
-  constexpr double minUpdateFactor = -0.9;
-  for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(image.size()); ++j) {
-    const size_t idx = static_cast<size_t>(j);
-    const double sensGlobal = denom[idx];
-    if (!(sensGlobal > kUpdateEps)) {
-      image[idx] = 0.0;
-      continue;
-    }
-
-    const double kappa = kappaPtr ? (*kappaPtr)[idx] : 1.0;
-    const double termLikelihood = numer[idx] - denom[idx];
-    const double termPenalty =
-        gradPtr ? bsremBeta * kappa * (*gradPtr)[idx] : 0.0;
-    double denomEff = sensGlobal;
-    if (curvPtr)
-      denomEff += bsremBeta * std::max((*curvPtr)[idx], 0.0);
-
-    double fCurr = image[idx];
-    if (fCurr < kUpdateEps)
-      fCurr = kUpdateEps;
-
-    double updateFactor =
-        bsremAlpha * ((termLikelihood - termPenalty) / denomEff);
-    if (updateFactor > maxUpdateFactor)
-      updateFactor = maxUpdateFactor;
-    if (updateFactor < minUpdateFactor)
-      updateFactor = minUpdateFactor;
-
-    double value = fCurr * (1.0 + updateFactor);
-    if (value < kUpdateEps)
-      value = nonneg ? 0.0 : kUpdateEps;
-    image[idx] = value;
-  }
-  return image;
-}
-
 void expectBitwiseEqual(const std::vector<double> &actual,
                         const std::vector<double> &expected) {
   ASSERT_EQ(actual.size(), expected.size());
@@ -230,8 +189,16 @@ TEST(BSREMUpdateParityTest, StandardStepMatchesCompactCoreFormula) {
   BSREM_step(matrix, subsetRows, numer, standard, denom, denom, kNvox, kNx, kNy,
              kNz, opts, nullptr, &grad, beta, &curv, &kappa, &buffer, alpha);
 
-  const std::vector<double> compact = compactLegacyBsremCore(
-      image0, numer, denom, &grad, beta, &curv, &kappa, alpha, opts.nonneg);
+  std::vector<double> compact = image0;
+  BsremUpdateParams updateParams;
+  updateParams.gradient = &grad;
+  updateParams.curvature = &curv;
+  updateParams.kappa = &kappa;
+  updateParams.betaScaled = beta;
+  updateParams.alpha = alpha;
+  updateParams.nonneg = opts.nonneg;
+  updateParams.threads = opts.threads;
+  applyBsremUpdate(compact, numer, denom, denom, updateParams);
 
   expectBitwiseEqual(compact, standard);
   expectBitwiseEqual(updateFactors(image0, compact),
