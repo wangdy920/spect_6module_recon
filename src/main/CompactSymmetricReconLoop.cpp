@@ -664,7 +664,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         std::vector<double> curvMap;
           std::vector<double> kappaMap =
             (args.algorithm == ReconArgs::Algorithm::BSREM)
-              ? computeKappaMapCompact(denom, args, maskPtr)
+              ? computeKappaMapStandard(denom, args, maskPtr)
                 : std::vector<double>();
         const bool useRegularization =
             args.algorithm == ReconArgs::Algorithm::BSREM && args.useReg &&

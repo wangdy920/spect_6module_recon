@@ -225,20 +225,35 @@ TEST(BSREMKappaMapGoldenTest, StandardHistoricalBehavior) {
     EXPECT_NEAR(actual[i], expected[i], 1e-15) << "index " << i;
 }
 
-TEST(BSREMKappaMapGoldenTest, CompactHistoricalBehavior) {
+TEST(BSREMKappaMapGoldenTest, CompactCallsiteUsesStandardSemantics) {
+  // 2026-07-04 physics ruling: the legacy compact kappa variant fed
+  // 1/sqrt(eps) for zero/negative-sensitivity voxels into the normalization
+  // mean, letting dead voxels outside the support suppress regularization
+  // inside the object (kappa ~1e-3 for in-object voxels in this input).
+  // The compact loop now uses computeKappaMapStandard. For strictly
+  // positive sensitivity (the production 260601 case) both historical
+  // variants were bit-identical; this test locks the standard behavior on
+  // such an input.
   cli::ReconArgs args;
   args.bsremUseKappaMap = true;
   args.bsremKappaEps = 1e-6;
   args.bsremKappaClipMin = 0.0;
   args.bsremKappaClipMax = 1.0e9;
-  const std::vector<double> sensitivity = {4.0, 0.0, -1.0, 9.0};
-  const std::vector<double> expected = {0.0009995833819646974,
-                                        1.9991670138252242,
-                                        1.9991670138252242,
-                                        0.0006663889675867998};
+  const std::vector<double> sensitivity = {4.0, 16.0, 25.0, 9.0};
 
   const std::vector<double> actual =
-      main::computeKappaMapCompact(sensitivity, args, nullptr);
+      main::computeKappaMapStandard(sensitivity, args, nullptr);
+
+  // Reference: kappa_i = (1/sqrt(s_i+eps)) / mean(1/sqrt(s+eps)).
+  std::vector<double> expected(sensitivity.size(), 0.0);
+  double sum = 0.0;
+  for (size_t i = 0; i < sensitivity.size(); ++i) {
+    expected[i] = 1.0 / std::sqrt(sensitivity[i] + args.bsremKappaEps);
+    sum += expected[i];
+  }
+  const double mean = sum / static_cast<double>(sensitivity.size());
+  for (auto &v : expected)
+    v /= mean;
 
   ASSERT_EQ(actual.size(), expected.size());
   for (size_t i = 0; i < actual.size(); ++i)

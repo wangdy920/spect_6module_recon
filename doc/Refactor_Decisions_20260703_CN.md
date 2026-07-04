@@ -18,6 +18,11 @@
 - 最终验证：`build_codex` 构建 `SPECT_recon` / `spect_tests`，`spect_tests.exe` 256/256 passed；`build_codex_cuda` 构建 CUDA `SPECT_recon` / `spect_cuda_scaffold_tests`，`spect_cuda_scaffold_tests.exe` 26 passed / 1 skipped（cuFFT Butterworth unavailable）。
 - PR10 review 归因：CUDA `spect_cuda_scaffold_tests` MSBuild target 的 app-local/gtest discovery post-build 失败在 main `2570a34` 干净 CUDA build 同样复现；当前覆盖证据以手动运行 `spect_cuda_scaffold_tests.exe` 为准。
 
+## PR12 BSREM 回归口径与 kappa 裁决（2026-07-04）
+
+- **CUDA BSREM 回归门槛修订**：compact CUDA 路径含 atomic 归约，同一 exe 同输入两次运行 `relative_l2 ≈ 4.28e-08`（实测噪声底）。`<1e-12`/bit 级门槛在该路径不可达。判定口径改为：(a) CPU 级 update 公式对照 gtest bit 级一致（`test_bsrem_update_parity.cpp`，永久保留）；(b) CUDA 端 10-iter BSREM 前后对比落在噪声底同量级（≤1e-7 relative_l2）。归因证据：final exe 复用 baseline denom 缓存后 vs baseline 两次输出均为 4.29e-08（= 噪声底）；此前 8.3e-08 的超额来自两侧独立生成的 denom 缓存（denom 生成本身经 CUDA atomic）。
+- **kappa map 双版本裁决**：能力保留（生产 `algo_bsrem.conf` 启用 `kappa_map=true`，6-module 灵敏度动态范围 ~8×，灵敏度自适应正则必要）。历史 compact 变体判定为缺陷：零/负灵敏度体素以 `1/sqrt(eps)` 计入归一化 mean，死体素可将物体内有效正则实质关闭（golden 输入下物体内 kappa 跌至 ~1e-3）。统一到 standard 语义（`computeKappaMapStandard`），compact 变体删除。对严格正灵敏度输入（260601 生产数据 933120 体素全非零）两版逐 bit 一致；统一后 10-iter BSREM 与统一前同 denom 对比 `relative_l2=4.30e-08`（噪声底内），确认零生产影响。
+
 ## 剩余依赖 / 暂不本地启动
 
 - PR9-PR13：依赖 PR1/PR2 经 Fable 5 / Opus 4.8 审定后再进入架构/物理链；PR11/PR12 仍需 `physics-regression-required` 双审。
