@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cuda/CudaConfig.h"
+#include "cuda/CudaLaunchConfig.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
@@ -16,10 +17,10 @@
 
 namespace spect {
 
-constexpr uint64_t kProjDomainChunkMinNnz = 8ull * 1024ull * 1024ull;
-constexpr uint64_t kProjDomainChunkDefaultNnz = 48ull * 1024ull * 1024ull;
-constexpr uint64_t kProjDomainChunkMaxNnz = 256ull * 1024ull * 1024ull;
-constexpr size_t kTransientRangeSlotCount = 2;
+constexpr uint64_t kProjDomainChunkMinNnz = cuda::kProjDomainChunkMinNnz;
+constexpr uint64_t kProjDomainChunkDefaultNnz = cuda::kProjDomainChunkDefaultNnz;
+constexpr uint64_t kProjDomainChunkMaxNnz = cuda::kProjDomainChunkMaxNnz;
+constexpr size_t kTransientRangeSlotCount = cuda::kTransientRangeSlotCount;
 
 template <typename T> class PinnedHostArray {
 public:

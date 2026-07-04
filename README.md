@@ -126,10 +126,17 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `SPECT_CSR_MMAP_MIN_BYTES` | code default | Minimum standard CSR file size to mmap payload |
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
 | `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | host RAM–derived | Host-side chunk cache budget (e.g. `24g`) |
 | `SPECT_COMPACT_CHUNK_DEVICE_CACHE_BYTES` | GPU–derived | Device resident chunk cache budget |
+| `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
+| `SPECT_COMPACT_DEVICE_RATIO` | off | Enable compact device-side ratio helper path |
+| `SPECT_COMPACT_DEVICE_BACKWARD` | off | Enable compact device-side backward accumulation helper path |
+| `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
 | `SPECT_CUDA_SPMV_ALG` | cuSPARSE default | SpMV algorithm selection when supported |
+| `SPECT_CUDA_SPMV_FWD_ALG` | `SPECT_CUDA_SPMV_ALG` | Forward SpMV algorithm override |
+| `SPECT_CUDA_SPMV_BWD_ALG` | `SPECT_CUDA_SPMV_ALG` | Backward SpMV algorithm override |
 
 mmap 失败时会 stderr 输出 `[WARN] compact-chunk mmap failed ... falling back to full copy load`。
 

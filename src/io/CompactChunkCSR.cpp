@@ -1,5 +1,7 @@
 #include "io/CompactChunkCSR.h"
 
+#include "cuda/CudaLaunchConfig.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -576,9 +578,8 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
 }
 
 uint64_t defaultCompactChunkHostCacheBudgetBytes() {
-  constexpr uint64_t kDefaultBudget = 24ull * 1024ull * 1024ull * 1024ull;
   return parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"),
-                         kDefaultBudget);
+                         spect::cuda::kCompactChunkHostCacheDefaultBytes);
 }
 
 CompactChunkCSRDirectory openCompactChunkCSRDirectory(

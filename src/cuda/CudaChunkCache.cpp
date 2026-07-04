@@ -31,17 +31,6 @@ namespace spect {
 
 namespace {
 
-constexpr uint64_t kPreparedChunkHostCacheMaxBytes =
-    24ull * 1024ull * 1024ull * 1024ull;
-constexpr uint64_t kPreparedChunkHostCacheMidBytes =
-    8ull * 1024ull * 1024ull * 1024ull;
-constexpr uint64_t kPreparedChunkHostCacheMinBytes =
-    2ull * 1024ull * 1024ull * 1024ull;
-constexpr uint64_t kPreparedChunkHostCacheEmergencyBytes =
-    512ull * 1024ull * 1024ull;
-constexpr uint64_t kPreparedChunkHostCacheSafetyReserveBytes =
-    4ull * 1024ull * 1024ull * 1024ull;
-
 struct SystemMemoryInfo {
   uint64_t totalBytes = 0;
   uint64_t availableBytes = 0;
@@ -68,28 +57,24 @@ std::atomic<uint64_t> g_cudaChunkNnzBudgetOverride{0};
 std::atomic<uint64_t> g_cudaPreparedChunkHostCacheBytesOverride{0};
 
 uint64_t recommendProjDomainChunkNnzBudget(size_t freeBytes) {
-  constexpr uint64_t kBytesPerNnz =
-      static_cast<uint64_t>(sizeof(int32_t) + sizeof(float));
-  constexpr uint64_t kReserveBytes = 768ull * 1024ull * 1024ull;
-  constexpr uint64_t kTargetBytesCap = 4ull * 1024ull * 1024ull * 1024ull;
-  constexpr uint64_t kHighMemThreshold = 12ull * 1024ull * 1024ull * 1024ull;
-
   uint64_t usableBytes = static_cast<uint64_t>(freeBytes);
-  if (usableBytes > kReserveBytes) {
-    usableBytes -= kReserveBytes;
+  if (usableBytes > cuda::kProjDomainChunkFreeMemoryReserveBytes) {
+    usableBytes -= cuda::kProjDomainChunkFreeMemoryReserveBytes;
   }
 
-  const uint64_t targetBytes = usableBytes >= kHighMemThreshold
-                                   ? std::min<uint64_t>(usableBytes / 2ull,
-                                                        kTargetBytesCap)
-                                   : std::min<uint64_t>(usableBytes / 3ull,
-                                                        3ull * 1024ull *
-                                                            1024ull * 1024ull);
+    const uint64_t targetBytes =
+    usableBytes >= cuda::kProjDomainChunkHighMemThresholdBytes
+        ? std::min<uint64_t>(
+          usableBytes / cuda::kProjDomainChunkHighMemDivisor,
+          cuda::kProjDomainChunkTargetBytesCap)
+        : std::min<uint64_t>(
+          usableBytes / cuda::kProjDomainChunkLowMemDivisor,
+          cuda::kProjDomainChunkLowMemTargetBytesCap);
   if (targetBytes == 0) {
     return kProjDomainChunkDefaultNnz;
   }
 
-  return std::clamp<uint64_t>(targetBytes / kBytesPerNnz,
+  return std::clamp<uint64_t>(targetBytes / cuda::kProjDomainChunkBytesPerNnz,
                               kProjDomainChunkMinNnz,
                               kProjDomainChunkMaxNnz);
 }
@@ -194,13 +179,14 @@ void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward) {
 
 uint64_t selectPreparedChunkHostCacheBudgetCapBytes() {
   const SystemMemoryInfo memory = querySystemMemoryInfo();
-  uint64_t cap = kPreparedChunkHostCacheMinBytes;
+  uint64_t cap = cuda::kPreparedChunkHostCacheMinBytes;
   // P3-A: Use 60 GiB threshold instead of 64 GiB — Windows reserves ~0.5 GiB
   // for hardware (BIOS, GPU BAR, etc.), so a 64 GB system reports ~63.8 GiB.
-  if (memory.totalBytes >= 60ull * 1024ull * 1024ull * 1024ull) {
-    cap = kPreparedChunkHostCacheMaxBytes;
-  } else if (memory.totalBytes >= 28ull * 1024ull * 1024ull * 1024ull) {
-    cap = kPreparedChunkHostCacheMidBytes;
+  if (memory.totalBytes >= cuda::kPreparedChunkHostCacheHighRamThresholdBytes) {
+    cap = cuda::kPreparedChunkHostCacheMaxBytes;
+  } else if (memory.totalBytes >=
+             cuda::kPreparedChunkHostCacheMidRamThresholdBytes) {
+    cap = cuda::kPreparedChunkHostCacheMidBytes;
   }
   // Code.CUDA.41: On high-RAM systems, Windows MEMORYSTATUSEX.ullAvailPhys
   // counts memory-mapped file pages (e.g. the 21 GB CSR file) as "in use",
@@ -208,14 +194,18 @@ uint64_t selectPreparedChunkHostCacheBudgetCapBytes() {
   // Use totalBytes*2/3 as a floor for effectiveAvailable to prevent the
   // cache budget from being suppressed below the matrix size.
   const uint64_t effectiveAvailable =
-      (memory.totalBytes >= 60ull * 1024ull * 1024ull * 1024ull)
-          ? std::max(memory.availableBytes, memory.totalBytes * 2ull / 3ull)
+      (memory.totalBytes >= cuda::kPreparedChunkHostCacheHighRamThresholdBytes)
+            ? std::max(
+              memory.availableBytes,
+              memory.totalBytes *
+                cuda::kPreparedChunkHostCacheEffectiveAvailableNumerator /
+                cuda::kPreparedChunkHostCacheEffectiveAvailableDenominator)
           : memory.availableBytes;
-  if (effectiveAvailable > kPreparedChunkHostCacheSafetyReserveBytes) {
+  if (effectiveAvailable > cuda::kPreparedChunkHostCacheSafetyReserveBytes) {
     cap = std::min<uint64_t>(
-        cap, effectiveAvailable - kPreparedChunkHostCacheSafetyReserveBytes);
+        cap, effectiveAvailable - cuda::kPreparedChunkHostCacheSafetyReserveBytes);
   } else {
-    cap = std::min<uint64_t>(cap, kPreparedChunkHostCacheEmergencyBytes);
+    cap = std::min<uint64_t>(cap, cuda::kPreparedChunkHostCacheEmergencyBytes);
   }
   return cap;
 }
@@ -241,7 +231,7 @@ uint64_t selectPreparedChunkHostCacheBudgetBytes(
   const uint64_t cap = selectPreparedChunkHostCacheBudgetCapBytes();
   if (cap == 0) {
     return splitPreparedChunkHostCacheBudgetBytes(
-        kPreparedChunkHostCacheEmergencyBytes, activePreparedCaches);
+        cuda::kPreparedChunkHostCacheEmergencyBytes, activePreparedCaches);
   }
   return splitPreparedChunkHostCacheBudgetBytes(cap, activePreparedCaches);
 }

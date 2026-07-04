@@ -4,6 +4,7 @@
 
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaLaunchConfig.h"
 #include "cuda/CudaNvrtcLoader.h"
 
 #include <cuda.h>
@@ -700,7 +701,7 @@ void uploadKernelIfNeededFloat(const std::vector<double> &host,
 
 void launchVolumeKernel(CUfunction function, void **args,
                         unsigned long long total) {
-  const unsigned int blockSize = 256;
+  const unsigned int blockSize = kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((total + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(function, gridSize, 1, 1, blockSize, 1, 1,

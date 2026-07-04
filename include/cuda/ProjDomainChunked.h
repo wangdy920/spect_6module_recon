@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cuda/CudaLaunchConfig.h"
+
 #include "filters/PSFConfig.h"
 #include "io/CSRTypes.h"
 
@@ -146,7 +148,7 @@ inline uint64_t resolveCudaPreparedChunkHostCacheBudgetForTestingCUDA(size_t) {
   return 0;
 }
 
-inline uint64_t getProjDomainChunkNnzBudgetCUDA() { return 8ull * 1024ull * 1024ull; }
+inline uint64_t getProjDomainChunkNnzBudgetCUDA() { return kProjDomainChunkMinNnz; }
 inline uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() { return 0; }
 
 #endif

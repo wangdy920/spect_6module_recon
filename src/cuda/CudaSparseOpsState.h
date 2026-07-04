@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cuda/CudaLaunchConfig.h"
+
 bool isContiguousAscending(const std::vector<int> &rows) {
   if (rows.empty()) {
     return true;
@@ -13,7 +15,8 @@ bool isContiguousAscending(const std::vector<int> &rows) {
   return true;
 }
 
-constexpr int kCompactDeviceBackwardMaxAccumulators = 5;
+constexpr int kCompactDeviceBackwardMaxAccumulators =
+  cuda::kCompactDeviceBackwardMaxAccumulators;
 
 cusparseSpMVAlg_t parseSpmvAlgName(const char *text,
                                    cusparseSpMVAlg_t fallback) {
@@ -1532,7 +1535,7 @@ private:
 
     // Reserve space for 2 transient slots + cuSPARSE/cuFFT workspace.
     constexpr uint64_t kDeviceCacheReserveBytes =
-        2ull * 3ull * 1024ull * 1024ull * 1024ull;  // ~6 GiB headroom
+      cuda::kDeviceChunkCacheReserveBytes;  // ~6 GiB headroom
 
     uint64_t freeBytes = 0;
     try {
@@ -1571,7 +1574,7 @@ private:
     deviceChunkCache_.initialized = true;
 
     const uint64_t usedMiB =
-        deviceChunkCache_.numCached * maxChunkBytes / (1024ull * 1024ull);
+        deviceChunkCache_.numCached * maxChunkBytes / cuda::kCudaMiB;
     fprintf(stderr,
             "[P3-D] Device chunk cache: %zu / %zu chunks cached "
             "(%llu MiB VRAM)\n",
@@ -1662,9 +1665,8 @@ public:
             "[CompactChunkCUDA] Resident matrix cache: %zu / %zu matrices "
             "cached (%llu MiB reserve=%llu MiB)\n",
             residentMatrixSetCache_.numCached, matrices.size(),
-            static_cast<unsigned long long>(usedBytes / (1024ull * 1024ull)),
-            static_cast<unsigned long long>(reserveBytes /
-                                            (1024ull * 1024ull)));
+            static_cast<unsigned long long>(usedBytes / cuda::kCudaMiB),
+            static_cast<unsigned long long>(reserveBytes / cuda::kCudaMiB));
     return true;
   }
 

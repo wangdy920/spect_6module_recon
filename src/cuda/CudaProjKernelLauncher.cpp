@@ -4,6 +4,7 @@
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaLaunchConfig.h"
 #include "cuda/CudaNvrtcLoader.h"
 #include "cuda/SparseOpsCudaKernels.h"
 
@@ -129,7 +130,7 @@ void launchProjDomainRatioKernel(const float *yhat, const float *projections,
   unsigned long long offset = static_cast<unsigned long long>(projectionOffset);
   unsigned long long total = static_cast<unsigned long long>(count);
   void *args[] = {&yhatPtr, &projPtr, &offset, &ratioPtr, &total, &eps};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.ratioFunction,
@@ -171,7 +172,7 @@ void launchCompactRatioKernel(
                   &ratioPtr,
                   &total,
                   &eps};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(
@@ -200,7 +201,7 @@ void launchCompactTransformBackwardAddKernel(
                   const_cast<int *>(&params.nz),
                   const_cast<int *>(&params.symId),
                   &zMirror};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((nvox + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(
@@ -243,7 +244,7 @@ void launchCompactBakeAttenKernel(const float *values, const int32_t *rowPtr,
                   const_cast<int *>(&params.nx),
                   const_cast<int *>(&params.ny),
                   const_cast<int *>(&params.nz)};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize = static_cast<unsigned int>(rows);
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactBakeAttenFunction, gridSize, 1, 1,
@@ -268,7 +269,7 @@ void launchProjDomainConvYKernel(const float *input, float *output,
   unsigned long long frames = static_cast<unsigned long long>(frameCount);
   void *args[] = {&inputPtr, &outputPtr, &kernelPtr, &radius, &detNz, &detNx,
                   &frames};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((total + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.convYFunction,
@@ -295,7 +296,7 @@ void launchProjDomainConvXKernel(const float *input, float *output,
   unsigned long long frames = static_cast<unsigned long long>(frameCount);
   void *args[] = {&inputPtr, &outputPtr, &kernelPtr, &radius, &detNz, &detNx,
                   &frames};
-  const unsigned int blockSize = 256;
+    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((total + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.convXFunction,

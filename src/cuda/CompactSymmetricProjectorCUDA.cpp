@@ -3,6 +3,7 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
 #include "core/ReconLimits.h"
+#include "cuda/CudaLaunchConfig.h"
 #include "interfaces/ISparseOps.h"
 #include "sparse/SparseOpsBackend.h"
 
@@ -28,7 +29,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 constexpr uint64_t kCompactChunkResidentReserveBytes =
-    2ull * 1024ull * 1024ull * 1024ull;
+    kCompactChunkResidentDeviceReserveBytes;
 
 struct RegisteredCompactChunkKey {
   const void *rowPtr = nullptr;

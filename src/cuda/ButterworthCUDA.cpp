@@ -4,6 +4,7 @@
 
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaLaunchConfig.h"
 #include "cuda/CudaNvrtcLoader.h"
 
 #if CUDA_ENABLED
@@ -224,7 +225,7 @@ void applyMaskOnDevice(cufftComplex *deviceBuffer, float *deviceMask,
   unsigned long long totalCount = static_cast<unsigned long long>(total);
   void *args[] = {&dataPtr, &maskPtr, &totalCount};
 
-  const unsigned int blockSize = 256;
+  const unsigned int blockSize = spect::cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((total + blockSize - 1) / blockSize);
   CUDRV_CHECK(cuLaunchKernel(g_butterworthKernel.maskFunction, gridSize, 1, 1,
