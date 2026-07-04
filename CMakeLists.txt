@@ -490,6 +490,7 @@ add_library(spect::app ALIAS spect_app)
 #       不要在这里重复包含，否则会导致 ODR 违规
 add_executable(SPECT_recon
   src/main/AutoMuMap.cpp
+  src/main/BsremKappaMap.cpp
   src/main/CTACOps.cpp
   src/main/CompactSymmetricReconLoop.cpp
   src/main/MainProgram.cpp
@@ -665,6 +666,7 @@ if(SPECT_BUILD_TESTS)
   # 测试可执行文件 - 不再依赖 original_source_backup
   add_executable(spect_tests
     src/main/AutoMuMap.cpp
+    src/main/BsremKappaMap.cpp
     src/main/CTACOps.cpp
     src/main/CompactSymmetricReconLoop.cpp
     src/main/MatVarPath.cpp
@@ -680,6 +682,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_spmv.cpp
     tests/test_bsrem_validation.cpp
     tests/test_bsrem_alignment.cpp
+    tests/test_bsrem_update_parity.cpp
     tests/test_osem_alignment.cpp
     tests/test_psf_modes.cpp
     tests/test_metric_output.cpp

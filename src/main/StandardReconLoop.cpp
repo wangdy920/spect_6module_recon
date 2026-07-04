@@ -16,6 +16,7 @@
 #include "filters/Convolution.h"
 #include "interfaces/ISparseOps.h"
 #include "main/CTACOps.h"
+#include "main/BsremKappaMap.h"
 #include "main/ReconDataLoader.h"
 #include "main/ReconLoopHelpers.h"
 #include "main/RunLogger.h"
@@ -240,39 +241,6 @@ inline void runProjDomainChunkedTranspose(const io::CSRView &matrix,
       y[index] += local[index];
     }
   }
-}
-
-std::vector<double> computeKappaMap(const std::vector<double> &globalSensitivity,
-                                    const ReconArgs &args,
-                                    const std::vector<uint8_t> *mask) {
-  std::vector<double> kappa(globalSensitivity.size(), 1.0);
-  if (!args.bsremUseKappaMap || globalSensitivity.empty())
-    return kappa;
-
-  const double eps = std::max(args.bsremKappaEps, 1e-12);
-  double sum = 0.0;
-  size_t count = 0;
-  for (size_t i = 0; i < globalSensitivity.size(); ++i) {
-    if (mask && !(*mask)[i])
-      continue;
-    const double value = globalSensitivity[i];
-    if (value > eps && std::isfinite(value)) {
-      kappa[i] = 1.0 / std::sqrt(value + eps);
-      sum += kappa[i];
-      ++count;
-    }
-  }
-  const double mean = (count > 0) ? (sum / static_cast<double>(count)) : 1.0;
-  for (size_t i = 0; i < kappa.size(); ++i) {
-    double value = kappa[i] / mean;
-    if (args.bsremSoftMask && mask && !(*mask)[i])
-      value = std::max(value, 1.0 + args.bsremSoftMaskLambdaOut);
-    value =
-        std::clamp(value, args.bsremKappaClipMin, args.bsremKappaClipMax);
-    kappa[i] = value;
-  }
-
-  return kappa;
 }
 
 template <typename MatrixType>
@@ -511,7 +479,7 @@ std::vector<double> runStandardReconstructionImpl(
   std::vector<double> subsetDenom;
   std::vector<double> bsremBuffer(globalNvox, 0.0);
   std::vector<double> curvMap;
-  std::vector<double> kappaMap = computeKappaMap(denom, args, maskPtr);
+  std::vector<double> kappaMap = computeKappaMapStandard(denom, args, maskPtr);
   const std::vector<uint8_t> *maskForReg =
       (maskPtr && args.useReg && args.reg.skip_outside_mask) ? maskPtr
                                                              : nullptr;

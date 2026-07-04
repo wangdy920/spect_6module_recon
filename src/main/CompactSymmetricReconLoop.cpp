@@ -7,6 +7,7 @@
 #include "filters/ButterworthFilter.h"
 #include "io/MHDWriter.h"
 #include "io/VolumeLoader.h"
+#include "main/BsremKappaMap.h"
 #include "main/ReconLoopHelpers.h"
 #include "main/RunLogger.h"
 #include "main/SmoothingOps.h"
@@ -480,38 +481,6 @@ void saveCompactDenomCache(const std::filesystem::path &cacheMhdPath,
                              manifestPath.string());
 }
 
-std::vector<double> computeKappaMap(const std::vector<double> &globalSensitivity,
-                                    const ReconArgs &args,
-                                    const std::vector<uint8_t> *mask) {
-  std::vector<double> kappa(globalSensitivity.size(), 1.0);
-  if (!args.bsremUseKappaMap || globalSensitivity.empty())
-    return kappa;
-
-  const double eps = std::max(args.bsremKappaEps, 1e-12);
-  double sum = 0.0;
-  size_t count = 0;
-  for (size_t i = 0; i < globalSensitivity.size(); ++i) {
-    if (mask && !(*mask)[i])
-      continue;
-    const double value = 1.0 / std::sqrt(std::max(globalSensitivity[i], 0.0) + eps);
-    sum += value;
-    ++count;
-    kappa[i] = value;
-  }
-
-  const double mean = (count > 0) ? (sum / static_cast<double>(count)) : 1.0;
-  for (size_t i = 0; i < kappa.size(); ++i) {
-    double value = kappa[i] / mean;
-    if (args.bsremSoftMask && mask && !(*mask)[i])
-      value = std::max(value, 1.0 + args.bsremSoftMaskLambdaOut);
-    value = std::clamp(value, args.bsremKappaClipMin, args.bsremKappaClipMax);
-    kappa[i] = value;
-  }
-
-  return kappa;
-}
-
-
 template <typename MatrixType>
 std::vector<double> runCompactSymmetricReconstructionImpl(
     const CompactSymmetricReconLoopContext &ctx, const MatrixType &matrix) {
@@ -692,9 +661,9 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         std::vector<double> image(globalNvox, 1.0);
         std::vector<double> gradReg(globalNvox, 0.0);
         std::vector<double> curvMap;
-        std::vector<double> kappaMap =
+          std::vector<double> kappaMap =
             (args.algorithm == ReconArgs::Algorithm::BSREM)
-                ? computeKappaMap(denom, args, maskPtr)
+              ? computeKappaMapCompact(denom, args, maskPtr)
                 : std::vector<double>();
         const bool useRegularization =
             args.algorithm == ReconArgs::Algorithm::BSREM && args.useReg &&
