@@ -4,9 +4,9 @@
 
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaNvrtcLoader.h"
 
 #include <cuda.h>
-#include <nvrtc.h>
 
 #include <algorithm>
 #include <cmath>
@@ -547,34 +547,12 @@ extern "C" __global__ void tv_prox_primal_update_3d(
 }
 )CU";
 
-  nvrtcProgram program = nullptr;
-  SPECT_NVRTC_CHECK(
-      nvrtcCreateProgram(&program, source, "volume_ops_cuda.cu", 0, nullptr,
-                         nullptr));
-
   std::string arch = "--gpu-architecture=compute_" +
                      std::to_string(props.major) +
                      std::to_string(props.minor);
   const char *options[] = {arch.c_str()};
-  const nvrtcResult compileStatus =
-      nvrtcCompileProgram(program, 1, options);
-
-  size_t logSize = 0;
-  SPECT_NVRTC_CHECK(nvrtcGetProgramLogSize(program, &logSize));
-  std::string log(logSize, '\0');
-  if (logSize > 1)
-    SPECT_NVRTC_CHECK(nvrtcGetProgramLog(program, log.data()));
-
-  if (compileStatus != NVRTC_SUCCESS) {
-    nvrtcDestroyProgram(&program);
-    throw std::runtime_error(std::string("NVRTC compile failed: ") + log);
-  }
-
-  size_t ptxSize = 0;
-  SPECT_NVRTC_CHECK(nvrtcGetPTXSize(program, &ptxSize));
-  std::string ptx(ptxSize, '\0');
-  SPECT_NVRTC_CHECK(nvrtcGetPTX(program, ptx.data()));
-  SPECT_NVRTC_CHECK(nvrtcDestroyProgram(&program));
+  const std::string ptx = compileNvrtcProgramToPtx(
+      source, "volume_ops_cuda.cu", 1, options);
 
   CUcontext context = nullptr;
   SPECT_CUDRV_CHECK(cuCtxGetCurrent(&context));
@@ -588,8 +566,7 @@ extern "C" __global__ void tv_prox_primal_update_3d(
     g_volumeKernelCache.module = nullptr;
   }
 
-  SPECT_CUDRV_CHECK(cuModuleLoadDataEx(&g_volumeKernelCache.module, ptx.data(),
-                                       0, nullptr, nullptr));
+  loadNvrtcPtxModule(&g_volumeKernelCache.module, ptx);
   SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convX,
                                         g_volumeKernelCache.module,
                                         "conv_x_mirror_3d"));

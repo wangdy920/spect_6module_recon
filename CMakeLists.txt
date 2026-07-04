@@ -525,6 +525,7 @@ target_link_libraries(SPECT_recon PRIVATE
   spect_app
   spect_io
   spect_cli
+  spect_sparse
   spect_filters
   spect_regularizer
 )

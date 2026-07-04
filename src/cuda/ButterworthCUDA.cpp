@@ -4,12 +4,12 @@
 
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaNvrtcLoader.h"
 
 #if CUDA_ENABLED
 
 #include <cuda.h>
 #include <cufft.h>
-#include <nvrtc.h>
 
 #include <algorithm>
 #include <cmath>
@@ -24,7 +24,6 @@ namespace {
 
 #define CUFFT_CHECK(call) SPECT_CUFFT_CHECK(call)
 #define CUDRV_CHECK(call) SPECT_CUDRV_CHECK(call)
-#define NVRTC_CHECK(call) SPECT_NVRTC_CHECK(call)
 
 // --- NVRTC kernel: single mask-apply kernel for float R2C/C2R path ---
 
@@ -189,33 +188,11 @@ extern "C" __global__ void apply_butterworth_mask_f(
 }
 )CU";
 
-  nvrtcProgram program;
-  NVRTC_CHECK(nvrtcCreateProgram(&program, source, "butterworth_mask.cu", 0,
-                                 nullptr, nullptr));
-
   std::string arch = "--gpu-architecture=compute_" +
                      std::to_string(props.major) + std::to_string(props.minor);
   const char *options[] = {arch.c_str()};
-  const nvrtcResult compileStatus =
-      nvrtcCompileProgram(program, 1, options);
-
-  size_t logSize = 0;
-  NVRTC_CHECK(nvrtcGetProgramLogSize(program, &logSize));
-  std::string log(logSize, '\0');
-  if (logSize > 1) {
-    NVRTC_CHECK(nvrtcGetProgramLog(program, log.data()));
-  }
-
-  if (compileStatus != NVRTC_SUCCESS) {
-    nvrtcDestroyProgram(&program);
-    throw std::runtime_error(std::string("NVRTC compile failed: ") + log);
-  }
-
-  size_t ptxSize = 0;
-  NVRTC_CHECK(nvrtcGetPTXSize(program, &ptxSize));
-  std::string ptx(ptxSize, '\0');
-  NVRTC_CHECK(nvrtcGetPTX(program, ptx.data()));
-  NVRTC_CHECK(nvrtcDestroyProgram(&program));
+  const std::string ptx = spect::cuda::compileNvrtcProgramToPtx(
+      source, "butterworth_mask.cu", 1, options);
 
   CUcontext context = nullptr;
   CUDRV_CHECK(cuCtxGetCurrent(&context));
@@ -229,8 +206,7 @@ extern "C" __global__ void apply_butterworth_mask_f(
     g_butterworthKernel.maskFunction = nullptr;
   }
 
-  CUDRV_CHECK(cuModuleLoadDataEx(&g_butterworthKernel.module, ptx.data(), 0,
-                                 nullptr, nullptr));
+  spect::cuda::loadNvrtcPtxModule(&g_butterworthKernel.module, ptx);
   CUDRV_CHECK(cuModuleGetFunction(&g_butterworthKernel.maskFunction,
                                   g_butterworthKernel.module,
                                   "apply_butterworth_mask_f"));
