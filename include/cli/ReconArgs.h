@@ -41,6 +41,9 @@ struct ReconArgs {
     int numSubsets = 1;           ///< Subsets (1 = MLEM)
     int numThreads = 8;           ///< Thread count
     std::string sparseBackend = "auto"; ///< Sparse backend preference: auto/cpu/ref/cuda
+    std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI
+    bool cudaDeviceRequested = false; ///< True if CUDA device selection was requested
+    bool cudaDeviceFromCli = false;   ///< True if -cudaDevice overrides env
 
     // ========== Input/Output Paths ==========
     std::string projPath;                ///< Single-bed projection file

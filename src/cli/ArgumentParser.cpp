@@ -186,6 +186,14 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     }
     args.configPath = configPath;
 
+    if (const char* cudaDeviceEnv = std::getenv("SPECT_CUDA_DEVICE")) {
+        if (cudaDeviceEnv[0] != '\0') {
+            args.cudaDeviceValue = cudaDeviceEnv;
+            args.cudaDeviceRequested = true;
+            args.cudaDeviceFromCli = false;
+        }
+    }
+
     // 1. Load global config if exists
     ConfigParser cfg;
     if (std::filesystem::exists(configPath)) {
@@ -403,6 +411,12 @@ void ArgumentParser::registerHandlers() {
         return true;
     };
     handlers_["-spBackend"] = handlers_["-sparseBackend"];
+    handlers_["-cudaDevice"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+        a.cudaDeviceValue = ArgumentParser::getRequiredArg(i, argc, argv, "-cudaDevice");
+        a.cudaDeviceRequested = true;
+        a.cudaDeviceFromCli = true;
+        return true;
+    };
 
     handlers_["-subsets"] = [](int& i, int argc, char** argv, ReconArgs& a) {
         a.numSubsets =
@@ -1736,7 +1750,8 @@ void ArgumentParser::printUsage() {
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
     std::cout << "  -subsets <N>             Subsets (1=ML-EM, >1=OS-EM)\n";
-    std::cout << "  -sparseBackend <b>       auto | cpu | ref | cuda\n\n";
+    std::cout << "  -sparseBackend <b>       auto | cpu | ref | cuda\n";
+    std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";
     std::cout << "  -bsrem <a0[,g]>          BSREM alpha0 and gamma\n";

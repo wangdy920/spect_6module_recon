@@ -16,6 +16,7 @@
 #include "core/Masks.h"
 #include "core/ReconLimits.h"
 #include "cuda/CompactSymmetricProjector.h"
+#include "cuda/CudaConfig.h"
 #include "cuda/VolumeOpsCUDA.h"
 #include "cuda/ProjDomainChunked.h"
 #include "filters/ButterworthFilter.h"
@@ -104,6 +105,46 @@ void reportConfigStatus(const ReconArgs &args) {
   }
 }
 
+int parseRequestedCudaDevice(const ReconArgs &args, int deviceCount) {
+  const std::string source = args.cudaDeviceFromCli ? "-cudaDevice" : "SPECT_CUDA_DEVICE";
+  const std::string &value = args.cudaDeviceValue;
+  bool invalid = value.empty();
+  long long parsed = -1;
+  if (!invalid) {
+    try {
+      size_t consumed = 0;
+      parsed = std::stoll(value, &consumed, 10);
+      invalid = consumed != value.size();
+    } catch (const std::exception &) {
+      invalid = true;
+    }
+  }
+  if (invalid || parsed < 0 || parsed >= deviceCount) {
+    throw std::runtime_error("Invalid CUDA device id '" + value + "' from " +
+                             source + "; available CUDA device count is " +
+                             std::to_string(deviceCount) + ".");
+  }
+  return static_cast<int>(parsed);
+}
+
+void selectCudaDeviceIfRequested(const ReconArgs &args) {
+  if (!args.cudaDeviceRequested)
+    return;
+
+#if defined(SPECT_HAS_CUDA)
+  const int deviceCount = spect::cuda::getDeviceCount();
+  const int deviceId = parseRequestedCudaDevice(args, deviceCount);
+  spect::cuda::setDevice(deviceId);
+  const std::string source = args.cudaDeviceFromCli ? "-cudaDevice" : "SPECT_CUDA_DEVICE";
+  logInfo("CUDA device selected from " + source + ": " +
+          std::to_string(deviceId) + " (device count=" +
+          std::to_string(deviceCount) + ")");
+#else
+  const int deviceCount = 0;
+  (void)parseRequestedCudaDevice(args, deviceCount);
+#endif
+}
+
 } // namespace
 
 int runProgram(int argc, char **argv) {
@@ -142,6 +183,13 @@ int runProgram(int argc, char **argv) {
   }
   logInfo("Command line: " + makeCommandLineString(argc, argv));
   reportConfigStatus(args);
+
+  try {
+    selectCudaDeviceIfRequested(args);
+  } catch (const std::exception &ex) {
+    std::cerr << "Error: " << ex.what() << "\n";
+    return spect::cli::kExitUserError;
+  }
 
 #ifdef _OPENMP
   omp_set_num_threads(std::max(1, args.numThreads));
