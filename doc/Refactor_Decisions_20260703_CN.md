@@ -14,6 +14,7 @@
 - GPT-5.5 high/xhigh 本轮补充完成：PR14、PR16 最小退出码接线、PR25。PR24 拆分时遗漏的 `CompactChunkCSRSampleValidationRejectsTailOutOfRangeColIdx` 已补回。
 - PR25 真实几何 CUDA scaffold 在本机实际跑到 `test_data/6module/260601` 首个 chunk：resident matrix cache `1 / 1 matrices cached (4720 MiB)`，forward SpMV 抽样 CPU 对照通过。
 - 返回码 smoke：`-help=0`、`-dumpConf=0`、parser error `=1`、runtime missing-input error `=2`，符合 `include/cli/ExitCodes.h` 当前契约。
+- 260525 smoke 口径：本批实跑为显式 `-matrixLayout compact-symmetric -loadCSR -compactMeta` 的 1-iteration legacy compact loader smoke，用于确认隐式 mmap / legacy compact CUDA path 可运行；不等同于 R50 数值回归或退场签收。
 - 最终验证：`build_codex` 构建 `SPECT_recon` / `spect_tests`，`spect_tests.exe` 256/256 passed；`build_codex_cuda` 构建 CUDA `SPECT_recon` / `spect_cuda_scaffold_tests`，`spect_cuda_scaffold_tests.exe` 26 passed / 1 skipped（cuFFT Butterworth unavailable）。
 
 ## 剩余依赖 / 暂不本地启动

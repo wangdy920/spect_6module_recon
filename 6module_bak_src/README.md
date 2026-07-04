@@ -13,6 +13,7 @@
 
 历史 50-iter 输出和 sensitivity 参考已移至 `test_data/legacy_ref/`。它们与
 `test_data/share/` 同名文件哈希不同，因此保留为 2026-05-23 legacy 对齐参考：
+注意：仓库 `.gitignore` 默认忽略 `test_data/`；后续如需新增 legacy reference 文件，需显式 `git add -f test_data/legacy_ref/<file>`。
 
 | 文件 | SHA256 |
 | --- | --- |

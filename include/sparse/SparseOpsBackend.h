@@ -75,7 +75,7 @@ inline bool isCudaSparseOpsAvailable() {
 
 namespace cuda {
 struct CompactDeviceRatioParams {
-    int symmetryMode = 0;
+    int symmetryMode = 0; // 45 or 90
     int compactRowBase = 0;
     int compactRaysPerAngle = 0;
     int compactNumAngles = 0;
@@ -108,8 +108,13 @@ struct CompactDeviceBackwardTiming {
     double transformBackwardSeconds = 0.0;
 };
 
+/// Parameters for baking per-angle attenuation factors into compact chunk
+/// matrix values on the device: baked[t] = val[t] * att[fullAngle(row(t)),
+/// unrotatedVoxel(col(t))]. Combines the row->full-angle mapping of
+/// CompactDeviceRatioParams with the voxel mapping of
+/// CompactDeviceTransformParams.
 struct CompactAttenBakeParams {
-    int symmetryMode = 0;
+    int symmetryMode = 0; // 45 or 90
     int compactRowBase = 0;
     int compactRaysPerAngle = 0;
     int compactNumAngles = 0;
