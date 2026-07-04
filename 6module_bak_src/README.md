@@ -35,4 +35,14 @@ nvcc -O3 -arch=sm_86 spect_sysmat_PSC_6module_24pin_YSO_v4.cu -o spect_sysmat_v4
 - **Canonical**：v4 `.csrb` + 主线 `-chunkCSRDir`
 - **Legacy**：v2 `.bin` → `spect_convert_6module_sysmat_to_csrb`（compact 行，不展开对称）
 
+### 格式 × 读取端矩阵（§5.1，canonical 裁决）
+
+| 格式 | 产生端 | 布局 | 主线 `SPECT_recon` | 转换工具 `spect_convert_6module_sysmat_to_csrb` | 独立 `spect_recon_mlem.cu` |
+| --- | --- | --- | --- | --- | --- |
+| v4 `chunk_*.csrb` + `metadata.bin`(88B, SYM_90Z) | `spect_sysmat_*_v4.cu` | compact CSR chunk（对称压缩，90°Z） | ✅ **canonical**（`-chunkCSRDir`） | ❌ 无需 | ❌ **不支持** |
+| v2 `chunk_*.bin` + `metadata.bin`(76B) | `spect_sysmat_*_v2.cu` | row-wise 原始 chunk | ❌ 不直接读（须先转换） | ✅ 唯一消费者 → 输出 `.csrb` | ✅ 唯一直接读取端 |
+| 单文件 `matrix_6module.csrb`(260525, 45z) | 转换工具输出 | 合并 CSRB | ✅（`-loadCSR` legacy 路径） | —（自身输出） | ❌ 不支持 |
+
+**已知且接受的限制**：v4 `.csrb` 矩阵**无法直接喂给独立 `spect_recon_mlem.cu`**（后者只解析 v2 row-wise `.bin`）。独立 MLEM 已标 deprecated / reference-only，不再跟进新格式；需要 legacy 数值对齐时，用 v2 生成端重新产出 `.bin`，或直接使用 `test_data/legacy_ref/` 中的既有参考输出。
+
 详见 `doc/SystemMatrix_6module_compact_vs_CSRB_CN.md`。
