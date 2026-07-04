@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
+
+#include "CudaChunkCache.h"
 #include "cuda/CudaLaunchConfig.h"
 
 bool isContiguousAscending(const std::vector<int> &rows) {
@@ -335,7 +339,7 @@ public:
     const bool backward = operation == CUSPARSE_OPERATION_TRANSPOSE;
 
     const auto stageStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(inputSize));
+    stageInputH2D(x, static_cast<size_t>(inputSize));
     noteCudaCompactInputH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       stageStart)
@@ -351,7 +355,7 @@ public:
     executeSpMVLocked(cached, operation, vecX.get(), vecY.get(), 0.0f);
     deviceTiming.recordStop(nullptr);
     const auto outputStart = std::chrono::steady_clock::now();
-    dOutput_.copyToHost(y, static_cast<size_t>(outputSize));
+    stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
     const double outputSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       outputStart)
@@ -436,7 +440,7 @@ public:
     const bool backward = operation == CUSPARSE_OPERATION_TRANSPOSE;
 
     const auto stageStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(inputSize));
+    stageInputH2D(x, static_cast<size_t>(inputSize));
     noteCudaCompactInputH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       stageStart)
@@ -456,7 +460,7 @@ public:
                                 vecX.get(), vecY.get(), 0.0f, backward);
     deviceTiming.recordStop(nullptr);
     const auto outputStart = std::chrono::steady_clock::now();
-    dOutput_.copyToHost(y, static_cast<size_t>(outputSize));
+    stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
     const double outputSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       outputStart)
@@ -489,7 +493,7 @@ public:
     const int64_t cols = cached.cols;
 
     const auto inputStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(cols));
+    stageInputH2D(x, static_cast<size_t>(cols));
     noteCudaCompactInputH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       inputStart)
@@ -529,7 +533,7 @@ public:
     backwardTiming.recordStop(nullptr);
 
     const auto outputStart = std::chrono::steady_clock::now();
-    dFullOutput_.copyToHost(y, static_cast<size_t>(cols));
+    stageOutputD2H(dFullOutput_, y, static_cast<size_t>(cols));
     const double outputSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       outputStart)
@@ -894,6 +898,35 @@ public:
   }
 
 private:
+  static bool cudaSyncLegacyEnabled() {
+    static const bool enabled = []() {
+      const char *v = std::getenv("SPECT_CUDA_SYNC_LEGACY");
+      return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+  }
+
+  void stageInputH2D(const float *x, size_t count) {
+    if (cudaSyncLegacyEnabled()) {
+      dInput_.copyFromHost(x, count);
+      return;
+    }
+    pinnedInputStage_.copyFromHost(x, count);
+    dInput_.copyFromHostAsync(pinnedInputStage_.data(), count, nullptr);
+  }
+
+  template <typename DeviceArrayT>
+  void stageOutputD2H(const DeviceArrayT &dev, float *y, size_t count) {
+    if (cudaSyncLegacyEnabled()) {
+      dev.copyToHost(y, count);
+      return;
+    }
+    pinnedOutputStage_.allocate(count);
+    dev.copyToHostAsync(pinnedOutputStage_.data(), count, nullptr);
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    std::memcpy(y, pinnedOutputStage_.data(), count * sizeof(float));
+  }
+
   // Double↔float host-device conversion helpers.
   // Pageable→device cudaMemcpy(Async) is host-synchronous, so a single
   // scratch buffer (hostFloatScratch_) is safe to reuse between calls.
@@ -2600,6 +2633,8 @@ private:
   DeviceArray<float> dProjectionInput_;
   DeviceArray<float> dCompactProjectionInput_;
   DeviceArray<float> dChunkInput_;
+  PinnedHostArray<float> pinnedInputStage_;
+  PinnedHostArray<float> pinnedOutputStage_;
   DeviceArray<float> dProjChunkScratch_;
   DeviceArray<float> dProjKernelX_;
   DeviceArray<float> dProjKernelY_;
