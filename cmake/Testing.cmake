@@ -17,6 +17,7 @@ if(SPECT_BUILD_TESTS)
     src/main/CompactSymmetricReconLoop.cpp
     src/main/MatVarPath.cpp
     src/main/ReconDataLoader.cpp
+    src/main/ReconLoopHelpers.cpp
     src/main/ReconPreparation.cpp
     src/main/ReconSetup.cpp
     src/main/RunLogger.cpp
