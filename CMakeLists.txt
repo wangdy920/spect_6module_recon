@@ -326,12 +326,17 @@ message(STATUS "SPECT modular libraries: spect_interfaces, spect_core, spect_alg
 # spect_sparse: 稀疏矩阵运算库 (SparseOpsRef, SparseOpsCPU等)
 # 【T3.1】统一SpMV实现
 # ----------------------------------
-add_library(spect_sparse INTERFACE)
-target_include_directories(spect_sparse INTERFACE
+add_library(spect_sparse STATIC
+  src/sparse/SparseOpsDefaults.cpp
+)
+target_include_directories(spect_sparse PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(spect_sparse INTERFACE spect_interfaces)
+target_link_libraries(spect_sparse PUBLIC spect_interfaces)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(spect_sparse PUBLIC OpenMP::OpenMP_CXX)
+endif()
 add_library(spect::sparse ALIAS spect_sparse)
 
 if(SPECT_BUILD_CUDA_SCAFFOLD)
