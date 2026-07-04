@@ -337,6 +337,7 @@ add_library(spect::sparse ALIAS spect_sparse)
 if(SPECT_BUILD_CUDA_SCAFFOLD)
   add_library(spect_sparse_cuda STATIC
     src/cuda/SparseOpsCUDA.cpp
+    src/cuda/CudaCsrBuilder.cpp
     src/cuda/SparseOpsCudaKernels.cpp
     src/cuda/CompactSymmetricProjectorCUDA.cpp
   )
