@@ -4,6 +4,7 @@
 #include "filters/Convolution.h"
 #include "interfaces/ISparseOps.h"
 
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <utility>
@@ -51,12 +52,20 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
               psfKernels->kz)) {
         if (!(inputHasSignal && isFiniteAllZero(volume)))
           return;
-        std::cerr << "[WARN] CUDA PSF returned finite all-zero output for "
-                     "nonzero input; falling back to CPU separable convolution.\n";
+        static std::atomic<bool> warnedAllZero{false};
+        if (!warnedAllZero.exchange(true)) {
+          std::cerr << "[WARN] CUDA PSF returned finite all-zero output for "
+                       "nonzero input; falling back to CPU separable "
+                       "convolution. (further occurrences suppressed)\n";
+        }
         volume = std::move(original);
       } else {
-        std::cerr << "[WARN] CUDA PSF unavailable or failed; falling back to "
-                     "CPU separable convolution.\n";
+        static std::atomic<bool> warnedUnavailable{false};
+        if (!warnedUnavailable.exchange(true)) {
+          std::cerr << "[WARN] CUDA PSF unavailable or failed; falling back to "
+                       "CPU separable convolution. (further occurrences "
+                       "suppressed)\n";
+        }
       }
     }
     filters::conv3d_separable_inplace(volume, Nx, Ny, Nz, psfKernels->kx,
