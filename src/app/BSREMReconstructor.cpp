@@ -1,5 +1,6 @@
 #include "app/BSREMReconstructor.h"
 
+#include "app/BsremUpdate.h"
 #include "app/ProjectionOps.h"
 #include "cuda/ProjDomainChunked.h"
 #include "interfaces/ISparseOps.h"
@@ -596,47 +597,17 @@ void BSREM_step_template(const MatrixType &A, const std::vector<int> &subset_row
   g_bsremStageTiming.bufferPSFSeconds +=
       std::chrono::duration<double>(StageClock::now() - stageStart).count();
 
-  constexpr double max_update_factor = 1.0;
-  constexpr double min_update_factor = -0.9;
-
   stageStart = StageClock::now();
-#pragma omp parallel for schedule(static) num_threads(threads)
-  for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(N); ++j) {
-    if (opts.mask && !(*opts.mask)[static_cast<size_t>(j)]) {
-      f[static_cast<size_t>(j)] = 0.0;
-      continue;
-    }
-
-    const double sens_global = global_denom[static_cast<size_t>(j)];
-    if (sens_global <= eps) {
-      f[static_cast<size_t>(j)] = 0.0;
-      continue;
-    }
-
-    const double kappa = kappaPtr ? (*kappaPtr)[static_cast<size_t>(j)] : 1.0;
-    const double term_likelihood = (*buffer)[static_cast<size_t>(j)] - subset_denom[static_cast<size_t>(j)];
-    const double term_penalty = gradPtr ? beta_scaled * kappa * (*gradPtr)[static_cast<size_t>(j)] : 0.0;
-    const double gradient_diff = term_likelihood - term_penalty;
-
-    double denom_eff = sens_global;
-    if (curvPtr)
-      denom_eff += beta_scaled * std::max((*curvPtr)[static_cast<size_t>(j)], 0.0);
-
-    double f_curr = f[static_cast<size_t>(j)];
-    if (f_curr < eps)
-      f_curr = eps;
-
-    double update_factor = alpha * (gradient_diff / denom_eff);
-    if (update_factor > max_update_factor)
-      update_factor = max_update_factor;
-    if (update_factor < min_update_factor)
-      update_factor = min_update_factor;
-
-    double f_new = f_curr * (1.0 + update_factor);
-    if (f_new < eps)
-      f_new = opts.nonneg ? 0.0 : eps;
-    f[static_cast<size_t>(j)] = f_new;
-  }
+  BsremUpdateParams updateParams;
+  updateParams.mask = opts.mask;
+  updateParams.gradient = gradPtr;
+  updateParams.curvature = curvPtr;
+  updateParams.kappa = kappaPtr;
+  updateParams.betaScaled = beta_scaled;
+  updateParams.alpha = alpha;
+  updateParams.nonneg = opts.nonneg;
+  updateParams.threads = threads;
+  applyBsremUpdate(f, *buffer, global_denom, subset_denom, updateParams);
 
   if (opts.psf.mode == PSFMode::PostSmooth && psf &&
       opts.do_post_smooth_every_iter) {

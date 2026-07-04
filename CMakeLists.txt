@@ -461,6 +461,7 @@ add_library(spect::io ALIAS spect_io)
 add_library(spect_app STATIC
   src/app/ProjectionOps.cpp
   src/app/OSEMReconstructor.cpp
+  src/app/BsremUpdate.cpp
   src/app/BSREMReconstructor.cpp
 )
 target_include_directories(spect_app PUBLIC
