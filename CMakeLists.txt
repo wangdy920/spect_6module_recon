@@ -491,6 +491,7 @@ add_library(spect::app ALIAS spect_app)
 add_executable(SPECT_recon
   src/main/AutoMuMap.cpp
   src/main/CTACOps.cpp
+  src/main/CompactSymmetricReconLoop.cpp
   src/main/MainProgram.cpp
   src/main/MatVarPath.cpp
   src/main/ReconDataLoader.cpp
@@ -665,6 +666,7 @@ if(SPECT_BUILD_TESTS)
   add_executable(spect_tests
     src/main/AutoMuMap.cpp
     src/main/CTACOps.cpp
+    src/main/CompactSymmetricReconLoop.cpp
     src/main/MatVarPath.cpp
     src/main/ReconDataLoader.cpp
     src/main/ReconPreparation.cpp
