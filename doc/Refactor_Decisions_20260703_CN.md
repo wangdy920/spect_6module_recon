@@ -16,6 +16,7 @@
 - 返回码 smoke：`-help=0`、`-dumpConf=0`、parser error `=1`、runtime missing-input error `=2`，符合 `include/cli/ExitCodes.h` 当前契约。
 - 260525 smoke 口径：本批实跑为显式 `-matrixLayout compact-symmetric -loadCSR -compactMeta` 的 1-iteration legacy compact loader smoke，用于确认隐式 mmap / legacy compact CUDA path 可运行；不等同于 R50 数值回归或退场签收。
 - 最终验证：`build_codex` 构建 `SPECT_recon` / `spect_tests`，`spect_tests.exe` 256/256 passed；`build_codex_cuda` 构建 CUDA `SPECT_recon` / `spect_cuda_scaffold_tests`，`spect_cuda_scaffold_tests.exe` 26 passed / 1 skipped（cuFFT Butterworth unavailable）。
+- PR10 review 归因：CUDA `spect_cuda_scaffold_tests` MSBuild target 的 app-local/gtest discovery post-build 失败在 main `2570a34` 干净 CUDA build 同样复现；当前覆盖证据以手动运行 `spect_cuda_scaffold_tests.exe` 为准。
 
 ## 剩余依赖 / 暂不本地启动
 

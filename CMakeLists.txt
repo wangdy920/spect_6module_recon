@@ -500,6 +500,7 @@ add_executable(SPECT_recon
   src/main/RunLogging.cpp
   src/main/RunLogger.cpp
   src/main/SmoothingOps.cpp
+  src/main/StandardReconLoop.cpp
   src/main/VolumeOutput.cpp
   src/main/main.cpp
 )
