@@ -29,12 +29,11 @@
 
 | 场景 | 推荐 |
 | --- | --- |
-| 260601 compact 生产 | `-psf <sigma_mm> -psfMode Operator` |
+| 260601 compact 生产 | `-psf [fwhm_mm[,N]] -psfMode Operator` |
 | 260525 legacy single-file compact | 同 Operator/None；CTAC 需 chunk 路径 |
 | standard CSRB 对比实验 | 可启用 ProjDomain，但需单独回归，不得与 Operator 输出直接对比 |
 
 ## 相关文档
 
-- `doc/Capability_Matrix_CN.md`
 - `doc/Capability_Matrix_CN.md`
 - `doc/USAGE_CN.md`

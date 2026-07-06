@@ -1,18 +1,23 @@
 #include "main/ReconArgsPrinter.h"
 
-#include <iostream>
+#include "main/RunLogger.h"
+
+#include <string>
 
 namespace spect {
 namespace main {
 
 void printReconArgs(const ReconArgs &args) {
-  std::cout << "Algorithm: " << args.getAlgorithmName() << '\n';
-  std::cout << "Dims: " << args.Nx << 'x' << args.Ny << 'x' << args.Nz << '\n';
-  std::cout << "Voxel: " << args.Vx << ',' << args.Vy << ',' << args.Vz << " mm\n";
-  std::cout << "Angles: " << args.numAngles << ", subsets: " << args.numSubsets
-            << ", iterations: " << args.numIters << '\n';
-  std::cout << "Threads: " << args.numThreads << ", sparse backend: "
-            << args.sparseBackend << '\n';
+  logDebug(std::string("Algorithm: ") + args.getAlgorithmName());
+  logDebug("Dims: " + std::to_string(args.Nx) + "x" +
+           std::to_string(args.Ny) + "x" + std::to_string(args.Nz));
+  logDebug("Voxel: " + std::to_string(args.Vx) + "," +
+           std::to_string(args.Vy) + "," + std::to_string(args.Vz) + " mm");
+  logDebug("Angles: " + std::to_string(args.numAngles) +
+           ", subsets: " + std::to_string(args.numSubsets) +
+           ", iterations: " + std::to_string(args.numIters));
+  logDebug("Threads: " + std::to_string(args.numThreads) +
+           ", sparse backend: " + args.sparseBackend);
 }
 
 } // namespace main

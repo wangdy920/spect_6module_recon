@@ -40,7 +40,7 @@ struct PSFConf {
     double fwhm_x = 0.0;
     double fwhm_y = 0.0;
     double fwhm_z = 0.0;
-    double fwhm_mm = 0.0;  // 简化接口
+    double fwhm_mm = 1.5;  // 简化接口，单位 mm
     
     // 体素尺寸（mm）
     double vox_x = 1.0;
@@ -52,7 +52,7 @@ struct PSFConf {
     double truncation_mm = 3.0;
     bool z_dependent = false;
     PSFInterp interp = PSFInterp::Linear;
-    double min_sigmas = 3.0;         // 核截断阈值
+    double min_sigmas = 4.0;         // 核截断阈值：N * sigma
 };
 
 // ================= Butterworth 滤波器配置 =================

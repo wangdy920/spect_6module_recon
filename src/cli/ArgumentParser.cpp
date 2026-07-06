@@ -555,16 +555,28 @@ void ArgumentParser::registerHandlers() {
             ArgumentParser::getRequiredArg(i, argc, argv, "-conv"), a);
     }, {"-conv"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-psf"), ',');
-        if (parts.empty())
-            return false;
-        const double sigma_mm = std::stod(parts[0]);
-        if (sigma_mm <= 0.0) {
-            std::cerr << "Error: -psf sigma must be positive.\n";
+        std::string value;
+        if (i + 1 < argc) {
+            const std::string next = argv[i + 1];
+            if (!next.empty() && next[0] != '-')
+                value = argv[++i];
+        }
+        const auto parts = value.empty() ? std::vector<std::string>{}
+                                         : split(value, ',');
+        if (parts.size() > 2) {
+            std::cerr << "Error: -psf expects fwhm_mm[,N].\n";
             return false;
         }
+        const double fwhm_mm =
+            parts.empty() || parts[0].empty() ? a.psf.fwhm_mm : std::stod(parts[0]);
+        if (fwhm_mm <= 0.0) {
+            std::cerr << "Error: -psf FWHM must be positive.\n";
+            return false;
+        }
+        if (parts.size() > 1 && !parts[1].empty())
+            a.psf.min_sigmas = std::stod(parts[1]);
         a.usePSF = true;
-        a.psf.fwhm_mm = sigma_mm * 2.354820045;
+        a.psf.fwhm_mm = fwhm_mm;
         if (!a.psfModeExplicit)
             a.psf.mode = PSFMode::Operator;
         return true;
@@ -1577,7 +1589,11 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         return false;
     }
     if (args.usePSF && args.psf.fwhm_mm <= 0.0) {
-        std::cerr << "Error: PSF sigma (-psf) must be positive.\n";
+        std::cerr << "Error: PSF FWHM (-psf) must be positive.\n";
+        return false;
+    }
+    if (args.usePSF && args.psf.min_sigmas <= 0.0) {
+        std::cerr << "Error: PSF kernel truncation N (-psf fwhm,N) must be positive.\n";
         return false;
     }
 
@@ -1689,7 +1705,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     const char* psfModes[] = {"None","Operator","PostSmooth","ProjDomain","Gaussian","File"};
     int psfIdx = static_cast<int>(a.psf.mode);
     std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 5 ? psfModes[psfIdx] : "Unknown") << "\n";
-    std::cout << "fwhm = " << a.psf.fwhm_mm << "\n\n";
+    std::cout << "fwhm = " << a.psf.fwhm_mm << "\n";
+    std::cout << "min_sigmas = " << a.psf.min_sigmas << "\n\n";
 
     std::cout << "[Mask]\n";
     std::cout << "use_cylinder   = " << (a.useCylindricalMask ? "true" : "false") << "\n";
@@ -1806,7 +1823,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -conv <params>           Legacy convolution filter\n\n";
 
     std::cout << "=== PSF ===\n";
-    std::cout << "  -psf <sigma_mm>          PSF Gaussian sigma (mm); FWHM=2.3548*sigma; enables PSF\n";
+    std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.5,4)\n";
     std::cout << "  -psfMode <mode>          None | Operator | PostSmooth | ProjDomain\n";
     std::cout << "  -psfProj on|off          Per-angle 2D PSF in projection domain\n";
     std::cout << "\n";

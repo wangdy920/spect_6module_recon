@@ -13,12 +13,14 @@
 namespace spect {
 namespace filters {
 
-std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm) {
+std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm,
+                                   double min_sigmas) {
   if (fwhm_mm <= 0.0 || vox_mm <= 0.0)
     return {1.0};
 
   const double sigma_vox = (fwhm_mm / 2.354820045) / vox_mm;
-  const int radius = std::max(1, static_cast<int>(std::ceil(3.0 * sigma_vox)));
+  const double trunc = (min_sigmas > 0.0) ? min_sigmas : 4.0;
+  const int radius = std::max(1, static_cast<int>(std::ceil(trunc * sigma_vox)));
   const int kernel_size = 2 * radius + 1;
 
   std::vector<double> kernel(static_cast<size_t>(kernel_size));
@@ -279,9 +281,9 @@ PSFKernels make_psf_kernels(const PSFConf &psf) {
   const double fwhm_x = (psf.fwhm_x > 0.0) ? psf.fwhm_x : psf.fwhm_mm;
   const double fwhm_y = (psf.fwhm_y > 0.0) ? psf.fwhm_y : psf.fwhm_mm;
   const double fwhm_z = (psf.fwhm_z > 0.0) ? psf.fwhm_z : psf.fwhm_mm;
-  kernels.kx = makeGaussian1D(fwhm_x, psf.vox_x);
-  kernels.ky = makeGaussian1D(fwhm_y, psf.vox_y);
-  kernels.kz = makeGaussian1D(fwhm_z, psf.vox_z);
+  kernels.kx = makeGaussian1D(fwhm_x, psf.vox_x, psf.min_sigmas);
+  kernels.ky = makeGaussian1D(fwhm_y, psf.vox_y, psf.min_sigmas);
+  kernels.kz = makeGaussian1D(fwhm_z, psf.vox_z, psf.min_sigmas);
   return kernels;
 }
 

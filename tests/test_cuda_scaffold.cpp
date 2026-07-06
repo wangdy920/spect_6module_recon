@@ -872,7 +872,7 @@ TEST(CudaScaffoldTest, VolumePsfMatchesCpuOnCompactShareGeometry) {
     const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
                          static_cast<size_t>(Nz);
     const std::vector<double> kernel =
-        spect::filters::makeGaussian1D(0.637 * 2.354820045, 0.3);
+        spect::filters::makeGaussian1D(1.5, 0.3);
 
     std::vector<double> ones(total, 1.0);
     ASSERT_TRUE(spect::cuda::applySeparableConv3DInplaceCUDA(

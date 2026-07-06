@@ -607,7 +607,7 @@ TEST(IOTest, CompactSymmetryToyZeroPsfIsIdentityAndGaussianCommutesWithD4) {
     expectVectorsNear(zeroPsf, image, 1e-12);
 
     auto blurred = image;
-    const auto xyKernel = spect::filters::makeGaussian1D(1.4, 1.0);
+    const auto xyKernel = spect::filters::makeGaussian1D(1.4, 1.0, 3.0);
     const std::vector<double> zIdentity = {1.0};
     spect::filters::conv3d_separable_inplace(
         blurred, nx, ny, nz, xyKernel, xyKernel, zIdentity, 1);

@@ -1142,7 +1142,8 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_EQ(parser.getString("SystemMatrix", "sparse_backend", ""), "auto");
         EXPECT_TRUE(parser.getBool("SystemMatrix", "map_csr", false));
         EXPECT_EQ(parser.getString("PSF", "mode", ""), "None");
-        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 3.0);
+        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.5);
+        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "min_sigmas", 0.0), 4.0);
         EXPECT_DOUBLE_EQ(
             parser.getDouble("Filtering", "butterworth_cutoff", 0.0), 0.35);
         EXPECT_EQ(parser.getInt("Filtering", "butterworth_order", 0), 2);

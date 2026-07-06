@@ -760,52 +760,52 @@ std::vector<double> runStandardReconstructionImpl(
                                   metric.modelTag));
   }
 
-  logInfo(formatProfileEntry("reg_gradient", stageTiming.regGradientSeconds,
+  logDebug(formatProfileEntry("reg_gradient", stageTiming.regGradientSeconds,
                              stageTiming.regGradientCalls));
-  logInfo(formatProfileEntry("subset_sensitivity",
+  logDebug(formatProfileEntry("subset_sensitivity",
                              stageTiming.subsetSensitivitySeconds,
                              stageTiming.subsetSensitivityCalls));
-  logInfo(formatProfileEntry("osem_core", stageTiming.osemCoreSeconds,
+  logDebug(formatProfileEntry("osem_core", stageTiming.osemCoreSeconds,
                              stageTiming.osemCoreCalls));
-  logInfo(formatProfileEntry("bsrem_core", stageTiming.bsremCoreSeconds,
+  logDebug(formatProfileEntry("bsrem_core", stageTiming.bsremCoreSeconds,
                              stageTiming.bsremCoreCalls));
-  logInfo(formatProfileEntry("butterworth", stageTiming.butterworthSeconds,
+  logDebug(formatProfileEntry("butterworth", stageTiming.butterworthSeconds,
                              stageTiming.butterworthCalls));
-  logInfo(formatProfileEntry("smoothing", stageTiming.smoothingSeconds,
+  logDebug(formatProfileEntry("smoothing", stageTiming.smoothingSeconds,
                              stageTiming.smoothingCalls));
-  logInfo(formatProfileEntry("save_volume", stageTiming.saveSeconds,
+  logDebug(formatProfileEntry("save_volume", stageTiming.saveSeconds,
                              stageTiming.saveCalls));
-  logInfo(formatProfileEntry("cuda.chunk_warmup",
+  logDebug(formatProfileEntry("cuda.chunk_warmup",
                              stageTiming.cudaChunkWarmupSeconds,
                              stageTiming.cudaChunkWarmupCalls));
 
   const BSREMStageTimingSnapshot bsremTiming = getBSREMStageTimingSnapshot();
   const OSEMStageTimingSnapshot osemTiming = getOSEMStageTimingSnapshot();
-  logInfo(formatProfileEntry("osem.input_psf", osemTiming.inputPSFSeconds,
+  logDebug(formatProfileEntry("osem.input_psf", osemTiming.inputPSFSeconds,
                              osemTiming.calls));
-  logInfo(formatProfileEntry("osem.forward", osemTiming.forwardSeconds,
+  logDebug(formatProfileEntry("osem.forward", osemTiming.forwardSeconds,
                              osemTiming.calls));
-  logInfo(formatProfileEntry("osem.backprojection",
+  logDebug(formatProfileEntry("osem.backprojection",
                              osemTiming.backprojectionSeconds,
                              osemTiming.calls));
-  logInfo(formatProfileEntry("osem.cuda_fused", osemTiming.cudaFusedSeconds,
+  logDebug(formatProfileEntry("osem.cuda_fused", osemTiming.cudaFusedSeconds,
                              osemTiming.cudaFusedCalls));
-  logInfo(formatProfileEntry("osem.buffer_psf", osemTiming.bufferPSFSeconds,
+  logDebug(formatProfileEntry("osem.buffer_psf", osemTiming.bufferPSFSeconds,
                              osemTiming.calls));
-  logInfo(formatProfileEntry("osem.update", osemTiming.updateSeconds,
+  logDebug(formatProfileEntry("osem.update", osemTiming.updateSeconds,
                              osemTiming.calls));
-  logInfo(formatProfileEntry("bsrem.input_psf", bsremTiming.inputPSFSeconds,
+  logDebug(formatProfileEntry("bsrem.input_psf", bsremTiming.inputPSFSeconds,
                              bsremTiming.calls));
-  logInfo(formatProfileEntry("bsrem.forward", bsremTiming.forwardSeconds,
+  logDebug(formatProfileEntry("bsrem.forward", bsremTiming.forwardSeconds,
                              bsremTiming.calls));
-  logInfo(formatProfileEntry("bsrem.backprojection",
+  logDebug(formatProfileEntry("bsrem.backprojection",
                              bsremTiming.backprojectionSeconds,
                              bsremTiming.calls));
-  logInfo(formatProfileEntry("bsrem.cuda_fused", bsremTiming.cudaFusedSeconds,
+  logDebug(formatProfileEntry("bsrem.cuda_fused", bsremTiming.cudaFusedSeconds,
                              bsremTiming.cudaFusedCalls));
-  logInfo(formatProfileEntry("bsrem.buffer_psf", bsremTiming.bufferPSFSeconds,
+  logDebug(formatProfileEntry("bsrem.buffer_psf", bsremTiming.bufferPSFSeconds,
                              bsremTiming.calls));
-  logInfo(formatProfileEntry("bsrem.update", bsremTiming.updateSeconds,
+  logDebug(formatProfileEntry("bsrem.update", bsremTiming.updateSeconds,
                              bsremTiming.calls));
   const spect::cuda::CudaChunkStageTimingSnapshot cudaChunkTiming =
       spect::cuda::getCudaChunkStageTimingSnapshotCUDA();

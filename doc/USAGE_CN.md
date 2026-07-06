@@ -203,7 +203,7 @@ ADMM 参数:
 - `-butter <cutoff,order>` — Butterworth 低通滤波（如 `-butter 0.35,2`）
 - `-smooth <sigma>` — 高斯平滑
 - `-joe <n>` — Joseph-like 平滑通道数（默认 0=关闭）
-- `-psf <sigma>` — PSF sigma（mm），启用 PSF 卷积
+- `-psf [fwhm_mm[,N]]` — PSF FWHM（mm），启用 PSF 卷积；默认 `1.5,4`，N 表示 `N*sigma` 截断
 - `-psfMode <mode>` — PSF 模式: `Operator`（默认）、`PostSmooth`、`None`
 - `-psfProj on|off` — 投影域 PSF（默认 off，仅支持 MLEM + subsets=1）
 

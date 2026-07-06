@@ -328,12 +328,24 @@ TEST(IOTest, PsfFlagDefaultsToOperatorMode) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();
     argv.push_back("-psf");
-    argv.push_back("0.637");
+    argv.push_back("1.5,5");
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_TRUE(args.usePSF);
     EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::Operator);
-    EXPECT_NEAR(args.psf.fwhm_mm, 0.637 * 2.354820045, 1e-12);
+    EXPECT_NEAR(args.psf.fwhm_mm, 1.5, 1e-12);
+    EXPECT_NEAR(args.psf.min_sigmas, 5.0, 1e-12);
+}
+TEST(IOTest, PsfFlagWithoutValueUsesDefaultFwhmAndTruncation) {
+    spect::cli::ReconArgs args;
+    auto argv = compactBaseArgs();
+    argv.push_back("-psf");
+
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.usePSF);
+    EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::Operator);
+    EXPECT_NEAR(args.psf.fwhm_mm, 1.5, 1e-12);
+    EXPECT_NEAR(args.psf.min_sigmas, 4.0, 1e-12);
 }
 TEST(IOTest, ExplicitPsfModeNoneOverridesPsfDefaultOperator) {
     spect::cli::ReconArgs args;
@@ -341,7 +353,7 @@ TEST(IOTest, ExplicitPsfModeNoneOverridesPsfDefaultOperator) {
     argv.push_back("-psfMode");
     argv.push_back("None");
     argv.push_back("-psf");
-    argv.push_back("0.637");
+    argv.push_back("1.5");
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_TRUE(args.usePSF);
@@ -424,7 +436,7 @@ TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
     {
         auto argv = compactBaseArgs();
         argv.push_back("-psf");
-        argv.push_back("0.637");
+        argv.push_back("1.5");
         argv.push_back("-psfProj");
         argv.push_back("on");
         expectRejected(argv);
@@ -498,4 +510,3 @@ TEST(IOTest, ConfigParserStripsInlineComments) {
 } // namespace test
 } // namespace io
 } // namespace spect
-

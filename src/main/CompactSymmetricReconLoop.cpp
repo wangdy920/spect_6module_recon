@@ -608,11 +608,11 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                   bedZStarts[static_cast<size_t>(bed)]);
               observeCompactMemory();
             }
-            logInfo(formatStatsEntry("compact_denom_pre_psf_global",
+            logDebug(formatStatsEntry("compact_denom_pre_psf_global",
                                      computeVectorStats(denom)));
             apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts, psfPtr,
                                opts.threads);
-            logInfo(formatStatsEntry("compact_denom_post_psf_global",
+            logDebug(formatStatsEntry("compact_denom_post_psf_global",
                                      computeVectorStats(denom)));
           } else {
             apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts, psfPtr,
@@ -646,14 +646,14 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             std::chrono::duration<double>(ProfileClock::now() - sensStart)
                 .count();
         const VectorStats denomStats = computeVectorStats(denom);
-        logInfo(formatStatsEntry("compact_denom", denomStats));
+        logDebug(formatStatsEntry("compact_denom", denomStats));
         if (denomStats.count == 0 || denomStats.finite != denomStats.count ||
             denomStats.nonzero == 0 || !(denomStats.sum > 0.0)) {
           throw std::runtime_error(
               "compact-symmetric denominator is empty, non-finite, or zero.");
         }
         const VectorStats projectionStats = computeVectorStats(projections);
-        logInfo(formatStatsEntry("compact_projection", projectionStats));
+        logDebug(formatStatsEntry("compact_projection", projectionStats));
         const bool compactPositiveProjectionInput =
             projectionStats.count > 0 &&
             projectionStats.finite == projectionStats.count &&
@@ -687,12 +687,12 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           std::vector<double> globalPsfImage;
           const std::vector<double> *bedImageSource = &image;
           if (compactMultiBedGlobalPsf) {
-            logInfo(formatStatsEntry(
+            logDebug(formatStatsEntry(
                 "compact_global_image.it" + std::to_string(it),
                 computeVectorStats(image)));
             apply_psf_forward(image, globalPsfImage, args.Nx, args.Ny, args.Nz,
                               opts, psfPtr, opts.threads);
-            logInfo(formatStatsEntry(
+            logDebug(formatStatsEntry(
                 "compact_global_psf_forward.it" + std::to_string(it),
                 computeVectorStats(globalPsfImage)));
             bedImageSource = &globalPsfImage;
@@ -723,19 +723,19 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               imagePtrs[static_cast<size_t>(bed)] =
                   localImages[static_cast<size_t>(bed)].data();
               if (compactMultiBedGlobalPsf) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_psf_forward.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localImages[static_cast<size_t>(bed)])));
               } else if (compactPsfActive) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_image.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
                     computeVectorStats(localImages[static_cast<size_t>(bed)])));
                 apply_psf_forward(localImages[static_cast<size_t>(bed)],
                                   localUsed[static_cast<size_t>(bed)], baseNx,
                                   baseNy, baseNz, opts, psfPtr, opts.threads);
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_psf_forward.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
                     computeVectorStats(localUsed[static_cast<size_t>(bed)])));
@@ -782,7 +782,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               std::vector<double> &localNumer =
                   localNumers[static_cast<size_t>(bed)];
               if (compactPsfActive) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_numer_pre_psf.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localNumer)));
@@ -794,7 +794,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                 apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                    psfPtr, opts.threads);
                 if (compactPsfActive) {
-                  logInfo(formatStatsEntry(
+                  logDebug(formatStatsEntry(
                       "compact_local_numer_post_psf.it" + std::to_string(it) +
                           ".bed" + std::to_string(bed),
                       computeVectorStats(localNumer)));
@@ -804,12 +804,12 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               }
             }
             if (compactMultiBedGlobalPsf) {
-              logInfo(formatStatsEntry(
+              logDebug(formatStatsEntry(
                   "compact_numer_pre_psf_global.it" + std::to_string(it),
                   computeVectorStats(numer)));
               apply_psf_backward(numer, args.Nx, args.Ny, args.Nz, opts, psfPtr,
                                  opts.threads);
-              logInfo(formatStatsEntry(
+              logDebug(formatStatsEntry(
                   "compact_numer_post_psf_global.it" + std::to_string(it),
                   computeVectorStats(numer)));
             }
@@ -822,18 +822,18 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               std::vector<double> localUsed;
               const double *localImageForProjection = localImage.data();
               if (compactMultiBedGlobalPsf) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_psf_forward.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localImage)));
               } else if (compactPsfActive) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_image.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
                     computeVectorStats(localImage)));
                 apply_psf_forward(localImage, localUsed, baseNx, baseNy, baseNz,
                                   opts, psfPtr, opts.threads);
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_psf_forward.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
                     computeVectorStats(localUsed)));
@@ -863,7 +863,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                       .count();
 
               if (compactPsfActive) {
-                logInfo(formatStatsEntry(
+                logDebug(formatStatsEntry(
                     "compact_local_numer_pre_psf.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localNumer)));
@@ -875,7 +875,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                 apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                    psfPtr, opts.threads);
                 if (compactPsfActive) {
-                  logInfo(formatStatsEntry(
+                  logDebug(formatStatsEntry(
                       "compact_local_numer_post_psf.it" + std::to_string(it) +
                           ".bed" + std::to_string(bed),
                       computeVectorStats(localNumer)));
@@ -885,18 +885,18 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               }
             }
             if (compactMultiBedGlobalPsf) {
-              logInfo(formatStatsEntry(
+              logDebug(formatStatsEntry(
                   "compact_numer_pre_psf_global.it" + std::to_string(it),
                   computeVectorStats(numer)));
               apply_psf_backward(numer, args.Nx, args.Ny, args.Nz, opts, psfPtr,
                                  opts.threads);
-              logInfo(formatStatsEntry(
+              logDebug(formatStatsEntry(
                   "compact_numer_post_psf_global.it" + std::to_string(it),
                   computeVectorStats(numer)));
             }
           }
           const VectorStats numerStats = computeVectorStats(numer);
-          logInfo(formatStatsEntry("compact_numer.it" + std::to_string(it),
+          logDebug(formatStatsEntry("compact_numer.it" + std::to_string(it),
                                    numerStats));
           if (numerStats.count == 0 || numerStats.finite != numerStats.count ||
               (compactPositiveProjectionInput &&
@@ -1049,64 +1049,64 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                                           fullCommandStart)
                 .count();
 
-        logInfo(formatProfileEntry("projection_load",
+        logDebug(formatProfileEntry("projection_load",
                                    compactTiming.projectionLoadSeconds, 1));
-        logInfo(formatProfileEntry("csr_map_or_load",
+        logDebug(formatProfileEntry("csr_map_or_load",
                                    compactTiming.csrMapOrLoadSeconds, 1));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "metadata_load_and_validate",
             compactTiming.metadataLoadAndValidateSeconds, 1));
-        logInfo(formatProfileEntry("psf_prepare",
+        logDebug(formatProfileEntry("psf_prepare",
                                    compactTiming.psfPrepareSeconds, 1));
-        logInfo(formatProfileEntry("compact_sensitivity",
+        logDebug(formatProfileEntry("compact_sensitivity",
                                    compactTiming.compactSensitivitySeconds,
                                    compactCudaTiming.sensitivityCalls));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "compact_forward_ratio_backward",
             compactTiming.compactForwardRatioBackwardSeconds,
             compactCudaTiming.numeratorCalls));
-        logInfo(formatProfileEntry("compact.transform_forward",
+        logDebug(formatProfileEntry("compact.transform_forward",
                                    compactCudaTiming.transformForwardSeconds,
                                    compactCudaTiming.numeratorCalls));
-        logInfo(formatProfileEntry("compact.forward",
+        logDebug(formatProfileEntry("compact.forward",
                                    compactCudaTiming.forwardSeconds,
                                    compactCudaTiming.numeratorCalls));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "compact.ratio", compactCudaTiming.ratioSeconds,
             compactCudaTiming.numeratorCalls + compactCudaTiming.sensitivityCalls));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "compact.backward", compactCudaTiming.backwardSeconds,
             compactCudaTiming.numeratorCalls + compactCudaTiming.sensitivityCalls));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "compact.transform_backward",
             compactCudaTiming.transformBackwardSeconds,
             compactCudaTiming.numeratorCalls + compactCudaTiming.sensitivityCalls));
         if (compactTiming.regGradientCalls > 0) {
-          logInfo(formatProfileEntry("compact.reg_gradient",
+          logDebug(formatProfileEntry("compact.reg_gradient",
                                      compactTiming.regGradientSeconds,
                                      compactTiming.regGradientCalls));
         }
-        logInfo(formatProfileEntry(useBsremPenaltyUpdate
+        logDebug(formatProfileEntry(useBsremPenaltyUpdate
                                        ? "bsrem_update"
                                        : "mlem_update",
                                    compactTiming.mlemUpdateSeconds,
                                    static_cast<size_t>(args.numIters)));
-        logInfo(formatProfileEntry("butterworth",
+        logDebug(formatProfileEntry("butterworth",
                                    compactTiming.butterworthSeconds,
                                    prepared.butterConf.enabled
                                        ? static_cast<size_t>(args.numIters)
                                        : 0));
-        logInfo(formatProfileEntry("output_write",
+        logDebug(formatProfileEntry("output_write",
                                    compactTiming.outputWriteSeconds, 1));
-        logInfo(formatProfileEntry(
+        logDebug(formatProfileEntry(
             "total_load_to_iteration_done",
             compactTiming.totalLoadToIterationDoneSeconds, 1));
-        logInfo(formatProfileEntry("full_command_wall_time",
+        logDebug(formatProfileEntry("full_command_wall_time",
                                    compactTiming.fullCommandWallSeconds, 1));
         const spect::cuda::CudaChunkStageTimingSnapshot cudaChunkTiming =
             spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
         logCudaChunkTimingSnapshot(cudaChunkTiming);
-        logInfo(formatMemoryEntry("compact_peak_memory", compactPeakMemory));
+        logDebug(formatMemoryEntry("compact_peak_memory", compactPeakMemory));
         return image;
 #endif
 }

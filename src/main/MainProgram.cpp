@@ -181,7 +181,7 @@ int runProgram(int argc, char **argv) {
   } else {
     logWarn("Failed to create log file at: " + makeDefaultLogPath(logArgs).string());
   }
-  logInfo("Command line: " + makeCommandLineString(argc, argv));
+  logDebug("Command line: " + makeCommandLineString(argc, argv));
   reportConfigStatus(args);
 
   try {

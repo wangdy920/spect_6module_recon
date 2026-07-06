@@ -21,7 +21,8 @@ inline size_t idx3(size_t i, size_t j, size_t k, size_t Nx, size_t Ny) {
 }
 
 /// 生成 1D 高斯核（归一化）
-std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm);
+std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm,
+                                   double min_sigmas = 4.0);
 
 // ================= 1D 卷积（内部使用）=================
 

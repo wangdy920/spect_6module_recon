@@ -39,7 +39,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
    ```powershell
    .\SPECT_recon.exe -df proj.mat -loadCSR out/sysmat.csrb -mapCSR on `
        -dim 200,200,200 -detN 40,40 -ang 72 -it 50:5 -th 8 `
-       -psf 1.0,3 -psfProj off -joe 0 -cyl 30,30 -vox 0.4,0.4,0.4 `
+       -psf 1.5,4 -psfProj off -joe 0 -cyl 30,30 -vox 0.4,0.4,0.4 `
        -fout recon_output/run1
    ```
 
@@ -53,7 +53,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and `chunk_*.csrb`. Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
 | `-Astream on|off`    | Build CSR directly from MAT files (default **off**, enable when RAM is tight). |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
-| `-psf <sigma>` , `-psfProj on|off` | Image-domain PSF or projection-domain per-angle PSF (`-psfProj` only for MLEM with `-subsets 1`). |
+| `-psf [fwhm_mm[,N]]` , `-psfProj on|off` | Image-domain PSF or projection-domain per-angle PSF; FWHM is in mm and N truncates the Gaussian at N*sigma (`-psfProj` only for MLEM with `-subsets 1`). |
 | `-psfMode Operator|PostSmooth|None` | Force PSF mode; `PostSmooth` applies PSF after each iteration (requires `-psf`). |
 | `-joe <n>` | Joseph-like (B-spline) smoothing passes on denom/image. Default 0 = disabled. |
 | `-subsets <n>` | OSEM subsets (1 = MLEM). |
@@ -184,5 +184,5 @@ cmake --build build -j
 ./build/bin/SPECT_recon \
   -df spect_1101.mat -loadCSR out/sysmat.csrb -mapCSR on \
   -dim 200,200,200 -detN 40,40 -ang 360 -it 50:5 -th 8 \
-  -psf 1.0,3 -psfProj off -joe 0 -vb 1 -fout recon_output/linux_sample
+  -psf 1.5,4 -psfProj off -joe 0 -vb 1 -fout recon_output/linux_sample
 ```

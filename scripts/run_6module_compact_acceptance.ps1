@@ -56,7 +56,7 @@ if (-not $SkipRecon) {
         "-sparseBackend", "cuda",
         "-butter", "0.35,2",
         "-butterBackend", "cufft",
-        "-psf", "0.637",
+        "-psf", "1.5",
         "-psfMode", "Operator",
         "-detN", "48,48",
         "-ang", "360",

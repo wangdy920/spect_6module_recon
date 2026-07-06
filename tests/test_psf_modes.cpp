@@ -84,6 +84,14 @@ TEST(PSFModeTest, OperatorModeBlursForwardAndBackward) {
     EXPECT_GT(maxAbsDiff(input, backward), 1e-12);
 }
 
+TEST(PSFModeTest, GaussianKernelUsesConfiguredSigmaTruncation) {
+    constexpr double fwhmForOneVoxelSigma = 2.354820045;
+    EXPECT_EQ(spect::filters::makeGaussian1D(fwhmForOneVoxelSigma, 1.0, 2.0).size(),
+              5u);
+    EXPECT_EQ(spect::filters::makeGaussian1D(fwhmForOneVoxelSigma, 1.0).size(),
+              9u);
+}
+
 TEST(PSFModeTest, PostSmoothDoesNotBlurDuringProjection) {
     const int Nx = 5, Ny = 3, Nz = 1;
     const auto input = makePatternVolume(Nx, Ny, Nz);

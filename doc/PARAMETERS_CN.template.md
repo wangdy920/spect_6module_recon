@@ -96,7 +96,7 @@ z_out_flip  = 0
 - `-it N[:save]`：迭代次数与保存间隔，例如 `50:5`。
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
-- `-psf <sigma>`：启用 image-domain Operator PSF；默认 sigma 单位为 mm。
+- `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。
 - `-alg mlem|bsrem|admm`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
