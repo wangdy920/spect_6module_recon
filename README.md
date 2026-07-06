@@ -13,8 +13,8 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - **260525 / B2**: legacy `test_data/legacy_ref/` reference lineage not fully confirmed; not a release hard gate in this cut.
 - **Target GPUs**: RTX 4070 (sm_89), RTX 5060/5070 (sm_120); CUDA 12.8+ recommended for Blackwell.
 - **Performance baseline**: v28 alternating chunk order — **117.6 s @ 50 iter** (PSC single-bed, CUDA, no PSF/filter/reg).
-- **Latest verified test baseline**: `spect_tests` **227/227** + `spect_cuda_scaffold_tests` **24/24** (2026-06-10).
-- **Share MLEM regression**: `test_data/share` 50-iter vs `recon_iter050.img` — `rmse_over_reference_mean ≈ 1.06e-5` (see `doc/share_mlem50_regression_20260605.md`).
+- **Latest verified test baseline**: `spect_tests` **263/263** (2026-07-06); latest CUDA scaffold baseline remains `24/24` from 2026-06-10.
+- **Release regression**: B1 / 260601 50-iter plain MLEM vs `test_data/sys_260601_recon_ref/recon_iter050.img` — `rmse_over_reference_mean ≈ 1.06e-5` (see `doc/Legacy_MLEM_B1B2_Parity_CN.md`).
 - **Optimization algorithms**: MLEM/OSEM, BSREM-II, ADMM (with RDP and TV proximal via Chambolle-Pock).
 - Deterministic mode remains optional (`SPECT_DETERMINISTIC=ON`) for regression checks; performance path keeps it off by default.
 
@@ -118,11 +118,12 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 - **[Usage (中文)](doc/USAGE_CN.md)** — CLI reference and examples
 - **[Reconstruction Flow (中文)](doc/RECON_FLOW_CN.md)** — end-to-end pipeline
 - **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout and cache env vars
-- **[Acceptance Checklist (中文)](doc/CompactSymmetricBackend_Acceptance_Checklist_CN.md)** — compact-symmetric sign-off criteria
-- **[Code Optimization Checklist (中文)](doc/Code_Optimization_Checklist_20260703_CN.md)** — 2026-07-03 audit backlog
+- **[Documentation Index](doc/README.md)** — current docs vs archived evidence
+- **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — current compact/standard support boundary
+- **[Release 2026-07-06](doc/RELEASE_20260706_CN.md)** — current release gate and package layout
 - **[Scripts](scripts/README.md)** — L-curve analysis and helper script entrypoints
-- **[CUDA Fusion Summary](doc/CUDA_Fusion_P1_P6_Summary.md)** — P1–P6 implementation report
-- **[CUDA Optimization Log](doc/CUDA_OPT_EXPERIMENT_LOG.md)** — detailed experiment records
+- **[Refactor Decisions](doc/Refactor_Decisions_20260703_CN.md)** — current decisions and rejected migrations
+- **[Legacy B1/B2 Parity](doc/Legacy_MLEM_B1B2_Parity_CN.md)** — 260601 release regression policy
 
 ## Environment variables (compact / CUDA)
 

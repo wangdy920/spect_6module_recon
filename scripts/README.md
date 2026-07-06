@@ -147,7 +147,7 @@ cmake --build build_cuda_scaffold --target spect_convert_6module_sysmat_to_csrb
 ## 6) 6module compact-symmetric 真实数据验收
 
 - 脚本：`scripts/run_6module_compact_acceptance.ps1`
-- 目标：按 `doc/CompactSymmetricBackend_Execution_Target_CN.md` 的固定 6module 单床位命令运行 compact-symmetric smoke，生成 QA 三视图/JSON，并在旧 CUDA reference 存在时自动做数值对齐。
+- 目标：按 archived compact-symmetric 6module smoke 口径运行历史验收；当前 release gate 见 `doc/Legacy_MLEM_B1B2_Parity_CN.md`。
 - 辅助脚本：
   - `scripts/qa_compact_cylinder.py`：输出中心 XY/XZ/YZ 三视图和基础 QA 指标。
   - `scripts/compare_compact_legacy.py`：对比新 compact 后端输出与旧 CUDA MLEM 输出。

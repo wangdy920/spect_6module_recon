@@ -25,5 +25,5 @@
 ## 参考
 
 - `6module_bak_src/README.md`
-- `doc/SystemMatrix_6module_compact_vs_CSRB_CN.md`
+- `doc/archive/SystemMatrix_6module_compact_vs_CSRB_CN.md`
 - `tests/test_convert_6module_sysmat.cpp`（toy chunk → CSRB 回归）

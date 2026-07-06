@@ -36,5 +36,5 @@
 ## 相关文档
 
 - `doc/Capability_Matrix_CN.md`
-- `doc/CompactSymmetricBackend_Design_CN.md` §PSF
+- `doc/Capability_Matrix_CN.md`
 - `doc/USAGE_CN.md`
