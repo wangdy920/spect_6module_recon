@@ -43,6 +43,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_compact_symmetry.cpp
     tests/test_parser.cpp
     tests/test_multibed_cli.cpp
+    tests/test_convert_6module_sysmat.cpp
     tests/test_bed_offsets.cpp
     tests/test_main_auto_mu_map.cpp
     tests/test_main_ctac_ops.cpp
@@ -55,6 +56,10 @@ if(SPECT_BUILD_TESTS)
   )
 
   target_compile_definitions(spect_tests PRIVATE SPECT_DETERMINISTIC=1)
+  target_compile_definitions(spect_tests PRIVATE
+    "SPECT_TEST_BINARY_DIR=\"${CMAKE_BINARY_DIR}\""
+  )
+  add_dependencies(spect_tests spect_convert_6module_sysmat_to_csrb)
   
   # 链接GoogleTest
   target_link_libraries(spect_tests PRIVATE

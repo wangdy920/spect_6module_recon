@@ -152,6 +152,21 @@ cmake --build build_cuda_scaffold --target spect_convert_6module_sysmat_to_csrb
   - `scripts/qa_compact_cylinder.py`：输出中心 XY/XZ/YZ 三视图和基础 QA 指标。
   - `scripts/compare_compact_legacy.py`：对比新 compact 后端输出与旧 CUDA MLEM 输出。
 
+## 6b) B1/B2 与 Legacy MLEM 50 iter 一致性（2026-07-06）
+
+- 文档：`doc/Legacy_MLEM_B1B2_Parity_CN.md`
+- 脚本：`scripts/run_6module_legacy_b1b2_parity.ps1`
+- 对照程序：`6module_bak_src/spect_recon_mlem.cu` → `build_legacy_6module/spect_recon_mlem_legacy.exe`
+- **对比口径**：B1/B1、B2/B2；默认投影 `test_data/sys_260601_recon_ref/PSC_6module_24pin_10MBq_600s_test_1.bin`（B1/B2 共用）
+- 归档 reference：B1 → `sys_260601_recon_ref/recon_iter050.img`；B2 → `legacy_ref/recon_iter050.img`（260525；与 test_1 投影联用需见文档 §2.3）
+- 案例：`plain` + `butter`（legacy 用 `--butter-mode every`）
+- B1/B1 需 `-Matrix260601LegacyDir` 指向含 `chunk_*.bin` 的 260601 等价目录（legacy 不读 `.csrb`）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_6module_legacy_b1b2_parity.ps1 `
+  -SpectExe staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Iterations 50
+```
+
 默认输入：
 
 ```text

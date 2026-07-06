@@ -1,6 +1,6 @@
-# SPECT-recon Capability Matrix（Draft，2026-07-03）
+# SPECT-recon Capability Matrix（2026-07-05）
 
-> 状态：第一批 PR 契约草案，待 Opus 4.8 / Fable 5 review。本文只记录当前代码能力，不为对齐文档修改代码。
+> 状态：post-refactor 对齐更新，待 Opus 4.8 / Fable 5 review。§2a：**不退场**，legacy 路径保留。
 
 ## 证据入口
 
@@ -56,10 +56,18 @@
 
 ## 260525 退场条件
 
-260525 单文件 compact 入口只有在以下三项均满足后才能删除：
+**正式决断（2026-07-05）：不退场，只做兼容保护。** 转换工具、single-file compact 路径、76B metadata、260525 对照脚本均保留；详见 `doc/Refactor_Decisions_20260703_CN.md` §2a。
+
+若将来三条件齐备且 Opus/Fable 显式签收，方可启动 PR28 删除清单。在此之前仅允许 deprecated 提示、大文件保护、隐式 mmap 安全路径和文档标注。
+
+历史上写明的退场门槛（供将来参考）：
 
 1. 连续两个发布周期无人使用 `-loadCSR -compactMeta`，有 RunLogger 使用记录或团队确认。
 2. 260601 chunk CSRB 路径完成全部物理验收并成为唯一 compact 生产路径。
 3. Opus 4.8 / Fable 5 显式签收退场。
 
-在此之前仅允许 deprecated 提示、大文件保护、隐式 mmap 安全路径和文档标注。
+## 相关文档
+
+- `doc/Format_Reader_Matrix_CN.md` — 格式 × 读者矩阵（PR26）
+- `doc/PSF_Model_Differences_CN.md` — projection-domain vs Operator PSF（§6.4）
+- `doc/Refactor_Decisions_20260703_CN.md` — §2a / 退出码 / 接口裁决

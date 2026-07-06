@@ -259,7 +259,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         return ParseResult::ExitSuccess;
     }
 
-    // 6. Validate
+    // 6. Normalize layout-specific defaults, then validate
+    normalizeArgs(args);
     if (!validateArgs(args))
         return ParseResult::ExitFailure;
     if (!args.projPaths.empty()) {
@@ -272,6 +273,12 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
   }
 }
 
+void ArgumentParser::bindHandlerAliases(
+    const Handler& handler, std::initializer_list<const char*> flags) {
+    for (const char* flag : flags)
+        handlers_[flag] = handler;
+}
+
 void ArgumentParser::registerHandlers() {
     handlers_.clear();
 
@@ -281,9 +288,7 @@ void ArgumentParser::registerHandlers() {
         a.projPath = ArgumentParser::getRequiredArg(i, argc, argv, "-df");
         return true;
     };
-    handlers_["-df"] = dataHandler;
-    handlers_["-i"] = dataHandler;
-    handlers_["-input"] = dataHandler;
+    bindHandlerAliases(dataHandler, {"-df", "-i", "-input"});
 
     handlers_["-dfList"] = [](int& i, int argc, char** argv, ReconArgs& a) {
         a.projPaths = spect::core::sortPathsByBedOrder(
@@ -364,8 +369,7 @@ void ArgumentParser::registerHandlers() {
         a.dz = a.Vz;
         return true;
     };
-    handlers_["-vox"] = voxelHandler;
-    handlers_["-spacing"] = voxelHandler;
+    bindHandlerAliases(voxelHandler, {"-vox", "-spacing"});
 
     handlers_["-detN"] = [](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-detN"), ',');
@@ -388,8 +392,7 @@ void ArgumentParser::registerHandlers() {
         a.numAngles = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
         return true;
     };
-    handlers_["-ang"] = anglesHandler;
-    handlers_["-angles"] = anglesHandler;
+    bindHandlerAliases(anglesHandler, {"-ang", "-angles"});
 
     // --- Algorithm & Iterations ---
     handlers_["-it"] = [](int& i, int argc, char** argv, ReconArgs& a) {
@@ -938,9 +941,7 @@ void ArgumentParser::registerHandlers() {
         a.helpRequested = true;
         return true;
     };
-    handlers_["-h"] = helpHandler;
-    handlers_["-help"] = helpHandler;
-    handlers_["--help"] = helpHandler;
+    bindHandlerAliases(helpHandler, {"-h", "-help", "--help"});
 }
 
 void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
@@ -1368,6 +1369,15 @@ bool ArgumentParser::parsePSFParams(const std::string& value, ReconArgs& args) {
     return false;
 }
 
+void ArgumentParser::normalizeArgs(ReconArgs& args) {
+    if (args.matrixLayout != "compact-symmetric")
+        return;
+
+    const std::string backend = toLower(args.sparseBackend);
+    if (backend == "auto")
+        args.sparseBackend = "cuda";
+}
+
 bool ArgumentParser::parseOutputPath(const std::string& path, ReconArgs& args) {
     try {
         std::filesystem::path p(path);
@@ -1381,8 +1391,7 @@ bool ArgumentParser::parseOutputPath(const std::string& path, ReconArgs& args) {
     }
 }
 
-bool ArgumentParser::validateArgs(const ReconArgs& args) {
-    // Validate projection paths
+bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     if (!args.projPaths.empty() && !args.projPath.empty()) {
         std::cerr << "Error: Use either -df or -dfList, not both.\n";
         return false;
@@ -1410,9 +1419,14 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
                   << spect::core::kMaxBeds << " fixed bed slots.\n";
         return false;
     }
+    if (!args.chunkCSRDir.empty() && !args.loadCSRPath.empty()) {
+        std::cerr << "Error: Use either -loadCSR or -chunkCSRDir, not both.\n";
+        return false;
+    }
+    return true;
+}
 
-    // Validate dimensions. In compact chunk mode metadata supplies geometry
-    // before projection loading in MainProgram.
+bool ArgumentParser::validateGeometryArgs(const ReconArgs& args) {
     const bool compactChunkGeometry =
         args.matrixLayout == "compact-symmetric" && !args.chunkCSRDir.empty();
     if (!compactChunkGeometry &&
@@ -1424,8 +1438,10 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         std::cerr << "Error: Invalid voxel spacing (-vox).\n";
         return false;
     }
+    return true;
+}
 
-    // Validate iteration parameters
+bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     if (args.numIters <= 0) {
         std::cerr << "Error: Number of iterations (-it) must be positive.\n";
         return false;
@@ -1453,10 +1469,6 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         std::cerr << "Error: Invalid -matrixLayout (expected standard or compact-symmetric).\n";
         return false;
     }
-    if (!args.chunkCSRDir.empty() && !args.loadCSRPath.empty()) {
-        std::cerr << "Error: Use either -loadCSR or -chunkCSRDir, not both.\n";
-        return false;
-    }
     if (!args.chunkCSRDir.empty() && args.matrixLayout != "compact-symmetric") {
         std::cerr << "Error: -chunkCSRDir requires -matrixLayout compact-symmetric.\n";
         return false;
@@ -1472,7 +1484,13 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
             return false;
         }
         if (!(args.sparseBackend == "cuda" || args.sparseBackend == "gpu")) {
-            std::cerr << "Error: compact-symmetric layout requires -sparseBackend cuda.\n";
+            const std::string backend = toLower(args.sparseBackend);
+            if (backend == "cpu" || backend == "ref" || backend == "reference") {
+                std::cerr << "Error: compact-symmetric layout requires CUDA; "
+                             "CPU/reference sparse backends are not supported.\n";
+            } else {
+                std::cerr << "Error: compact-symmetric layout requires a CUDA sparse backend.\n";
+            }
             return false;
         }
         const bool compactAlgorithmOk =
@@ -1508,12 +1526,12 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
             return false;
         }
     }
-        if (!(args.butterBackend == "auto" || args.butterBackend == "fftw" ||
-                    args.butterBackend == "cpu" || args.butterBackend == "cufft" ||
-                    args.butterBackend == "cuda" || args.butterBackend == "gpu")) {
-                std::cerr << "Error: Invalid -butterBackend (expected auto/fftw/cufft).\n";
-                return false;
-        }
+    if (!(args.butterBackend == "auto" || args.butterBackend == "fftw" ||
+          args.butterBackend == "cpu" || args.butterBackend == "cufft" ||
+          args.butterBackend == "cuda" || args.butterBackend == "gpu")) {
+        std::cerr << "Error: Invalid -butterBackend (expected auto/fftw/cufft).\n";
+        return false;
+    }
     if (args.bsremCurvWarmupIters < 0) {
         std::cerr << "Error: BSREM curvature warmup iterations must be >= 0.\n";
         return false;
@@ -1544,7 +1562,6 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         return false;
     }
 
-    // Validate CTAC auto mu-map options
     if (!args.ctacAutoMuFrom.empty() && !args.doCTAC) {
         std::cerr << "Error: -ctacAutoMu requires -ctac.\n";
         return false;
@@ -1555,7 +1572,6 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         return false;
     }
 
-    // Validate PSF parameters
     if (args.psfProj && !args.usePSF) {
         std::cerr << "Error: -psfProj requires -psf.\n";
         return false;
@@ -1565,14 +1581,13 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         return false;
     }
 
-    // Validate regularization
     if (args.useReg) {
         if (args.reg.beta < 0) {
             std::cerr
                 << "Error: Regularization beta (-regBeta) must be non-negative.\n";
             return false;
         }
-        if ((args.reg.type == RegType::TVIsotropic || 
+        if ((args.reg.type == RegType::TVIsotropic ||
              args.reg.type == RegType::TVHuber ||
              args.reg.type == RegType::RDP) && args.reg.delta < 0) {
             std::cerr << "Error: TV/Huber/RDP regularization delta (-regDelta) must "
@@ -1587,13 +1602,11 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
         }
     }
 
-    // Validate smoothing
     if (args.useSmooth && args.smoothSigma <= 0) {
         std::cerr << "Error: Smoothing sigma (-smooth) must be positive.\n";
         return false;
     }
 
-    // Validate cylindrical mask
     if (args.useCylindricalMask) {
         if (args.cylinderDiameterMM <= 0) {
             std::cerr << "Error: Cylinder diameter (-cylMask) must be positive.\n";
@@ -1606,6 +1619,14 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
     }
 
     return true;
+}
+
+bool ArgumentParser::validateArgs(const ReconArgs& args) {
+    if (!validateIoArgs(args))
+        return false;
+    if (!validateGeometryArgs(args))
+        return false;
+    return validateAlgorithmArgs(args);
 }
 
 void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
@@ -1732,6 +1753,7 @@ void ArgumentParser::printUsage() {
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
     std::cout << "  -matrixLayout <layout>   standard | compact-symmetric\n";
     std::cout << "  -compactMeta <path>      metadata.bin for compact-symmetric layout\n";
+    std::cout << "                           Legacy: -loadCSR + -compactMeta single-file CSRB (260525, 76B metadata) remains supported; prefer -chunkCSRDir for 260601 production.\n";
     std::cout << "  -compactDenomCache <mhd> Reuse/save compact global denominator cache; use separate files for PSF/no-PSF/FWHM/bed variants\n";
     std::cout << "  -saveCSR <path>          Save CSR binary after build\n";
     std::cout << "  -indexMat <file>         System matrix voxel index file\n";
@@ -1750,7 +1772,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
     std::cout << "  -subsets <N>             Subsets (1=ML-EM, >1=OS-EM)\n";
-    std::cout << "  -sparseBackend <b>       auto | cpu | ref | cuda\n";
+    std::cout << "  -sparseBackend <b>       auto | cpu | ref | cuda (compact layout defaults to cuda)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";
@@ -1784,7 +1806,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -conv <params>           Legacy convolution filter\n\n";
 
     std::cout << "=== PSF ===\n";
-    std::cout << "  -psf <sigma>             PSF sigma (mm), enables PSF modeling\n";
+    std::cout << "  -psf <sigma_mm>          PSF Gaussian sigma (mm); FWHM=2.3548*sigma; enables PSF\n";
     std::cout << "  -psfMode <mode>          None | Operator | PostSmooth | ProjDomain\n";
     std::cout << "  -psfProj on|off          Per-angle 2D PSF in projection domain\n";
     std::cout << "\n";

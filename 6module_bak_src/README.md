@@ -11,6 +11,20 @@
 | `spect_recon_mlem.cu` | **deprecated / reference-only** | 独立 CUDA MLEM，只读 `.bin`；与主线逻辑已迁入 `CompactSymmetricProjectorCUDA.cpp`，保留作 legacy 数值对齐 |
 | `mat_convert_bin.m` | 工具 | MAT → 投影 BIN（函数 `mat_convert_bin(...)`；示例见 `run_mat_convert_bin_example.m`） |
 
+## Legacy MLEM 编译与 B1/B2 一致性验证
+
+详见 **`doc/Legacy_MLEM_B1B2_Parity_CN.md`**。
+
+```powershell
+nvcc -O3 -std=c++14 -arch=sm_86 6module_bak_src\spect_recon_mlem.cu `
+  -o build_legacy_6module\spect_recon_mlem_legacy.exe -lcusparse -lcufft
+
+powershell -ExecutionPolicy Bypass -File scripts\run_6module_legacy_b1b2_parity.ps1 `
+  -SpectExe build_codex_cuda\bin\SPECT_recon.exe -Iterations 50
+```
+
+Legacy 支持 Butterworth（`--butter-cutoff` / `--butter-mode every` 对齐主线每 iter 滤波）。验证口径为 **B1/B1、B2/B2**（legacy 当场生成 reference）；B1 需另备 v2 `chunk_*.bin` 目录，见 `doc/Legacy_MLEM_B1B2_Parity_CN.md`。
+
 历史 50-iter 输出和 sensitivity 参考已移至 `test_data/legacy_ref/`。它们与
 `test_data/share/` 同名文件哈希不同，因此保留为 2026-05-23 legacy 对齐参考：
 注意：仓库 `.gitignore` 默认忽略 `test_data/`；后续如需新增 legacy reference 文件，需显式 `git add -f test_data/legacy_ref/<file>`。

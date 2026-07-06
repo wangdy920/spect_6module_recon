@@ -30,8 +30,8 @@ function Resolve-SpectExe {
     }
 
     $candidates = @(
-        (Join-Path $RootDir "out/install/Release/bin/SPECT_recon.exe"),
-        (Join-Path $RootDir "out/install/x64-release/bin/SPECT_recon.exe"),
+        (Join-Path $RootDir "staging/SPECT_recon_rc_dev/bin/SPECT_recon.exe"),
+        (Join-Path $RootDir "install/cmake-presets/x64-release/bin/SPECT_recon.exe"),
         (Join-Path $RootDir "build/bin/Release/SPECT_recon.exe"),
         (Join-Path $RootDir "build_refactored/bin/Release/SPECT_recon.exe")
     )

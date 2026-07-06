@@ -9,14 +9,14 @@
       "name": "windows-base",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
-      "installDir": "${sourceDir}/out/install/${presetName}",
+      "binaryDir": "${sourceDir}/build/cmake-presets/${presetName}",
+      "installDir": "${sourceDir}/install/cmake-presets/${presetName}",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_INSTALLED_DIR": "$env{VCPKG_ROOT}/installed",
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_POLICY_DEFAULT_CMP0091": "NEW",
-        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/install/cmake-presets/${presetName}",
         "VCPKG_APPLOCAL_DEPS": "ON"
       },
       "condition": {

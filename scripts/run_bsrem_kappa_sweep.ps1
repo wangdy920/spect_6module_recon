@@ -27,7 +27,7 @@ function Resolve-ExePath {
         return (Resolve-Path $InputPath).Path
     }
     $candidates = @(
-        ".\out\install\Release\bin\SPECT_recon.exe",
+        ".\staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe",
         ".\build\bin\SPECT_recon.exe",
         ".\build\Release\SPECT_recon.exe"
     )

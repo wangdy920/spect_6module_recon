@@ -10,12 +10,12 @@ install(DIRECTORY "${CMAKE_SOURCE_DIR}/config/"
   PATTERN "*.ini"
   PATTERN "*.conf")
 
-# On Windows, vcpkg typically provides shared libraries (DLLs). The build step
-# already places required runtime DLLs next to the executable under
-# `${CMAKE_BINARY_DIR}/bin` (via vcpkg applocal). Install them alongside the
-# installed executable so `out/install/.../bin/SPECT_recon.exe` is runnable.
+# On Windows, vcpkg places runtime DLLs next to the executable under the
+# generator-specific output directory (e.g. bin/Release for VS multi-config).
+# Install them alongside the installed executable so `staging/SPECT_recon_rc_dev/bin/`
+# is runnable without referencing the build tree.
 if(WIN32)
-  install(DIRECTORY "${CMAKE_BINARY_DIR}/bin/"
+  install(DIRECTORY "$<TARGET_FILE_DIR:SPECT_recon>/"
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     FILES_MATCHING
     PATTERN "*.dll")

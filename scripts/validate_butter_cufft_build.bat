@@ -7,7 +7,7 @@ for %%I in ("%REPO_ROOT%") do set "REPO_ROOT=%%~fI"
 set "VCVARS=D:\win_programFiles\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 set "VCPKG_TOOLCHAIN=D:\win_programFiles\cppDev\vcpkg\scripts\buildsystems\vcpkg.cmake"
 set "BUILD_DIR=%REPO_ROOT%\build_butter_cufft"
-set "INSTALL_DIR=%BUILD_DIR%\out\install\Release"
+set "INSTALL_DIR=%REPO_ROOT%\staging\SPECT_recon_rc_dev"
 
 call "%VCVARS%"
 if errorlevel 1 exit /b %errorlevel%

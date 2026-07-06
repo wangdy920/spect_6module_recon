@@ -1,6 +1,6 @@
-# Refactor Decisions（Draft，2026-07-03）
+# Refactor Decisions（2026-07-05）
 
-> 状态：PR2 本地草案，待 Opus 4.8 / Fable 5 review。
+> 状态：PR2 本地更新，§2a 正式结论为**不退场**；待 Opus 4.8 / Fable 5 review。
 
 ## 第一批本地执行摘要
 
@@ -23,12 +23,21 @@
 - **CUDA BSREM 回归门槛修订**：compact CUDA 路径含 atomic 归约，同一 exe 同输入两次运行 `relative_l2 ≈ 4.28e-08`（实测噪声底）。`<1e-12`/bit 级门槛在该路径不可达。判定口径改为：(a) CPU 级 update 公式对照 gtest bit 级一致（`test_bsrem_update_parity.cpp`，永久保留）；(b) CUDA 端 10-iter BSREM 前后对比落在噪声底同量级（≤1e-7 relative_l2）。归因证据：final exe 复用 baseline denom 缓存后 vs baseline 两次输出均为 4.29e-08（= 噪声底）；此前 8.3e-08 的超额来自两侧独立生成的 denom 缓存（denom 生成本身经 CUDA atomic）。
 - **kappa map 双版本裁决**：能力保留（生产 `algo_bsrem.conf` 启用 `kappa_map=true`，6-module 灵敏度动态范围 ~8×，灵敏度自适应正则必要）。历史 compact 变体判定为缺陷：零/负灵敏度体素以 `1/sqrt(eps)` 计入归一化 mean，死体素可将物体内有效正则实质关闭（golden 输入下物体内 kappa 跌至 ~1e-3）。统一到 standard 语义（`computeKappaMapStandard`），compact 变体删除。对严格正灵敏度输入（260601 生产数据 933120 体素全非零）两版逐 bit 一致；统一后 10-iter BSREM 与统一前同 denom 对比 `relative_l2=4.30e-08`（噪声底内），确认零生产影响。
 
+## 第三批本地执行摘要（2026-07-05）
+
+- **§2a 正式决断**：不退场，只做兼容保护；PR28 不启动；转换工具与 260525 路径保留。
+- **PR15 后半（部分）**：`validateArgs` 拆为 `validateIoArgs` / `validateGeometryArgs` / `validateAlgorithmArgs`；`bindHandlerAliases` 统一 `-df/-i/-input`、`-vox/-spacing`、`-ang/-angles`、help 别名；`-help` 补充 260525 legacy 说明。完整 `registerHandlers()` 表驱动留待后续 xhigh PR。
+- **§1.14 RegularizerCompat**：`compute_reg_gradient()` 继续保留 legacy 实现；委托 `computeGradientNew()` 的尝试已撤销（TVIsotropic/TVHuber FD 回归失败）。迁移必须等能量/梯度离散化口径统一后另开 PR。
+- **Epic 8 §4.3**：新增 `tests/test_convert_6module_sysmat.cpp` toy chunk → CSRB 回归。
+- **文档**：`doc/PSF_Model_Differences_CN.md`、`doc/Format_Reader_Matrix_CN.md`；README 补 `SPECT_CUDA_SYNC_LEGACY`。
+- 此前验证：撤销 RegularizerCompat 委托后，主仓根目录 + `TMP=D:\Temp` 全量 `spect_tests` 261/261 passed。
+- Codex 收尾复测（2026-07-06）：`spect_tests` 263/263 passed；`build_release.bat` 通过并生成 `staging\SPECT_recon_rc_dev`；包内 `-dumpConf` 加载 exe-local config 且自动解析 `bin\matrix\260601`；B1/B1 50-iter plain MLEM 对 `sys_260601_recon_ref/recon_iter050.img` 通过（`rmse_over_reference_mean=1.062910420816022e-05`，`sum_rel_diff=1.8900022603998347e-09`）。
+
 ## 剩余依赖 / 暂不本地启动
 
-- PR9-PR13：依赖 PR1/PR2 经 Fable 5 / Opus 4.8 审定后再进入架构/物理链；PR11/PR12 仍需 `physics-regression-required` 双审。
-- PR17：Composer CUDA helper 三合一，用户记录为需 Epic 2 稳定；本轮不抢跑。
-- PR18-PR23：依赖 PR17、接口契约审定和性能 benchmark，不在当前混合工作树继续拆。
-- PR27：依赖 PR18；PR28 / Epic 8 §4.3：依赖 §2a legacy 退场决策；PR26 format matrix 誊写仍需 Fable 5 内容。
+- PR15 `registerHandlers()` 全表驱动：仍交 GPT-5.5 xhigh（Opus review）。
+- PR28 / §2a 删除：仅在将来三条件齐备且团队明确要求退场时启动。
+- PR26 format matrix 正文已迁至 `doc/Format_Reader_Matrix_CN.md`，待 Fable 5 审定措辞。
 
 ## §1.6 双轨接口裁决
 
@@ -38,7 +47,7 @@
 
 ## §2a 260525 退场条件
 
-当前结论：不退场，只做兼容保护。
+**正式决断（2026-07-05）：不退场，只做兼容保护。** PR28 不启动；仅当团队将来明确要求退场且三条件齐备时再评估删除。
 
 退场必须同时满足：
 

@@ -7,9 +7,9 @@
 
 ## 可执行文件
 
-- **Windows 构建**: 运行 `build.bat` → 安装到 `out/install/Release/bin/SPECT_recon.exe`；构建/安装产物会在 exe 同级生成 `config/`，通常不需要传 `-config`
+- **Windows 构建**: 运行 `build_release.bat` → 开发包 `staging/SPECT_recon_rc_dev/`（RC 布局）；`build/Release/` 为编译树
 - **CUDA scaffold 构建**: `scripts/build_cuda_scaffold.ps1 -Build` → `build_cuda_scaffold/bin/SPECT_recon.exe`
-- **Release 构建**: CMake preset `x64-release` → Ninja → `release/install/bin/SPECT_recon.exe`
+- **Release 构建**: CMake preset `x64-release` → `install/cmake-presets/x64-release/bin/SPECT_recon.exe`
 
 推荐 RC 发布包结构如下，`config/` 与可执行文件和 DLL 放在同一个 `bin/` 目录下：
 
@@ -278,7 +278,14 @@ SPECT_recon.exe -dfList "bed1.mat;bed2.mat;bed3.mat;bed4.mat" \
 build.bat
 ```
 
-可执行文件: `out/install/Release/bin/SPECT_recon.exe`
+可执行文件（开发包，与 RC 调用方式一致）:
+
+```powershell
+cd staging\SPECT_recon_rc_dev
+.\bin\SPECT_recon.exe ...
+```
+
+归档 RC 包见 `dist/release_candidates/SPECT_recon_rc_YYYYMMDD/`。
 
 ### CMake Preset（Ninja）
 

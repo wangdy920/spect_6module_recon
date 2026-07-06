@@ -214,6 +214,47 @@ TEST(IOTest, CompactSymmetricParserAcceptsChunkCSRDirWithoutManualGeometry) {
     EXPECT_EQ(args.chunkCSRDir, "matrix_dir");
     EXPECT_TRUE(args.loadCSRPath.empty());
 }
+
+TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", "__missing_compact_test_config__.ini",
+        "-df", "proj.bin",
+        "-matrixLayout", "compact-symmetric",
+        "-chunkCSRDir", "matrix_dir",
+        "-alg", "mlem",
+        "-subsets", "1",
+        "-it", "1",
+        "-dim", "108,108,80",
+        "-vox", "0.3",
+        "-ang", "360"
+    };
+
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.sparseBackend, "cuda");
+}
+
+TEST(IOTest, CompactSymmetricRejectsCpuSparseBackend) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", "__missing_compact_test_config__.ini",
+        "-df", "proj.bin",
+        "-matrixLayout", "compact-symmetric",
+        "-chunkCSRDir", "matrix_dir",
+        "-sparseBackend", "cpu",
+        "-alg", "mlem",
+        "-subsets", "1",
+        "-it", "1",
+        "-dim", "108,108,80",
+        "-vox", "0.3",
+        "-ang", "360"
+    };
+
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
 TEST(IOTest, CompactSymmetricParserReadsDefaultChunkCSRDirFromConfig) {
     const auto dir =
         std::filesystem::temp_directory_path() / "spect_matrix_config_tests";

@@ -128,6 +128,18 @@ private:
      */
     static bool validateArgs(const ReconArgs& args);
 
+    static bool validateIoArgs(const ReconArgs& args);
+    static bool validateGeometryArgs(const ReconArgs& args);
+    static bool validateAlgorithmArgs(const ReconArgs& args);
+
+    /**
+     * @brief Apply layout-specific defaults after parsing (e.g. compact → CUDA).
+     */
+    static void normalizeArgs(ReconArgs& args);
+
+    void bindHandlerAliases(const Handler& handler,
+                            std::initializer_list<const char*> flags);
+
     /**
      * @brief Resolve the directory that contains the running executable.
      */

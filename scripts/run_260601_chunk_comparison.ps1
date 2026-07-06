@@ -5,7 +5,7 @@ param(
     [int]$Iterations = 1,
     [int]$Threads = 4,
 
-    [string]$Exe = "out\build\chunk-csrb-agent\bin\SPECT_recon.exe",
+    [string]$Exe = "staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe",
     [string]$OutputRoot = "",
 
     [string]$CompactChunkHostCacheBytes = "0",

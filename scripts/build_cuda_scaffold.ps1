@@ -47,7 +47,7 @@ New-Item -ItemType Directory -Force -Path $buildDirAbs | Out-Null
 $enableTestsValue = if ($EnableTests) { "ON" } else { "OFF" }
 $enableCudaSelectionValue = if ($EnableCudaSelection) { "ON" } else { "OFF" }
 $toolchainFile = "$($env:VCPKG_ROOT)/scripts/buildsystems/vcpkg.cmake"
-$installPrefix = "$buildDirAbs/out/install/Release"
+$installPrefix = "$repoRoot/staging/SPECT_recon_rc_dev"
 
 $batchLines = @(
     "@echo off",

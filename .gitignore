@@ -15,6 +15,9 @@ build/
 build_*/
 out/
 release/
+dist/
+staging/
+install/
 recon_output/
 output/
 recon_out/
