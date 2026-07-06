@@ -202,10 +202,12 @@ sum_rel_diff          <= 0.005
 - 只用于 CTAC/auto-mu 调试；Derenzo 不作为主 gate。
 - `scripts/qa_ctac_automu_cylinder.py`：从 260601 reference 圆柱测量直径/高度，生成 true/auto mu-map、Dice/volume/profile 表和 PNG。
 - `scripts/run_ctac_automu_cylinder_debug.ps1`：可选运行 true-mu CTAC 与 auto-mu CTAC，并比较输出差异。
+- `scripts/eng_to_6module_projection_bin.py`：把单床 `Bed*/Angle*/data*.eng` 转成 6module compact projection BIN（60 physical angles x 6 modules -> 360 full angles）。
 
 ```powershell
 python scripts\qa_ctac_automu_cylinder.py --self-test
 powershell -ExecutionPolicy Bypass -File scripts\run_ctac_automu_cylinder_debug.ps1 -IterationList 20,50,100
+python scripts\eng_to_6module_projection_bin.py --self-test
 ```
 
 `-Iterations 1` 仅作为入口 smoke；CTAC/auto-mu 输出差异主记录应使用 20/50/100 或更长 iteration。可加 `-SkipRecon` 只生成/刷新 mu-map、profile 和视图。
