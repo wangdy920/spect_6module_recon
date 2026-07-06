@@ -14,6 +14,7 @@ This directory has one maintained surface for each current concern. Older design
 | `Legacy_MLEM_B1B2_Parity_CN.md` | B1/B2 regression policy; B1 is the release gate, B2 is reference-only. |
 | `Format_Reader_Matrix_CN.md` | 6module file format vs reader/tool matrix. |
 | `PSF_Model_Differences_CN.md` | Operator PSF vs projection-domain PSF boundary. |
+| `CTAC_AutoMu_Validation_CN.md` | Uniform-cylinder CTAC / auto-mu primary validation gate and debug scripts. |
 | `RECON_FLOW_CN.md` | Stable high-level reconstruction flow. |
 
 ## Archived

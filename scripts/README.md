@@ -196,6 +196,20 @@ sum_rel_diff          <= 0.005
 
 说明：当前 1 iter 圆柱输出存在 ring-like 边界增强，旧 CUDA reference 在同一 QA 口径下也不满足 `inside disk > outside annulus`。因此 single-bed 首轮验收应同时看图像有限性/连续性/无明显 folding 错误，以及新后端对旧 CUDA 的数值对齐。
 
+## 6c) CTAC / auto-mu 圆柱调试 gate
+
+- 文档：`doc/CTAC_AutoMu_Validation_CN.md`
+- 只用于 CTAC/auto-mu 调试；Derenzo 不作为主 gate。
+- `scripts/qa_ctac_automu_cylinder.py`：从 260601 reference 圆柱测量直径/高度，生成 true/auto mu-map、Dice/volume/profile 表和 PNG。
+- `scripts/run_ctac_automu_cylinder_debug.ps1`：可选运行 true-mu CTAC 与 auto-mu CTAC，并比较输出差异。
+
+```powershell
+python scripts\qa_ctac_automu_cylinder.py --self-test
+powershell -ExecutionPolicy Bypass -File scripts\run_ctac_automu_cylinder_debug.ps1 -IterationList 20,50,100
+```
+
+`-Iterations 1` 仅作为入口 smoke；CTAC/auto-mu 输出差异主记录应使用 20/50/100 或更长 iteration。可加 `-SkipRecon` 只生成/刷新 mu-map、profile 和视图。
+
 ## 7) CUDA OSEM 对比（优先多床位 full-subset CPU vs GPU 时间/内存）
 
 - 脚本：`scripts/run_cuda_osem_compare.ps1`
