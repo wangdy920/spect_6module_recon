@@ -26,7 +26,7 @@
 ## 第三批本地执行摘要（2026-07-05）
 
 - **§2a 正式决断**：不退场，只做兼容保护；PR28 不启动；转换工具与 260525 路径保留。
-- **PR15 后半（部分）**：`validateArgs` 拆为 `validateIoArgs` / `validateGeometryArgs` / `validateAlgorithmArgs`；`bindHandlerAliases` 统一 `-df/-i/-input`、`-vox/-spacing`、`-ang/-angles`、help 别名；`-help` 补充 260525 legacy 说明。完整 `registerHandlers()` 表驱动留待后续 xhigh PR。
+- **PR15 后半**：`validateArgs` 拆为 `validateIoArgs` / `validateGeometryArgs` / `validateAlgorithmArgs`；`registerHandlers()` 内所有 flag 绑定统一经 `bindHandlerAliases`，不再直接写 `handlers_["flag"]`；各 handler lambda 内部解析逻辑未改；`-help` 补充 260525 legacy 说明。
 - **§1.14 RegularizerCompat**：`compute_reg_gradient()` 继续保留 legacy 实现；委托 `computeGradientNew()` 的尝试已撤销（TVIsotropic/TVHuber FD 回归失败）。迁移必须等能量/梯度离散化口径统一后另开 PR。
 - **Epic 8 §4.3**：新增 `tests/test_convert_6module_sysmat.cpp` toy chunk → CSRB 回归。
 - **文档**：`doc/PSF_Model_Differences_CN.md`、`doc/Format_Reader_Matrix_CN.md`；README 补 `SPECT_CUDA_SYNC_LEGACY`。
@@ -35,7 +35,7 @@
 
 ## 剩余依赖 / 暂不本地启动
 
-- PR15 `registerHandlers()` 全表驱动：仍交 GPT-5.5 xhigh（Opus review）。
+- PR15 `registerHandlers()` 收敛：本轮完成 flag 绑定统一入口，待 Opus review 核对为无语义改动。
 - PR28 / §2a 删除：仅在将来三条件齐备且团队明确要求退场时启动。
 - PR26 format matrix 正文已迁至 `doc/Format_Reader_Matrix_CN.md`，待 Fable 5 审定措辞。
 

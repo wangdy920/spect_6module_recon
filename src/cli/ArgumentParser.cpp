@@ -290,37 +290,37 @@ void ArgumentParser::registerHandlers() {
     };
     bindHandlerAliases(dataHandler, {"-df", "-i", "-input"});
 
-    handlers_["-dfList"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.projPaths = spect::core::sortPathsByBedOrder(
             splitPathList(ArgumentParser::getRequiredArg(i, argc, argv, "-dfList")));
         return true;
-    };
-    handlers_["-indexMat"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-dfList"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.sysIndexPath = ArgumentParser::getRequiredArg(i, argc, argv, "-indexMat");
         return true;
-    };
-    handlers_["-weightMat"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-indexMat"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.sysWeightPath = ArgumentParser::getRequiredArg(i, argc, argv, "-weightMat");
         return true;
-    };
-    handlers_["-saveCSR"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-weightMat"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.saveCSRPath = ArgumentParser::getRequiredArg(i, argc, argv, "-saveCSR");
         return true;
-    };
-    handlers_["-loadCSR"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-saveCSR"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.loadCSRPath = ArgumentParser::getRequiredArg(i, argc, argv, "-loadCSR");
         a.loadCSRExplicit = true;
         return true;
-    };
-    handlers_["-chunkCSRDir"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-loadCSR"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.chunkCSRDir = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir");
         a.chunkCSRDirExplicit = true;
         return true;
-    };
-    handlers_["-mapCSR"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-chunkCSRDir"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.mapCSR);
-    };
-    handlers_["-matrixLayout"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-mapCSR"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         std::string val = toLower(
             ArgumentParser::getRequiredArg(i, argc, argv, "-matrixLayout"));
         if (val == "compact" || val == "compact_symmetric")
@@ -328,23 +328,23 @@ void ArgumentParser::registerHandlers() {
         a.matrixLayout = val;
         a.matrixLayoutExplicit = true;
         return true;
-    };
-    handlers_["-compactMeta"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-matrixLayout"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.compactMetaPath =
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactMeta");
         return true;
-    };
-    handlers_["-compactDenomCache"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-compactMeta"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.compactDenomCachePath =
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactDenomCache");
         return true;
-    };
+    }, {"-compactDenomCache"});
 
     // --- Dimensions & Spacing ---
-    handlers_["-dim"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseDimensions(
             ArgumentParser::getRequiredArg(i, argc, argv, "-dim"), a);
-    };
+    }, {"-dim"});
     auto voxelHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, k), ',');
@@ -371,7 +371,7 @@ void ArgumentParser::registerHandlers() {
     };
     bindHandlerAliases(voxelHandler, {"-vox", "-spacing"});
 
-    handlers_["-detN"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-detN"), ',');
         if (parts.size() == 1) {
             a.detNz = a.detNx = std::stoi(parts[0]);
@@ -385,7 +385,7 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
+    }, {"-detN"});
 
     auto anglesHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
@@ -395,37 +395,37 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases(anglesHandler, {"-ang", "-angles"});
 
     // --- Algorithm & Iterations ---
-    handlers_["-it"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseIterations(
             ArgumentParser::getRequiredArg(i, argc, argv, "-it"), a);
-    };
+    }, {"-it"});
     auto threadsHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.numThreads = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
         return true;
     };
-    handlers_["-th"] = threadsHandler;
-    handlers_["-threads"] = threadsHandler;
-    handlers_["-t"] = threadsHandler;
-    handlers_["-sparseBackend"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases(threadsHandler, {"-th"});
+    bindHandlerAliases(threadsHandler, {"-threads"});
+    bindHandlerAliases(threadsHandler, {"-t"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         std::string val = toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-sparseBackend"));
         if (val == "reference") val = "ref";
         a.sparseBackend = val;
         return true;
-    };
-    handlers_["-spBackend"] = handlers_["-sparseBackend"];
-    handlers_["-cudaDevice"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-sparseBackend"});
+    bindHandlerAliases(handlers_.at("-sparseBackend"), {"-spBackend"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.cudaDeviceValue = ArgumentParser::getRequiredArg(i, argc, argv, "-cudaDevice");
         a.cudaDeviceRequested = true;
         a.cudaDeviceFromCli = true;
         return true;
-    };
+    }, {"-cudaDevice"});
 
-    handlers_["-subsets"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.numSubsets =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-subsets"));
         return true;
-    };
+    }, {"-subsets"});
 
     auto algHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
@@ -443,28 +443,28 @@ void ArgumentParser::registerHandlers() {
         }
         return true;
     };
-    handlers_["-opti"] = algHandler;
-    handlers_["-alg"] = algHandler;
+    bindHandlerAliases(algHandler, {"-opti"});
+    bindHandlerAliases(algHandler, {"-alg"});
 
-    handlers_["-admmRho"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.admmRho = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-admmRho"));
         return true;
-    };
+    }, {"-admmRho"});
 
-    handlers_["-admmTvInner"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.admmTvInner = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-admmTvInner"));
         return true;
-    };
+    }, {"-admmTvInner"});
 
-    handlers_["-admmAdaptive"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto val = ArgumentParser::getRequiredArg(i, argc, argv, "-admmAdaptive");
         a.admmAdaptive = (val == "on" || val == "true" || val == "1");
         return true;
-    };
+    }, {"-admmAdaptive"});
 
-    handlers_["-bsrem"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-bsrem"), ',');
         if (parts.empty())
             return false;
@@ -472,32 +472,32 @@ void ArgumentParser::registerHandlers() {
         if (parts.size() > 1)
             a.bsrem_gamma = (float)std::stod(parts[1]);
         return true;
-    };
-    handlers_["-bsremCurv"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsrem"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremUseCurvDenom);
-    };
-    handlers_["-bsremCurvFreeze"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremCurv"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremFreezeCurv);
-    };
-    handlers_["-bsremCurvWarmup"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremCurvFreeze"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremCurvWarmupIters = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremCurvWarmup"));
         return true;
-    };
-    handlers_["-bsremCurvEps"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremCurvWarmup"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremCurvEps = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremCurvEps"));
         return true;
-    };
-    handlers_["-bsremKappa"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremCurvEps"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremUseKappaMap);
-    };
-    handlers_["-bsremKappaEps"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremKappa"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremKappaEps = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremKappaEps"));
         return true;
-    };
-    handlers_["-bsremKappaClip"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremKappaEps"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremKappaClip"), ',');
         if (parts.size() != 2) {
@@ -507,54 +507,54 @@ void ArgumentParser::registerHandlers() {
         a.bsremKappaClipMin = std::stod(parts[0]);
         a.bsremKappaClipMax = std::stod(parts[1]);
         return true;
-    };
-    handlers_["-bsremSoftMask"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremKappaClip"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremSoftMask);
-    };
-    handlers_["-bsremSoftBand"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremSoftMask"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremSoftMaskBandVox = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftBand"));
         return true;
-    };
-    handlers_["-bsremSoftLambda"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bsremSoftBand"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremSoftMaskLambdaOut = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftLambda"));
         return true;
-    };
+    }, {"-bsremSoftLambda"});
 
     // --- IO & Verbosity ---
-    handlers_["-fout"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOutputPath(
             ArgumentParser::getRequiredArg(i, argc, argv, "-fout"), a);
-    };
+    }, {"-fout"});
     auto outDirHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.outputDir = ArgumentParser::getRequiredArg(i, argc, argv, k);
         return true;
     };
-    handlers_["-o"] = outDirHandler;
-    handlers_["-output"] = outDirHandler;
+    bindHandlerAliases(outDirHandler, {"-o"});
+    bindHandlerAliases(outDirHandler, {"-output"});
     auto outNameHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.outputName = ArgumentParser::getRequiredArg(i, argc, argv, k);
         return true;
     };
-    handlers_["-n"] = outNameHandler;
-    handlers_["-name"] = outNameHandler;
+    bindHandlerAliases(outNameHandler, {"-n"});
+    bindHandlerAliases(outNameHandler, {"-name"});
     auto verbosityHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.verbosity = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
         return true;
     };
-    handlers_["-vb"] = verbosityHandler;
-    handlers_["-v"] = verbosityHandler;
+    bindHandlerAliases(verbosityHandler, {"-vb"});
+    bindHandlerAliases(verbosityHandler, {"-v"});
 
     // --- Filtering & PSF ---
-    handlers_["-conv"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parsePSFParams(
             ArgumentParser::getRequiredArg(i, argc, argv, "-conv"), a);
-    };
-    handlers_["-psf"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-conv"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-psf"), ',');
         if (parts.empty())
             return false;
@@ -568,11 +568,11 @@ void ArgumentParser::registerHandlers() {
         if (!a.psfModeExplicit)
             a.psf.mode = PSFMode::Operator;
         return true;
-    };
-    handlers_["-psfProj"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-psf"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.psfProj);
-    };
-    handlers_["-psfMode"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-psfProj"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string val =
             toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-psfMode"));
         a.psfModeExplicit = true;
@@ -589,19 +589,19 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
-    handlers_["-smooth"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-psfMode"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useSmooth = true;
         a.smoothSigma =
             (float)std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-smooth"));
         return true;
-    };
-    handlers_["-smoothKernel"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-smooth"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.smoothKernel =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-smoothKernel"));
         return true;
-    };
-    handlers_["-butter"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-smoothKernel"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-butter"), ',');
         if (parts.empty())
@@ -611,20 +611,20 @@ void ArgumentParser::registerHandlers() {
         if (parts.size() > 1)
             a.butterOrder = std::stoi(parts[1]);
         return true;
-    };
-    handlers_["-butterOrder"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-butter"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.butterOrder =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-butterOrder"));
         return true;
-    };
-    handlers_["-butterBackend"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-butterOrder"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.butterBackend = toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-butterBackend"));
         return true;
-    };
-    handlers_["-bwBackend"] = handlers_["-butterBackend"];
+    }, {"-butterBackend"});
+    bindHandlerAliases(handlers_.at("-butterBackend"), {"-bwBackend"});
 
     // --- Regularization ---
-    handlers_["-reg"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-reg"), ',');
         if (parts.empty())
             return false;
@@ -682,7 +682,7 @@ void ArgumentParser::registerHandlers() {
             }
         }
         return true;
-    };
+    }, {"-reg"});
 
     auto regValHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
@@ -698,55 +698,55 @@ void ArgumentParser::registerHandlers() {
             a.reg.sigma = val;
         return true;
     };
-    handlers_["-regBeta"] = regValHandler;
-    handlers_["-regDelta"] = regValHandler;
-    handlers_["-regPower"] = regValHandler;
-    handlers_["-regSigma"] = regValHandler;
+    bindHandlerAliases(regValHandler, {"-regBeta"});
+    bindHandlerAliases(regValHandler, {"-regDelta"});
+    bindHandlerAliases(regValHandler, {"-regPower"});
+    bindHandlerAliases(regValHandler, {"-regSigma"});
 
-    handlers_["-regKernel"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.kernel =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regKernel"));
         return true;
-    };
-    handlers_["-regIter"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regKernel"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.numIter =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regIter"));
         return true;
-    };
-    handlers_["-regSubsets"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regIter"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.numSubsets = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-regSubsets"));
         return true;
-    };
-    handlers_["-regUpdateFreq"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regSubsets"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.updateFreq = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateFreq"));
         return true;
-    };
-    handlers_["-regUpdateStart"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regUpdateFreq"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.updateStart = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateStart"));
         return true;
-    };
-    handlers_["-regUpdateEnd"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regUpdateStart"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         a.reg.updateEnd =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateEnd"));
         return true;
-    };
-    handlers_["-regUpdateInterval"] = [](int& i, int argc, char** argv,
+    }, {"-regUpdateEnd"});
+    bindHandlerAliases([](int& i, int argc, char** argv,
                                         ReconArgs& a) {
         a.useReg = true;
         a.reg.updateInterval = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateInterval"));
         return true;
-    };
-    handlers_["-regUpdateType"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-regUpdateInterval"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useReg = true;
         const std::string val =
             toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateType"));
@@ -757,7 +757,7 @@ void ArgumentParser::registerHandlers() {
         else
             return false;
         return true;
-    };
+    }, {"-regUpdateType"});
 
     // --- Mask & Geometry Extras ---
     auto cylHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
@@ -770,8 +770,8 @@ void ArgumentParser::registerHandlers() {
         a.cylinderHeightMM = (float)std::stod(parts[1]);
         return true;
     };
-    handlers_["-cyl"] = cylHandler;
-    handlers_["-cylMask"] = cylHandler;
+    bindHandlerAliases(cylHandler, {"-cyl"});
+    bindHandlerAliases(cylHandler, {"-cylMask"});
 
     auto cylCenterHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
@@ -783,15 +783,15 @@ void ArgumentParser::registerHandlers() {
         a.cylCenterZ = std::stod(parts[2]);
         return true;
     };
-    handlers_["-cylc"] = cylCenterHandler;
-    handlers_["-cylCenter"] = cylCenterHandler;
+    bindHandlerAliases(cylCenterHandler, {"-cylc"});
+    bindHandlerAliases(cylCenterHandler, {"-cylCenter"});
 
-    handlers_["-maskFromAtt"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.maskFromAttThreshold = (float)std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-maskFromAtt"));
         return true;
-    };
-    handlers_["-bedOverlap"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-maskFromAtt"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-bedOverlap"), ',');
         a.bedOverlaps.clear();
@@ -800,8 +800,8 @@ void ArgumentParser::registerHandlers() {
                 a.bedOverlaps.push_back(std::stoi(p));
         }
         return true;
-    };
-    handlers_["-cropEnd"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bedOverlap"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-cropEnd"), ',');
         if (parts.size() == 1) {
@@ -813,23 +813,23 @@ void ArgumentParser::registerHandlers() {
             a.cropEndEnd = std::stoi(parts[1]);
         }
         return true;
-    };
-    handlers_["-zbedflip"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-cropEnd"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.zBedFlip);
-    };
-    handlers_["-zoutflip"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-zbedflip"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.zOutFlip);
-    };
+    }, {"-zoutflip"});
 
     // --- Physics & Correction ---
-    handlers_["-ctac"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)i;
         (void)argc;
         (void)argv;
         a.doCTAC = true;
         return true;
-    };
-    handlers_["-ctacModel"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctac"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         std::string value = ArgumentParser::getRequiredArg(i, argc, argv, "-ctacModel");
         std::transform(value.begin(), value.end(), value.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -844,12 +844,12 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
-    handlers_["-ctacAutoMu"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctacModel"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.ctacAutoMuFrom = ArgumentParser::getRequiredArg(i, argc, argv, "-ctacAutoMu");
         return true;
-    };
-    handlers_["-ctacAutoMuThresh"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctacAutoMu"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.ctacAutoMuThresh =
             std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-ctacAutoMuThresh"));
         if (!(a.ctacAutoMuThresh > 0.0) || a.ctacAutoMuThresh >= 1.0) {
@@ -857,8 +857,8 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
-    handlers_["-ctacAutoMuValue"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctacAutoMuThresh"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.ctacAutoMuValue =
             std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-ctacAutoMuValue"));
         if (!(a.ctacAutoMuValue > 0.0)) {
@@ -866,8 +866,8 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
-    handlers_["-ctacRotSign"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctacAutoMuValue"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string value = ArgumentParser::getRequiredArg(i, argc, argv, "-ctacRotSign");
         if (value == "1" || value == "+1" || value == "cw") {
             a.ctacRotSign = 1;
@@ -879,60 +879,60 @@ void ArgumentParser::registerHandlers() {
             return false;
         }
         return true;
-    };
-    handlers_["-attMap"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ctacRotSign"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.attMapPath = ArgumentParser::getRequiredArg(i, argc, argv, "-attMap");
         return true;
-    };
-    handlers_["-prior"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-attMap"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.priorPath = ArgumentParser::getRequiredArg(i, argc, argv, "-prior");
         return true;
-    };
-    handlers_["-bProj"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-prior"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bProjPath = ArgumentParser::getRequiredArg(i, argc, argv, "-bProj");
         return true;
-    };
-    handlers_["-bProjList"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-bProj"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bProjPaths = spect::core::sortPathsByBedOrder(
             splitPathList(ArgumentParser::getRequiredArg(i, argc, argv, "-bProjList")));
         return true;
-    };
+    }, {"-bProjList"});
 
     // --- Performance & Misc ---
-    handlers_["-Aprune"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.weightPruneEps =
             std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-Aprune"));
         return true;
-    };
-    handlers_["-Astream"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-Aprune"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.Astream);
-    };
-    handlers_["-ApruneMask"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-Astream"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.ApruneMask);
-    };
-    handlers_["-joe"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-ApruneMask"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.josephPasses =
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-joe"));
         return true;
-    };
-    handlers_["-config"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-joe"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)argc;
         (void)argv;
         (void)a;
         ++i;
         return true; // Handled by pre-scan
-    };
-    handlers_["-algoConf"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-config"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.algoConfPath = ArgumentParser::getRequiredArg(i, argc, argv, "-algoConf");
         return true; // Loading handled in parse() after CLI pass
-    };
-    handlers_["-dumpConf"] = [](int& i, int argc, char** argv, ReconArgs& a) {
+    }, {"-algoConf"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)i;
         (void)argc;
         (void)argv;
         a.dumpConf = true;
         return true;
-    };
+    }, {"-dumpConf"});
     auto helpHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         (void)i;
         (void)argc;
