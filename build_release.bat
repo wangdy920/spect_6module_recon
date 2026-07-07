@@ -25,6 +25,9 @@ if not exist "%VCVARS%" (
 )
 call "%VCVARS%"
 
+set "GIT_BIN=D:\DevToolchain\Git\cmd"
+if exist "!GIT_BIN!" set "PATH=!GIT_BIN!;!PATH!"
+
 set "VCPKG_ROOT=D:\DevToolchain\vcpkg"
 set "VCPKG_DEFAULT_TRIPLET=x64-windows"
 set "CMAKE_TOOLCHAIN_FILE=D:/DevToolchain/vcpkg/scripts/buildsystems/vcpkg.cmake"

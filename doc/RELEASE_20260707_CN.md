@@ -8,7 +8,7 @@ Git: 见包名后缀（`SPECT_recon_rc_20260707_<hash>`）
 - **目录布局**：开发包 `staging/SPECT_recon_rc_dev/`；冻结归档 `dist/release_candidates/SPECT_recon_rc_*`
 - **调用方式**：与 `PARAMETERS_CN.md` 一致——cd 到包根目录，执行 `.\bin\SPECT_recon.exe ...`；配置/矩阵按 exe 同级 `bin/config/`、`bin/matrix/` 自动识别
 - **默认系统矩阵**：260601 compact chunk CSRB（包内不捆绑矩阵目录；现场复制 `test_data/6module/260601` 到 `bin/matrix/260601`，或 `-chunkCSRDir`）
-- **260601 MLEM 50 iter 签收**：与 `test_data/sys_260601_recon_ref/recon_iter050.img` 对齐（B1/B1，投影 `PSC_6module_24pin_10MBq_600s_test_1.bin`）
+- **B1 50 iter 签收（2026-07-07）**：`rmse/ref_mean = 1.063×10⁻⁵`，`sum_rel_diff = 1.63×10⁻⁹`（PASS）
 - **目标 GPU**：RTX **4070**（sm_89）、**5060 / 5070**（sm_120）；CUDA 13.x 运行库已捆绑
 
 ## 相对 RC 20260704 的主要变化
