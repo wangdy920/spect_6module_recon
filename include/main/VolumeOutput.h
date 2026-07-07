@@ -24,6 +24,7 @@ struct OutputGeometry {
 struct OutputTransform {
   bool flipZPerBed = false;
   bool flipZWholeOutput = false;
+  bool flipXWholeOutput = false;
   int baseNz = 0;
   std::vector<int> bedZStarts;
 };

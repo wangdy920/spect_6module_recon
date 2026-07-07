@@ -297,17 +297,8 @@ void runProjDomainMLEMStep(const MatrixType &matrix,
                                     image.data(), yhat.data());
         usedSparseForward = true;
       } else {
-        try {
-          opts.sparseOps->spmv(matrix, image.data(), yhat.data(), opts.threads);
-          usedSparseForward = true;
-        } catch (const std::runtime_error &ex) {
-          const std::string message = ex.what() ? ex.what() : "";
-          if (message.find("row offsets representable as int32") ==
-              std::string::npos) {
-            throw;
-          }
-          std::cerr << "[WARN] Proj-domain MLEM forward projection fell back to CPU because the CUDA sparse backend does not support this matrix row-offset range.\n";
-        }
+        opts.sparseOps->spmv(matrix, image.data(), yhat.data(), opts.threads);
+        usedSparseForward = true;
       }
     } else {
       spect::io::CSRView view{};
@@ -317,21 +308,12 @@ void runProjDomainMLEMStep(const MatrixType &matrix,
       view.col_idx = matrix.col_idx.data();
       view.val = matrix.val.data();
       view.nnz = matrix.val.size();
-      try {
-        opts.sparseOps->spmv(view, image.data(), yhat.data(), opts.threads);
-        usedSparseForward = true;
-      } catch (const std::runtime_error &ex) {
-        const std::string message = ex.what() ? ex.what() : "";
-        if (message.find("row offsets representable as int32") ==
-            std::string::npos) {
-          throw;
-        }
-        std::cerr << "[WARN] Proj-domain MLEM forward projection fell back to CPU because the CUDA sparse backend does not support this matrix row-offset range.\n";
-      }
+      opts.sparseOps->spmv(view, image.data(), yhat.data(), opts.threads);
+      usedSparseForward = true;
     }
 
     if (!usedSparseForward) {
-      yhat = spect::forward_project(matrix, image, opts.threads);
+      throw std::runtime_error("Proj-domain MLEM requires CUDA sparse forward projection.");
     }
 
     std::vector<double> ratio = projections;
@@ -529,7 +511,8 @@ std::vector<double> runStandardReconstructionImpl(
           projections.size();
 
   if constexpr (std::is_same_v<MatrixType, spect::io::CSRView>) {
-    if (ctx.resolvedBackend == SparseBackendChoice::CUDA && args.numIters > 1 &&
+    if (opts.sparseOps != nullptr && opts.sparseOps->backend() == BackendType::CUDA &&
+        args.numIters > 1 &&
         !canProjPSF) {
       const auto warmupStart = ProfileClock::now();
       const bool warmed = spect::cuda::warmupFullSubsetChunkCacheCUDA(
@@ -547,18 +530,17 @@ std::vector<double> runStandardReconstructionImpl(
   }
 
   for (int it = 1; it <= args.numIters; ++it) {
-    logInfo("Iteration " + std::to_string(it) + "/" +
+    logInfo("[ITER] " + std::to_string(it) + "/" +
             std::to_string(args.numIters) +
-            (canProjPSF ? " (Proj-domain PSF path)" : " (standard path)"));
+            (canProjPSF ? " proj-psf" : " standard"));
 
     if (canProjPSF) {
       const std::vector<double> *gradPtr = nullptr;
       if (useRegularization) {
         const auto stageStart = ProfileClock::now();
         if (!tryComputeRegGradientCUDA(image, args, opts, maskForReg, gradReg)) {
-          spect::regularizer::compute_reg_gradient(
-              image, args.Nx, args.Ny, args.Nz, args.reg, maskForReg, gradReg,
-              opts.threads);
+          throw std::runtime_error(
+              "Regularization gradient requires CUDA volume helpers.");
         }
         stageTiming.regGradientSeconds +=
             std::chrono::duration<double>(ProfileClock::now() - stageStart)
@@ -579,9 +561,8 @@ std::vector<double> runStandardReconstructionImpl(
           const auto stageStart = ProfileClock::now();
           if (!tryComputeRegGradientCUDA(image, args, opts, maskForReg,
                                          gradReg)) {
-            spect::regularizer::compute_reg_gradient(
-                image, args.Nx, args.Ny, args.Nz, args.reg, maskForReg,
-                gradReg, opts.threads);
+            throw std::runtime_error(
+                "Regularization gradient requires CUDA volume helpers.");
           }
           stageTiming.regGradientSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - stageStart)

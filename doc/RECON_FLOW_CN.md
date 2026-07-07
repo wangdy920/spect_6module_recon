@@ -13,7 +13,7 @@
   - 多床位：`-bProjList <f1,f2...>`，与投影一一对应加载拼接。
 - 虚拟床位堆叠（Multi-bed）：若输入多个床位，系统矩阵仅加载单床位（CSR/CSRView），在投影/反投影计算中通过隐式偏移（Implicit Offset）实现多床位逻辑（节省 N 倍系统矩阵内存）。注意：多床位+映射模式（`-mapCSR on`）下支持 `-ctac`（动态衰减因子，不修改只读 CSR；会带来额外内存/计算开销）。
 - 圆柱掩码（可选）：`-cyl <diam,height>`，可配合 `-cylc <cx,cy,cz>`；打印覆盖比例并导出一次 `*_mask.mhd/.raw`；掩码用于迭代内裁剪与 CSR 构建期列剪枝（`-ApruneMask on`）。
-- 身体掩码（可选）：`-maskFromAtt <th>` 从 `-attMap` / `-prior` 生成二值身体掩码，并在每次迭代更新后将掩码外体素强制置零。
+- 身体掩码（可选）：`-maskFromAtt <th>` 从 `-attMap` 生成二值身体掩码，并在每次迭代更新后将掩码外体素强制置零。
 - CSR 获取（3 选 1）：
   1) `-loadCSR <file>`：若配合 `-mapCSR on` → 以内存映射读取（CSRView），否则读入内存（CSR）；
   2) `-Astream on`（默认）：`buildCSR_from_mat_stream(...)` 两遍扫描、按列读；|w|≤`-Aprune`（默认 1e-10）剪枝；可 `-saveCSR` 持久化；
@@ -22,7 +22,7 @@
 
 ## 二、迭代重建（MLEM/OSEM/BSREM‑II）
 
-- 算法选择：默认 MLEM；`-subsets > 1` 即 OSEM；BSREM‑II 可在配置中启用（`algorithm=BSREM`），也可用命令行 `-alg BSREM -bsrem <alpha0[,gamma]>` 直接选择并覆盖配置。
+- 算法选择：默认 MLEM；`-subsets > 1` 即 OSEM；BSREM‑II 可在配置中启用（`algorithm=BSREM`），也可用命令行 `-opti BSREM -bsrem <alpha0[,gamma]>` 直接选择并覆盖配置。
 - 配置：`opts.threads = args.numThreads`；`opts.n_subsets = args.numSubsets`；按参数准备 PSF/平滑/Butterworth；`opts.mask = maskPtr`。
 - 归一化与初始化：`denom = computeNormAT(A)`（CSR/CSRView）；`image` 初始化为 1，准备正则梯度与缓存。
 - 迭代主循环（it = 1..numIters）：
@@ -53,9 +53,7 @@
 
 1) 正则化（OSL‑MAP‑EM，乘性/除性）
 
-- TV / Tikhonov / MRP：以当前迭代图像 `F_k` 计算梯度/拉普拉斯/中值先验项，并在 OSL 更新中以除性/乘性方式融合。
-- NLM：非局部均值先验，利用 patch 相似性抑制噪声并保持纹理。
-- Bowsher / PLS：基于解剖先验图像的正则化（需 `-prior` 或 `-attMap` 提供先验）。
+- TV / RDP：以当前迭代图像 `F_k` 计算公开支持的正则项，并在 OSL/BSREM/ADMM 对应路径中融合；其他历史正则化入口不再作为公开 CLI 支持。
 - 对接位置：使用 `compute_reg_gradient` 的结果在 OSL 更新时以乘性/除性方式融合，并对更新结果做非负/限幅处理。
 
 1) 后处理（迭代外）

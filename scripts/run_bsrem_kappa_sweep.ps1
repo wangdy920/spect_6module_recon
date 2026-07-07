@@ -14,7 +14,6 @@ param(
     [string]$BsremAlpha = "1.0,0.05",
     [string]$RegSpec = "RDP,1e-4,2.0,0.01",
     [string]$Butter = "0.35,2",
-    [string]$PriorMaskMhd = ".\recon_out\perf_check_fix\multibed_mlem_it20.mhd",
     [double]$MaskThreshold = 0.02,
     [switch]$SkipConfirm = $false
 )
@@ -130,7 +129,7 @@ function Invoke-BSREMCase {
     $args += $CommonArgs
     $args += @("-it", ("{0}:{0}" -f $Iters))
     $args += @("-fout", $outPrefix)
-    $args += @("-alg", "BSREM")
+    $args += @("-opti", "BSREM")
     $args += @("-subsets", "1")
     $args += @("-bsrem", $BsremAlpha)
     $args += @("-bsremCurv", "on")
@@ -147,10 +146,12 @@ function Invoke-BSREMCase {
     }
 
     if ($Case.UseSoftMask) {
+        if (-not ($CommonArgs -contains "-attMap")) {
+            throw "Soft-mask sweep requires -attMap in CommonArgs; -prior is no longer supported."
+        }
         $args += @("-bsremSoftMask", "on")
         $args += @("-bsremSoftBand", $Case.SoftBand.ToString())
         $args += @("-bsremSoftLambda", $Case.SoftLambda.ToString([System.Globalization.CultureInfo]::InvariantCulture))
-        $args += @("-prior", $PriorMaskMhd)
         $args += @("-maskFromAtt", $MaskThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture))
     }
     else {
@@ -179,8 +180,9 @@ function Invoke-BSREMCase {
     $metric = Parse-Metric -LogPath $logPath
 
     $evalArgs = @("scripts/eval_mhd_stats.py", "--image", $mhdPath)
-    if (Test-Path $PriorMaskMhd) {
-        $evalArgs += @("--mask-source", $PriorMaskMhd, "--mask-threshold", $MaskThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture))
+    $attIndex = [array]::IndexOf($CommonArgs, "-attMap")
+    if ($attIndex -ge 0 -and ($attIndex + 1) -lt $CommonArgs.Count -and (Test-Path $CommonArgs[$attIndex + 1])) {
+        $evalArgs += @("--mask-source", $CommonArgs[$attIndex + 1], "--mask-threshold", $MaskThreshold.ToString([System.Globalization.CultureInfo]::InvariantCulture))
     }
     if ($SeamZList) {
         $evalArgs += @("--seam-z-list", $SeamZList, "--seam-window", $SeamWindow.ToString())

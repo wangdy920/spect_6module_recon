@@ -269,6 +269,22 @@ std::filesystem::path compactDenomManifestPath(
   return manifest;
 }
 
+uint64_t fnv1a64(const std::string &text) {
+  uint64_t value = 14695981039346656037ull;
+  for (const unsigned char ch : text) {
+    value ^= static_cast<uint64_t>(ch);
+    value *= 1099511628211ull;
+  }
+  return value;
+}
+
+std::filesystem::path autoCompactDenomCachePath(const std::string &manifest) {
+  std::ostringstream name;
+  name << "auto_" << std::hex << fnv1a64(manifest) << ".mhd";
+  return normalizePathForCache(
+      std::filesystem::path("recon_out") / "compact_denom_cache" / name.str());
+}
+
 std::string abbreviateManifestLine(const std::string &line) {
   constexpr size_t kMaxManifestLine = 160;
   if (line.size() <= kMaxManifestLine)
@@ -370,6 +386,7 @@ std::string buildCompactDenomCacheManifest(
       appendFileIdentity(oss, "ctac_auto_mu_from", args.ctacAutoMuFrom);
       oss << "ctac_auto_mu_thresh=" << args.ctacAutoMuThresh << '\n';
       oss << "ctac_auto_mu_value=" << args.ctacAutoMuValue << '\n';
+      oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
     }
   }
   oss << "bed_count=" << bedZStarts.size() << '\n';
@@ -467,6 +484,10 @@ void saveCompactDenomCache(const std::filesystem::path &cacheMhdPath,
                            const std::string &manifest,
                            const OutputGeometry &geometry,
                            const std::vector<double> &denom) {
+  std::error_code ec;
+  const auto parent = cacheMhdPath.parent_path();
+  if (!parent.empty())
+    std::filesystem::create_directories(parent, ec);
   spect::io::writeMHD(cacheMhdPath.string(), denom, geometry.nx, geometry.ny,
                       geometry.nz, static_cast<float>(geometry.vx),
                       static_cast<float>(geometry.vy),
@@ -554,14 +575,22 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         };
         observeCompactMemory();
         const auto sensStart = ProfileClock::now();
-        const std::filesystem::path compactDenomCachePath =
+        std::filesystem::path compactDenomCachePath =
             resolveCompactDenomCacheMhdPath(args);
-        const std::string compactDenomManifest =
-            compactDenomCachePath.empty()
-                ? std::string()
-                : buildCompactDenomCacheManifest(
-                      args, geometry, compactMeta, compactMetaPath,
-                      compactChunkLayout, compactChunks, bedZStarts, psfPtr);
+        std::string compactDenomManifest;
+        if (!compactDenomCachePath.empty() ||
+            (compactChunkLayout && compactAttFactors == nullptr)) {
+          compactDenomManifest = buildCompactDenomCacheManifest(
+              args, geometry, compactMeta, compactMetaPath, compactChunkLayout,
+              compactChunks, bedZStarts, psfPtr);
+        }
+        if (compactDenomCachePath.empty() && compactChunkLayout &&
+            compactAttFactors == nullptr) {
+          compactDenomCachePath =
+              autoCompactDenomCachePath(compactDenomManifest);
+          logDebug("compact denom auto-cache path: " +
+                   compactDenomCachePath.string());
+        }
         bool loadedCompactDenomCache = false;
         if (!compactDenomCachePath.empty()) {
           std::string cacheStatus;
@@ -680,9 +709,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         auto lastIterationDone = ProfileClock::now();
 
         for (int it = 1; it <= args.numIters; ++it) {
-          logInfo("Iteration " + std::to_string(it) + "/" +
-                  std::to_string(args.numIters) +
-                  " (compact-symmetric CUDA path)");
+          logInfo("[ITER] " + std::to_string(it) + "/" +
+                  std::to_string(args.numIters) + " compact");
           std::vector<double> numer(globalNvox, 0.0);
           std::vector<double> globalPsfImage;
           const std::vector<double> *bedImageSource = &image;
@@ -911,9 +939,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             const auto regStart = ProfileClock::now();
             if (!tryComputeRegGradientCUDA(image, args, opts, maskForReg,
                                            gradReg)) {
-              spect::regularizer::compute_reg_gradient(
-                  image, args.Nx, args.Ny, args.Nz, args.reg, maskForReg,
-                  gradReg, opts.threads);
+              throw std::runtime_error(
+                  "Regularization gradient requires CUDA volume helpers.");
             }
             compactTiming.regGradientSeconds +=
                 std::chrono::duration<double>(ProfileClock::now() - regStart)

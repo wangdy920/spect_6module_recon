@@ -20,7 +20,7 @@ target_include_directories(spect_interfaces INTERFACE
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(spect_interfaces INTERFACE cxx_std_17)
-# 接口库不得依赖任何第三方库 (matio/fftw/omp等)
+# 接口库不得依赖任何第三方库 (matio/cufft/omp等)
 
 # ----------------------------------
 # spect_core: 核心类型库 (CSR, Types等)
@@ -118,10 +118,6 @@ target_include_directories(spect_filters PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(spect_filters PUBLIC spect_interfaces)
-# 依赖 FFTW3 和 OpenMP - PUBLIC 以传递头文件路径
-if(_fftw_targets)
-  target_link_libraries(spect_filters PUBLIC ${_fftw_targets})
-endif()
 if(TARGET CUDA::cudart)
   target_link_libraries(spect_filters PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::nvrtc)
   target_compile_definitions(spect_filters PUBLIC
@@ -299,11 +295,6 @@ set_target_properties(spect_convert_6module_sysmat_to_csrb PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
-# FFTW threads support
-if(_use_fftw_threads)
-  target_compile_definitions(SPECT_recon PRIVATE USE_FFTW_THREADS)
-endif()
-
 # ----------------------------------
 # 10) 统一链接
 # ----------------------------------
@@ -316,9 +307,6 @@ endif()
 if(NOT _matio_target)
   message(FATAL_ERROR "matio target not resolved; ensure vcpkg/toolchain is configured")
 endif()
-if(NOT _fftw_targets)
-  message(FATAL_ERROR "FFTW3 targets not resolved; ensure vcpkg/toolchain is configured")
-endif()
 if(NOT _hdf5_targets)
   message(FATAL_ERROR "HDF5 targets not resolved; ensure vcpkg/toolchain is configured")
 endif()
@@ -328,7 +316,6 @@ endif()
 
 target_link_libraries(SPECT_recon PRIVATE
   ${_matio_target}
-  ${_fftw_targets}
   ${_hdf5_targets}
   ${_zlib_target}
 )

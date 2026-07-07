@@ -173,44 +173,5 @@ TEST(FiltersGolden, ButterworthMaskSamplesMatchFormula) {
     }
 }
 
-TEST(FiltersGolden, ButterworthFFTWThreadedPathMatchesSingleThreadReference) {
-    const int Nx = 24;
-    const int Ny = 20;
-    const int Nz = 12;
-
-    spect::filters::ButterworthConf bw;
-    bw.enabled = true;
-    bw.type = spect::filters::BWType::Lowpass;
-    bw.order = 2;
-    bw.cutoff_hi_frac = 0.35;
-
-    std::vector<double> input(static_cast<size_t>(Nx) * Ny * Nz, 0.0);
-    for (int z = 0; z < Nz; ++z) {
-        for (int y = 0; y < Ny; ++y) {
-            for (int x = 0; x < Nx; ++x) {
-                input[idx3(x, y, z, Nx, Ny)] =
-                    0.1 * static_cast<double>(x) +
-                    0.2 * static_cast<double>(y) +
-                    0.3 * static_cast<double>(z) +
-                    std::sin(static_cast<double>(x + 2 * y + 3 * z));
-            }
-        }
-    }
-
-    auto single_thread = input;
-    auto threaded = input;
-
-    spect::filters::apply_butterworth_inplace_fftw(
-        single_thread, Nx, Ny, Nz, {1.0, 1.0, 1.0}, bw, 1);
-    spect::filters::apply_butterworth_inplace_fftw(
-        threaded, Nx, Ny, Nz, {1.0, 1.0, 1.0}, bw, 4);
-
-    ASSERT_EQ(single_thread.size(), threaded.size());
-    for (size_t i = 0; i < single_thread.size(); ++i) {
-        EXPECT_NEAR(threaded[i], single_thread[i], 1e-9);
-        EXPECT_GE(threaded[i], 0.0);
-    }
-}
-
 }  // namespace test
 }  // namespace spect

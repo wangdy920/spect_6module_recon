@@ -128,7 +128,7 @@ def convert_bed(bed_dir: Path, out_bin: Path, threshold: int, xflip: bool) -> di
         "total_counts": float(proj.sum()),
         "nonzero_bins": int(np.count_nonzero(proj)),
         "threshold": threshold,
-        "projection_variant": "xflip" if xflip else "none",
+        "projection_variant": "xflip" if xflip else "identity",
         "angle_mapping": "full_angle = physical_angle + fpga * 60",
         "ray_mapping": "16 detector blocks of 12x12 flood bins -> 48x48",
     }
@@ -156,7 +156,7 @@ def main() -> int:
     parser.add_argument("--bed-dir", type=Path, required=False)
     parser.add_argument("--out-bin", type=Path, required=False)
     parser.add_argument("--threshold", type=int, default=20)
-    parser.add_argument("--no-xflip", action="store_true")
+    parser.add_argument("--xflip", action="store_true", help="mirror detector x before writing rays; default is identity")
     parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -164,7 +164,7 @@ def main() -> int:
         return self_test()
     if args.bed_dir is None or args.out_bin is None:
         parser.error("--bed-dir and --out-bin are required unless --self-test is used")
-    summary = convert_bed(args.bed_dir, args.out_bin, args.threshold, not args.no_xflip)
+    summary = convert_bed(args.bed_dir, args.out_bin, args.threshold, args.xflip)
     if args.summary_json:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
         args.summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -42,7 +42,7 @@ bool computeRegGradientCUDA(const std::vector<double> &f, int Nx, int Ny,
 
 /// TV proximal via Chambolle-Pock primal-dual on GPU.
 /// Solves: u = argmin_u (1/2)||u-v||^2 + lambda*TV(u)
-/// Returns true if CUDA was used, false to fall back to CPU.
+/// Returns true only when the CUDA kernel ran successfully.
 bool computeTVProxCUDA(const std::vector<double> &v, int Nx, int Ny, int Nz,
                        double lambda, int innerIters,
                        std::vector<double> &u_out);

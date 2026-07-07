@@ -41,7 +41,7 @@ cd D:\path\to\<package_root>
 ```
 
 说明：
-- `-alg mlem`、`-subsets 1` 可由 `bin/config/algo_mlem.conf` 提供，通常不用显式传。
+- `-opti mlem`、`-subsets 1` 可由 `bin/config/algo_mlem.conf` 提供，通常不用显式传。
 - `-config` 不需要显式传。
 - 多个矩阵目录时，在 `bin/config/spect_config.ini` 设置 `default_chunk_csr_dir = matrix/<matrix_name>`，或在命令行传 `-chunkCSRDir .\bin\matrix\<matrix_name>`。
 - 投影路径仍需要按实际数据传入。
@@ -79,6 +79,7 @@ bed_overlap = 0,0,0,0,0
 crop_end    = 0,0
 z_bed_flip  = 1
 z_out_flip  = 0
+x_out_flip  = 0
 ```
 
 命令行覆盖：
@@ -86,10 +87,11 @@ z_out_flip  = 0
 ```powershell
 -zbedflip 0
 -zoutflip 1
+-xoutflip 1
 -cropEnd top,end
 ```
 
-处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> `cropEnd top,end`。
+处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。
 
 ## 常用覆盖参数
 
@@ -97,7 +99,7 @@ z_out_flip  = 0
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。
-- `-alg mlem|bsrem|admm`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
+- `-opti mlem|bsrem|admm`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
 ## 查看合并配置

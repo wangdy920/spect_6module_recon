@@ -2,7 +2,7 @@
 
 High-performance 3D SPECT reconstruction pipeline with C++17 modular architecture and CUDA acceleration. The project provides:
 
-- **C++ recon engine**: consumes projection data (MAT/BIN) + system matrix (standard CSRB or compact chunk CSRB) and runs MLEM/OSEM, BSREM-II, or ADMM with PSF, regularisers (TV/NLM/Bowsher/PLS/RDP/LogCosh), masks, Butterworth, and Joseph-like smoothing.
+- **C++ recon engine**: consumes projection data (MAT/BIN) + system matrix (standard CSRB or compact chunk CSRB) and runs MLEM/OSEM, BSREM-II, or ADMM with PSF, TV/RDP regularisation, masks, Butterworth, and Joseph-like smoothing.
 - **Compact-symmetric backend**: **default matrix 260601** — `-chunkCSRDir` loads `metadata.bin` + `chunk_*.csrb` (`test_data/6module/260601`, 88B metadata, Sym90Z); legacy 260525 single-file CSRB (`-loadCSR -compactMeta`) remains for reference-only parity.
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, NVRTC kernels for PSF/RDP/TV gradients and TV proximal (Chambolle-Pock).
 - **6-module matrix generation reference**: `6module_bak_src/` holds CUDA v2/v4 system-matrix generators and standalone MLEM reference (legacy).
@@ -53,22 +53,22 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and `chunk_*.csrb`. Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
 | `-Astream on|off`    | Build CSR directly from MAT files (default **off**, enable when RAM is tight). |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
+| Sparse backend | Fixed to CUDA. The old `-sparseBackend` / `-spBackend` CLI switch is rejected. |
 | `-psf [fwhm_mm[,N]]` , `-psfProj on|off` | Image-domain PSF or projection-domain per-angle PSF; FWHM is in mm and N truncates the Gaussian at N*sigma (`-psfProj` only for MLEM with `-subsets 1`). |
 | `-psfMode Operator|PostSmooth|None` | Force PSF mode; `PostSmooth` applies PSF after each iteration (requires `-psf`). |
 | `-joe <n>` | Joseph-like (B-spline) smoothing passes on denom/image. Default 0 = disabled. |
 | `-subsets <n>` | OSEM subsets (1 = MLEM). |
-| `-alg mlem|bsrem|admm` | Select optimisation algorithm (overrides config). |
-| `-alg admm` | Select ADMM optimizer (with `-admmRho`, `-admmTvInner`, `-admmAdaptive`). |
+| `-opti mlem|bsrem|admm` | Select optimisation algorithm (overrides config). |
+| `-opti admm` | Select ADMM optimizer (with `-admmRho`, `-admmTvInner`, `-admmAdaptive`). |
 | `-bsrem <alpha0[,gamma]>` | BSREM‑II step parameters (overrides config). |
-| `-reg <type,beta,...>` | Regularisation. Types: `None`, `TVIsotropic`, `TVHuber`, `Tikhonov`, `MRP`, `NLM,<beta>,<h>,<search>,<patch>`, `Bowsher,<beta>,<k>`, `PLS,<beta>,<eta>`, `RDP,<beta>[,<delta>]`. `beta` is the regularisation weight and is independent of `-bsrem` alpha/gamma. |
+| `-reg <type,beta,...>` | Regularisation. Public types: `None`, `TV`/`TVIsotropic`, `RDP`. For TV use `-reg TV,beta,delta`; for RDP use `-reg RDP,beta,gamma,delta`. `beta` is independent of `-bsrem` alpha/gamma. |
 | `-bProj <file>` | Background/scatter projection term (MAT or BIN); added to forward model `yhat`. |
 | `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds. |
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-cropEnd <top[,end]>` | Crop final output Z top/end slices after output flips. |
-| `-zbedflip <0|1>` / `-zoutflip <0|1>` | Flip each `-dfList` bed segment on output / flip whole output volume on Z. Defaults: `1` / `0`. |
-| `-prior <file>` | Anatomical prior image for `Bowsher/PLS` (if omitted, `-attMap` is used as prior). |
-| `-maskFromAtt <th>` | Generate body mask from attenuation/prior map and zero outside mask each iteration. |
+| `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Flip each `-dfList` bed segment on output / flip whole output volume on Z / flip whole output volume on X. Defaults: `1` / `0` / `0`. |
+| `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
 | `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI args override config. |
 | `-vb 0/1/2` | Verbosity (0=quiet, 1=info default, 2=debug). |
 
@@ -76,7 +76,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 
 Use `-dfList` to load multiple bed projections at once. The list may contain 1 to 5 beds. If paths contain `BedN`, `-dfList` and `-bProjList` are sorted by numeric bed order before loading. `-bedOverlap` is a fixed Bed1..Bed5 table: slot `b1` applies to `Bed1-Bed2`, `b2` to `Bed2-Bed3`, `b3` to `Bed3-Bed4`, and `b4` to `Bed4-Bed5`; `b5` is kept as the fixed five-bed placeholder. For example, `Bed2,Bed3,Bed4` uses `b2,b3`. The reconstruction dimensions in `-dim` are **per-bed** sizes; the combined output Z dimension becomes `Nz * beds` when `-bedOverlap=0`, or `Nz * beds - sum(overlaps)` when overlaps are enabled. Beds are processed using **Virtual Bed Stacking**, meaning system matrix memory usage remains identical to a single bed. Background projections can be supplied via `-bProjList`. Memory mapping (`-mapCSR on`) is supported for multi-bed; when `-ctac` is enabled, the recon uses dynamic on-the-fly attenuation factors so the mapped CSR remains read-only.
 
-Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z. `-cropEnd top,end` is applied after those flips and is only responsible for final top/end trimming.
+Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z; `-xoutflip 1` flips the final stitched output in X. `-cropEnd top,end` is applied after those flips and is only responsible for final top/end trimming.
 
 ## Release package layout
 
@@ -120,7 +120,7 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 - **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout and cache env vars
 - **[Documentation Index](doc/README.md)** — current docs vs archived evidence
 - **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — current compact/standard support boundary
-- **[Release 2026-07-06](doc/RELEASE_20260706_CN.md)** — current release gate and package layout
+- **[Release 2026-07-07](doc/RELEASE_20260707_CN.md)** — current release gate and package layout
 - **[Scripts](scripts/README.md)** — L-curve analysis and helper script entrypoints
 - **[Refactor Decisions](doc/Refactor_Decisions_20260703_CN.md)** — current decisions and rejected migrations
 - **[Legacy B1/B2 Parity](doc/Legacy_MLEM_B1B2_Parity_CN.md)** — 260601 release regression policy

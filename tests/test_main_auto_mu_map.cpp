@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "core/AttenuationCoefficients.h"
 #include "main/AutoMuMap.h"
 
 #include <cmath>
@@ -136,6 +137,17 @@ TEST(AutoMuMapTest, WaterValueParameterRespected) {
   const double mu = 0.0120; // broad-beam effective value
   const AutoMuMapResult r = buildAutoMuMapFromActivity(act, n, n, n, 0.05, mu);
   EXPECT_DOUBLE_EQ(r.muMap[idx3(n / 2, n / 2, n / 2, n, n)], mu);
+}
+
+TEST(AutoMuMapTest, WaterMuNuclideLookupUsesCentralTable) {
+  double mu = 0.0;
+  EXPECT_TRUE(spect::core::waterMuPerMMForNuclide("Tc-99m", mu));
+  EXPECT_DOUBLE_EQ(mu, kWaterMu);
+  EXPECT_TRUE(spect::core::waterMuPerMMForNuclide("I123", mu));
+  EXPECT_NEAR(mu, 0.014766221821206932, 1e-15);
+  EXPECT_TRUE(spect::core::waterMuPerMMForNuclide("In111_245", mu));
+  EXPECT_NEAR(mu, 0.012738504550836008, 1e-15);
+  EXPECT_FALSE(spect::core::waterMuPerMMForNuclide("unknown", mu));
 }
 
 TEST(AutoMuMapTest, InvalidArgumentsThrow) {

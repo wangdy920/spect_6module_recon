@@ -17,7 +17,7 @@ void printReconArgs(const ReconArgs &args) {
            ", subsets: " + std::to_string(args.numSubsets) +
            ", iterations: " + std::to_string(args.numIters));
   logDebug("Threads: " + std::to_string(args.numThreads) +
-           ", sparse backend: " + args.sparseBackend);
+           ", sparse backend: cuda");
 }
 
 } // namespace main

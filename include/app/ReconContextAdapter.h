@@ -57,10 +57,7 @@ inline ReconOpts createReconOpts(const ReconContext& ctx) {
     // PSF settings (basic)
     opts.psf.mode = PSFMode::None;  // Default off, caller can override
 
-    SparseBackendChoice resolvedBackend = SparseBackendChoice::Auto;
-    bool parsedBackend = false;
-    opts.sparseOps =
-        &selectSparseOps(ctx.args.sparseBackend, &resolvedBackend, &parsedBackend);
+    opts.sparseOps = &getSparseOpsCUDA();
 
     return opts;
 }
@@ -98,10 +95,7 @@ inline ReconOpts createReconOpts(const cli::ReconArgs& args) {
     opts.det_nx = args.detNx > 0 ? args.detNx : args.detectorChannels;
     opts.num_angles = args.numAngles;
 
-    SparseBackendChoice resolvedBackend = SparseBackendChoice::Auto;
-    bool parsedBackend = false;
-    opts.sparseOps =
-        &selectSparseOps(args.sparseBackend, &resolvedBackend, &parsedBackend);
+    opts.sparseOps = &getSparseOpsCUDA();
 
     return opts;
 }

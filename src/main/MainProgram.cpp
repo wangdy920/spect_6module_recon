@@ -360,7 +360,8 @@ int runProgram(int argc, char **argv) {
                 std::to_string(autoMu.bodyVoxels) + ", threshold=" +
                 std::to_string(autoMu.thresholdUsed) + " (P99.9=" +
                 std::to_string(autoMu.robustMax) + "), mu=" +
-                std::to_string(args.ctacAutoMuValue) + " mm^-1.");
+                std::to_string(args.ctacAutoMuValue) + " mm^-1 (" +
+                args.ctacAutoMuValueSource + ").");
         ctacMuMap = autoMu.muMap;
         saveVolumeOutput(ctacMuMap, outputGeometry, args.outputDir,
                          outputPrefixFromArgs(args) + "_automu", -1, nullptr,
@@ -377,7 +378,7 @@ int runProgram(int argc, char **argv) {
       else if (!sharedAnatomical.empty())
         maskSource = &sharedAnatomical;
       if (!maskSource)
-        throw std::runtime_error("-maskFromAtt requires -attMap or -prior.");
+        throw std::runtime_error("-maskFromAtt requires -attMap.");
 
       if (mask.empty())
         mask.assign(globalNvox, 1);
@@ -614,17 +615,8 @@ int runProgram(int argc, char **argv) {
       }
     }
 
-    SparseBackendChoice resolvedBackend;
-    bool backendParsed = false;
-    const ISparseOps &sparseOps =
-        selectSparseOps(args.sparseBackend, &resolvedBackend, &backendParsed);
-    if (!backendParsed)
-      logWarn("Unknown sparse backend '" + args.sparseBackend + "'. Falling back to auto.");
-    logInfo(std::string("Sparse backend: ") + sparseBackendChoiceName(resolvedBackend));
-    if (compactLayout && resolvedBackend != SparseBackendChoice::CUDA) {
-      throw std::runtime_error(
-          "compact-symmetric layout requires an enabled CUDA sparse backend.");
-    }
+    const ISparseOps &sparseOps = getSparseOpsCUDA();
+    logInfo("Sparse backend: cuda");
 
     ReconOpts opts;
     opts.threads = std::max(1, args.numThreads);
@@ -672,9 +664,10 @@ int runProgram(int argc, char **argv) {
     const OutputTransform *outputTransformPtr = nullptr;
     const bool dfListMode = !args.projPaths.empty();
     const bool enableBedZFlip = args.zBedFlip && dfListMode;
-    if (enableBedZFlip || args.zOutFlip) {
+    if (enableBedZFlip || args.zOutFlip || args.xOutFlip) {
       outputTransform.flipZPerBed = enableBedZFlip;
       outputTransform.flipZWholeOutput = args.zOutFlip;
+      outputTransform.flipXWholeOutput = args.xOutFlip;
       outputTransform.baseNz = baseNz;
       outputTransform.bedZStarts = bedZStarts;
       outputTransformPtr = &outputTransform;
@@ -682,6 +675,8 @@ int runProgram(int argc, char **argv) {
         logInfo("Output transform: per-bed Z flip enabled for dfList bed segments.");
       if (args.zOutFlip)
         logInfo("Output transform: whole-output Z flip enabled.");
+      if (args.xOutFlip)
+        logInfo("Output transform: whole-output X flip enabled.");
     }
 
     const auto runReconstruction = [&](const auto &matrix) {
@@ -729,7 +724,6 @@ int runProgram(int argc, char **argv) {
       standardContext.outputGeometry = outputGeometry;
       standardContext.crop = crop;
       standardContext.outputTransform = outputTransformPtr;
-      standardContext.resolvedBackend = resolvedBackend;
       standardContext.bedCount = bedCount;
       standardContext.baseNx = baseNx;
       standardContext.baseNy = baseNy;

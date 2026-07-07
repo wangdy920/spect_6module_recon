@@ -141,8 +141,7 @@ TEST(IOTest, CompactSymmetricParserDefaultsToStandard) {
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
         "-loadCSR", "matrix.csrb",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -162,8 +161,7 @@ TEST(IOTest, StandardParserDoesNotEnableCompactFromMetaOverride) {
         "-df", "proj.bin",
         "-loadCSR", "matrix.csrb",
         "-compactMeta", "custom_metadata.bin",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -203,8 +201,7 @@ TEST(IOTest, CompactSymmetricParserAcceptsChunkCSRDirWithoutManualGeometry) {
         "-df", "proj.bin",
         "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
-        "-sparseBackend", "cuda",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1"
     };
@@ -223,7 +220,7 @@ TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
         "-df", "proj.bin",
         "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -232,10 +229,9 @@ TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
     };
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.sparseBackend, "cuda");
 }
 
-TEST(IOTest, CompactSymmetricRejectsCpuSparseBackend) {
+TEST(IOTest, PublicSparseBackendFlagIsRejected) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
         "SPECT_recon",
@@ -244,6 +240,24 @@ TEST(IOTest, CompactSymmetricRejectsCpuSparseBackend) {
         "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
         "-sparseBackend", "cpu",
+        "-opti", "mlem",
+        "-subsets", "1",
+        "-it", "1",
+        "-dim", "108,108,80",
+        "-vox", "0.3",
+        "-ang", "360"
+    };
+
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, PublicAlgFlagIsRejected) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", "__missing_compact_test_config__.ini",
+        "-df", "proj.bin",
+        "-loadCSR", "matrix.csrb",
         "-alg", "mlem",
         "-subsets", "1",
         "-it", "1",
@@ -252,6 +266,43 @@ TEST(IOTest, CompactSymmetricRejectsCpuSparseBackend) {
         "-ang", "360"
     };
 
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, OptiSelectsAlgorithm) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", "__missing_compact_test_config__.ini",
+        "-df", "proj.bin",
+        "-loadCSR", "matrix.csrb",
+        "-opti", "bsrem",
+        "-subsets", "1",
+        "-it", "1",
+        "-dim", "108,108,80",
+        "-vox", "0.3",
+        "-ang", "360"
+    };
+
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.algorithm, spect::cli::ReconArgs::Algorithm::BSREM);
+}
+
+TEST(IOTest, PublicRegularizationRejectsNonTvRdp) {
+    auto argv = compactBaseArgs();
+    argv.push_back("-reg");
+    argv.push_back("Tikhonov,0.01");
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, PublicPriorFlagIsRejected) {
+    auto argv = compactBaseArgs();
+    argv.push_back("-prior");
+    argv.push_back("prior.mhd");
+
+    spect::cli::ReconArgs args;
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
@@ -273,8 +324,7 @@ TEST(IOTest, CompactSymmetricParserReadsDefaultChunkCSRDirFromConfig) {
         "SPECT_recon",
         "-config", path.string(),
         "-df", "proj.bin",
-        "-sparseBackend", "cuda",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1"
     };
@@ -308,8 +358,7 @@ TEST(IOTest, ExplicitLoadCSROverridesConfigDefaultChunkCSRDir) {
         "-df", "proj.bin",
         "-loadCSR", "matrix.csrb",
         "-matrixLayout", "standard",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -375,8 +424,7 @@ TEST(IOTest, StandardParserRejectsCompactDenomCachePathWithoutCompactLayout) {
         "-df", "proj.bin",
         "-loadCSR", "matrix.csrb",
         "-compactDenomCache", "cache/psc_260601_global_denom.mhd",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -394,9 +442,8 @@ TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
 
     {
         auto argv = compactBaseArgs();
-        auto it = std::find(argv.begin(), argv.end(), "cuda");
-        ASSERT_NE(it, argv.end());
-        *it = "cpu";
+        argv.push_back("-sparseBackend");
+        argv.push_back("cpu");
         expectRejected(argv);
     }
     {
@@ -503,6 +550,41 @@ TEST(IOTest, ConfigParserStripsInlineComments) {
     EXPECT_EQ(cfg.getInt("Basic", "threads", 0), 16);
     EXPECT_EQ(cfg.getString("PSF", "mode"), "None");
     EXPECT_DOUBLE_EQ(cfg.getDouble("PSF", "fwhm", 0.0), 3.0);
+
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, CtacAutoMuNuclideConfigResolvesWaterMu) {
+    const auto dir = std::filesystem::temp_directory_path() / "spect_ctac_config_tests";
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "spect_config.ini";
+
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out);
+        out << "[Basic]\n";
+        out << "dimensions = 8,8,8\n";
+        out << "voxel_size = 1,1,1\n";
+        out << "[Detector]\n";
+        out << "angles = 1\n";
+        out << "[CTAC]\n";
+        out << "auto_mu_nuclide = I131\n";
+    }
+
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", path.string(),
+        "-df", "proj.bin",
+        "-loadCSR", "matrix.csrb",
+        "-matrixLayout", "standard",
+        "-opti", "mlem",
+        "-subsets", "1",
+        "-it", "1"
+    };
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.ctacAutoMuValueSource, "i131");
+    EXPECT_NEAR(args.ctacAutoMuValue, 0.010998703003107506, 1e-15);
 
     std::filesystem::remove(path);
 }

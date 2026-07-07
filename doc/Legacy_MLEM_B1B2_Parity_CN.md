@@ -48,8 +48,8 @@ test_data/sys_260601_recon_ref/PSC_6module_24pin_10MBq_600s_test_1.bin
 staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe `
   -df test_data\sys_260601_recon_ref\PSC_6module_24pin_10MBq_600s_test_1.bin `
   -chunkCSRDir test_data\6module\260601 `
-  -matrixLayout compact-symmetric -sparseBackend cuda `
-  -alg mlem -subsets 1 -it 50 `
+  -matrixLayout compact-symmetric `
+  -opti mlem -subsets 1 -it 50 `
   -fout recon_out\b1_plain_it50\recon
 ```
 
@@ -60,8 +60,8 @@ staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe `
   -df test_data\sys_260601_recon_ref\PSC_6module_24pin_10MBq_600s_test_1.bin `
   -loadCSR test_data\6module\260525\matrix_6module.csrb `
   -compactMeta test_data\6module\260525\metadata.bin `
-  -matrixLayout compact-symmetric -sparseBackend cuda `
-  -alg mlem -subsets 1 -it 50 `
+  -matrixLayout compact-symmetric `
+  -opti mlem -subsets 1 -it 50 `
   -dim 108,108,80 -vox 0.3 -ang 360 -detN 48,48 `
   -fout recon_out\b2_plain_it50\recon
 ```

@@ -10,60 +10,12 @@
 #include "sparse/SparseOpsCPU.h"
 #include "sparse/SparseOpsRef.h"
 
-#include <algorithm>
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace spect {
-
-enum class SparseBackendChoice {
-    Auto,
-    CPU,
-    Reference,
-    CUDA
-};
-
-inline const char* sparseBackendChoiceName(SparseBackendChoice choice) {
-    switch (choice) {
-    case SparseBackendChoice::Auto:
-        return "auto";
-    case SparseBackendChoice::CPU:
-        return "cpu";
-    case SparseBackendChoice::Reference:
-        return "ref";
-    case SparseBackendChoice::CUDA:
-        return "cuda";
-    default:
-        return "auto";
-    }
-}
-
-inline bool parseSparseBackendChoice(const std::string& raw,
-                                     SparseBackendChoice& choice) {
-    std::string value = raw;
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (value.empty() || value == "auto") {
-        choice = SparseBackendChoice::Auto;
-        return true;
-    }
-    if (value == "cpu") {
-        choice = SparseBackendChoice::CPU;
-        return true;
-    }
-    if (value == "ref" || value == "reference") {
-        choice = SparseBackendChoice::Reference;
-        return true;
-    }
-    if (value == "cuda" || value == "gpu") {
-        choice = SparseBackendChoice::CUDA;
-        return true;
-    }
-    return false;
-}
 
 inline bool isCudaSparseOpsAvailable() {
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
@@ -180,6 +132,11 @@ bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
 #endif
 
 #if !(defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL))
+inline const ISparseOps& getSparseOpsCUDA() {
+    throw std::runtime_error(
+        "SPECT_recon requires a CUDA-enabled sparse backend build.");
+}
+
 namespace cuda {
 inline bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>&,
                                         uint64_t = 0) {
@@ -227,55 +184,5 @@ inline bool compactDeviceRatioSpmvTFloatCUDA(
 }
 }
 #endif
-
-inline const ISparseOps& selectSparseOps(SparseBackendChoice choice,
-                                         SparseBackendChoice* resolved = nullptr) {
-    const ISparseOps* selected = nullptr;
-    SparseBackendChoice out = choice;
-
-    switch (choice) {
-    case SparseBackendChoice::Auto:
-        selected = &getDefaultSparseOps();
-        out = (selected->backend() == BackendType::Reference)
-                  ? SparseBackendChoice::Reference
-                  : SparseBackendChoice::CPU;
-        break;
-    case SparseBackendChoice::CPU:
-        selected = &getSparseOpsCPU();
-        break;
-    case SparseBackendChoice::Reference:
-        selected = &getSparseOpsRef();
-        break;
-    case SparseBackendChoice::CUDA:
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-        selected = &getSparseOpsCUDA();
-#else
-        selected = &getDefaultSparseOps();
-        out = (selected->backend() == BackendType::Reference)
-                  ? SparseBackendChoice::Reference
-                  : SparseBackendChoice::CPU;
-#endif
-        break;
-    }
-
-    if (resolved) {
-        *resolved = out;
-    }
-    return *selected;
-}
-
-inline const ISparseOps& selectSparseOps(const std::string& backend,
-                                         SparseBackendChoice* resolved = nullptr,
-                                         bool* parsedOk = nullptr) {
-    SparseBackendChoice parsed = SparseBackendChoice::Auto;
-    const bool ok = parseSparseBackendChoice(backend, parsed);
-    if (parsedOk) {
-        *parsedOk = ok;
-    }
-    if (!ok) {
-        parsed = SparseBackendChoice::Auto;
-    }
-    return selectSparseOps(parsed, resolved);
-}
 
 } // namespace spect

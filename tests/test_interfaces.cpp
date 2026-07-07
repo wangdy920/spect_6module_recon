@@ -491,39 +491,11 @@ TEST(SparseOpsCPUTest, LargeMatrix_MultiThread) {
     EXPECT_LT(maxErr, 1e-10) << "Large matrix SpMV mismatch";
 }
 
-TEST(SparseOpsCPUTest, SparseBackendChoiceParse) {
-    SparseBackendChoice choice = SparseBackendChoice::Auto;
-    EXPECT_TRUE(parseSparseBackendChoice("auto", choice));
-    EXPECT_EQ(choice, SparseBackendChoice::Auto);
-    EXPECT_TRUE(parseSparseBackendChoice("cpu", choice));
-    EXPECT_EQ(choice, SparseBackendChoice::CPU);
-    EXPECT_TRUE(parseSparseBackendChoice("reference", choice));
-    EXPECT_EQ(choice, SparseBackendChoice::Reference);
-    EXPECT_TRUE(parseSparseBackendChoice("cuda", choice));
-    EXPECT_EQ(choice, SparseBackendChoice::CUDA);
-    EXPECT_FALSE(parseSparseBackendChoice("invalid", choice));
-}
-
 TEST(SparseOpsCPUTest, CudaAvailabilityFlag) {
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
     EXPECT_TRUE(isCudaSparseOpsAvailable());
 #else
     EXPECT_FALSE(isCudaSparseOpsAvailable());
-#endif
-}
-
-TEST(SparseOpsCPUTest, SparseBackendSelectorFallback) {
-    SparseBackendChoice resolved = SparseBackendChoice::Auto;
-    bool parsedOk = false;
-    const auto& ops = selectSparseOps("cuda", &resolved, &parsedOk);
-    EXPECT_TRUE(parsedOk);
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-    EXPECT_EQ(ops.backend(), BackendType::CUDA);
-    EXPECT_EQ(resolved, SparseBackendChoice::CUDA);
-#else
-    EXPECT_NE(ops.backend(), BackendType::CUDA);
-    EXPECT_TRUE(resolved == SparseBackendChoice::CPU ||
-                resolved == SparseBackendChoice::Reference);
 #endif
 }
 } // namespace cpu_test
@@ -1139,7 +1111,6 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_EQ(parser.getInt("Basic", "verbosity", 0), 1);
         EXPECT_EQ(parser.getInt("Detector", "channels", 0), 40);
         EXPECT_EQ(parser.getInt("Detector", "angles", 0), 360);
-        EXPECT_EQ(parser.getString("SystemMatrix", "sparse_backend", ""), "auto");
         EXPECT_TRUE(parser.getBool("SystemMatrix", "map_csr", false));
         EXPECT_EQ(parser.getString("PSF", "mode", ""), "None");
         EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.5);
@@ -1242,7 +1213,7 @@ TEST(AppTest, ReconContextAdapterFromArgs) {
     EXPECT_EQ(opts.bedOffsetVoxels[1], 40LL * 100 * 100);
 }
 
-TEST(AppTest, ReconContextAdapterSparseBackendRef) {
+TEST(AppTest, ReconContextAdapterUsesCudaRegardlessOfArgBackend) {
     using namespace spect::app;
 
     spect::cli::ReconArgs args;
@@ -1251,32 +1222,30 @@ TEST(AppTest, ReconContextAdapterSparseBackendRef) {
     args.Nz = 16;
     args.numAngles = 90;
     args.detectorChannels = 20;
-    args.sparseBackend = "ref";
-
-    ReconOpts opts = createReconOpts(args);
-
-    ASSERT_NE(opts.sparseOps, nullptr);
-    EXPECT_EQ(opts.sparseOps->backend(), BackendType::Reference);
-}
-
-TEST(AppTest, ReconContextAdapterSparseBackendCudaFallback) {
-    using namespace spect::app;
-
-    spect::cli::ReconArgs args;
-    args.Nx = 32;
-    args.Ny = 32;
-    args.Nz = 16;
-    args.numAngles = 90;
-    args.detectorChannels = 20;
-    args.sparseBackend = "cuda";
-
-    ReconOpts opts = createReconOpts(args);
-
-    ASSERT_NE(opts.sparseOps, nullptr);
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
+    ReconOpts opts = createReconOpts(args);
+    ASSERT_NE(opts.sparseOps, nullptr);
     EXPECT_EQ(opts.sparseOps->backend(), BackendType::CUDA);
 #else
-    EXPECT_NE(opts.sparseOps->backend(), BackendType::CUDA);
+    EXPECT_THROW(createReconOpts(args), std::runtime_error);
+#endif
+}
+
+TEST(AppTest, ReconContextAdapterUsesCuda) {
+    using namespace spect::app;
+
+    spect::cli::ReconArgs args;
+    args.Nx = 32;
+    args.Ny = 32;
+    args.Nz = 16;
+    args.numAngles = 90;
+    args.detectorChannels = 20;
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
+    ReconOpts opts = createReconOpts(args);
+    ASSERT_NE(opts.sparseOps, nullptr);
+    EXPECT_EQ(opts.sparseOps->backend(), BackendType::CUDA);
+#else
+    EXPECT_THROW(createReconOpts(args), std::runtime_error);
 #endif
 }
 

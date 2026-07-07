@@ -3,10 +3,6 @@ param(
     [string]$ExePath,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('fftw', 'cufft')]
-    [string]$ButterBackend,
-
-    [Parameter(Mandatory = $true)]
     [string]$Scenario,
 
     [Parameter(Mandatory = $true)]
@@ -33,12 +29,10 @@ $argsList = @(
     '-bedOverlap', '16',
     '-cropEnd', '16,16',
     '-vb', '1',
-    '-alg', 'BSREM',
+    '-opti', 'BSREM',
     '-subsets', '1',
     '-bsrem', '1.0,0.05',
     '-butter', '0.35,2',
-    '-butterBackend', $ButterBackend,
-    '-sparseBackend', 'cuda',
     '-fout', "./recon_out/cufft_pipeline/$Scenario"
 )
 
@@ -61,7 +55,7 @@ if ($dir -and -not (Test-Path $dir)) {
 }
 
 $seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 3)
-Set-Content -Path $OutputFile -Value ("backend=$ButterBackend scenario=$Scenario iter=$IterSpec seconds=$seconds exit=$exitCode")
+Set-Content -Path $OutputFile -Value ("backend=cufft scenario=$Scenario iter=$IterSpec seconds=$seconds exit=$exitCode")
 
 if ($exitCode -ne 0) {
     exit $exitCode

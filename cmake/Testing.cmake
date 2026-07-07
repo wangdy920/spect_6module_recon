@@ -88,7 +88,6 @@ if(SPECT_BUILD_TESTS)
   # 链接第三方依赖 (后续会迁移到spect_io等模块)
   target_link_libraries(spect_tests PRIVATE
     ${_matio_target}
-    ${_fftw_targets}
     ${_hdf5_targets}
     ${_zlib_target}
   )

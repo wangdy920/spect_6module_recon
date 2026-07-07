@@ -65,16 +65,9 @@ enum class BWType {
     Bandstop
 };
 
-enum class ButterworthBackendChoice {
-    Auto,
-    FFTW,
-    CUFFT
-};
-
 struct ButterworthConf {
     bool enabled = false;
     BWType type = BWType::Lowpass;
-    ButterworthBackendChoice backend = ButterworthBackendChoice::Auto;
     int order = 4;
     
     // 截止频率（Nyquist 分数：0~1）

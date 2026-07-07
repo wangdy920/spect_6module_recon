@@ -8,6 +8,7 @@
 
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 namespace spect::main {
 
@@ -131,8 +132,10 @@ void applySeparableConvRuntime(std::vector<double> &volume, int nx, int ny,
                                const std::vector<double> &ky,
                                const std::vector<double> &kz,
                                const ReconOpts &opts, int threads) {
+  (void)threads;
   if (!tryApplySeparableConvCUDA(volume, nx, ny, nz, kx, ky, kz, opts)) {
-    filters::conv3d_separable_inplace(volume, nx, ny, nz, kx, ky, kz, threads);
+    throw std::runtime_error(
+        "3D separable convolution requires CUDA volume helpers.");
   }
 }
 

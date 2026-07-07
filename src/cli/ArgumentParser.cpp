@@ -2,8 +2,19 @@
 
 #include "cli/ArgumentParser.h"
 
+#include "core/AttenuationCoefficients.h"
+
 namespace spect {
 namespace cli {
+
+namespace {
+
+bool isPublicRegularizer(RegType type) {
+    return type == RegType::None || type == RegType::TVIsotropic ||
+           type == RegType::RDP;
+}
+
+} // namespace
 
 std::filesystem::path ArgumentParser::executableDir(char** argv) {
 #ifdef _WIN32
@@ -169,7 +180,7 @@ bool ArgumentParser::applyMatrixAutoDiscovery(ReconArgs& args,
 ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
                                                   ReconArgs& args) {
   try {
-    // 0. Pre-scan for -config, -alg, -algoConf
+    // 0. Pre-scan for -config, -opti, -algoConf
     std::string configPath = resolveDefaultConfigPath(argv);
     std::string preScanAlg;
     std::string preScanAlgoConf;
@@ -178,7 +189,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (key == "-config" && i + 1 < argc) {
             configPath = argv[++i];
             args.configExplicit = true;
-        } else if ((key == "-alg" || key == "-opti") && i + 1 < argc) {
+        } else if (key == "-opti" && i + 1 < argc) {
             preScanAlg = toLower(std::string(argv[++i]));
         } else if (key == "-algoConf" && i + 1 < argc) {
             preScanAlgoConf = argv[++i];
@@ -207,7 +218,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     }
 
     // 2. Load algorithm config (algo_conf layer)
-    //    Priority: explicit -algoConf > auto-detect from -alg > auto-detect from global INI algorithm
+    //    Priority: explicit -algoConf > auto-detect from -opti > auto-detect from global INI algorithm
     std::string algoConfPath;
     if (!preScanAlgoConf.empty()) {
         algoConfPath = preScanAlgoConf;
@@ -253,14 +264,16 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         return ParseResult::ExitFailure;
     }
 
-    // 5. Handle -dumpConf: print merged config and exit
+    // 5. Normalize derived defaults, then handle -dumpConf and validation.
+    normalizeArgs(args);
+
+    // 6. Handle -dumpConf: print merged config and exit
     if (args.dumpConf) {
         dumpMergedConfig(args);
         return ParseResult::ExitSuccess;
     }
 
-    // 6. Normalize layout-specific defaults, then validate
-    normalizeArgs(args);
+    // 7. Validate
     if (!validateArgs(args))
         return ParseResult::ExitFailure;
     if (!args.projPaths.empty()) {
@@ -281,6 +294,16 @@ void ArgumentParser::bindHandlerAliases(
 
 void ArgumentParser::registerHandlers() {
     handlers_.clear();
+    auto rejectCliOption = [](const char* message) {
+        return [message](int& i, int argc, char** argv, ReconArgs& a) {
+            (void)i;
+            (void)argc;
+            (void)argv;
+            (void)a;
+            std::cerr << "Error: " << message << "\n";
+            return false;
+        };
+    };
 
     auto dataHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         // Treat -i/-input as aliases for -df (path normalization/drive-letter
@@ -407,13 +430,9 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases(threadsHandler, {"-th"});
     bindHandlerAliases(threadsHandler, {"-threads"});
     bindHandlerAliases(threadsHandler, {"-t"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        std::string val = toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-sparseBackend"));
-        if (val == "reference") val = "ref";
-        a.sparseBackend = val;
-        return true;
-    }, {"-sparseBackend"});
-    bindHandlerAliases(handlers_.at("-sparseBackend"), {"-spBackend"});
+    bindHandlerAliases(
+        rejectCliOption("-sparseBackend was removed; the sparse backend is fixed to CUDA."),
+        {"-sparseBackend", "-spBackend"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.cudaDeviceValue = ArgumentParser::getRequiredArg(i, argc, argv, "-cudaDevice");
         a.cudaDeviceRequested = true;
@@ -444,7 +463,9 @@ void ArgumentParser::registerHandlers() {
         return true;
     };
     bindHandlerAliases(algHandler, {"-opti"});
-    bindHandlerAliases(algHandler, {"-alg"});
+    bindHandlerAliases(
+        rejectCliOption("-alg was removed; use -opti mlem|bsrem|admm."),
+        {"-alg"});
 
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.admmRho = std::stod(
@@ -629,11 +650,9 @@ void ArgumentParser::registerHandlers() {
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-butterOrder"));
         return true;
     }, {"-butterOrder"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.butterBackend = toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-butterBackend"));
-        return true;
-    }, {"-butterBackend"});
-    bindHandlerAliases(handlers_.at("-butterBackend"), {"-bwBackend"});
+    bindHandlerAliases(
+        rejectCliOption("-butterBackend was removed; Butterworth uses cuFFT."),
+        {"-butterBackend", "-bwBackend"});
 
     // --- Regularization ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -646,20 +665,16 @@ void ArgumentParser::registerHandlers() {
             typeStr = "None";
         else if (typeLower == "tv")
             typeStr = "TVIsotropic";
-        else if (typeLower == "nlm")
-            typeStr = "NLM";
-        else if (typeLower == "bowsher")
-            typeStr = "Bowsher";
-        else if (typeLower == "pls")
-            typeStr = "PLS";
         else if (typeLower == "rdp")
             typeStr = "RDP";
-        else if (typeLower == "logcosh" || typeLower == "lc")
-            typeStr = "LogCosh";
 
         const RegType t = stringToRegType(typeStr);
         if (t == RegType::Unknown) {
             std::cerr << "Error: Unknown regularization type '" << parts[0] << "'.\n";
+            return false;
+        }
+        if (!isPublicRegularizer(t)) {
+            std::cerr << "Error: Only TV and RDP regularization are supported.\n";
             return false;
         }
         if (t == RegType::None) {
@@ -670,25 +685,12 @@ void ArgumentParser::registerHandlers() {
             a.reg.type = t;
             if (parts.size() >= 2)
                 a.reg.beta = std::stod(parts[1]);
-            if (t == RegType::NLM) {
-                if (parts.size() >= 3)
-                    a.reg.nlm_h = std::stod(parts[2]);
-                if (parts.size() >= 4)
-                    a.reg.nlm_search = std::stoi(parts[3]);
-                if (parts.size() >= 5)
-                    a.reg.nlm_patch = std::stoi(parts[4]);
-            } else if (t == RegType::Bowsher) {
-                if (parts.size() >= 3)
-                    a.reg.bowsher_k = std::stoi(parts[2]);
-            } else if (t == RegType::PLS) {
-                if (parts.size() >= 3)
-                    a.reg.pls_eta = std::stod(parts[2]);
-            } else if (t == RegType::RDP) {
+            if (t == RegType::RDP) {
                 if (parts.size() >= 3)
                     a.reg.gamma = std::stod(parts[2]);
                 if (parts.size() >= 4)
                     a.reg.delta = std::stod(parts[3]);
-            } else if (t == RegType::LogCosh) {
+            } else if (t == RegType::TVIsotropic) {
                 if (parts.size() >= 3)
                     a.reg.delta = std::stod(parts[2]);
             }
@@ -704,72 +706,23 @@ void ArgumentParser::registerHandlers() {
             a.reg.beta = val;
         else if (key == "-regDelta")
             a.reg.delta = val;
-        else if (key == "-regPower")
-            a.reg.power = val;
-        else if (key == "-regSigma")
-            a.reg.sigma = val;
         return true;
     };
     bindHandlerAliases(regValHandler, {"-regBeta"});
     bindHandlerAliases(regValHandler, {"-regDelta"});
-    bindHandlerAliases(regValHandler, {"-regPower"});
-    bindHandlerAliases(regValHandler, {"-regSigma"});
+    bindHandlerAliases(
+        rejectCliOption("-regPower was removed; use -reg TV or -reg RDP."),
+        {"-regPower"});
+    bindHandlerAliases(
+        rejectCliOption("-regSigma was removed; use -reg TV or -reg RDP."),
+        {"-regSigma"});
 
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.kernel =
-            std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regKernel"));
-        return true;
-    }, {"-regKernel"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.numIter =
-            std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regIter"));
-        return true;
-    }, {"-regIter"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.numSubsets = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-regSubsets"));
-        return true;
-    }, {"-regSubsets"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.updateFreq = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateFreq"));
-        return true;
-    }, {"-regUpdateFreq"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.updateStart = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateStart"));
-        return true;
-    }, {"-regUpdateStart"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        a.reg.updateEnd =
-            std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateEnd"));
-        return true;
-    }, {"-regUpdateEnd"});
-    bindHandlerAliases([](int& i, int argc, char** argv,
-                                        ReconArgs& a) {
-        a.useReg = true;
-        a.reg.updateInterval = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateInterval"));
-        return true;
-    }, {"-regUpdateInterval"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.useReg = true;
-        const std::string val =
-            toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-regUpdateType"));
-        if (val == "subset")
-            a.reg.updateType = RegConf::UpdateType::Subset;
-        else if (val == "iteration")
-            a.reg.updateType = RegConf::UpdateType::Iteration;
-        else
-            return false;
-        return true;
-    }, {"-regUpdateType"});
+    const Handler removedRegOption =
+        rejectCliOption("this regularization option was removed; use -reg TV or -reg RDP.");
+    bindHandlerAliases(removedRegOption,
+                       {"-regKernel", "-regIter", "-regSubsets",
+                        "-regUpdateFreq", "-regUpdateStart", "-regUpdateEnd",
+                        "-regUpdateInterval", "-regUpdateType"});
 
     // --- Mask & Geometry Extras ---
     auto cylHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
@@ -832,6 +785,9 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.zOutFlip);
     }, {"-zoutflip"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.xOutFlip);
+    }, {"-xoutflip"});
 
     // --- Physics & Correction ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -873,6 +829,8 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.ctacAutoMuValue =
             std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-ctacAutoMuValue"));
+        a.ctacAutoMuValueExplicit = true;
+        a.ctacAutoMuValueSource = "manual";
         if (!(a.ctacAutoMuValue > 0.0)) {
             std::cerr << "Error: -ctacAutoMuValue (mu per mm) must be positive.\n";
             return false;
@@ -896,10 +854,9 @@ void ArgumentParser::registerHandlers() {
         a.attMapPath = ArgumentParser::getRequiredArg(i, argc, argv, "-attMap");
         return true;
     }, {"-attMap"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.priorPath = ArgumentParser::getRequiredArg(i, argc, argv, "-prior");
-        return true;
-    }, {"-prior"});
+    bindHandlerAliases(
+        rejectCliOption("-prior was removed with anatomical regularizers; use TV or RDP."),
+        {"-prior"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bProjPath = ArgumentParser::getRequiredArg(i, argc, argv, "-bProj");
         return true;
@@ -982,8 +939,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         }
     }
     a.numThreads = cfg.getInt("Basic", "threads", a.numThreads);
-    a.sparseBackend = toLower(cfg.getString("Reconstruction", "sparse_backend", a.sparseBackend));
-    a.butterBackend = toLower(cfg.getString("Reconstruction", "butter_backend", a.butterBackend));
     a.verbosity = cfg.getInt("Basic", "verbosity", a.verbosity);
 
     // Detector
@@ -1045,6 +1000,16 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     a.josephPasses = cfg.getInt("Reconstruction", "joseph_passes", a.josephPasses);
     a.bProjPath = cfg.getString("Reconstruction", "b_proj", a.bProjPath);
 
+    if (cfg.hasKey("CTAC", "auto_mu_nuclide"))
+        a.ctacAutoMuNuclide =
+            cfg.getString("CTAC", "auto_mu_nuclide", a.ctacAutoMuNuclide);
+    if (cfg.hasKey("CTAC", "auto_mu_value")) {
+        a.ctacAutoMuValue =
+            cfg.getDouble("CTAC", "auto_mu_value", a.ctacAutoMuValue);
+        a.ctacAutoMuValueExplicit = true;
+        a.ctacAutoMuValueSource = "manual";
+    }
+
     // IO
     a.outputDir = cfg.getString("InputOutput", "output_dir", a.outputDir);
     a.outputName = cfg.getString("InputOutput", "output_name", a.outputName);
@@ -1082,24 +1047,16 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             throw std::runtime_error("Unknown regularization type '" + regT +
                                      "' in config file.");
         }
+        if (!isPublicRegularizer(a.reg.type)) {
+            throw std::runtime_error(
+                "Only TV and RDP regularization are supported in config.");
+        }
         a.reg.beta = cfg.getDouble("Regularization", "beta", a.reg.beta);
         double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
         a.reg.tv_eps = eps;
         a.reg.mrp_eps = eps;
-        // Delta for LogCosh/RDP
         a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
-
-        // NLM
-        a.reg.nlm_h = cfg.getDouble("NLM", "h", a.reg.nlm_h);
-        a.reg.nlm_search = cfg.getInt("NLM", "search_radius", a.reg.nlm_search);
-        a.reg.nlm_patch = cfg.getInt("NLM", "patch_radius", a.reg.nlm_patch);
-
-        // Priors
-        a.priorPath =
-            cfg.getString("AnatomicalPriors", "prior_image", a.priorPath);
-        a.reg.bowsher_k =
-            cfg.getInt("AnatomicalPriors", "bowsher_k", a.reg.bowsher_k);
-        a.reg.pls_eta = cfg.getDouble("AnatomicalPriors", "pls_eta", a.reg.pls_eta);
+        a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
     }
 
     // PSF
@@ -1163,9 +1120,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.butterCutoff = (float)bwCut;
         }
         a.butterOrder = cfg.getInt("Filtering", "butterworth_order", a.butterOrder);
-        std::string bwBackend = cfg.getString("Filtering", "butterworth_backend");
-        if (!bwBackend.empty())
-            a.butterBackend = toLower(bwBackend);
         double gSigma = cfg.getDouble("Filtering", "gaussian_sigma", 0.0);
         if (gSigma > 0.0) {
             a.useSmooth = true;
@@ -1199,6 +1153,7 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         }
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
+        a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
     }
 }
 
@@ -1242,6 +1197,10 @@ void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
             regT = "TVIsotropic";
 
         RegType rt = stringToRegType(regT);
+        if (rt != RegType::Unknown && !isPublicRegularizer(rt)) {
+            throw std::runtime_error(
+                "Only TV and RDP regularization are supported in algo config.");
+        }
         if (rt != RegType::Unknown && rt != RegType::None) {
             a.useReg = true;
             a.reg.type = rt;
@@ -1251,6 +1210,8 @@ void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         a.reg.beta = cfg.getDouble("Regularization", "beta", a.reg.beta);
     if (cfg.hasKey("Regularization", "delta"))
         a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
+    if (cfg.hasKey("Regularization", "gamma"))
+        a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
     if (cfg.hasKey("Regularization", "epsilon")) {
         double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
         a.reg.tv_eps = eps;
@@ -1287,12 +1248,6 @@ void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         a.admmAdaptive = cfg.getBool("ADMM", "adaptive", a.admmAdaptive);
     }
 
-    // [BackendHint] section
-    if (cfg.hasSection("BackendHint")) {
-        std::string sp = cfg.getString("BackendHint", "sparse");
-        if (!sp.empty())
-            a.sparseBackend = toLower(sp);
-    }
 }
 
 std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
@@ -1309,7 +1264,7 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
          argName == "-indexMat" || argName == "-weightMat" ||
          argName == "-fout" || argName == "-loadCSR" ||
          argName == "-chunkCSRDir" || argName == "-saveCSR" ||
-         argName == "-attMap" || argName == "-prior" || argName == "-bProj" ||
+         argName == "-attMap" || argName == "-bProj" ||
          argName == "-config" || argName == "-algoConf");
     
     if (isPathArg) {
@@ -1382,12 +1337,18 @@ bool ArgumentParser::parsePSFParams(const std::string& value, ReconArgs& args) {
 }
 
 void ArgumentParser::normalizeArgs(ReconArgs& args) {
-    if (args.matrixLayout != "compact-symmetric")
-        return;
-
-    const std::string backend = toLower(args.sparseBackend);
-    if (backend == "auto")
-        args.sparseBackend = "cuda";
+    if (!args.ctacAutoMuValueExplicit) {
+        double mu = 0.0;
+        if (spect::core::waterMuPerMMForNuclide(args.ctacAutoMuNuclide, mu)) {
+            args.ctacAutoMuValue = mu;
+            if (const auto *preset =
+                    spect::core::waterAttenuationPreset(args.ctacAutoMuNuclide)) {
+                args.ctacAutoMuValueSource = preset->key;
+            } else {
+                args.ctacAutoMuValueSource = args.ctacAutoMuNuclide;
+            }
+        }
+    }
 }
 
 bool ArgumentParser::parseOutputPath(const std::string& path, ReconArgs& args) {
@@ -1470,10 +1431,14 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: Number of threads (-th) must be positive.\n";
         return false;
     }
-    if (!(args.sparseBackend == "auto" || args.sparseBackend == "cpu" ||
-          args.sparseBackend == "ref" || args.sparseBackend == "reference" ||
-          args.sparseBackend == "cuda" || args.sparseBackend == "gpu")) {
-        std::cerr << "Error: Invalid -sparseBackend (expected auto/cpu/ref/cuda).\n";
+    if (!args.ctacAutoMuValueExplicit &&
+        spect::core::waterAttenuationPreset(args.ctacAutoMuNuclide) == nullptr) {
+        std::cerr << "Error: [CTAC] auto_mu_nuclide must be one of "
+                  << spect::core::supportedWaterMuNuclides() << ".\n";
+        return false;
+    }
+    if (!(args.ctacAutoMuValue > 0.0)) {
+        std::cerr << "Error: CTAC auto-mu value must be positive.\n";
         return false;
     }
     if (!(args.matrixLayout == "standard" ||
@@ -1495,21 +1460,11 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
             std::cerr << "Error: compact-symmetric layout requires -loadCSR, -chunkCSRDir, [SystemMatrix] default_chunk_csr_dir, or exactly one exe-local matrix directory.\n";
             return false;
         }
-        if (!(args.sparseBackend == "cuda" || args.sparseBackend == "gpu")) {
-            const std::string backend = toLower(args.sparseBackend);
-            if (backend == "cpu" || backend == "ref" || backend == "reference") {
-                std::cerr << "Error: compact-symmetric layout requires CUDA; "
-                             "CPU/reference sparse backends are not supported.\n";
-            } else {
-                std::cerr << "Error: compact-symmetric layout requires a CUDA sparse backend.\n";
-            }
-            return false;
-        }
         const bool compactAlgorithmOk =
             args.algorithm == ReconArgs::Algorithm::MLEM ||
             args.algorithm == ReconArgs::Algorithm::BSREM;
         if (!compactAlgorithmOk || args.numSubsets != 1) {
-            std::cerr << "Error: compact-symmetric layout supports only -alg mlem|bsrem -subsets 1.\n";
+            std::cerr << "Error: compact-symmetric layout supports only -opti mlem|bsrem -subsets 1.\n";
             return false;
         }
         if ((args.doCTAC || !args.attMapPath.empty()) &&
@@ -1529,7 +1484,7 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         if (compactHasReg &&
             (args.algorithm != ReconArgs::Algorithm::BSREM ||
              args.reg.type != RegType::RDP)) {
-            std::cerr << "Error: compact-symmetric regularization currently supports only -alg bsrem -reg RDP,...\n";
+            std::cerr << "Error: compact-symmetric regularization currently supports only -opti bsrem -reg RDP,...\n";
             return false;
         }
         if (args.psfProj || args.psf.mode == PSFMode::ProjDomain ||
@@ -1537,12 +1492,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
             std::cerr << "Error: compact-symmetric Phase 1 supports only image-domain -psfMode Operator or None.\n";
             return false;
         }
-    }
-    if (!(args.butterBackend == "auto" || args.butterBackend == "fftw" ||
-          args.butterBackend == "cpu" || args.butterBackend == "cufft" ||
-          args.butterBackend == "cuda" || args.butterBackend == "gpu")) {
-        std::cerr << "Error: Invalid -butterBackend (expected auto/fftw/cufft).\n";
-        return false;
     }
     if (args.bsremCurvWarmupIters < 0) {
         std::cerr << "Error: BSREM curvature warmup iterations must be >= 0.\n";
@@ -1598,22 +1547,19 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     }
 
     if (args.useReg) {
+        if (!isPublicRegularizer(args.reg.type)) {
+            std::cerr << "Error: Only TV and RDP regularization are supported.\n";
+            return false;
+        }
         if (args.reg.beta < 0) {
             std::cerr
                 << "Error: Regularization beta (-regBeta) must be non-negative.\n";
             return false;
         }
         if ((args.reg.type == RegType::TVIsotropic ||
-             args.reg.type == RegType::TVHuber ||
              args.reg.type == RegType::RDP) && args.reg.delta < 0) {
-            std::cerr << "Error: TV/Huber/RDP regularization delta (-regDelta) must "
+            std::cerr << "Error: TV/RDP regularization delta (-regDelta) must "
                          "be non-negative.\n";
-            return false;
-        }
-        if ((args.reg.type == RegType::Bowsher || args.reg.type == RegType::PLS) &&
-            args.priorPath.empty() && args.attMapPath.empty()) {
-            std::cerr << "Error: Anatomical regularization (Bowsher/PLS) requires an "
-                         "anatomical prior (-prior or -attMap).\n";
             return false;
         }
     }
@@ -1697,7 +1643,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[Filtering]\n";
     std::cout << "butterworth_cutoff  = " << a.butterCutoff << "\n";
     std::cout << "butterworth_order   = " << a.butterOrder << "\n";
-    std::cout << "butterworth_backend = " << a.butterBackend << "\n";
     std::cout << "gaussian_sigma      = " << a.smoothSigma << "\n";
     std::cout << "gaussian_kernel     = " << a.smoothKernel << "\n\n";
 
@@ -1708,13 +1653,18 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "fwhm = " << a.psf.fwhm_mm << "\n";
     std::cout << "min_sigmas = " << a.psf.min_sigmas << "\n\n";
 
+    std::cout << "[CTAC]\n";
+    std::cout << "auto_mu_nuclide = " << a.ctacAutoMuNuclide << "\n";
+    std::cout << "auto_mu_value   = " << a.ctacAutoMuValue << "\n";
+    std::cout << "auto_mu_source  = " << a.ctacAutoMuValueSource << "\n\n";
+
     std::cout << "[Mask]\n";
     std::cout << "use_cylinder   = " << (a.useCylindricalMask ? "true" : "false") << "\n";
     std::cout << "cylinder_dims  = " << a.cylinderDiameterMM << "," << a.cylinderHeightMM << "\n\n";
 
-    std::cout << "[BackendHint]\n";
-    std::cout << "sparse = " << a.sparseBackend << "\n";
-    std::cout << "butter = " << a.butterBackend << "\n\n";
+    std::cout << "[Backend]\n";
+    std::cout << "sparse = cuda\n";
+    std::cout << "butter = cufft\n\n";
 
     std::cout << "[Matrix]\n";
     std::cout << "layout       = " << a.matrixLayout << "\n";
@@ -1736,7 +1686,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "\n";
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
-    std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n\n";
+    std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
+    std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n\n";
 
     std::cout << "[InputOutput]\n";
     std::cout << "output_dir  = " << a.outputDir << "\n";
@@ -1755,8 +1706,8 @@ void ArgumentParser::printUsage() {
     std::cout << "  SPECT-recon -df proj.bin -o recon_output   # uses single exe-local bin/matrix/* if present\n";
     std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb\n";
     std::cout << "  SPECT-recon -df proj.bin -loadCSR matrix.csrb -detN 40,40\n";
-    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -alg bsrem\n";
-    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -alg admm -it 100\n\n";
+    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -opti bsrem\n";
+    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -opti admm -it 100\n\n";
 
     std::cout << "  Windows paths: use quotes or forward slashes\n";
     std::cout << "    -df \"D:\\path\\file.mat\"  or  -df D:/path/file.bin\n\n";
@@ -1778,18 +1729,16 @@ void ArgumentParser::printUsage() {
     std::cout << "  -attMap <path>           Attenuation map (mu, mm^-1) for attenuation correction / Chang's AC\n";
     std::cout << "  -bProj <path>            Background/scatter projection MAT/BIN\n";
     std::cout << "  -bProjList <list>        Multi-bed background MAT/BIN list, sorted by BedN when present\n";
-    std::cout << "  -prior <path>            Anatomical prior for Bowsher/PLS\n";
     std::cout << "  -fout <dir/name>         Output path prefix\n";
     std::cout << "  -o <dir>                 Output directory\n";
     std::cout << "  -n <name>                Output filename base\n\n";
 
     std::cout << "=== Algorithm ===\n";
-    std::cout << "  -alg <name>              MLEM | BSREM | ADMM\n";
+    std::cout << "  -opti <name>             MLEM | BSREM | ADMM\n";
     std::cout << "                           Auto-loads config/algo_<name>.conf\n";
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
     std::cout << "  -subsets <N>             Subsets (1=ML-EM, >1=OS-EM)\n";
-    std::cout << "  -sparseBackend <b>       auto | cpu | ref | cuda (compact layout defaults to cuda)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";
@@ -1811,13 +1760,12 @@ void ArgumentParser::printUsage() {
     std::cout << "  -admmAdaptive on|off     Adaptive rho (default on, Boyd 2011)\n\n";
 
     std::cout << "=== Regularization ===\n";
-    std::cout << "  -reg <type[,beta,delta]> TV | RDP | LogCosh | Tikhonov | MRP | NLM | ...\n";
+    std::cout << "  -reg <type[,beta,delta]> TV | RDP\n";
     std::cout << "  -regBeta <beta>          Regularization weight\n";
     std::cout << "  -regDelta <delta>        Transition parameter\n\n";
 
     std::cout << "=== Filtering ===\n";
     std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2)\n";
-    std::cout << "  -butterBackend <b>       auto | fftw | cufft\n";
     std::cout << "  -smooth <sigma>          Gaussian smoothing sigma (mm)\n";
     std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n";
     std::cout << "  -conv <params>           Legacy convolution filter\n\n";
@@ -1839,6 +1787,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -cropEnd <top[,end]>      Final output Z cropping after output flips\n";
     std::cout << "  -zbedflip <0|1>           Flip each dfList bed segment on output (default 1)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
+    std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
     std::cout << "  -ctacModel <m>            line-integral (default; angle-dependent parallel-ray Int mu ds)\n";
     std::cout << "                            or per-voxel (legacy exp(-mu) approximation, not quantitative)\n";
@@ -1847,8 +1796,8 @@ void ArgumentParser::printUsage() {
     std::cout << "                            (threshold + closing + hole fill; for activity-filled phantoms;\n";
     std::cout << "                            mutually exclusive with -attMap; generated map saved as *_automu)\n";
     std::cout << "  -ctacAutoMuThresh <f>     Relative threshold vs P99.9 activity (default 0.05)\n";
-    std::cout << "  -ctacAutoMuValue <mu>     Body fill mu in mm^-1 (default 0.0152 = water @140keV narrow-beam;\n";
-    std::cout << "                            consider ~0.012 broad-beam when scatter is uncorrected)\n\n";
+    std::cout << "  -ctacAutoMuValue <mu>     Debug override for auto-mu body fill, mm^-1\n";
+    std::cout << "                            Default comes from [CTAC] auto_mu_nuclide (Tc99m => 0.0152)\n\n";
 
     std::cout << "=== Masking ===\n";
     std::cout << "  -cyl <diam,height>        Cylindrical mask (mm)\n";

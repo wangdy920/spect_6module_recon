@@ -109,12 +109,12 @@ if ($UseBackground) {
 }
 
 Run-Case -CaseName "mlem" -CommonArgs $commonArgs -ExtraArgs @(
-    "-alg", "MLEM",
+    "-opti", "MLEM",
     "-subsets", "1"
 ) -Exe $Exe
 
 Run-Case -CaseName "bsrem" -CommonArgs $commonArgs -ExtraArgs @(
-    "-alg", "BSREM",
+    "-opti", "BSREM",
     "-subsets", $Subsets.ToString(),
     "-bsrem", "1.0,0.05",
     "-reg", "TVIsotropic,1e-6"

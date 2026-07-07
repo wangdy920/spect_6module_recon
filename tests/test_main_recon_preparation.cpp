@@ -25,18 +25,16 @@ TEST(ReconPreparationTest, ButterworthUsesConfiguredOrderAndCutoff) {
   EXPECT_TRUE(conf.enabled);
   EXPECT_EQ(conf.order, 1);
   EXPECT_NEAR(conf.cutoff_hi_frac, 0.42, 1e-6);
-  EXPECT_EQ(conf.backend, spect::filters::defaultButterworthBackendChoice());
 }
 
-TEST(ReconPreparationTest, ButterworthBackendCanBeExplicitlyOverridden) {
+TEST(ReconPreparationTest, ButterworthPreparationHasNoBackendChoice) {
   ReconArgs args;
   args.useButter = true;
-  args.butterBackend = "fftw";
 
   const auto conf = prepareButterworthConf(args);
 
   EXPECT_TRUE(conf.enabled);
-  EXPECT_EQ(conf.backend, spect::filters::ButterworthBackendChoice::FFTW);
+  EXPECT_EQ(conf.order, args.butterOrder);
 }
 
 TEST(ReconPreparationTest, SmoothingDisabledWhenSigmaNonPositive) {

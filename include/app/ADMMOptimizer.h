@@ -9,7 +9,7 @@
 ///
 /// f-update: EM-ADMM step reusing OSEM_step numerator computation.
 /// u-update: prox_{βR/ρ}(f + d).
-///   - TV: Chambolle-Pock iteration (GPU or CPU).
+///   - TV: Chambolle-Pock iteration on CUDA.
 ///   - RDP/Quad: gradient-step (f+d) − (β/ρ)∇R(f+d).
 /// d-update: d += f − u.
 
@@ -132,16 +132,16 @@ public:
       const double lambda = beta / rho; // effective TV/reg weight
 
       if (cfg_.reg.type == RegType::TVIsotropic) {
-        // TV proximal via Chambolle-Pock (GPU then CPU fallback)
         if (!tryComputeTVProxCUDA(v, lambda)) {
-          computeTVProxCPU(v, lambda);
+          throw std::runtime_error(
+              "ADMM TV proximal requires CUDA volume helpers.");
         }
       } else {
-        // Gradient-step proximal for RDP/Quadratic/etc.
+        // Gradient-step proximal for RDP.
         std::fill(gradBuf_.begin(), gradBuf_.end(), 0.0);
         if (!tryComputeRegGradCUDA(v)) {
-          spect::regularizer::compute_reg_gradient(
-              v, Nx_, Ny_, Nz_, cfg_.reg, cfg_.mask, gradBuf_, threads);
+          throw std::runtime_error(
+              "ADMM regularization gradient requires CUDA volume helpers.");
         }
 
         const double scale = lambda;
@@ -212,73 +212,6 @@ private:
     (void)lambda;
     return false;
 #endif
-  }
-
-  /// CPU fallback for TV proximal via Chambolle-Pock primal-dual.
-  void computeTVProxCPU(const std::vector<double> &v, double lambda) {
-    const size_t N = v.size();
-    const int Nx = Nx_, Ny = Ny_, Nz = Nz_;
-    const size_t slice = static_cast<size_t>(Nx) * static_cast<size_t>(Ny);
-    const int threads = cfg_.threads;
-    const int iters = cfg_.tvInnerIters;
-    const double sigma = 1.0 / std::sqrt(12.0);
-    const double tau = 1.0 / std::sqrt(12.0);
-    const double theta = 1.0;
-
-    // Initialize: u = v, u_bar = v, p = 0
-    u_ = v;
-    std::vector<double> u_bar = v;
-    std::vector<double> px(N, 0.0), py(N, 0.0), pz(N, 0.0);
-
-    for (int k = 0; k < iters; ++k) {
-      // Dual update: p = proj_{||·||≤lambda}(p + sigma * grad(u_bar))
-#pragma omp parallel for schedule(static) num_threads(threads)
-      for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(N); ++j) {
-        const auto jj = static_cast<size_t>(j);
-        const int x = static_cast<int>(jj % static_cast<size_t>(Nx));
-        const int y = static_cast<int>((jj / static_cast<size_t>(Nx)) %
-                                        static_cast<size_t>(Ny));
-
-        const double u0 = u_bar[jj];
-        double gx = 0.0, gy = 0.0, gz = 0.0;
-        if (x + 1 < Nx) gx = u_bar[jj + 1] - u0;
-        if (y + 1 < Ny) gy = u_bar[jj + static_cast<size_t>(Nx)] - u0;
-        if (jj + slice < N) gz = u_bar[jj + slice] - u0;
-
-        double qx = px[jj] + sigma * gx;
-        double qy = py[jj] + sigma * gy;
-        double qz = pz[jj] + sigma * gz;
-
-        const double norm = std::sqrt(qx * qx + qy * qy + qz * qz);
-        if (norm > lambda) {
-          const double s = lambda / norm;
-          qx *= s; qy *= s; qz *= s;
-        }
-        px[jj] = qx; py[jj] = qy; pz[jj] = qz;
-      }
-
-      // Primal update + extrapolation
-#pragma omp parallel for schedule(static) num_threads(threads)
-      for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(N); ++j) {
-        const auto jj = static_cast<size_t>(j);
-        const int x = static_cast<int>(jj % static_cast<size_t>(Nx));
-        const int y = static_cast<int>((jj / static_cast<size_t>(Nx)) %
-                                        static_cast<size_t>(Ny));
-
-        double div_val = px[jj] + py[jj] + pz[jj];
-        if (x > 0) div_val -= px[jj - 1];
-        if (y > 0) div_val -= py[jj - static_cast<size_t>(Nx)];
-        if (jj >= slice) div_val -= pz[jj - slice];
-
-        const double u_old = u_[jj];
-        double u_new =
-            (tau * v[jj] + u_old + tau * div_val) / (1.0 + tau);
-        if (u_new < 0.0) u_new = 0.0;
-
-        u_[jj] = u_new;
-        u_bar[jj] = u_new + theta * (u_new - u_old);
-      }
-    }
   }
 
   /// Adaptive ρ adjustment based on primal/dual residual balance.

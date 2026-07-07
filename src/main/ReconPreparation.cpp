@@ -38,11 +38,6 @@ filters::ButterworthConf prepareButterworthConf(const ReconArgs &args) {
     return conf;
   conf.enabled = true;
   conf.type = filters::BWType::Lowpass;
-  conf.backend = filters::defaultButterworthBackendChoice();
-  filters::ButterworthBackendChoice parsedBackend = filters::ButterworthBackendChoice::Auto;
-  if (filters::parseButterworthBackendChoice(args.butterBackend, parsedBackend) &&
-      parsedBackend != filters::ButterworthBackendChoice::Auto)
-    conf.backend = parsedBackend;
   conf.order = std::max(1, args.butterOrder);
   conf.cutoff_hi_frac = args.butterCutoff;
   conf.cutoff_lo_frac = 0.0;

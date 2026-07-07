@@ -31,8 +31,7 @@ TEST(IOTest, MultiBedParserSortsDfListAndBProjListByBedNumber) {
         "-dfList", "C:/scan/Bed3.bin;C:/scan/Bed1.bin;C:/scan/Bed2.bin",
         "-bProjList", "C:/bg/Bed2.bin;C:/bg/Bed3.bin;C:/bg/Bed1.bin",
         "-loadCSR", "matrix.csrb",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -58,8 +57,7 @@ TEST(IOTest, MultiBedParserRejectsMoreThanFiveDfListBeds) {
         "-config", "__missing_compact_test_config__.ini",
         "-dfList", "Bed1.bin;Bed2.bin;Bed3.bin;Bed4.bin;Bed5.bin;Bed6.bin",
         "-loadCSR", "matrix.csrb",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -77,8 +75,7 @@ TEST(IOTest, MultiBedParserRejectsMoreThanFiveBedOverlapSlots) {
         "-dfList", "Bed1.bin;Bed2.bin;Bed3.bin",
         "-bedOverlap", "1,2,3,4,5,6",
         "-loadCSR", "matrix.csrb",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -95,10 +92,13 @@ TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     argv.push_back("0");
     argv.push_back("-zoutflip");
     argv.push_back("1");
+    argv.push_back("-xoutflip");
+    argv.push_back("1");
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
+    EXPECT_TRUE(args.xOutFlip);
 }
 TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
     const auto dir = std::filesystem::temp_directory_path() / "spect_multibed_config_tests";
@@ -113,6 +113,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         out << "crop_end = 2,3\n";
         out << "z_bed_flip = 0\n";
         out << "z_out_flip = 1\n";
+        out << "x_out_flip = 1\n";
     }
 
     spect::cli::ReconArgs args;
@@ -121,8 +122,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         "-config", path.string(),
         "-df", "proj.bin",
         "-loadCSR", "matrix.csrb",
-        "-sparseBackend", "cpu",
-        "-alg", "mlem",
+        "-opti", "mlem",
         "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
@@ -136,6 +136,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
     EXPECT_EQ(args.cropEndEnd, 3);
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
+    EXPECT_TRUE(args.xOutFlip);
 
     std::filesystem::remove(path);
 }

@@ -386,8 +386,7 @@ try {
     $common = @(
         "-config", "__missing_260601_compare_config__.ini",
         "-matrixLayout", "compact-symmetric",
-        "-sparseBackend", "cuda",
-        "-alg", "MLEM",
+        "-opti", "MLEM",
         "-subsets", "1",
         "-it", "$Iterations",
         "-th", "$Threads"

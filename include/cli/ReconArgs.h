@@ -40,7 +40,6 @@ struct ReconArgs {
     int saveInterval = 5;         ///< Save every N iterations
     int numSubsets = 1;           ///< Subsets (1 = MLEM)
     int numThreads = 8;           ///< Thread count
-    std::string sparseBackend = "auto"; ///< Sparse backend preference: auto/cpu/ref/cuda
     std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI
     bool cudaDeviceRequested = false; ///< True if CUDA device selection was requested
     bool cudaDeviceFromCli = false;   ///< True if -cudaDevice overrides env
@@ -67,7 +66,6 @@ struct ReconArgs {
     float smoothSigma = 1.0f;
     int smoothKernel = 3;
     bool useButter = false;
-    std::string butterBackend = "auto";
     float butterCutoff = 0.35f;
     int butterOrder = 2;
     bool usePSF = false;
@@ -97,6 +95,9 @@ struct ReconArgs {
     std::string ctacAutoMuFrom;   ///< Early-iteration recon volume for auto water mu-map
     double ctacAutoMuThresh = 0.05;  ///< Relative threshold vs P99.9 activity
     double ctacAutoMuValue = 0.0152; ///< Water mu (mm^-1) used to fill the body
+    std::string ctacAutoMuNuclide = "Tc99m"; ///< Water mu lookup key
+    bool ctacAutoMuValueExplicit = false; ///< true when mu was manually set
+    std::string ctacAutoMuValueSource = "Tc99m";
 
     // ========== Attenuation & Prior ==========
     std::string attMapPath;               ///< Attenuation map file
@@ -151,6 +152,7 @@ struct ReconArgs {
     std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
     bool zBedFlip = true;          ///< Flip each dfList bed segment in Z before output
     bool zOutFlip = false;         ///< Flip the final output volume in Z
+    bool xOutFlip = false;         ///< Flip the final output volume in X
 
     // ========== Symmetry expansion ==========
     // Reverses the 4-fold XY 90-degree rotation sense in compact-symmetric

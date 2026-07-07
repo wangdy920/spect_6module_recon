@@ -2,7 +2,7 @@
  * @file Types.h
  * @brief 核心类型定义、状态码、基础宏
  * 
- * 此文件不应包含任何第三方头文件(matio/fftw/omp等)
+ * 此文件不应包含任何第三方头文件(matio/cufft/omp等)
  */
 
 #pragma once

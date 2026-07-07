@@ -145,6 +145,15 @@ void warmCompactChunkResidentDeviceCache(
       cacheBudget < estimatedCompactChunkResidentBytes(chunks)) {
     return;
   }
+  static std::mutex warmedMutex;
+  static const spect::io::CompactChunkCSRDirectory *lastWarmedChunks = nullptr;
+  static uint64_t lastWarmedCacheBudget = 0;
+  {
+    std::lock_guard<std::mutex> lock(warmedMutex);
+    if (lastWarmedChunks == &chunks && lastWarmedCacheBudget == cacheBudget) {
+      return;
+    }
+  }
 
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
@@ -229,7 +238,11 @@ void warmCompactChunkResidentDeviceCache(
     views.push_back(chunk->view());
     loaded.push_back(std::move(chunk));
   }
-  (void)warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes);
+  if (warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes)) {
+    std::lock_guard<std::mutex> lock(warmedMutex);
+    lastWarmedChunks = &chunks;
+    lastWarmedCacheBudget = cacheBudget;
+  }
 }
 
 struct CompactBranchDescriptor {

@@ -97,6 +97,23 @@ TEST(VolumeOutputTest, PrepareOutputWholeZFlipPrecedesCrop) {
   EXPECT_EQ(output, expected);
 }
 
+TEST(VolumeOutputTest, PrepareOutputFlipsWholeX) {
+  const int nx = 3;
+  const int ny = 2;
+  const int nz = 1;
+  const std::vector<double> source = {1, 2, 3, 4, 5, 6};
+  OutputTransform transform;
+  transform.flipXWholeOutput = true;
+
+  int outNz = 0;
+  const std::vector<double> output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, &outNz, &transform);
+
+  EXPECT_EQ(outNz, 1);
+  const std::vector<double> expected = {3, 2, 1, 6, 5, 4};
+  EXPECT_EQ(output, expected);
+}
+
 TEST(VolumeOutputTest, ThrowsWhenSourceSizeMismatch) {
   const std::vector<double> source = {1.0, 2.0, 3.0};
   EXPECT_THROW(

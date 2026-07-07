@@ -4,11 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
-#include <mutex>
 #include <omp.h>
 #include <stdexcept>
-
-#include <fftw3.h>
 
 namespace spect {
 namespace filters {
@@ -355,23 +352,7 @@ std::vector<double> make_butterworth_mask_3d(int Nx, int Ny, int Nz, Spacing3,
 void apply_butterworth_inplace(std::vector<double> &f, int Nx, int Ny, int Nz,
                                Spacing3 sp, const ButterworthConf &bw,
                                int threads) {
-  ButterworthBackendChoice resolved = bw.backend;
-  if (resolved == ButterworthBackendChoice::Auto) {
-    resolved = isButterworthCUFFTAvailable()
-                   ? ButterworthBackendChoice::CUFFT
-                   : ButterworthBackendChoice::FFTW;
-  }
-
-  if (resolved == ButterworthBackendChoice::CUFFT) {
-    if (isButterworthCUFFTAvailable()) {
-      apply_butterworth_inplace_cufft(f, Nx, Ny, Nz, sp, bw, threads);
-      return;
-    }
-    apply_butterworth_inplace_fftw(f, Nx, Ny, Nz, sp, bw, threads);
-    return;
-  }
-
-  apply_butterworth_inplace_fftw(f, Nx, Ny, Nz, sp, bw, threads);
+  apply_butterworth_inplace_cufft(f, Nx, Ny, Nz, sp, bw, threads);
 }
 
 #if !defined(SPECT_BUTTERWORTH_HAVE_CUFFT)
@@ -381,149 +362,6 @@ void apply_butterworth_inplace_cufft(std::vector<double> &, int, int, int,
       "Butterworth cuFFT backend was requested but is not compiled in this build.");
 }
 #endif
-
-void apply_butterworth_inplace_fftw(std::vector<double> &f, int Nx, int Ny, int Nz,
-                                    Spacing3 sp, const ButterworthConf &bw,
-                                    int threads) {
-  if (!bw.enabled)
-    return;
-
-  // Keep the FFTW execution path conservative until the backend is abstracted.
-  // The broader reconstruction pipeline may still use the caller's thread count.
-  const int fftw_safe_threads = 1;
-
-  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) * static_cast<size_t>(Nz);
-  if (f.size() != total)
-    throw std::runtime_error("Butterworth input size mismatch");
-
-  struct FFTWCache {
-    int Nx = 0;
-    int Ny = 0;
-    int Nz = 0;
-#ifdef USE_FFTW_THREADS
-    int plan_threads = 1;
-#endif
-    Spacing3 sp;
-    ButterworthConf bw;
-    fftw_complex *F = nullptr;
-    fftw_complex *Fk = nullptr;
-    fftw_plan fwd = nullptr;
-    fftw_plan bwd = nullptr;
-    std::vector<double> H_cache;
-
-    ~FFTWCache() {
-      if (fwd)
-        fftw_destroy_plan(fwd);
-      if (bwd)
-        fftw_destroy_plan(bwd);
-      if (F)
-        fftw_free(F);
-      if (Fk)
-        fftw_free(Fk);
-    }
-  };
-
-  thread_local FFTWCache cache;
-
-  static std::once_flag fftw_init_flag;
-  static std::mutex fftw_plan_mutex;
-#ifdef USE_FFTW_THREADS
-  std::call_once(fftw_init_flag, []() {
-    if (fftw_init_threads() == 0)
-      throw std::runtime_error("FFTW thread initialization failed");
-  });
-#endif
-
-  auto approx_eq = [](double a, double b) {
-    return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(std::abs(a), std::abs(b)));
-  };
-
-  const int requested_plan_threads = fftw_safe_threads;
-  const bool rebuild_plan = Nx != cache.Nx || Ny != cache.Ny || Nz != cache.Nz
-#ifdef USE_FFTW_THREADS
-                            || requested_plan_threads != cache.plan_threads
-#endif
-      ;
-  const bool rebuild_mask = rebuild_plan || !approx_eq(sp.dx, cache.sp.dx) ||
-                            !approx_eq(sp.dy, cache.sp.dy) || !approx_eq(sp.dz, cache.sp.dz) ||
-                            bw.type != cache.bw.type || bw.order != cache.bw.order ||
-                            !approx_eq(bw.cutoff_lo_frac, cache.bw.cutoff_lo_frac) ||
-                            !approx_eq(bw.cutoff_hi_frac, cache.bw.cutoff_hi_frac);
-
-  if (rebuild_plan) {
-    if (cache.fwd) {
-      fftw_destroy_plan(cache.fwd);
-      cache.fwd = nullptr;
-    }
-    if (cache.bwd) {
-      fftw_destroy_plan(cache.bwd);
-      cache.bwd = nullptr;
-    }
-    if (cache.F) {
-      fftw_free(cache.F);
-      cache.F = nullptr;
-    }
-    if (cache.Fk) {
-      fftw_free(cache.Fk);
-      cache.Fk = nullptr;
-    }
-
-    cache.F = fftw_alloc_complex(total);
-    cache.Fk = fftw_alloc_complex(total);
-    if (!cache.F || !cache.Fk)
-      throw std::bad_alloc();
-
-    cache.Nx = Nx;
-    cache.Ny = Ny;
-    cache.Nz = Nz;
-
-    {
-      std::lock_guard<std::mutex> lock(fftw_plan_mutex);
-#ifdef USE_FFTW_THREADS
-      fftw_plan_with_nthreads(requested_plan_threads);
-      cache.plan_threads = requested_plan_threads;
-#endif
-      cache.fwd = fftw_plan_dft_3d(Nz, Ny, Nx, cache.F, cache.Fk, FFTW_FORWARD, FFTW_ESTIMATE);
-      cache.bwd = fftw_plan_dft_3d(Nz, Ny, Nx, cache.Fk, cache.F, FFTW_BACKWARD, FFTW_ESTIMATE);
-    }
-    if (!cache.fwd || !cache.bwd)
-      throw std::runtime_error("FFTW plan creation failed");
-  }
-
-  if (rebuild_mask) {
-    cache.H_cache = make_butterworth_mask_3d(Nx, Ny, Nz, sp, bw, 1);
-    cache.sp = sp;
-    cache.bw = bw;
-    const bool any_nonzero = std::any_of(cache.H_cache.begin(), cache.H_cache.end(),
-                                         [](double value) { return value != 0.0; });
-    if (!any_nonzero)
-      throw std::runtime_error("Butterworth mask is all zero");
-  }
-
-#pragma omp parallel for schedule(static) num_threads(fftw_safe_threads)
-  for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(total); ++i) {
-    cache.F[i][0] = f[static_cast<size_t>(i)];
-    cache.F[i][1] = 0.0;
-  }
-
-  fftw_execute(cache.fwd);
-
-#pragma omp parallel for schedule(static) num_threads(fftw_safe_threads)
-  for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(total); ++i) {
-    const double h = cache.H_cache[static_cast<size_t>(i)];
-    cache.Fk[i][0] *= h;
-    cache.Fk[i][1] *= h;
-  }
-
-  fftw_execute(cache.bwd);
-
-  const double scale = 1.0 / static_cast<double>(total);
-#pragma omp parallel for schedule(static) num_threads(fftw_safe_threads)
-  for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(total); ++i) {
-    const double value = cache.F[i][0] * scale;
-    f[static_cast<size_t>(i)] = (value < 0.0) ? 0.0 : value;
-  }
-}
 
 } // namespace filters
 } // namespace spect

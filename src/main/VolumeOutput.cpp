@@ -31,6 +31,10 @@ bool shouldFlipZWholeOutput(const OutputTransform *transform) {
   return transform && transform->flipZWholeOutput;
 }
 
+bool shouldFlipXWholeOutput(const OutputTransform *transform) {
+  return transform && transform->flipXWholeOutput;
+}
+
 void validateBedZFlipTransform(const OutputTransform &transform, int nz) {
   for (int zStart : transform.bedZStarts) {
     if (zStart < 0 || zStart + transform.baseNz > nz) {
@@ -127,6 +131,25 @@ std::vector<uint8_t> flipMaskZWholeOutput(const std::vector<uint8_t> &source,
   return out;
 }
 
+template <typename T>
+std::vector<T> flipXWholeOutput(const std::vector<T> &source, int nx, int ny,
+                                int nz) {
+  const size_t row = static_cast<size_t>(nx);
+  const size_t plane = row * static_cast<size_t>(ny);
+  std::vector<T> out(source.size());
+  for (int z = 0; z < nz; ++z) {
+    const size_t zOffset = static_cast<size_t>(z) * plane;
+    for (int y = 0; y < ny; ++y) {
+      const size_t yOffset = zOffset + static_cast<size_t>(y) * row;
+      for (int x = 0; x < nx; ++x) {
+        out[yOffset + static_cast<size_t>(x)] =
+            source[yOffset + static_cast<size_t>(nx - 1 - x)];
+      }
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 std::vector<double> prepareOutputVolume(const std::vector<double> &source, int nx,
@@ -162,6 +185,14 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     if (maskForOutput) {
       transformedMask =
           flipMaskZWholeOutput(*maskForOutput, nx, ny, nz);
+      maskForOutput = &transformedMask;
+    }
+  }
+  if (shouldFlipXWholeOutput(transform)) {
+    transformedSource = flipXWholeOutput(*sourceForOutput, nx, ny, nz);
+    sourceForOutput = &transformedSource;
+    if (maskForOutput) {
+      transformedMask = flipXWholeOutput(*maskForOutput, nx, ny, nz);
       maskForOutput = &transformedMask;
     }
   }

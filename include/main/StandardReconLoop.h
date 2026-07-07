@@ -6,7 +6,6 @@
 #include "io/CSRBuilder.h"
 #include "main/ReconPreparation.h"
 #include "main/VolumeOutput.h"
-#include "sparse/SparseOpsBackend.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +25,6 @@ struct StandardReconLoopContext {
   OutputGeometry outputGeometry{};
   CropSettings crop{};
   const OutputTransform *outputTransform = nullptr;
-  SparseBackendChoice resolvedBackend = SparseBackendChoice::Auto;
   int bedCount = 1;
   int baseNx = 0;
   int baseNy = 0;

@@ -66,11 +66,20 @@ function Invoke-Logged([string]$Label, [string]$Exe, [string[]]$ArgList, [string
     "`$ $cmd" | Set-Content -Encoding UTF8 -LiteralPath $LogPath
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $oldEap = $ErrorActionPreference
+    $oldNativeEap = $PSNativeCommandUseErrorActionPreference
     $ErrorActionPreference = "Continue"
+    $PSNativeCommandUseErrorActionPreference = $false
+    $tmpOut = "$LogPath.stdout.tmp"
     try {
-        & $Exe @ArgList *>&1 | Tee-Object -FilePath $LogPath -Append | Out-Null
+        & $Exe @ArgList > $tmpOut 2> $null
         $code = $LASTEXITCODE
+        if (Test-Path -LiteralPath $tmpOut) {
+            $text = (Get-Content -LiteralPath $tmpOut -Raw) -replace "`0", ""
+            Add-Content -Encoding UTF8 -LiteralPath $LogPath -Value $text
+        }
     } finally {
+        Remove-Item -LiteralPath $tmpOut -ErrorAction SilentlyContinue
+        $PSNativeCommandUseErrorActionPreference = $oldNativeEap
         $ErrorActionPreference = $oldEap
     }
     $sw.Stop()
@@ -215,8 +224,7 @@ Ensure-Directory $metricsDir
 $commonSpect = @(
     "-config", "__missing_legacy_parity__.ini",
     "-matrixLayout", "compact-symmetric",
-    "-sparseBackend", "cuda",
-    "-alg", "mlem",
+    "-opti", "mlem",
     "-subsets", "1",
     "-it", "$Iterations",
     "-th", "$Threads"
@@ -274,7 +282,7 @@ foreach ($case in $cases) {
             "-fout", $b2Prefix
         ) + $geom525 + $commonSpect
         if ($case -eq "butter") {
-            $b2Args += @("-butter", "0.35,2", "-butterBackend", "cufft")
+            $b2Args += @("-butter", "0.35,2")
         }
         $r2 = Invoke-Logged "b2_$case" $spectPath $b2Args (Join-Path $outRoot "logs\b2_$case.log")
         $results.Add($r2) | Out-Null
@@ -288,7 +296,7 @@ foreach ($case in $cases) {
             "-fout", $b1Prefix
         ) + $commonSpect
         if ($case -eq "butter") {
-            $b1Args += @("-butter", "0.35,2", "-butterBackend", "cufft")
+            $b1Args += @("-butter", "0.35,2")
         }
         $r1 = Invoke-Logged "b1_$case" $spectPath $b1Args (Join-Path $outRoot "logs\b1_$case.log")
         $results.Add($r1) | Out-Null
