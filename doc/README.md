@@ -15,6 +15,7 @@ This directory has one maintained surface for each current concern. Older design
 | `Format_Reader_Matrix_CN.md` | 6module file format vs reader/tool matrix. |
 | `PSF_Model_Differences_CN.md` | Operator PSF vs projection-domain PSF boundary. |
 | `CTAC_AutoMu_Validation_CN.md` | Uniform-cylinder CTAC / auto-mu primary validation gate and debug scripts. |
+| `CTAC_Pinhole_Attenuation_Model_Decision_20260708_CN.md` | Decision record for keeping `att[angle, voxel]` fused CTAC and deferring production row/bin/Siddon CTAC. |
 | `RECON_FLOW_CN.md` | Stable high-level reconstruction flow. |
 
 ## Archived
