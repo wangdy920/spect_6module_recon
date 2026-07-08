@@ -1,5 +1,6 @@
 #include "main/CTACOps.h"
 
+#include "cuda/CTACFactorsCUDA.h"
 #include "core/AttenuationConstants.h"
 
 #include <algorithm>
@@ -143,9 +144,22 @@ std::vector<uint16_t> computeAttenFactors(
     CTACModel model, const std::vector<double> &muMap, int nx, int ny, int nz,
     double dx, double dy, double dz, int numAngles, int rotationSign,
     int threads) {
-  if (model == CTACModel::LineIntegral)
+  if (model == CTACModel::LineIntegral) {
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) &&                                  \
+    defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
+    (void)threads;
+    std::vector<uint16_t> factors;
+    if (!spect::cuda::computeAttenFactorsLineIntegralCUDA(
+            muMap, nx, ny, nz, dx, dy, dz, numAngles, rotationSign, factors)) {
+      throw std::runtime_error(
+          "CUDA CTAC line-integral factor generation failed.");
+    }
+    return factors;
+#else
     return computeAttenFactorsLineIntegral(muMap, nx, ny, nz, dx, dy, dz,
                                            numAngles, rotationSign, threads);
+#endif
+  }
   return computeAttenFactorsPerVoxel(muMap, nx, ny, nz, dx, dy, dz, numAngles,
                                      threads);
 }

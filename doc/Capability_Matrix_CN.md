@@ -1,4 +1,4 @@
-# SPECT-recon Capability Matrix（2026-07-05）
+# SPECT-recon Capability Matrix（2026-07-08）
 
 > 状态：post-refactor 对齐更新，待 Opus 4.8 / Fable 5 review。§2a：**不退场**，legacy 路径保留。
 
@@ -15,7 +15,7 @@
 
 1. 260601 chunk CSRB 是 canonical compact 路径：`-chunkCSRDir` + 88B/96B metadata + Sym90Z/Sym45Z 校验。
 2. 260525 `-loadCSR -compactMeta` 单文件入口仍是 legacy compatibility；三条件签收前不删除，只加安全保护和 deprecated 提示。
-3. CTAC line-integral、compact CTAC value baking、Operator PSF sensitivity、BSREM `w_proj/w_img` fail-fast、bProj additive 位置和 sensitivity/numerator/denominator 语义都属于物理回归触发区。
+3. CTAC line-integral、compact CTAC fused nnz lookup、Operator PSF sensitivity、BSREM `w_proj/w_img` fail-fast、bProj additive 位置和 sensitivity/numerator/denominator 语义都属于物理回归触发区。
 4. 结构拆分 PR 不改变数值顺序；性能 PR 单独立项。
 
 ## 当前能力矩阵
@@ -28,7 +28,7 @@
 | standard CSR/MAT/CSRB | ADMM/TV | 是 | 未作为生产物理签收 | 无本批新增记录 | `include/app/ADMMOptimizer.h`, CLI help |
 | standard CSR/MAT/CSRB | Operator PSF | 是，含 sensitivity `G^T A^T 1` | 是，模式级回归 | 是 | `ProjectionOps.cpp`, `tests/test_psf_modes.cpp` |
 | standard CSR/MAT/CSRB | projection-domain PSF | 内部隔离实现；公开 CLI 已退场 | 不作为生产物理签收项 | 无本批新增记录 | `ReconPreparation.cpp`, `ProjDomainChunked.h` |
-| standard CSR/MAT/CSRB | CTAC line-integral | 是 | slab gtest；phantom 定量待做 | 是 | `CTACOps.cpp`, `tests/test_main_ctac_ops.cpp` |
+| standard CSR/MAT/CSRB | CTAC line-integral | 是；CUDA 构建下 GPU 生成 `att[angle,voxel]` 表 | slab + CUDA/CPU parity gtest；phantom 定量待做 | 是 | `CTACOps.cpp`, `CTACFactorsCUDA.cpp`, `tests/test_main_ctac_ops.cpp` |
 | standard CSR/MAT/CSRB | bProj additive | 是 | 外部项接入，散射 solver 未实现 | 路径 smoke 已有 | `MainProgram.cpp` background projection 分支 |
 | standard CSR/MAT/CSRB | multi-bed | 是 | 输出 Z flip/overlap 回归 | 是 | `ReconSetup.cpp`, `BedOffsets.h`, `tests/test_main_*` |
 | compact 260601 chunk CSRB | MLEM, subset=1, CUDA | 是 | 是 | 是 | `CompactChunkCSR.cpp`, `CompactSymmetricProjectorCUDA.cpp`, continuity 260601 记录 |
@@ -36,7 +36,7 @@
 | compact 260601 chunk CSRB | OSEM subsets | 否 | 否 | 否 | `validateArgs` 拒绝 `numSubsets != 1` |
 | compact 260601 chunk CSRB | ADMM/TV | 否 | 否 | 否 | `validateArgs` 仅允许 MLEM/BSREM |
 | compact 260601 chunk CSRB | Operator PSF | 是，multi-bed global-volume | 是 | 是 | `MainProgram.cpp`, `tests/test_psf_modes.cpp` |
-| compact 260601 chunk CSRB | CTAC | 单床 chunk 路径已实现 | 需物理 review | share zero-mu/水圆柱记录 | `CompactSymmetricProjectorCUDA.cpp`, checklist/continuity |
+| compact 260601 chunk CSRB | CTAC | 单床 chunk fused CUDA 路径已实现 | fused vs baked parity；需物理 review | share zero-mu/水圆柱记录 | `CompactSymmetricProjectorCUDA.cpp`, checklist/continuity |
 | compact 260601 chunk CSRB | CTAC multi-bed | 否 | 否 | 否 | `validateArgs` 拒绝 compact CTAC multi-bed |
 | compact 260601 chunk CSRB | bProj / bProjList | 外部 additive 支持 | 零背景回归；非零散射未物理签收 | 是 | continuity bProjList zero smoke |
 | compact 260525 single-file | MLEM/BSREM subset=1 CUDA | legacy compatibility；compact-symmetric 公式路径保留 | 旧数据对照需要保留 | 条件可跑 | `-loadCSR -compactMeta`, 76B metadata |
@@ -52,7 +52,8 @@
 ## 本批变更附注
 
 - 260525 single-file 路径的能力不扩展；本批只增加安全保护：大文件默认隐式 `CSRMap`，full-copy 超过可用物理内存一半时拒绝。
-- 本批本地修复了 NVRTC attenuation scale 常量作用域问题；这是 kernel source 自包含缺陷修复，不作为新能力项，随 compact CTAC value baking review 交 Opus/Fable 签收。
+- 2026-07-08 fused CTAC 批次后，旧 value baking 仅保留 `SPECT_COMPACT_CTAC_BAKED_REFERENCE=1` debug oracle，不是默认 fallback。
+- 2026-07-08 GPU line-integral 小批次新增 `CTACFactorsCUDA.cpp`：生产 CUDA 构建下 `computeAttenFactors(CTACModel::LineIntegral, ...)` 直接要求 GPU 表生成成功；CPU `computeAttenFactorsLineIntegral` 保留为 reference / 非 CUDA 编译路径。
 
 ## 260525 退场条件
 

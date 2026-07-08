@@ -371,8 +371,9 @@ std::string buildCompactDenomCacheManifest(
       << geometry.nz << '\n';
   oss << "global_spacing=" << geometry.vx << ',' << geometry.vy << ','
       << geometry.vz << '\n';
-  // CTAC bakes attenuation into the matrix values, so the sensitivity depends
-  // on the mu-map; keep these in the manifest to invalidate stale caches.
+  // CTAC fuses attenuation into CUDA forward/backward/sensitivity kernels, so
+  // sensitivity depends on the mu-map; keep these in the manifest to
+  // invalidate stale caches.
   // Lines are emitted only when CTAC is active so pre-existing no-CTAC caches
   // keep matching their stored manifests.
   if (args.doCTAC) {

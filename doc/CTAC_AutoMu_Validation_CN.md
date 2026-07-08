@@ -158,3 +158,23 @@ Performance summary：
 
 Decision：`keep` fused CTAC as default. Baked reference remains explicit
 debug/parity only; it is not viable as default on this 260601 CTAC gate.
+
+## 2026-07-08 GPU line-integral 表生成小批次
+
+改动范围：
+
+- 新增 `CTACFactorsCUDA.cpp`，在 CUDA 构建下用 GPU 生成
+  `att[angle, voxel]` line-integral 表。
+- 生产 dispatch：`computeAttenFactors(CTACModel::LineIntegral, ...)`
+  直接要求 CUDA helper 成功；不再静默退回 CPU 生成。
+- CPU `computeAttenFactorsLineIntegral` 保留为 reference 和非 CUDA 编译路径，
+  用于 gtest parity，不作为 CUDA production fallback。
+
+验证：
+
+- `CTACOpsTest.CudaLineIntegralMatchesCpuReference`：不对称 mu-map，
+  `ctacRotSign=+1/-1`，GPU 输出逐项等于 CPU reference。
+- `spect_tests.exe --gtest_filter=CTACOpsTest.* --gtest_brief=1`：
+  10/10 passed。
+- `spect_tests.exe --gtest_brief=1`：273/273 passed。
+- `spect_cuda_scaffold_tests.exe --gtest_brief=1`：27/27 passed。

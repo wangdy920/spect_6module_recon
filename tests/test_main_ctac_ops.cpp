@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "cuda/CTACFactorsCUDA.h"
 #include "main/CTACOps.h"
 
 #include <cmath>
@@ -177,6 +178,45 @@ TEST(CTACOpsTest, LineIntegralRotationSignFlipsLateralView) {
   // sign=-1, theta=-90: ray (+1,0) crosses it.
   EXPECT_LT(factorAt(minus, voxels, 1, centre), std::exp(-mu * 9.0));
 }
+
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) &&                                  \
+    defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
+TEST(CTACOpsTest, CudaLineIntegralMatchesCpuReference) {
+  const int nx = 9;
+  const int ny = 7;
+  const int nz = 2;
+  const int numAngles = 8;
+  std::vector<double> muMap(static_cast<size_t>(nx) * ny * nz, 0.0);
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int iy = 0; iy < ny; ++iy) {
+      for (int ix = 0; ix < nx; ++ix) {
+        if ((ix >= 5 && iy <= 4) || (iz == 1 && ix == 2)) {
+          muMap[(static_cast<size_t>(iz) * ny + iy) * nx + ix] =
+              0.0125 + 0.001 * static_cast<double>(ix + iy + iz);
+        }
+      }
+    }
+  }
+
+  const std::vector<uint16_t> cpuPlus = computeAttenFactorsLineIntegral(
+      muMap, nx, ny, nz, 0.7, 0.9, 1.1, numAngles, 1, 1);
+  std::vector<uint16_t> gpuPlus;
+  ASSERT_TRUE(spect::cuda::computeAttenFactorsLineIntegralCUDA(
+      muMap, nx, ny, nz, 0.7, 0.9, 1.1, numAngles, 1, gpuPlus));
+  ASSERT_EQ(gpuPlus.size(), cpuPlus.size());
+  for (size_t i = 0; i < cpuPlus.size(); ++i)
+    EXPECT_EQ(gpuPlus[i], cpuPlus[i]) << "index=" << i;
+
+  const std::vector<uint16_t> cpuMinus = computeAttenFactorsLineIntegral(
+      muMap, nx, ny, nz, 0.7, 0.9, 1.1, numAngles, -1, 1);
+  std::vector<uint16_t> gpuMinus;
+  ASSERT_TRUE(spect::cuda::computeAttenFactorsLineIntegralCUDA(
+      muMap, nx, ny, nz, 0.7, 0.9, 1.1, numAngles, -1, gpuMinus));
+  ASSERT_EQ(gpuMinus.size(), cpuMinus.size());
+  for (size_t i = 0; i < cpuMinus.size(); ++i)
+    EXPECT_EQ(gpuMinus[i], cpuMinus[i]) << "index=" << i;
+}
+#endif
 
 TEST(CTACOpsTest, DispatchPerVoxelMatchesLegacy) {
   const int nx = 5;

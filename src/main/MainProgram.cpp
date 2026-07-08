@@ -591,6 +591,12 @@ int runProgram(int argc, char **argv) {
       }
       if (useMappedCSR || bedCount > 1 || compactChunkLayout) {
         logInfo("Using dynamic CTAC attenuation factors.");
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) &&                                  \
+    defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
+        logInfo("CTAC factor generation: CUDA angle-voxel line-integral table.");
+#else
+        logInfo("CTAC factor generation: CPU reference line-integral table.");
+#endif
         dynamicAttenFactors.resize(static_cast<size_t>(bedCount));
         const size_t plane = static_cast<size_t>(baseNx) * static_cast<size_t>(baseNy);
         for (int bed = 0; bed < bedCount; ++bed) {
