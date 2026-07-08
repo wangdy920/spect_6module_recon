@@ -49,6 +49,52 @@ att[angle, voxel] = exp(- integral mu(s) ds)
 
 This proves implementation correctness and pipeline stability. It does not prove that `att[angle, voxel]` is always physically sufficient for pinhole geometry, because true-mu and auto-mu runs both use the same attenuation approximation.
 
+## Validation-Only Pinhole Reference Result
+
+Added tool:
+
+```text
+scripts/validate_ctac_pinhole_reference.py
+```
+
+Scope:
+
+- reads compact `metadata.bin + chunk_*.csrb` by memmap
+- samples high-weight nnz entries
+- compares current parallel-ray `att[angle, voxel]` integral with pinhole-center Siddon integral
+- writes `summary.json` and `samples.csv`
+- does not change production reconstruction or attenuation table generation
+
+Self-test:
+
+```powershell
+python scripts\validate_ctac_pinhole_reference.py --self-test
+```
+
+260601 true-mu active-voxel gate:
+
+```powershell
+python scripts\validate_ctac_pinhole_reference.py `
+  --mu-map recon_out\ctac_automu_cylinder_debug_260601_fused_ctac_20260708\maps\sys260601_ref_true_mu.mhd `
+  --out-dir recon_out\ctac_pinhole_reference_validation_260601_active_4096 `
+  --rows-per-chunk 16 `
+  --nnz-per-row 8 `
+  --active-voxel-only
+```
+
+Result:
+
+| Metric | Value |
+| --- | ---: |
+| samples | `4096` |
+| active samples | `3734` |
+| active H-weighted RMS `abs(delta I)` | `6.693e-04` |
+| active H-weighted P95 `abs(delta I)` | `1.515e-03` |
+| max `abs(delta I)` | `2.963e-03` |
+| decision | `keep` |
+
+This is far below the current upgrade trigger (`RMS_H > 0.02` or `P95_H > 0.03-0.05`) for this uniform-cylinder true-mu gate. The default unfiltered sample is allowed to return `blocked_insufficient_active_samples` when high-weight samples do not cross nonzero mu; use `--active-voxel-only` for this cylinder-specific validation gate.
+
 ## GPT 5.5 PRO Consultation Summary
 
 GPT 5.5 PRO recommends:
