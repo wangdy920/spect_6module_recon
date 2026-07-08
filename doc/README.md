@@ -8,6 +8,7 @@ This directory has one maintained surface for each current concern. Older design
 | --- | --- |
 | `RELEASE_20260708_CN.md` | Current release boundary: CUDA-only public CLI, fused compact CTAC, package layout, build entrypoint. |
 | `USAGE_CN.md` | CLI usage and examples. |
+| `CLI_CHANGES_CN.md` | Short release-facing migration list for removed or renamed CLI entries. |
 | `PARAMETERS_CN.template.md` | Release package parameter handout template. |
 | `Capability_Matrix_CN.md` | Current supported/unsupported standard vs compact capabilities. |
 | `Refactor_Decisions_20260703_CN.md` | Current refactor decisions, rejected migrations, review gates. |

@@ -6,6 +6,8 @@
 cd D:\path\to\<package_root>
 ```
 
+已废弃或改名的参数见 `CLI_CHANGES_CN.md`。迁移旧脚本时先看那份短表。
+
 ## 默认识别规则
 
 正常运行不需要传 `-config`。程序会优先按 exe 所在目录自动识别：

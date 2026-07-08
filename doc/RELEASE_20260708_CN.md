@@ -7,6 +7,7 @@ Git: 见包名后缀（`SPECT_recon_rc_20260708_<hash>`）
 
 - **CUDA-only 生产口径**：稀疏后端固定 CUDA；旧 `-sparseBackend` / `-spBackend` 直接拒绝。
 - **公开 CLI 收口**：算法入口保留 `-opti`；PSF 公开入口保留 image-domain `Operator` / `None`；`-psfProj`、PostSmooth/ProjDomain 公开入口退场。
+- **CLI 迁移清单**：发布包新增 `CLI_CHANGES_CN.md`，列出已删除/改名参数和替代写法。
 - **CTAC**：compact chunk float CTAC 默认走 fused CUDA nnz lookup，`SPECT_COMPACT_CTAC_BAKED_REFERENCE=1` 仅作 debug/parity。
 - **CTAC pinhole 决策**：生产路径继续使用 `att[angle, voxel]` fused CTAC；pinhole-center Siddon 只作为 validation-only sampler，不进入生产。
 - **打包**：`scripts/package_rc.ps1 -CleanPrevious` 清理旧 `dist/release_candidates` 后生成当前 RC 目录和 zip。
