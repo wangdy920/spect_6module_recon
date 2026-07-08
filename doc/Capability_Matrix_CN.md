@@ -27,7 +27,7 @@
 | standard CSR/MAT/CSRB | BSREM + RDP/curvature/kappa | 是 | 部分，beta 标定未完成 | 是 | `BSREMReconstructor.cpp`, `tests/test_bsrem_*` |
 | standard CSR/MAT/CSRB | ADMM/TV | 是 | 未作为生产物理签收 | 无本批新增记录 | `include/app/ADMMOptimizer.h`, CLI help |
 | standard CSR/MAT/CSRB | Operator PSF | 是，含 sensitivity `G^T A^T 1` | 是，模式级回归 | 是 | `ProjectionOps.cpp`, `tests/test_psf_modes.cpp` |
-| standard CSR/MAT/CSRB | projection-domain PSF | 隔离实现，单床/subset=1 约束 | 模型差异未物理签收 | 无本批新增记录 | `ReconPreparation.cpp`, `ProjDomainChunked.h` |
+| standard CSR/MAT/CSRB | projection-domain PSF | 内部隔离实现；公开 CLI 已退场 | 不作为生产物理签收项 | 无本批新增记录 | `ReconPreparation.cpp`, `ProjDomainChunked.h` |
 | standard CSR/MAT/CSRB | CTAC line-integral | 是 | slab gtest；phantom 定量待做 | 是 | `CTACOps.cpp`, `tests/test_main_ctac_ops.cpp` |
 | standard CSR/MAT/CSRB | bProj additive | 是 | 外部项接入，散射 solver 未实现 | 路径 smoke 已有 | `MainProgram.cpp` background projection 分支 |
 | standard CSR/MAT/CSRB | multi-bed | 是 | 输出 Z flip/overlap 回归 | 是 | `ReconSetup.cpp`, `BedOffsets.h`, `tests/test_main_*` |

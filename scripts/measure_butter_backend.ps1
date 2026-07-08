@@ -41,7 +41,7 @@ if ($UseRegularization) {
 }
 
 if ($UsePSF) {
-    $argsList += @('-psf', '1.5,4', '-psfProj', 'off', '-psfMode', 'Operator')
+    $argsList += @('-psf', '1.5,4', '-psfMode', 'Operator')
 }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()

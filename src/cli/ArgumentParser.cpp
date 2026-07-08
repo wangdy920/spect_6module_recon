@@ -602,23 +602,19 @@ void ArgumentParser::registerHandlers() {
             a.psf.mode = PSFMode::Operator;
         return true;
     }, {"-psf"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.psfProj);
-    }, {"-psfProj"});
+    bindHandlerAliases(
+        rejectCliOption("-psfProj was removed; use image-domain -psf Operator."),
+        {"-psfProj"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string val =
             toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-psfMode"));
         a.psfModeExplicit = true;
         if (val == "operator")
             a.psf.mode = PSFMode::Operator;
-        else if (val == "postsmooth")
-            a.psf.mode = PSFMode::PostSmooth;
         else if (val == "none")
             a.psf.mode = PSFMode::None;
-        else if (val == "projdomain")
-            a.psf.mode = PSFMode::ProjDomain;
         else {
-            std::cerr << "Error: Unknown -psfMode '" << val << "'.\n";
+            std::cerr << "Error: -psfMode expects None|Operator; got '" << val << "'.\n";
             return false;
         }
         return true;
@@ -803,11 +799,8 @@ void ArgumentParser::registerHandlers() {
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (value == "line-integral" || value == "lineintegral" || value == "ray") {
             a.ctacModel = "line-integral";
-        } else if (value == "per-voxel" || value == "pervoxel" || value == "voxel" ||
-                   value == "legacy") {
-            a.ctacModel = "per-voxel";
         } else {
-            std::cerr << "Error: -ctacModel expects line-integral|per-voxel, got '"
+            std::cerr << "Error: -ctacModel expects line-integral, got '"
                       << value << "'\n";
             return false;
         }
@@ -1067,14 +1060,10 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.psf.mode = PSFMode::None;
         else if (psfModeLower == "operator")
             a.psf.mode = PSFMode::Operator;
-        else if (psfModeLower == "postsmooth")
-            a.psf.mode = PSFMode::PostSmooth;
-        else if (psfModeLower == "projdomain")
-            a.psf.mode = PSFMode::ProjDomain;
         else {
-            std::cerr << "Warning: Unknown PSF mode '" << psfModeStr
-                      << "' in config, using None.\n";
-            a.psf.mode = PSFMode::None;
+            throw std::runtime_error(
+                "PSF mode in config must be None or Operator; got '" +
+                psfModeStr + "'.");
         }
         // If mode is set to something other than None, enable PSF
         if (a.psf.mode != PSFMode::None)
@@ -1772,8 +1761,7 @@ void ArgumentParser::printUsage() {
 
     std::cout << "=== PSF ===\n";
     std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.5,4)\n";
-    std::cout << "  -psfMode <mode>          None | Operator | PostSmooth | ProjDomain\n";
-    std::cout << "  -psfProj on|off          Per-angle 2D PSF in projection domain\n";
+    std::cout << "  -psfMode <mode>          None | Operator\n";
     std::cout << "\n";
 
     std::cout << "=== Geometry ===\n";
@@ -1790,7 +1778,6 @@ void ArgumentParser::printUsage() {
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
     std::cout << "  -ctacModel <m>            line-integral (default; angle-dependent parallel-ray Int mu ds)\n";
-    std::cout << "                            or per-voxel (legacy exp(-mu) approximation, not quantitative)\n";
     std::cout << "  -ctacRotSign <1|-1>       Rotation sign matching sysmat generator --voxel-rotation-sign (default 1)\n";
     std::cout << "  -ctacAutoMu <vol>         Build water mu-map from an early-iteration recon volume\n";
     std::cout << "                            (threshold + closing + hole fill; for activity-filled phantoms;\n";

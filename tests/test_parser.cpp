@@ -297,6 +297,37 @@ TEST(IOTest, PublicRegularizationRejectsNonTvRdp) {
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
+TEST(IOTest, PublicPsfProjFlagIsRejected) {
+    auto argv = compactBaseArgs();
+    argv.push_back("-psf");
+    argv.push_back("1.5,4");
+    argv.push_back("-psfProj");
+    argv.push_back("off");
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, PublicPsfModeRejectsNonOperatorModes) {
+    auto argv = compactBaseArgs();
+    argv.push_back("-psf");
+    argv.push_back("1.5,4");
+    argv.push_back("-psfMode");
+    argv.push_back("PostSmooth");
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, PublicCtacModelRejectsLegacyPerVoxel) {
+    auto argv = compactBaseArgs();
+    argv.push_back("-ctacModel");
+    argv.push_back("per-voxel");
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
 TEST(IOTest, PublicPriorFlagIsRejected) {
     auto argv = compactBaseArgs();
     argv.push_back("-prior");
@@ -540,7 +571,7 @@ TEST(IOTest, ConfigParserStripsInlineComments) {
         out << "threads = 16 # worker count\n";
         out << "\n";
         out << "[PSF]\n";
-        out << "mode = None ; None | Operator | PostSmooth\n";
+        out << "mode = None ; None | Operator\n";
         out << "fwhm = 3.0 ; mm\n";
     }
 

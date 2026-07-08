@@ -39,7 +39,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
    ```powershell
    .\SPECT_recon.exe -df proj.mat -loadCSR out/sysmat.csrb -mapCSR on `
        -dim 200,200,200 -detN 40,40 -ang 72 -it 50:5 -th 8 `
-       -psf 1.5,4 -psfProj off -joe 0 -cyl 30,30 -vox 0.4,0.4,0.4 `
+       -psf 1.5,4 -cyl 30,30 -vox 0.4,0.4,0.4 `
        -fout recon_output/run1
    ```
 
@@ -54,8 +54,8 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-Astream on|off`    | Build CSR directly from MAT files (default **off**, enable when RAM is tight). |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
 | Sparse backend | Fixed to CUDA. The old `-sparseBackend` / `-spBackend` CLI switch is rejected. |
-| `-psf [fwhm_mm[,N]]` , `-psfProj on|off` | Image-domain PSF or projection-domain per-angle PSF; FWHM is in mm and N truncates the Gaussian at N*sigma (`-psfProj` only for MLEM with `-subsets 1`). |
-| `-psfMode Operator|PostSmooth|None` | Force PSF mode; `PostSmooth` applies PSF after each iteration (requires `-psf`). |
+| `-psf [fwhm_mm[,N]]` | Image-domain Operator PSF; FWHM is in mm and N truncates the Gaussian at N*sigma. |
+| `-psfMode Operator|None` | Force PSF on/off; `-psf` defaults to `Operator`. |
 | `-joe <n>` | Joseph-like (B-spline) smoothing passes on denom/image. Default 0 = disabled. |
 | `-subsets <n>` | OSEM subsets (1 = MLEM). |
 | `-opti mlem|bsrem|admm` | Select optimisation algorithm (overrides config). |
@@ -184,5 +184,5 @@ cmake --build build -j
 ./build/bin/SPECT_recon \
   -df spect_1101.mat -loadCSR out/sysmat.csrb -mapCSR on \
   -dim 200,200,200 -detN 40,40 -ang 360 -it 50:5 -th 8 \
-  -psf 1.5,4 -psfProj off -joe 0 -vb 1 -fout recon_output/linux_sample
+  -psf 1.5,4 -vb 1 -fout recon_output/linux_sample
 ```

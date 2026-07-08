@@ -151,9 +151,8 @@ compact chunk 矩阵默认识别优先级：
 
 | 参数 | 说明 |
 |---|---|
-| `-psf [fwhm_mm[,N]]` | 启用 Gaussian PSF；FWHM 单位 mm，默认 `1.5,4`；`N` 表示 `N*sigma` 截断 |
-| `-psfMode <None\|Operator\|PostSmooth\|ProjDomain>` | PSF 模式；使用 `-psf` 且未显式指定时默认 `Operator` |
-| `-psfProj [on\|off]` | 投影域 per-angle 2D PSF |
+| `-psf [fwhm_mm[,N]]` | 启用 image-domain Operator Gaussian PSF；FWHM 单位 mm，默认 `1.5,4`；`N` 表示 `N*sigma` 截断 |
+| `-psfMode <None\|Operator>` | PSF 开关模式；使用 `-psf` 且未显式指定时默认 `Operator` |
 | `-smooth <sigma>` | Gaussian 平滑 sigma mm |
 | `-smoothKernel <n>` | Gaussian kernel half-width |
 | `-butter <cutoff[,order]>` | Butterworth 低通滤波，如 `0.35,2` |
@@ -171,7 +170,7 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | 参数 | 说明 |
 |---|---|
 | `-ctac` | 启用迭代 CTAC |
-| `-ctacModel <line-integral\|per-voxel>` | CTAC 模型；默认 `line-integral`，`per-voxel` 为 legacy 近似 |
+| `-ctacModel <line-integral>` | CTAC 模型；默认且唯一公开入口为 `line-integral` |
 | `-ctacRotSign <1\|-1\|cw\|ccw>` | 角度旋转符号，默认 1 |
 | `-ctacAutoMu <vol>` | 从早期重建体自动生成水 mu-map；与 `-attMap` 二选一 |
 | `-ctacAutoMuThresh <f>` | auto-mu 阈值，相对 P99.9，范围 `(0,1)`，默认 0.05 |
