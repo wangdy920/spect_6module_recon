@@ -6,7 +6,7 @@ This directory has one maintained surface for each current concern. Older design
 
 | File | Purpose |
 | --- | --- |
-| `RELEASE_20260706_CN.md` | Current release boundary: 260601 default matrix, package layout, build entrypoint. |
+| `RELEASE_20260708_CN.md` | Current release boundary: CUDA-only public CLI, fused compact CTAC, package layout, build entrypoint. |
 | `USAGE_CN.md` | CLI usage and examples. |
 | `PARAMETERS_CN.template.md` | Release package parameter handout template. |
 | `Capability_Matrix_CN.md` | Current supported/unsupported standard vs compact capabilities. |
