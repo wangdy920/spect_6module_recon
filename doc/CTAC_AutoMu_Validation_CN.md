@@ -104,3 +104,57 @@ mu-map 匹配：
 快速 1-iter smoke 曾测得 auto-mu CTAC vs true-mu CTAC `relative L2=3.873e-06`、`RMSE/reference positive mean=3.897e-06`、`sum_relative_difference=1.083e-06`；该结果只证明入口和 mask 对齐可用，不作为主 gate。
 
 Decision：`keep` for debug-gated cylinder-masked auto-mu；`non-blocker` for default 0.05 oversegmentation because this dataset has known FOV-outside noise and the debug wrapper now records the failure explicitly.
+
+## 2026-07-08 compact fused CTAC 回归
+
+改动：compact chunk float CTAC 默认不再把 attenuation factor bake 进
+CSR values；forward、backward、sensitivity 的 CUDA nnz loop 直接查：
+
+```text
+effective[t] = value[t] * att[fullAngle(row) * nvox + transformedVoxel(col)] / 65535
+```
+
+旧 baked path 仅保留为显式 debug/reference：设置
+`SPECT_COMPACT_CTAC_BAKED_REFERENCE=1` 才会启用。
+
+代数 gate：
+
+- `spect_cuda_scaffold_tests.exe --gtest_filter=CudaScaffoldTest.CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable --gtest_brief=1`
+- 默认 fused：passed。
+- `SPECT_COMPACT_CTAC_BAKED_REFERENCE=1` baked reference：passed。
+- 覆盖 forward、backward、sensitivity、adjoint dot-product、unit attenuation
+  zero-mu parity，以及 Sym90Z `symId=0..3` 和 `zMirror=false/true`。
+
+端到端圆柱 gate 输出目录：
+
+- `recon_out/ctac_automu_cylinder_debug_260601_fused_ctac_20260708`
+
+auto-mu CTAC vs true-mu CTAC：
+
+| Iter | NCC | relative L2 | RMSE / reference positive mean | sum relative difference |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | `0.999999963095` | `3.472e-05` | `3.500e-05` | `2.750e-06` |
+| 50 | `0.999999941147` | `6.061e-05` | `6.157e-05` | `3.009e-06` |
+| 100 | `0.999999900582` | `1.065e-04` | `1.097e-04` | `3.164e-06` |
+
+日志口径：
+
+- 每次 run 默认输出 `Run configuration` 块，包含 projection、matrix、
+  output、iterations/subsets/dim/voxel、CTAC/PSF/Butterworth/reg 参数。
+- CTAC path 明确打印：`compact CTAC: attenuation factors fused in native CUDA forward/backward/sensitivity kernels.`
+
+20 iter true-mu performance gate（复用 denom cache，`-vb 2`，GPU precheck
+约 20% util / 1012 MiB used）：
+
+| mode | rep | outer wall | internal full command wall | compact forward-ratio-backward |
+| --- | ---: | ---: | ---: | ---: |
+| fused default | 1 | `41.343 s` | `39.968 s` | `18.402 s` |
+| fused default | 2 | `40.926 s` | `39.524 s` | `18.073 s` |
+| baked reference | 1 | terminated | `>300 s` lower bound, stopped at iter 12/20 | not completed |
+
+Performance summary：
+
+- `recon_out/ctac_automu_cylinder_debug_260601_fused_ctac_20260708/perf_baked_vs_fused_it20/summary.json`
+
+Decision：`keep` fused CTAC as default. Baked reference remains explicit
+debug/parity only; it is not viable as default on this 260601 CTAC gate.

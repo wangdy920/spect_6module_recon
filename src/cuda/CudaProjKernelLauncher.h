@@ -35,6 +35,18 @@ void launchCompactBakeAttenKernel(const float *values, const int32_t *rowPtr,
                                   const cuda::CompactAttenBakeParams &params,
                                   cudaStream_t stream = nullptr);
 
+void launchCompactAttenFusedForwardKernel(
+    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
+    const uint16_t *att, const float *x, float *y, int rows,
+    const cuda::CompactAttenBakeParams &params,
+    cudaStream_t stream = nullptr);
+
+void launchCompactAttenFusedBackwardKernel(
+    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
+    const uint16_t *att, const float *x, float *y, int rows,
+    const cuda::CompactAttenBakeParams &params,
+    cudaStream_t stream = nullptr);
+
 void launchProjDomainConvYKernel(const float *input, float *output,
                                  const float *kernel, int radius, int detNz,
                                  int detNx, size_t frameCount,

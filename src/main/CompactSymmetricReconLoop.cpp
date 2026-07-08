@@ -562,8 +562,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                 "compact-symmetric CTAC currently supports a single bed.");
           }
           compactAttFactors = opts.bedAttenFactors[0].data();
-          logInfo("compact CTAC: attenuation factors baked into chunk values "
-                  "on device (fused kernels disabled for this run).");
+          logInfo("compact CTAC: attenuation factors fused in native CUDA "
+                  "forward/backward/sensitivity kernels.");
         }
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);

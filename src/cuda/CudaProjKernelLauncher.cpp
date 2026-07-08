@@ -23,6 +23,8 @@ struct ProjDomainKernelCache {
   CUfunction compactRatioFunction = nullptr;
   CUfunction compactTransformBackwardFunction = nullptr;
   CUfunction compactBakeAttenFunction = nullptr;
+  CUfunction compactAttenForwardFunction = nullptr;
+  CUfunction compactAttenBackwardFunction = nullptr;
   CUfunction convYFunction = nullptr;
   CUfunction convXFunction = nullptr;
   int device = -1;
@@ -56,6 +58,8 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactRatioFunction != nullptr &&
       g_projDomainKernelCache.compactTransformBackwardFunction != nullptr &&
       g_projDomainKernelCache.compactBakeAttenFunction != nullptr &&
+      g_projDomainKernelCache.compactAttenForwardFunction != nullptr &&
+      g_projDomainKernelCache.compactAttenBackwardFunction != nullptr &&
       g_projDomainKernelCache.convYFunction != nullptr &&
       g_projDomainKernelCache.convXFunction != nullptr &&
       g_projDomainKernelCache.device == device &&
@@ -87,6 +91,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactRatioFunction = nullptr;
     g_projDomainKernelCache.compactTransformBackwardFunction = nullptr;
     g_projDomainKernelCache.compactBakeAttenFunction = nullptr;
+    g_projDomainKernelCache.compactAttenForwardFunction = nullptr;
+    g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
     g_projDomainKernelCache.convYFunction = nullptr;
     g_projDomainKernelCache.convXFunction = nullptr;
   }
@@ -104,6 +110,12 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactBakeAttenFunction,
       g_projDomainKernelCache.module, "compact_bake_atten_values"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactAttenForwardFunction,
+      g_projDomainKernelCache.module, "compact_atten_fused_spmv"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactAttenBackwardFunction,
+      g_projDomainKernelCache.module, "compact_atten_fused_spmvt"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.convYFunction, g_projDomainKernelCache.module,
       "conv2d_y_mirror_frames"));
@@ -248,6 +260,92 @@ void launchCompactBakeAttenKernel(const float *values, const int32_t *rowPtr,
   const unsigned int gridSize = static_cast<unsigned int>(rows);
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactBakeAttenFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactAttenFusedForwardKernel(
+    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
+    const uint16_t *att, const float *x, float *y, int rows,
+    const cuda::CompactAttenBakeParams &params, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr attPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(att));
+  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x));
+  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(y);
+  int zMirror = params.zMirror ? 1 : 0;
+  void *args[] = {&valuesPtr,
+                  &rowPtrPtr,
+                  &colIdxPtr,
+                  &attPtr,
+                  &xPtr,
+                  &yPtr,
+                  &rows,
+                  const_cast<int *>(&params.symmetryMode),
+                  const_cast<int *>(&params.compactRowBase),
+                  const_cast<int *>(&params.compactRaysPerAngle),
+                  const_cast<int *>(&params.compactNumAngles),
+                  const_cast<int *>(&params.fullNumAngles),
+                  const_cast<int *>(&params.symId),
+                  &zMirror,
+                  const_cast<int *>(&params.nx),
+                  const_cast<int *>(&params.ny),
+                  const_cast<int *>(&params.nz)};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactAttenForwardFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactAttenFusedBackwardKernel(
+    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
+    const uint16_t *att, const float *x, float *y, int rows,
+    const cuda::CompactAttenBakeParams &params, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr attPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(att));
+  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x));
+  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(y);
+  int zMirror = params.zMirror ? 1 : 0;
+  void *args[] = {&valuesPtr,
+                  &rowPtrPtr,
+                  &colIdxPtr,
+                  &attPtr,
+                  &xPtr,
+                  &yPtr,
+                  &rows,
+                  const_cast<int *>(&params.symmetryMode),
+                  const_cast<int *>(&params.compactRowBase),
+                  const_cast<int *>(&params.compactRaysPerAngle),
+                  const_cast<int *>(&params.compactNumAngles),
+                  const_cast<int *>(&params.fullNumAngles),
+                  const_cast<int *>(&params.symId),
+                  &zMirror,
+                  const_cast<int *>(&params.nx),
+                  const_cast<int *>(&params.ny),
+                  const_cast<int *>(&params.nz)};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactAttenBackwardFunction, gridSize, 1, 1,
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 

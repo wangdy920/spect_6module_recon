@@ -60,11 +60,10 @@ struct CompactDeviceBackwardTiming {
     double transformBackwardSeconds = 0.0;
 };
 
-/// Parameters for baking per-angle attenuation factors into compact chunk
-/// matrix values on the device: baked[t] = val[t] * att[fullAngle(row(t)),
-/// unrotatedVoxel(col(t))]. Combines the row->full-angle mapping of
-/// CompactDeviceRatioParams with the voxel mapping of
-/// CompactDeviceTransformParams.
+/// Parameters for compact CTAC attenuation lookup:
+/// effective[t] = val[t] * att[fullAngle(row(t)), unrotatedVoxel(col(t))].
+/// Combines the row->full-angle mapping of CompactDeviceRatioParams with the
+/// voxel mapping of CompactDeviceTransformParams.
 struct CompactAttenBakeParams {
     int symmetryMode = 0; // 45 or 90
     int compactRowBase = 0;
@@ -88,9 +87,11 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
-/// spmv/spmvT with attenuation-baked values. attFactors is the full-angle
-/// table (fullNumAngles * nx*ny*nz uint16, scale 1/65535) in the unrotated
-/// image frame; it is uploaded once and cached by host pointer.
+/// spmv/spmvT with compact CTAC factors fused into the CUDA nnz loop.
+/// attFactors is the full-angle table (fullNumAngles * nx*ny*nz uint16,
+/// scale 1/65535) in the unrotated image frame; it is uploaded once and cached
+/// by host pointer. The lookup is algebraically equivalent to the baked
+/// reference values.
 bool compactAttenSpmvFloatCUDA(const io::CSRView& matrix,
                                const uint16_t* attFactors,
                                size_t attCount,

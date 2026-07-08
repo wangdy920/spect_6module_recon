@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "CudaChunkCache.h"
+#include "CudaProjKernelLauncher.h"
 #include "cuda/CudaLaunchConfig.h"
 
 bool isContiguousAscending(const std::vector<int> &rows) {
@@ -382,11 +383,11 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (params.symmetryMode != 45 && params.symmetryMode != 90) {
       throw std::runtime_error(
-          "compact attenuation-baked SpMV requires symmetryMode 45 or 90.");
+          "compact fused CTAC SpMV requires symmetryMode 45 or 90.");
     }
     if (attFactors == nullptr || attCount == 0) {
       throw std::runtime_error(
-          "compact attenuation-baked SpMV received an empty factor table.");
+          "compact fused CTAC SpMV received an empty factor table.");
     }
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
 
@@ -397,38 +398,80 @@ public:
       attenTableCount_ = attCount;
       bakedValid_ = false;
     }
+    if (compactCtacBakedReferenceEnabled()) {
+      const bool bakeHit =
+          bakedValid_ && bakedMatrixKey_ == cached.key &&
+          bakedRowPtrDev_ == static_cast<const void *>(cached.dRowPtr.get()) &&
+          bakedColIdxDev_ == static_cast<const void *>(cached.dColIdx.get()) &&
+          bakedAttPtr_ == static_cast<const void *>(attFactors) &&
+          bakedParams_.symmetryMode == params.symmetryMode &&
+          bakedParams_.compactRowBase == params.compactRowBase &&
+          bakedParams_.symId == params.symId &&
+          bakedParams_.zMirror == params.zMirror;
+      if (!bakeHit) {
+        dBakedValues_.allocate(static_cast<size_t>(cached.nnz));
+        launchCompactBakeAttenKernel(
+            cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+            dAttenTable_.get(), dBakedValues_.get(),
+            static_cast<int>(cached.rows), params, computeStream_.get());
+        bakedMat_.create(cached.rows, cached.cols, cached.nnz,
+                         cached.dRowPtr.get(), cached.dColIdx.get(),
+                         dBakedValues_.get());
+        bakedBufferSizeValid_ = {};
+        bakedMatrixKey_ = cached.key;
+        bakedRowPtrDev_ = cached.dRowPtr.get();
+        bakedColIdxDev_ = cached.dColIdx.get();
+        bakedAttPtr_ = attFactors;
+        bakedParams_ = params;
+        bakedValid_ = true;
+        CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
+      }
 
-    // Re-bake only when the (matrix, branch, angle window, table) key changes;
-    // a forward spmv followed by the transposed spmv of the same chunk/branch
-    // reuses the baked values.
-    // Comparing device pointers as well guards against the same key being
-    // re-uploaded to a different device allocation (single-slot cache churn).
-    const bool bakeHit =
-        bakedValid_ && bakedMatrixKey_ == cached.key &&
-        bakedRowPtrDev_ == static_cast<const void *>(cached.dRowPtr.get()) &&
-        bakedColIdxDev_ == static_cast<const void *>(cached.dColIdx.get()) &&
-        bakedAttPtr_ == static_cast<const void *>(attFactors) &&
-        bakedParams_.symmetryMode == params.symmetryMode &&
-        bakedParams_.compactRowBase == params.compactRowBase &&
-        bakedParams_.symId == params.symId &&
-        bakedParams_.zMirror == params.zMirror;
-    if (!bakeHit) {
-      dBakedValues_.allocate(static_cast<size_t>(cached.nnz));
-      launchCompactBakeAttenKernel(
-          cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-          dAttenTable_.get(), dBakedValues_.get(),
-          static_cast<int>(cached.rows), params, computeStream_.get());
-      bakedMat_.create(cached.rows, cached.cols, cached.nnz,
-                       cached.dRowPtr.get(), cached.dColIdx.get(),
-                       dBakedValues_.get());
-      bakedBufferSizeValid_ = {};
-      bakedMatrixKey_ = cached.key;
-      bakedRowPtrDev_ = cached.dRowPtr.get();
-      bakedColIdxDev_ = cached.dColIdx.get();
-      bakedAttPtr_ = attFactors;
-      bakedParams_ = params;
-      bakedValid_ = true;
-      CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
+      const int64_t inputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
+                                    ? cached.rows
+                                    : cached.cols;
+      const int64_t outputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
+                                     ? cached.cols
+                                     : cached.rows;
+      const bool backward = operation == CUSPARSE_OPERATION_TRANSPOSE;
+
+      const auto stageStart = std::chrono::steady_clock::now();
+      stageInputH2D(x, static_cast<size_t>(inputSize));
+      noteCudaCompactInputH2D(
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        stageStart)
+              .count());
+      dOutput_.allocate(static_cast<size_t>(outputSize));
+
+      CuSparseVecGuard vecX;
+      CuSparseVecGuard vecY;
+      vecX.create(inputSize, dInput_.get());
+      vecY.create(outputSize, dOutput_.get());
+      TimedCudaStagePair deviceTiming;
+      deviceTiming.recordStart(nullptr);
+      const size_t bufferIndex = spmvBufferIndex(operation);
+      executeSpMVDescriptorLocked(bakedMat_.get(),
+                                  bakedBufferSizes_[bufferIndex],
+                                  bakedBufferSizeValid_[bufferIndex],
+                                  operation, vecX.get(), vecY.get(), 0.0f,
+                                  backward);
+      deviceTiming.recordStop(nullptr);
+      const auto outputStart = std::chrono::steady_clock::now();
+      stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
+      const double outputSeconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        outputStart)
+              .count();
+      noteCudaCompactOutputD2H(outputSeconds,
+                               static_cast<size_t>(outputSize) * sizeof(float),
+                               backward);
+      const double deviceSeconds = deviceTiming.elapsedSeconds();
+      if (backward) {
+        noteCudaCusparseBackward(deviceSeconds, 1);
+      } else {
+        noteCudaCusparseForward(deviceSeconds, 1);
+      }
+      return;
     }
 
     const int64_t inputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
@@ -446,18 +489,24 @@ public:
                                       stageStart)
             .count());
     dOutput_.allocate(static_cast<size_t>(outputSize));
+    if (backward && outputSize > 0) {
+      CUDA_CHECK(cudaMemset(dOutput_.get(), 0,
+                            static_cast<size_t>(outputSize) * sizeof(float)));
+    }
 
-    CuSparseVecGuard vecX;
-    CuSparseVecGuard vecY;
-    vecX.create(inputSize, dInput_.get());
-    vecY.create(outputSize, dOutput_.get());
     TimedCudaStagePair deviceTiming;
     deviceTiming.recordStart(nullptr);
-    const size_t bufferIndex = spmvBufferIndex(operation);
-    executeSpMVDescriptorLocked(bakedMat_.get(),
-                                bakedBufferSizes_[bufferIndex],
-                                bakedBufferSizeValid_[bufferIndex], operation,
-                                vecX.get(), vecY.get(), 0.0f, backward);
+    if (backward) {
+      launchCompactAttenFusedBackwardKernel(
+          cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+          dAttenTable_.get(), dInput_.get(), dOutput_.get(),
+          static_cast<int>(cached.rows), params);
+    } else {
+      launchCompactAttenFusedForwardKernel(
+          cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+          dAttenTable_.get(), dInput_.get(), dOutput_.get(),
+          static_cast<int>(cached.rows), params);
+    }
     deviceTiming.recordStop(nullptr);
     const auto outputStart = std::chrono::steady_clock::now();
     stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
@@ -901,6 +950,14 @@ private:
   static bool cudaSyncLegacyEnabled() {
     static const bool enabled = []() {
       const char *v = std::getenv("SPECT_CUDA_SYNC_LEGACY");
+      return v != nullptr && v[0] == '1';
+    }();
+    return enabled;
+  }
+
+  static bool compactCtacBakedReferenceEnabled() {
+    static const bool enabled = []() {
+      const char *v = std::getenv("SPECT_COMPACT_CTAC_BAKED_REFERENCE");
       return v != nullptr && v[0] == '1';
     }();
     return enabled;
@@ -2650,7 +2707,8 @@ private:
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
   DeviceBuffer dBuffer_;
-  // Compact CTAC: resident attenuation factor table + baked-values scratch.
+  // Compact CTAC: resident attenuation table plus explicit debug/reference
+  // baked-values scratch. Default CTAC uses fused kernels above.
   DeviceArray<uint16_t> dAttenTable_;
   const void *attenTableHostPtr_ = nullptr;
   size_t attenTableCount_ = 0;

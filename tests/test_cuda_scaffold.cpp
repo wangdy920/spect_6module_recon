@@ -491,27 +491,29 @@ TEST(CudaScaffoldTest, CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable) {
         GTEST_SKIP() << "No CUDA device available in the current runtime.";
     }
 
-    // 2x2x1 image (nvox=4), Sym90Z: compactNumAngles=2, fullNumAngles=8.
+    // 2x2x2 image (nvox=8), Sym90Z: compactNumAngles=2, fullNumAngles=8.
     // One ray per angle -> 2 compact rows in this chunk (compactRowBase=0).
-    const int nx = 2, ny = 2, nz = 1;
+    const int nx = 2, ny = 2, nz = 2;
     const int nvox = nx * ny * nz;
     const int compactNumAngles = 2;
     const int fullNumAngles = 8;
 
     const uint32_t rowPtr[] = {0, 3, 6};
-    const uint32_t colIdx[] = {0, 1, 3, 0, 2, 3};
+    const uint32_t colIdx[] = {0, 1, 7, 2, 4, 6};
     const float values[] = {1.0f, 2.0f, 0.5f, 1.5f, 3.0f, 0.25f};
     const auto matrix = makeTinyIoMatrix(rowPtr, colIdx, values, 2, nvox, 6);
 
     std::vector<uint16_t> att(static_cast<size_t>(fullNumAngles) * nvox);
     for (size_t i = 0; i < att.size(); ++i) {
-        att[i] = static_cast<uint16_t>(20000 + 617 * i);
+        att[i] = static_cast<uint16_t>(10000 + ((941 * i) % 50000));
     }
 
-    const std::vector<float> x = {1.0f, 0.5f, 2.0f, 1.5f};
+    const std::vector<float> x = {1.0f, 0.5f, 2.0f, 1.5f,
+                                  0.75f, 1.25f, 0.4f, 1.8f};
     const std::vector<float> r = {0.8f, 1.3f};
 
     for (int symId = 0; symId < 4; ++symId) {
+      for (const bool zMirror : {false, true}) {
         spect::cuda::CompactAttenBakeParams params;
         params.symmetryMode = 90;
         params.compactRowBase = 0;
@@ -519,7 +521,7 @@ TEST(CudaScaffoldTest, CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable) {
         params.compactNumAngles = compactNumAngles;
         params.fullNumAngles = fullNumAngles;
         params.symId = symId;
-        params.zMirror = false;
+        params.zMirror = zMirror;
         params.nx = nx;
         params.ny = ny;
         params.nz = nz;
@@ -530,12 +532,15 @@ TEST(CudaScaffoldTest, CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable) {
             const int fullAngle = row + symId * compactNumAngles;
             for (uint32_t t = rowPtr[row]; t < rowPtr[row + 1]; ++t) {
                 const int col = static_cast<int>(colIdx[t]);
-                const int iy = col / nx;
-                const int ix = col - iy * nx;
+                const int plane = nx * ny;
+                const int iz = col / plane;
+                const int rem = col - iz * plane;
+                const int iy = rem / nx;
+                const int ix = rem - iy * nx;
                 const auto mapped = spect::io::mapSym90ZVoxelCoord(
-                    ix, iy, 0, nx, nz, symId, false);
-                const size_t mappedIdx =
-                    static_cast<size_t>(mapped.y) * nx + mapped.x;
+                    ix, iy, iz, nx, nz, symId, zMirror);
+                const size_t mappedIdx = spect::io::compactVoxelLinearIndex(
+                    mapped, nx, ny);
                 baked[t] = static_cast<double>(values[t]) *
                            att[static_cast<size_t>(fullAngle) * nvox +
                                mappedIdx] /
@@ -555,24 +560,50 @@ TEST(CudaScaffoldTest, CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable) {
                 bpRef[colIdx[t]] += baked[t] * r[row];
             }
         }
+        std::vector<double> sensRef(nvox, 0.0);
+        for (int row = 0; row < 2; ++row) {
+            for (uint32_t t = rowPtr[row]; t < rowPtr[row + 1]; ++t) {
+                sensRef[colIdx[t]] += baked[t];
+            }
+        }
 
         std::vector<float> yCuda(2, 0.0f);
         ASSERT_TRUE(spect::cuda::compactAttenSpmvFloatCUDA(
             matrix, att.data(), att.size(), params, x.data(), yCuda.data()))
-            << "symId=" << symId;
+            << "symId=" << symId << " zMirror=" << zMirror;
         std::vector<float> bpCuda(nvox, 0.0f);
         ASSERT_TRUE(spect::cuda::compactAttenSpmvTFloatCUDA(
             matrix, att.data(), att.size(), params, r.data(), bpCuda.data()))
-            << "symId=" << symId;
+            << "symId=" << symId << " zMirror=" << zMirror;
+        const std::vector<float> ones = {1.0f, 1.0f};
+        std::vector<float> sensCuda(nvox, 0.0f);
+        ASSERT_TRUE(spect::cuda::compactAttenSpmvTFloatCUDA(
+            matrix, att.data(), att.size(), params, ones.data(),
+            sensCuda.data()))
+            << "symId=" << symId << " zMirror=" << zMirror;
 
         for (int row = 0; row < 2; ++row) {
             EXPECT_NEAR(yCuda[row], yRef[row], 1e-5)
-                << "symId=" << symId << " row=" << row;
+                << "symId=" << symId << " zMirror=" << zMirror
+                << " row=" << row;
         }
         for (int v = 0; v < nvox; ++v) {
             EXPECT_NEAR(bpCuda[v], bpRef[v], 1e-5)
-                << "symId=" << symId << " voxel=" << v;
+                << "symId=" << symId << " zMirror=" << zMirror
+                << " voxel=" << v;
+            EXPECT_NEAR(sensCuda[v], sensRef[v], 1e-5)
+                << "symId=" << symId << " zMirror=" << zMirror
+                << " sensitivity voxel=" << v;
         }
+        const double lhs = static_cast<double>(yCuda[0]) * r[0] +
+                           static_cast<double>(yCuda[1]) * r[1];
+        double rhs = 0.0;
+        for (int v = 0; v < nvox; ++v) {
+            rhs += static_cast<double>(x[v]) * bpCuda[v];
+        }
+        EXPECT_NEAR(lhs, rhs, 1e-5)
+            << "symId=" << symId << " zMirror=" << zMirror;
+      }
     }
 
     // A unit table (all 65535) must reduce to the plain spmv.
@@ -596,6 +627,15 @@ TEST(CudaScaffoldTest, CompactAttenBakedSpmvMatchesCpuWhenCudaAvailable) {
     ASSERT_TRUE(spect::cuda::spmvFloatCUDA(matrix, x.data(), yPlain.data()));
     for (int row = 0; row < 2; ++row) {
         EXPECT_NEAR(yUnit[row], yPlain[row], 1e-6) << "row=" << row;
+    }
+    std::vector<float> bpUnit(nvox, 0.0f);
+    std::vector<float> bpPlain(nvox, 0.0f);
+    ASSERT_TRUE(spect::cuda::compactAttenSpmvTFloatCUDA(
+        matrix, unitAtt.data(), unitAtt.size(), unitParams, r.data(),
+        bpUnit.data()));
+    ASSERT_TRUE(spect::cuda::spmvTFloatCUDA(matrix, r.data(), bpPlain.data()));
+    for (int v = 0; v < nvox; ++v) {
+        EXPECT_NEAR(bpUnit[v], bpPlain[v], 1e-6) << "voxel=" << v;
     }
 }
 
