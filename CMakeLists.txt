@@ -30,7 +30,7 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
     ERROR_QUIET
   )
   execute_process(
-    COMMAND "${GIT_EXECUTABLE}" status --porcelain
+    COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     OUTPUT_VARIABLE _spect_git_dirty
     OUTPUT_STRIP_TRAILING_WHITESPACE

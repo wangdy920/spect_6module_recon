@@ -26,7 +26,7 @@ Push-Location $repo
 try {
     $gitHashRaw = (& $gitExe rev-parse --short HEAD 2>$null)
     if (-not $gitHashRaw) { $gitHashRaw = "local" }
-    $dirty = (& $gitExe status --porcelain 2>$null)
+    $dirty = (& $gitExe status --porcelain --untracked-files=no 2>$null)
     $gitDirty = [bool]$dirty
     # Package directory/zip names stay clean (no -dirty). Build -v may still report dirty until the tree is committed.
     $gitHash = $gitHashRaw
