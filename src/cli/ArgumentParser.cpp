@@ -2,6 +2,7 @@
 
 #include "cli/ArgumentParser.h"
 
+#include "cli/Version.h"
 #include "core/AttenuationCoefficients.h"
 
 namespace spect {
@@ -249,7 +250,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (it != handlers_.end()) {
             if (!it->second(i, argc, argv, args))
                 return ParseResult::ExitFailure;
-            if (args.helpRequested)
+            if (args.helpRequested || args.versionRequested)
                 return ParseResult::ExitSuccess;
         } else {
             std::cerr << "Unknown argument: " << key << "\n";
@@ -568,7 +569,14 @@ void ArgumentParser::registerHandlers() {
         return true;
     };
     bindHandlerAliases(verbosityHandler, {"-vb"});
-    bindHandlerAliases(verbosityHandler, {"-v"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        (void)i;
+        (void)argc;
+        (void)argv;
+        printVersion();
+        a.versionRequested = true;
+        return true;
+    }, {"-v", "--version"});
 
     // --- Filtering & PSF ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1773,7 +1781,7 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
     std::cout << "  -cropEnd <top[,end]>      Final output Z cropping after output flips\n";
-    std::cout << "  -zbedflip <0|1>           Flip each dfList bed segment on output (default 1)\n";
+    std::cout << "  -zbedflip <0|1>           Flip each dfList bed segment on output (default 0)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
@@ -1800,6 +1808,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -mapCSR on|off            Memory-mapped CSR loading (default off)\n";
     std::cout << "  -joe <n>                  Joseph-like smoothing passes (default 0)\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
+    std::cout << "  -v, --version             Print version string and exit\n";
     std::cout << "  -th <N>                   Thread count\n";
     std::cout << "  -h, -help, --help         Show this help\n\n";
 

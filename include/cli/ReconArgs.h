@@ -59,6 +59,7 @@ struct ReconArgs {
     bool configLoaded = false;    ///< Config file loaded successfully
     std::string algoConfPath;     ///< Algorithm config file path (empty = auto-detect)
     bool helpRequested = false;    ///< Print usage and exit successfully
+    bool versionRequested = false; ///< Print version and exit successfully
     bool dumpConf = false;        ///< Print merged config and exit
 
     // ========== Filtering Options ==========
@@ -150,7 +151,7 @@ struct ReconArgs {
     // ========== Multi-Bed ==========
     int bedCount = 1;
     std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
-    bool zBedFlip = true;          ///< Flip each dfList bed segment in Z before output
+    bool zBedFlip = false;         ///< Legacy per-bed output Z flip; identity inputs keep this off
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
 

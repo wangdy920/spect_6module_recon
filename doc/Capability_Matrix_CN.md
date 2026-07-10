@@ -1,73 +1,65 @@
-# SPECT-recon Capability Matrix（2026-07-05）
+# SPECT-recon Capability Matrix
 
-> 状态：post-refactor 对齐更新，待 Opus 4.8 / Fable 5 review。§2a：**不退场**，legacy 路径保留。
+> 对齐日期：2026-07-10。以 `ArgumentParser::validateArgs`、`MainProgram.cpp`、compact CUDA 路径为准；过时设计稿已删除，勿再引用 archive。
 
 ## 证据入口
 
-- CLI 校验：`include/cli/ArgumentParser.h::validateArgs`
-- compact 几何校验：`src/io/CompactSymmetryMetadata.cpp::validateCompactSymmetricInputs` / `validateCompactChunkSymmetricInputs`
-- 主流程：`src/main/MainProgram.cpp`
-- 标准算法：`src/app/OSEMReconstructor.cpp`、`src/app/BSREMReconstructor.cpp`
-- compact CUDA：`src/cuda/CompactSymmetricProjectorCUDA.cpp`
-- 回归证据：`tests/test_interfaces.cpp`、`tests/test_psf_modes.cpp`、`tests/test_main_ctac_ops.cpp`、`.agent/CONTINUITY.md`
+| 区域 | 代码 |
+|---|---|
+| CLI 校验 | `src/cli/ArgumentParser.cpp`（`validateArgs`） |
+| compact 几何 | `src/io/CompactSymmetryMetadata.cpp`、`ReconDataLoader.cpp::applyCompactMetadataGeometry` |
+| 主流程 | `src/main/MainProgram.cpp` |
+| compact CUDA | `src/cuda/CompactSymmetricProjectorCUDA.cpp` |
+| 回归 | `tests/`、`doc/Legacy_MLEM_B1B2_Parity_CN.md` |
 
-## 重构不动边界
+## 耐久决策（原 refactor / PSF / CTAC 决策合并）
 
-1. 260601 chunk CSRB 是 canonical compact 路径：`-chunkCSRDir` + 88B/96B metadata + Sym90Z/Sym45Z 校验。
-2. 260525 `-loadCSR -compactMeta` 单文件入口仍是 legacy compatibility；三条件签收前不删除，只加安全保护和 deprecated 提示。
-3. CTAC line-integral、compact CTAC value baking、Operator PSF sensitivity、BSREM `w_proj/w_img` fail-fast、bProj additive 位置和 sensitivity/numerator/denominator 语义都属于物理回归触发区。
-4. 结构拆分 PR 不改变数值顺序；性能 PR 单独立项。
+| 决策 | 结论 |
+|---|---|
+| 默认 compact 矩阵 | **260601** `-chunkCSRDir`（或 `bin/matrix` 唯一目录自动发现） |
+| 260525 `-loadCSR -compactMeta` | **不退场**，legacy 兼容 + deprecated 提示；大文件隐式 mmap |
+| 公开 PSF | 仅 image-domain **Operator / None**；`-psf` 为 FWHM mm；ProjDomain/PostSmooth/DD 公开入口拒绝 |
+| 稀疏 / Butterworth | 生产固定 **CUDA / cuFFT**；旧 backend 选择 CLI 拒绝 |
+| 公开正则 | 仅 **TV / RDP** |
+| compact CTAC 模型 | 生产保留 **`att[angle, voxel]` fused**；不做 production Siddon / row-bin 表 |
+| compact multi-bed CTAC | **不支持**（`validateArgs` 拒绝） |
+| 退出码 | `0` 成功/help/dumpConf；`1` CLI/配置错误；`2` runtime（`include/cli/ExitCodes.h`） |
+| RegularizerCompat→新梯度 | **拒绝**静默委托；离散化未统一前不迁 |
+| v2 sysmat 生成端 | 暂不删；归档条件见 `6module_bak_src/README.md` |
 
-## 当前能力矩阵
+## 能力表
 
-| 路径 | 算法/特性 | 公式已实现 | 物理已验证 | 真实矩阵 smoke | 证据 |
-|---|---|---:|---:|---:|---|
-| standard CSR/MAT/CSRB | MLEM, subsets=1 | 是 | 基线回归 | 是 | `MainProgram.cpp`, `test_data/share` 50 iter 记录 |
-| standard CSR/MAT/CSRB | OSEM, subsets>1 | 是 | 算法对齐测试 | 无本批新增记录 | `OSEMReconstructor.cpp`, `tests/test_osem_alignment.cpp` |
-| standard CSR/MAT/CSRB | BSREM + RDP/curvature/kappa | 是 | 部分，beta 标定未完成 | 是 | `BSREMReconstructor.cpp`, `tests/test_bsrem_*` |
-| standard CSR/MAT/CSRB | ADMM/TV | 是 | 未作为生产物理签收 | 无本批新增记录 | `include/app/ADMMOptimizer.h`, CLI help |
-| standard CSR/MAT/CSRB | Operator PSF | 是，含 sensitivity `G^T A^T 1` | 是，模式级回归 | 是 | `ProjectionOps.cpp`, `tests/test_psf_modes.cpp` |
-| standard CSR/MAT/CSRB | projection-domain PSF | 内部隔离实现；公开 CLI 已退场 | 不作为生产物理签收项 | 无本批新增记录 | `ReconPreparation.cpp`, `ProjDomainChunked.h` |
-| standard CSR/MAT/CSRB | CTAC line-integral | 是 | slab gtest；phantom 定量待做 | 是 | `CTACOps.cpp`, `tests/test_main_ctac_ops.cpp` |
-| standard CSR/MAT/CSRB | bProj additive | 是 | 外部项接入，散射 solver 未实现 | 路径 smoke 已有 | `MainProgram.cpp` background projection 分支 |
-| standard CSR/MAT/CSRB | multi-bed | 是 | 输出 Z flip/overlap 回归 | 是 | `ReconSetup.cpp`, `BedOffsets.h`, `tests/test_main_*` |
-| compact 260601 chunk CSRB | MLEM, subset=1, CUDA | 是 | 是 | 是 | `CompactChunkCSR.cpp`, `CompactSymmetricProjectorCUDA.cpp`, continuity 260601 记录 |
-| compact 260601 chunk CSRB | BSREM + RDP, subset=1, CUDA | 是 | 路径和 beta=0 parity；beta 标定未完成 | 是 | continuity 2026-06-05 记录 |
-| compact 260601 chunk CSRB | OSEM subsets | 否 | 否 | 否 | `validateArgs` 拒绝 `numSubsets != 1` |
-| compact 260601 chunk CSRB | ADMM/TV | 否 | 否 | 否 | `validateArgs` 仅允许 MLEM/BSREM |
-| compact 260601 chunk CSRB | Operator PSF | 是，multi-bed global-volume | 是 | 是 | `MainProgram.cpp`, `tests/test_psf_modes.cpp` |
-| compact 260601 chunk CSRB | CTAC | 单床 chunk 路径已实现 | 需物理 review | share zero-mu/水圆柱记录 | `CompactSymmetricProjectorCUDA.cpp`, checklist/continuity |
-| compact 260601 chunk CSRB | CTAC multi-bed | 否 | 否 | 否 | `validateArgs` 拒绝 compact CTAC multi-bed |
-| compact 260601 chunk CSRB | bProj / bProjList | 外部 additive 支持 | 零背景回归；非零散射未物理签收 | 是 | continuity bProjList zero smoke |
-| compact 260525 single-file | MLEM/BSREM subset=1 CUDA | legacy compatibility；compact-symmetric 公式路径保留 | 旧数据对照需要保留 | 条件可跑 | `-loadCSR -compactMeta`, 76B metadata |
-| old row-wise chunk_*.bin | 转换工具读取 | reference-only | 否 | 否 | `tools/convert_6module_sysmat_to_csrb.cpp`, `6module_bak_src/README.md` |
+| 路径 | 特性 | 实现 | 生产签收 | 备注 |
+|---|---|---:|---:|---|
+| standard CSRB/MAT | MLEM / OSEM | 是 | 基线/对齐测试 | `subsets>1`→OSEM |
+| standard | BSREM + RDP | 是 | 部分（beta 标定未完） | |
+| standard | ADMM + TV | 是 | 未作生产物理签收 | |
+| standard | Operator PSF | 是 | 是 | |
+| standard | CTAC line-integral | 是 | slab gtest；phantom 见 CTAC 文档 | |
+| standard | multi-bed / bProj | 是 | 路径回归 | |
+| compact 260601 | MLEM subset=1 CUDA | 是 | **是（B1 gate）** | |
+| compact 260601 | BSREM + RDP subset=1 | 是 | 路径/parity；beta 标定未完 | |
+| compact 260601 | Operator PSF | 是 | 是 | multi-bed 全局体 |
+| compact 260601 | CTAC 单床 | 是 | 圆柱 true/auto gate | fused 默认 |
+| compact 260601 | OSEM / ADMM / multi-bed CTAC | 否 | — | CLI 拒绝 |
+| compact 260525 单文件 | MLEM/BSREM | legacy | 非 hard gate | 无 CTAC |
+| v2 row-wise `chunk_*.bin` | 转换工具 | 是 | reference | `spect_convert_6module_sysmat_to_csrb` |
 
-## 明确不支持或未签收
+## PSF 边界（简）
 
-- compact OSEM subsets、compact ADMM/TV、compact CTAC multi-bed。
-- `w_proj` / `w_img` 在 compact/fused BSREM 中不允许静默忽略。
-- OSL-style penalized path不是生产推荐口径；不在本批统一。
-- projection-domain PSF 与 Operator PSF 模型不同，保持隔离。
-- BSREM/RDP beta sweep、Derenzo objective、针孔汇聚射线 Siddon CTAC 属物理专项。
-## 本批变更附注
+- **Operator**：图像域可分 Gaussian，前/后向与 sensitivity 同口径；compact 要求 XY 各向同性。
+- **ProjDomain 等**：内部/历史路径，公开 CLI 已退场；与 Operator **不可互换**。
 
-- 260525 single-file 路径的能力不扩展；本批只增加安全保护：大文件默认隐式 `CSRMap`，full-copy 超过可用物理内存一半时拒绝。
-- 本批本地修复了 NVRTC attenuation scale 常量作用域问题；这是 kernel source 自包含缺陷修复，不作为新能力项，随 compact CTAC value baking review 交 Opus/Fable 签收。
+## CTAC 边界（简）
 
-## 260525 退场条件
-
-**正式决断（2026-07-05）：不退场，只做兼容保护。** 转换工具、single-file compact 路径、76B metadata、260525 对照脚本均保留；详见 `doc/Refactor_Decisions_20260703_CN.md` §2a。
-
-若将来三条件齐备且 Opus/Fable 显式签收，方可启动 PR28 删除清单。在此之前仅允许 deprecated 提示、大文件保护、隐式 mmap 安全路径和文档标注。
-
-历史上写明的退场门槛（供将来参考）：
-
-1. 连续两个发布周期无人使用 `-loadCSR -compactMeta`，有 RunLogger 使用记录或团队确认。
-2. 260601 chunk CSRB 路径完成全部物理验收并成为唯一 compact 生产路径。
-3. Opus 4.8 / Fable 5 显式签收退场。
+- 生产：`effective = value * att[fullAngle, voxel] / 65535`（fused nnz）。
+- Validation-only：`scripts/validate_ctac_pinhole_reference.py` 等抽样对照；不进入生产表布局。
+- 调试 gate：`doc/CTAC_AutoMu_Validation_CN.md`。
 
 ## 相关文档
 
-- `doc/Format_Reader_Matrix_CN.md` — 格式 × 读者矩阵（PR26）
-- `doc/PSF_Model_Differences_CN.md` — projection-domain vs Operator PSF（§6.4）
-- `doc/Refactor_Decisions_20260703_CN.md` — §2a / 退出码 / 接口裁决
+- `RELEASE_20260708_CN.md` — 当前 release
+- `USAGE_CN.md` / `CLI_CHANGES_CN.md` — CLI
+- `Format_Reader_Matrix_CN.md` — 格式×读者
+- `Legacy_MLEM_B1B2_Parity_CN.md` — B1 签收
+- `Recon_Interface_Migration_Field_CN.md` — 现场迁移

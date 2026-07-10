@@ -161,7 +161,7 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | `-conv <params>` | legacy convolution 参数 |
 | `-joe <n>` | Joseph-like smoothing passes，默认 0 |
 
-注意：旧冻结包 `dist/release_candidates/SPECT_recon_rc_20260706_c1ee948` 的 `PARAMETERS_CN.md` 和二进制仍使用 `-psf <sigma>` 口径；当前最新代码和文档已改为 `-psf [fwhm_mm[,N]]`，新发布包应重新生成 `PARAMETERS_CN.md`。
+注意：`-psf` 单位为 FWHM mm（默认 `1.5,4`）。旧现场/冻结包若仍写 `-psf 0.637`，那是历史 sigma 口径，不要与当前 FWHM 混用。
 
 ---
 
@@ -189,11 +189,18 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 |---|---|
 | `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` overlap 表；`b1=Bed1-Bed2`，只传一个值时复制到所有固定槽 |
 | `-cropEnd <top[,end]>` | 最终输出 Z 轴裁剪，在输出翻转之后执行 |
-| `-zbedflip [0\|1]` | 对 `-dfList` 每个床位段单独 Z 翻转，默认 1 |
+| `-zbedflip [0\|1]` | 对 `-dfList` **每个床位段**单独 Z 翻转。配对规则：`-chunkCSRDir` + 预处理 **identity** → 用包内 `[MultiBed] z_bed_flip` 默认（勿与矩阵路径脱钩乱改）；`-loadCSR`+`-compactMeta` 单文件 + 预处理 **xflip** → **必须 `1`（翻转）** |
 | `-zoutflip [0\|1]` | 对最终整体输出再做 Z 翻转，默认 0 |
 | `-xoutflip [0\|1]` | 对最终整体输出做 X 翻转，默认 0 |
 
 `-dim` 表示单床位维度；最终输出 `Z = Nz * bed_count - sum(overlap)`。保存前处理顺序为：每床 Z 翻转 -> 整体 Z 翻转 -> 整体 X 翻转 -> `cropEnd` 裁剪。
+
+预处理投影变体必须与矩阵入口配对（详见 `Recon_Interface_Migration_Field_CN.md` §2.5）：
+
+| 矩阵入口 | `PROJECTION_VARIANT` | `-zbedflip` |
+|---|---|---|
+| `-chunkCSRDir`（260601） | `identity` | 保留包默认配置 |
+| `-loadCSR` + `-compactMeta`（如 `matrix_6module.csrb`） | `xflip` / `flipx` | **`1`（每床翻转）** |
 
 ---
 
@@ -204,9 +211,10 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | `-fout <dir/name>` | 输出路径前缀 |
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
-| `-vb <0\|1\|2>` / `-v <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
+| `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
+| `-v` / `--version` | 打印版本字符串并退出（形如 `20260710+ad3c1d4`） |
 
-默认输出 MHD/RAW 体数据与自动日志 `<outputName>_YYYYMMDD_HHMMSS_mmm.log`。
+默认输出 MHD/RAW 体数据与自动日志 `<outputName>_YYYYMMDD_HHMMSS_mmm.log`。重建开始时 INFO 日志会打印 `=== SPECT_recon <version> ===` 与完整 `Command line:`。
 
 ---
 

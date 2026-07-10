@@ -107,6 +107,17 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
                   spect::cli::ArgumentParser::ParseResult::ExitSuccess);
     }
 
+    spect::cli::ReconArgs versionArgs;
+    {
+        std::vector<std::string> storage = {"SPECT_recon", "-v"};
+        std::vector<char*> argv;
+        for (std::string& arg : storage)
+            argv.push_back(arg.data());
+        EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), versionArgs),
+                  spect::cli::ArgumentParser::ParseResult::ExitSuccess);
+        EXPECT_TRUE(versionArgs.versionRequested);
+    }
+
     spect::cli::ReconArgs dumpArgs;
     {
         std::vector<std::string> storage = {

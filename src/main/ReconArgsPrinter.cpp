@@ -1,5 +1,6 @@
 #include "main/ReconArgsPrinter.h"
 
+#include "cli/Version.h"
 #include "main/RunLogger.h"
 
 #include <sstream>
@@ -73,9 +74,12 @@ std::string ctacSummary(const ReconArgs &args) {
 
 } // namespace
 
-void printReconArgs(const ReconArgs &args) {
+void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
   std::ostringstream oss;
-  oss << "Run configuration:\n"
+  oss << "Run configuration [SPECT_recon " << spect::cli::versionString()
+      << "]:\n"
+      << "  command: " << (commandLine.empty() ? "<unset>" : commandLine)
+      << "\n"
       << "  data: projection=" << projectionSource(args) << "\n"
       << "  matrix: " << matrixSource(args) << "\n"
       << "  output: dir=" << args.outputDir

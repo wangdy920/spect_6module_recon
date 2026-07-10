@@ -24,10 +24,12 @@ if ([string]::IsNullOrWhiteSpace($ReleaseDate)) {
 
 Push-Location $repo
 try {
-    $gitHash = (& $gitExe rev-parse --short HEAD 2>$null)
-    if (-not $gitHash) { $gitHash = "local" }
+    $gitHashRaw = (& $gitExe rev-parse --short HEAD 2>$null)
+    if (-not $gitHashRaw) { $gitHashRaw = "local" }
     $dirty = (& $gitExe status --porcelain 2>$null)
-    if ($dirty) { $gitHash = "${gitHash}-dirty" }
+    $gitDirty = [bool]$dirty
+    # Package directory/zip names stay clean (no -dirty). Build -v may still report dirty until the tree is committed.
+    $gitHash = $gitHashRaw
 } finally {
     Pop-Location
 }
@@ -57,6 +59,10 @@ $runtimeDlls = @(
 
 function Write-Step([string]$Message) {
     Write-Host "[package] $Message"
+}
+
+if ($gitDirty) {
+    Write-Step "WARNING: working tree is dirty; package name uses clean hash '$gitHash' (exe -v may still show -dirty until rebuild on a clean tree)"
 }
 
 function Resolve-RuntimeDllPath([string]$Name) {
@@ -136,11 +142,13 @@ foreach ($dll in $runtimeDlls) {
     Copy-Item -LiteralPath $src -Destination (Join-Path $packageBin $dll) -Force
 }
 
-Write-Step "generate docs/SPECT_recon_help.txt"
+Write-Step "generate docs/SPECT_recon_help.txt and version.txt"
 $helpPath = Join-Path $packageDocs "SPECT_recon_help.txt"
+$versionPath = Join-Path $packageDocs "SPECT_recon_version.txt"
 Push-Location $packageRoot
 try {
     & (Join-Path $packageBin "SPECT_recon.exe") -help 2>&1 | Out-File -LiteralPath $helpPath -Encoding utf8
+    & (Join-Path $packageBin "SPECT_recon.exe") -v 2>&1 | Out-File -LiteralPath $versionPath -Encoding utf8
 } finally {
     Pop-Location
 }
@@ -162,7 +170,7 @@ if (Test-Path -LiteralPath $readmeTemplate) {
 
 $releaseNotesPath = Join-Path $repo "doc\RELEASE_${ReleaseDate}_CN.md"
 if (-not (Test-Path -LiteralPath $releaseNotesPath)) {
-    $releaseNotesPath = Join-Path $repo "doc\RELEASE_20260707_CN.md"
+    $releaseNotesPath = Join-Path $repo "doc\RELEASE_20260708_CN.md"
 }
 if (Test-Path -LiteralPath $releaseNotesPath) {
     Copy-Item -LiteralPath $releaseNotesPath -Destination (Join-Path $packageRoot "RELEASE_NOTES.md") -Force
@@ -192,7 +200,19 @@ if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
 Write-Step "create zip $zipPath"
-Compress-Archive -LiteralPath $packageRoot -DestinationPath $zipPath -CompressionLevel Optimal
+# Compress-Archive fails on long matrix paths; tar handles them.
+Push-Location $distRoot
+try {
+    & tar -a -cf $zipPath $PackageName
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar zip failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    Pop-Location
+}
+if (-not (Test-Path -LiteralPath $zipPath) -or ((Get-Item -LiteralPath $zipPath).Length -le 0)) {
+    throw "zip missing or empty: $zipPath"
+}
 
 Write-Step "done: $packageRoot"
 Write-Step "zip:   $zipPath"

@@ -1,24 +1,25 @@
 # Documentation Index
 
-This directory has one maintained surface for each current concern. Older design notes and run logs live under `doc/archive/` and are not kept current.
+只维护下表文档。过时设计稿、PR 执行日志、旧 release 说明与 `doc/archive/` 已删除；行为以代码与当前 release 为准。
 
 ## Maintained
 
 | File | Purpose |
-| --- | --- |
-| `RELEASE_20260708_CN.md` | Current release boundary: CUDA-only public CLI, fused compact CTAC, package layout, build entrypoint. |
-| `USAGE_CN.md` | CLI usage and examples. |
-| `CLI_CHANGES_CN.md` | Short release-facing migration list for removed or renamed CLI entries. |
-| `PARAMETERS_CN.template.md` | Release package parameter handout template. |
-| `Capability_Matrix_CN.md` | Current supported/unsupported standard vs compact capabilities. |
-| `Refactor_Decisions_20260703_CN.md` | Current refactor decisions, rejected migrations, review gates. |
-| `Legacy_MLEM_B1B2_Parity_CN.md` | B1/B2 regression policy; B1 is the release gate, B2 is reference-only. |
-| `Format_Reader_Matrix_CN.md` | 6module file format vs reader/tool matrix. |
-| `PSF_Model_Differences_CN.md` | Operator PSF vs projection-domain PSF boundary. |
-| `CTAC_AutoMu_Validation_CN.md` | Uniform-cylinder CTAC / auto-mu primary validation gate and debug scripts. |
-| `CTAC_Pinhole_Attenuation_Model_Decision_20260708_CN.md` | Decision record for keeping `att[angle, voxel]` fused CTAC and deferring production row/bin/Siddon CTAC. |
-| `RECON_FLOW_CN.md` | Stable high-level reconstruction flow. |
+|---|---|
+| `RELEASE_20260710_CN.md` | 当前 release 边界、包布局、签收 |
+| `USAGE_CN.md` | 公开 CLI |
+| `CLI_CHANGES_CN.md` | 废弃/改名参数速查 |
+| `PARAMETERS_CN.template.md` | 发布包参数说明模板 |
+| `README_RC.template.md` | 发布包 README 模板 |
+| `Capability_Matrix_CN.md` | 能力矩阵 + 耐久决策 |
+| `Format_Reader_Matrix_CN.md` | 6module 格式 × 读者 |
+| `Legacy_MLEM_B1B2_Parity_CN.md` | B1/260601 回归；B2 reference-only |
+| `CTAC_AutoMu_Validation_CN.md` | CTAC / auto-mu 调试与主 gate |
+| `Recon_Interface_Migration_Field_CN.md` | 现场 ThreeModalities 重建接口迁移 |
 
-## Archived
+## How to decide
 
-Historical execution logs, old compact design drafts, and superseded audit plans are in `doc/archive/README.md`.
+- 改 CLI / 默认配置 → 更新 `USAGE_CN.md`、`CLI_CHANGES_CN.md`，必要时改 template。
+- 改能力边界 → 更新 `Capability_Matrix_CN.md`，并在 `RELEASE_*.md` 记一笔。
+- 现场集成 → `Recon_Interface_Migration_Field_CN.md`。
+- 不要恢复已删 archive；需要历史证据时查 git。

@@ -160,6 +160,7 @@ add_library(spect_cli STATIC
 target_include_directories(spect_cli PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(spect_cli PUBLIC spect_core)
@@ -252,6 +253,9 @@ target_link_libraries(SPECT_recon PRIVATE
   spect_sparse
   spect_filters
   spect_regularizer
+)
+target_include_directories(SPECT_recon PRIVATE
+  $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
 )
 
 if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)

@@ -7,16 +7,15 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, NVRTC kernels for PSF/RDP/TV gradients and TV proximal (Chambolle-Pock).
 - **6-module matrix generation reference**: `6module_bak_src/` holds CUDA v2/v4 system-matrix generators and standalone MLEM reference (legacy).
 
-## Project Status (Snapshot: 2026-07-06)
+## Project Status (Snapshot: 2026-07-08)
 
-- **Default system matrix (Release)**: `test_data/6module/260601` — `-chunkCSRDir`; B1 plain 50-iter vs `test_data/sys_260601_recon_ref/recon_iter050.img` **signed off** (`rmse/ref_mean ≈ 1.06×10⁻⁵`, projection `PSC_6module_24pin_10MBq_600s_test_1.bin`). See `doc/RELEASE_20260706_CN.md`.
-- **260525 / B2**: legacy `test_data/legacy_ref/` reference lineage not fully confirmed; not a release hard gate in this cut.
-- **Target GPUs**: RTX 4070 (sm_89), RTX 5060/5070 (sm_120); CUDA 12.8+ recommended for Blackwell.
-- **Performance baseline**: v28 alternating chunk order — **117.6 s @ 50 iter** (PSC single-bed, CUDA, no PSF/filter/reg).
-- **Latest verified test baseline**: `spect_tests` **263/263** (2026-07-06); latest CUDA scaffold baseline remains `24/24` from 2026-06-10.
-- **Release regression**: B1 / 260601 50-iter plain MLEM vs `test_data/sys_260601_recon_ref/recon_iter050.img` — `rmse_over_reference_mean ≈ 1.06e-5` (see `doc/Legacy_MLEM_B1B2_Parity_CN.md`).
-- **Optimization algorithms**: MLEM/OSEM, BSREM-II, ADMM (with RDP and TV proximal via Chambolle-Pock).
-- Deterministic mode remains optional (`SPECT_DETERMINISTIC=ON`) for regression checks; performance path keeps it off by default.
+- **Current release**: `doc/RELEASE_20260708_CN.md` (`SPECT_recon_rc_20260708_*`).
+- **Default system matrix**: 260601 compact chunk (`-chunkCSRDir` / `bin/matrix/260601` auto-discovery). B1 plain 50-iter vs `test_data/sys_260601_recon_ref/recon_iter050.img` signed off (`rmse/ref_mean ≈ 1.06×10⁻⁵`).
+- **260525 / B2**: legacy compatibility / reference-only; not a release hard gate.
+- **Target GPUs**: RTX 4070 (sm_89), RTX 5060/5070 (sm_120).
+- **Public backends**: CUDA-only sparse ops; cuFFT Butterworth; PSF Operator/None; regularizers TV/RDP.
+- **Optimization algorithms**: MLEM/OSEM, BSREM-II, ADMM (TV proximal via Chambolle-Pock). Compact path: MLEM/BSREM, subsets=1 only.
+- See `doc/Capability_Matrix_CN.md` and `doc/Legacy_MLEM_B1B2_Parity_CN.md`.
 
 **Project Structure**
 - **Core Code**: [include/](include/), [src/](src/) — modular C++17 implementation
@@ -67,7 +66,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-cropEnd <top[,end]>` | Crop final output Z top/end slices after output flips. |
-| `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Flip each `-dfList` bed segment on output / flip whole output volume on Z / flip whole output volume on X. Defaults: `1` / `0` / `0`. |
+| `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default; single-file `-loadCSR`+`-compactMeta` + `xflip` → **`-zbedflip 1`**. |
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
 | `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI args override config. |
 | `-vb 0/1/2` | Verbosity (0=quiet, 1=info default, 2=debug). |
@@ -75,6 +74,8 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 ## Multi-bed reconstruction
 
 Use `-dfList` to load multiple bed projections at once. The list may contain 1 to 5 beds. If paths contain `BedN`, `-dfList` and `-bProjList` are sorted by numeric bed order before loading. `-bedOverlap` is a fixed Bed1..Bed5 table: slot `b1` applies to `Bed1-Bed2`, `b2` to `Bed2-Bed3`, `b3` to `Bed3-Bed4`, and `b4` to `Bed4-Bed5`; `b5` is kept as the fixed five-bed placeholder. For example, `Bed2,Bed3,Bed4` uses `b2,b3`. The reconstruction dimensions in `-dim` are **per-bed** sizes; the combined output Z dimension becomes `Nz * beds` when `-bedOverlap=0`, or `Nz * beds - sum(overlaps)` when overlaps are enabled. Beds are processed using **Virtual Bed Stacking**, meaning system matrix memory usage remains identical to a single bed. Background projections can be supplied via `-bProjList`. Memory mapping (`-mapCSR on`) is supported for multi-bed; when `-ctac` is enabled, the recon uses dynamic on-the-fly attenuation factors so the mapped CSR remains read-only.
+
+The shipped multi-bed default is `bed_overlap=16,16,16,0,0` with `crop_end=0,0`; use the same values for the mouse and spiral-hose validation datasets. `crop_end` remains zero so valid signal is not removed at the global ends.
 
 Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z; `-xoutflip 1` flips the final stitched output in X. `-cropEnd top,end` is applied after those flips and is only responsible for final top/end trimming.
 
@@ -115,15 +116,14 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 ## Documentation
 
 ### Quick Links
-- **[Usage (中文)](doc/USAGE_CN.md)** — CLI reference and examples
-- **[Reconstruction Flow (中文)](doc/RECON_FLOW_CN.md)** — end-to-end pipeline
-- **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout and cache env vars
-- **[Documentation Index](doc/README.md)** — current docs vs archived evidence
-- **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — current compact/standard support boundary
-- **[Release 2026-07-07](doc/RELEASE_20260707_CN.md)** — current release gate and package layout
-- **[Scripts](scripts/README.md)** — L-curve analysis and helper script entrypoints
-- **[Refactor Decisions](doc/Refactor_Decisions_20260703_CN.md)** — current decisions and rejected migrations
-- **[Legacy B1/B2 Parity](doc/Legacy_MLEM_B1B2_Parity_CN.md)** — 260601 release regression policy
+- **[Documentation Index](doc/README.md)** — maintained docs only
+- **[Release 2026-07-08](doc/RELEASE_20260708_CN.md)** — current release boundary
+- **[Usage (中文)](doc/USAGE_CN.md)** — CLI reference
+- **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — support boundary and durable decisions
+- **[Field recon migration](doc/Recon_Interface_Migration_Field_CN.md)** — ThreeModalities → current RC
+- **[Legacy B1/B2 Parity](doc/Legacy_MLEM_B1B2_Parity_CN.md)** — 260601 release regression
+- **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout
+- **[Scripts](scripts/README.md)** — validation and helper scripts
 
 ## Environment variables (compact / CUDA)
 

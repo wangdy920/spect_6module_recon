@@ -13,6 +13,7 @@
 #include "app/ReconMetrics.h"
 #include "cli/ArgumentParser.h"
 #include "cli/ExitCodes.h"
+#include "cli/Version.h"
 #include "core/Masks.h"
 #include "core/ReconLimits.h"
 #include "cuda/CompactSymmetricProjector.h"
@@ -181,7 +182,11 @@ int runProgram(int argc, char **argv) {
   } else {
     logWarn("Failed to create log file at: " + makeDefaultLogPath(logArgs).string());
   }
-  logDebug("Command line: " + makeCommandLineString(argc, argv));
+
+  const std::string commandLine = makeCommandLineString(argc, argv);
+  logInfo(std::string("=== SPECT_recon ") + spect::cli::versionString() +
+          " ===");
+  logInfo("Command line: " + commandLine);
   reportConfigStatus(args);
 
   try {
@@ -205,11 +210,11 @@ int runProgram(int argc, char **argv) {
     spect::io::CompactSymmetryMetadata compactMeta;
     std::string compactMetaPath;
 
-    if (compactChunkLayout) {
+    if (compactLayoutRequested) {
       compactMetaPath = resolveCompactMetadataPath(args);
       compactMeta = spect::io::loadCompactSymmetryMetadata(compactMetaPath);
       applyCompactMetadataGeometry(args, compactMeta);
-      logInfo("compact chunk metadata geometry loaded from " + compactMetaPath +
+      logInfo("compact metadata geometry loaded from " + compactMetaPath +
               " (mode=" + spect::io::compactSymmetryModeName(compactMeta.mode) +
               ", compactRows=" + std::to_string(compactMeta.compactRows()) +
               ", fullRows=" + std::to_string(compactMeta.fullRows()) + ")");
@@ -227,7 +232,7 @@ int runProgram(int argc, char **argv) {
     for (const std::string &warning : bedSetup.warnings)
       logWarn(warning);
     logInfo(bedSetup.summary);
-    printReconArgs(args);
+    printReconArgs(args, commandLine);
 
     std::filesystem::create_directories(args.outputDir);
 

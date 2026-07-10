@@ -9,6 +9,7 @@
 | --- | --- |
 | `-alg mlem|bsrem|admm` | `-opti mlem|bsrem|admm` |
 | `-sparseBackend cpu|cuda` / `-spBackend ...` | 删除该参数；稀疏后端固定 CUDA |
+| `-v <0\|1\|2>`（旧 verbosity 别名） | 改用 `-vb <0\|1\|2>`；**`-v` / `--version` 现为输出版本号** |
 | `-butterBackend fftw|cufft|auto` | 删除该参数；Butterworth 后端固定 CUDA/cuFFT |
 | `-psf <sigma>` | `-psf <fwhm_mm[,N]>`，默认 `1.5,4` |
 | `-psfProj` | 删除；公开 PSF 只保留 image-domain Operator |

@@ -53,7 +53,7 @@ cd D:\path\to\<package_root>
 ```powershell
 .\bin\SPECT_recon.exe `
   -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin;D:\scan\Bed3.bin;D:\scan\Bed4.bin" `
-  -bedOverlap 0,0,0,0,0 `
+  -bedOverlap 16,16,16,0,0 `
   -o recon_multibed `
   -it 50:5
 ```
@@ -77,9 +77,9 @@ cd D:\path\to\<package_root>
 
 ```ini
 [MultiBed]
-bed_overlap = 0,0,0,0,0
+bed_overlap = 16,16,16,0,0
 crop_end    = 0,0
-z_bed_flip  = 1
+z_bed_flip  = 0
 z_out_flip  = 0
 x_out_flip  = 0
 ```
@@ -94,6 +94,13 @@ x_out_flip  = 0
 ```
 
 处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。
+
+矩阵入口与预处理投影变体必须配对：
+
+| 矩阵入口 | `PROJECTION_VARIANT` | `z_bed_flip` / `-zbedflip` |
+|---|---|---|
+| `-chunkCSRDir`（推荐） | `identity` | 保留本包 `[MultiBed]` 默认，勿擅自改 |
+| `-loadCSR` + `-compactMeta`（单文件 legacy） | `xflip` / `flipx` | **必须为 `1`（每床翻转）** |
 
 ## 常用覆盖参数
 
