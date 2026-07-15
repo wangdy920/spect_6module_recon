@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <numeric>
 #include <vector>
 
 #include "app/BSREMReconstructor.h"
@@ -10,6 +11,7 @@
 #include "app/ProjectionOps.h"
 #include "app/ReconConfig.h"
 #include "cuda/CudaConfig.h"
+#include "cuda/CompactSymmetricProjector.h"
 #include "cuda/ProjDomainChunked.h"
 #include "cuda/VolumeOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
@@ -777,6 +779,103 @@ TEST(CudaScaffoldTest, VolumePsfMatchesCpuWhenCudaAvailable) {
     }
 }
 
+TEST(CudaScaffoldTest, CompactFinalForwardProjectionMatchesExplicitToyMatrix) {
+    if (!spect::cuda::isCudaAvailable()) {
+        GTEST_SKIP() << "No CUDA device available in the current runtime.";
+    }
+
+    spect::io::CompactSymmetryMetadata meta;
+    meta.Nx = 2;
+    meta.Ny = 2;
+    meta.Nz = 2;
+    meta.totalVoxels = 8;
+    meta.fullNumAngles = 16;
+    meta.compactNumAngles = 3;
+    meta.detNx = 2;
+    meta.detNz = 2;
+    meta.compactDetZ = 1;
+    meta.compactRaysPerAngle = 2;
+    meta.totalRows = 6;
+    meta.useZSym = true;
+    meta.use45Sym = true;
+    meta.symCode = 45;
+    meta.symmetryOrder = 8;
+    meta.mode = spect::io::CompactSymmetryMode::Sym45Z;
+
+    const std::vector<uint32_t> rowPtr = {0, 2, 3, 5, 6, 8, 10};
+    const std::vector<uint32_t> colIdx = {0, 3, 5, 1, 6, 2, 4, 7, 0, 6};
+    const std::vector<float> values = {1.0f, 0.5f, 0.75f, 0.2f, 1.1f,
+                                       0.9f, 0.4f, 1.2f, 0.3f, 0.8f};
+    const auto compact = makeTinyIoMatrix(
+        rowPtr.data(), colIdx.data(), values.data(), meta.totalRows,
+        meta.totalVoxels, values.size());
+    const std::vector<double> image = {0.5, 1.0, 1.5, 2.0,
+                                       2.5, 3.0, 3.5, 4.0};
+    std::vector<double> expected(static_cast<size_t>(meta.fullRows()), 0.0);
+    for (int sym = 0; sym < meta.xySymmetryCount(); ++sym) {
+        for (int z = 0; z < meta.zBranchCount(); ++z) {
+            const bool zMirror = z != 0;
+            for (int row = 0; row < meta.totalRows; ++row) {
+                uint64_t fullRow = 0;
+                if (!spect::io::fullProjectionIndexFromCompactRow(
+                        meta, row, sym, zMirror, fullRow)) {
+                    continue;
+                }
+                for (uint32_t k = rowPtr[static_cast<size_t>(row)];
+                     k < rowPtr[static_cast<size_t>(row) + 1u]; ++k) {
+                    const size_t fullCol = spect::io::mapSym45ZVoxelIndex(
+                        colIdx[static_cast<size_t>(k)], meta.Nx, meta.Ny,
+                        meta.Nz, sym, zMirror);
+                    expected[static_cast<size_t>(fullRow)] +=
+                        static_cast<double>(values[static_cast<size_t>(k)]) *
+                        image[fullCol];
+                }
+            }
+        }
+    }
+
+    std::vector<double> actual(expected.size(), 0.0);
+    ASSERT_TRUE(spect::cuda::computeCompactSymmetricForwardProjectionCUDA(
+        compact, meta, image.data(), 1, actual.data()));
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1e-5) << "row=" << i;
+    }
+}
+
+TEST(CudaScaffoldTest, VolumePsfForwardAdjointDotProductAtBoundaries) {
+    if (!spect::cuda::isCudaAvailable()) {
+        GTEST_SKIP() << "No CUDA device available in the current runtime.";
+    }
+
+    const int Nx = 5, Ny = 4, Nz = 3;
+    const size_t total = static_cast<size_t>(Nx) * Ny * Nz;
+    std::vector<double> x(total);
+    std::vector<double> y(total);
+    for (size_t i = 0; i < total; ++i) {
+        x[i] = 0.2 + static_cast<double>((7 * i + 3) % 19) / 11.0;
+        y[i] = 0.1 + static_cast<double>((5 * i + 1) % 23) / 13.0;
+    }
+    x.front() += 3.0;
+    x.back() += 2.0;
+    y[static_cast<size_t>(Nx) * Ny - 1] += 4.0;
+    const std::vector<double> kx = {0.1, 0.2, 0.4, 0.2, 0.1};
+    const std::vector<double> ky = {0.2, 0.6, 0.2};
+    const std::vector<double> kz = {0.15, 0.7, 0.15};
+
+    auto gx = x;
+    auto gty = y;
+    ASSERT_TRUE(spect::cuda::applySeparableConv3DInplaceCUDA(
+        gx, Nx, Ny, Nz, kx, ky, kz, true));
+    ASSERT_TRUE(spect::cuda::applySeparableConv3DAdjointInplaceCUDA(
+        gty, Nx, Ny, Nz, kx, ky, kz, true));
+
+    const double lhs = std::inner_product(gx.begin(), gx.end(), y.begin(), 0.0);
+    const double rhs = std::inner_product(x.begin(), x.end(), gty.begin(), 0.0);
+    const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+    EXPECT_NEAR(lhs, rhs, 2e-6 * scale);
+}
+
 TEST(CudaScaffoldTest, RdpGradientMatchesCpuWhenCudaAvailable) {
     if (!spect::cuda::isCudaAvailable()) {
         GTEST_SKIP() << "No CUDA device available in the current runtime.";
@@ -799,12 +898,16 @@ TEST(CudaScaffoldTest, RdpGradientMatchesCpuWhenCudaAvailable) {
         1, 1, 1,
         1, 1, 1,
         1, 1, 1};
+    std::vector<double> ct(image.size(), 0.0);
+    for (size_t i = image.size() / 2; i < image.size(); ++i)
+        ct[i] = 0.03;
 
     spect::RegConf conf;
     conf.type = spect::RegType::RDP;
     conf.delta = 1e-3;
     conf.gamma = 0.2;
     conf.skip_outside_mask = true;
+    conf.ct_image = &ct;
 
     std::vector<double> gradCpu;
     std::vector<double> gradCuda;
@@ -812,7 +915,8 @@ TEST(CudaScaffoldTest, RdpGradientMatchesCpuWhenCudaAvailable) {
                                              gradCpu, 1);
     ASSERT_TRUE(spect::cuda::computeRDPGradientCUDA(
         image, Nx, Ny, Nz, conf.delta, conf.gamma, &mask,
-        conf.skip_outside_mask, gradCuda));
+        conf.skip_outside_mask, gradCuda, conf.ct_image, conf.ct_sigma,
+        conf.ct_weight_floor));
 
     ASSERT_EQ(gradCpu.size(), gradCuda.size());
     for (size_t i = 0; i < gradCpu.size(); ++i) {
@@ -842,11 +946,15 @@ TEST(CudaScaffoldTest, TvGradientMatchesCpuWhenCudaAvailable) {
         1, 1, 1,
         1, 1, 1,
         1, 1, 1};
+    std::vector<double> ct(image.size(), 0.0);
+    for (size_t i = 0; i < image.size(); ++i)
+        ct[i] = 0.002 * static_cast<double>(i % 7);
 
     spect::RegConf conf;
     conf.type = spect::RegType::TVIsotropic;
     conf.tv_eps = 1e-6;
     conf.skip_outside_mask = true;
+    conf.ct_image = &ct;
 
     std::vector<double> gradCpu;
     std::vector<double> gradCuda;
@@ -854,12 +962,39 @@ TEST(CudaScaffoldTest, TvGradientMatchesCpuWhenCudaAvailable) {
                                              gradCpu, 1);
     ASSERT_TRUE(spect::cuda::computeTVGradientCUDA(
         image, Nx, Ny, Nz, conf.tv_eps, &mask,
-        conf.skip_outside_mask, gradCuda));
+        conf.skip_outside_mask, gradCuda, conf.ct_image, conf.ct_sigma,
+        conf.ct_weight_floor));
 
     ASSERT_EQ(gradCpu.size(), gradCuda.size());
     for (size_t i = 0; i < gradCpu.size(); ++i) {
         EXPECT_NEAR(gradCuda[i], gradCpu[i], 1e-5) << "index=" << i;
     }
+}
+
+TEST(CudaScaffoldTest, TvProxRegisteredCtPreservesCtEdge) {
+    if (!spect::cuda::isCudaAvailable()) {
+        GTEST_SKIP() << "No CUDA device available in the current runtime.";
+    }
+
+    const int Nx = 6, Ny = 1, Nz = 1;
+    const std::vector<double> image = {1.0, 1.0, 1.0, 4.0, 4.0, 4.0};
+    const std::vector<double> constantCt(image.size(), 0.0);
+    const std::vector<double> edgeCt = {0.0, 0.0, 0.0, 0.08, 0.08, 0.08};
+    std::vector<double> activityOnly;
+    std::vector<double> constantCtResult;
+    std::vector<double> edgeCtResult;
+
+    ASSERT_TRUE(spect::cuda::computeTVProxCUDA(
+        image, Nx, Ny, Nz, 0.5, 80, activityOnly));
+    ASSERT_TRUE(spect::cuda::computeTVProxCUDA(
+        image, Nx, Ny, Nz, 0.5, 80, constantCtResult, &constantCt, 0.01, 0.05));
+    ASSERT_TRUE(spect::cuda::computeTVProxCUDA(
+        image, Nx, Ny, Nz, 0.5, 80, edgeCtResult, &edgeCt, 0.01, 0.05));
+
+    for (size_t i = 0; i < image.size(); ++i)
+        EXPECT_NEAR(constantCtResult[i], activityOnly[i], 1e-10);
+    EXPECT_GT(edgeCtResult[3] - edgeCtResult[2],
+              activityOnly[3] - activityOnly[2]);
 }
 
 TEST(CudaScaffoldTest, FloatPsfMatchesDoublePsfWhenCudaAvailable) {

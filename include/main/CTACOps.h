@@ -7,29 +7,9 @@
 
 namespace spect::main {
 
-/**
- * @brief Attenuation factor model used by CTAC / Chang's AC.
- *
- * - PerVoxelApprox: legacy behaviour, factor = exp(-mu[voxel]) replicated to
- *   every angle. Ignores voxel spacing, angle and ray path. Kept only for
- *   backwards comparison; not quantitative.
- * - LineIntegral: first-order parallel-ray attenuation,
- *   factor(angle, voxel) = exp(-Int mu ds) integrated from the voxel centre
- *   toward the detector along the angle-dependent ray direction. The mu map
- *   must be in mm^-1 and is integrated with the physical voxel spacing.
- */
-enum class CTACModel { PerVoxelApprox, LineIntegral };
-
 void applyChangsAC(std::vector<double> &image, const std::vector<double> &muMap,
                    int nx, int ny, int nz, double dx, double dy, double dz,
-                   int numAngles, int threads,
-                   CTACModel model = CTACModel::LineIntegral,
-                   int rotationSign = 1);
-
-/// Legacy per-voxel exp(-mu) factors replicated per angle (see CTACModel).
-std::vector<uint16_t> computeAttenFactorsPerVoxel(
-    const std::vector<double> &muMap, int nx, int ny, int nz, double dx,
-    double dy, double dz, int numAngles, int threads);
+                   int numAngles, int threads, int rotationSign = 1);
 
 /**
  * @brief Angle-dependent parallel-ray line-integral attenuation factors.
@@ -48,22 +28,14 @@ std::vector<uint16_t> computeAttenFactorsPerVoxel(
  * modelled).
  *
  * Result layout: factors[angle * voxels + voxel], quantised to uint16
- * (65535 == 1.0), identical to computeAttenFactorsPerVoxel.
+ * (65535 == 1.0).
  */
-std::vector<uint16_t> computeAttenFactorsLineIntegral(
+std::vector<uint16_t> computeAttenFactors(
     const std::vector<double> &muMap, int nx, int ny, int nz, double dx,
     double dy, double dz, int numAngles, int rotationSign, int threads);
 
-/// Dispatch helper over CTACModel.
-std::vector<uint16_t> computeAttenFactors(
-    CTACModel model, const std::vector<double> &muMap, int nx, int ny, int nz,
-    double dx, double dy, double dz, int numAngles, int rotationSign,
-    int threads);
-
 void applyCTACToCSR(spect::io::CSR &csr, const std::vector<double> &muMap,
-                    int nx, int ny, int nz, double dx, double dy, double dz,
-                    int numAngles, int threads,
-                    CTACModel model = CTACModel::LineIntegral,
-                    int rotationSign = 1);
+                     int nx, int ny, int nz, double dx, double dy, double dz,
+                     int numAngles, int threads, int rotationSign = 1);
 
 } // namespace spect::main

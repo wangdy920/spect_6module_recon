@@ -84,6 +84,35 @@ TEST(BedOffsetsTest, ZeroOverlapIdenticalLocalBedsAccumulateIndependently) {
               local);
 }
 
+TEST(BedOffsetsTest, VirtualZFlipMapsLocalSlicesIntoPhysicalGlobalOrder) {
+    const int nx = 1;
+    const int ny = 1;
+    const int baseNz = 3;
+    std::vector<double> global(3, 0.0);
+    const std::vector<double> local{1.0, 2.0, 3.0};
+
+    accumulateBedVolumeToGlobal(global, local, nx, ny, baseNz, 0, true);
+
+    EXPECT_EQ(global, (std::vector<double>{3.0, 2.0, 1.0}));
+    EXPECT_EQ(extractBedVolumeFromGlobal(global, nx, ny, baseNz, 0, true),
+              local);
+}
+
+TEST(BedOffsetsTest, VirtualZFlipUsesTheSamePhysicalOverlapForBothBeds) {
+    const int nx = 1;
+    const int ny = 1;
+    const int baseNz = 3;
+    const auto starts = computeBedZOffsets(2, baseNz, {1});
+    std::vector<double> global(5, 0.0);
+
+    accumulateBedVolumeToGlobal(global, {1.0, 2.0, 3.0}, nx, ny, baseNz,
+                                starts[0], true);
+    accumulateBedVolumeToGlobal(global, {4.0, 5.0, 6.0}, nx, ny, baseNz,
+                                starts[1], true);
+
+    EXPECT_EQ(global, (std::vector<double>{3.0, 2.0, 7.0, 5.0, 4.0}));
+}
+
 } // namespace test
 } // namespace app
 } // namespace spect

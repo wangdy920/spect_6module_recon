@@ -116,6 +116,7 @@ TEST(ReconSetupTest, PrepareBedSetupReplicatesSingleOverlap) {
   args.Nz = 100;
   args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
   args.bedOverlaps = {16};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -123,9 +124,49 @@ TEST(ReconSetupTest, PrepareBedSetupReplicatesSingleOverlap) {
   EXPECT_EQ(result.bedCount, 4);
   EXPECT_EQ(args.bedCount, 4);
   EXPECT_EQ(args.bedOverlaps, (std::vector<int>{16, 16, 16}));
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{16, 16, 16}));
   EXPECT_EQ(result.totalOverlap, 48);
   EXPECT_EQ(args.Nz, 352);
   EXPECT_TRUE(result.warnings.empty());
+}
+
+TEST(ReconSetupTest, AdoptReconDimsFromRegisteredCtHintWhenNotExplicit) {
+  const auto path = makeTempMhdPath();
+  writeMinimalMhd(path, 54, 55, 56);
+
+  ReconArgs args;
+  args.useReg = true;
+  args.regCtPath = path.string();
+
+  std::string warning;
+  const bool changed = adoptReconDimsFromHint(args, &warning);
+
+  EXPECT_TRUE(changed);
+  EXPECT_EQ(args.Nx, 54);
+  EXPECT_EQ(args.Ny, 55);
+  EXPECT_EQ(args.Nz, 56);
+  EXPECT_NE(warning.find("adopting 54x55x56"), std::string::npos);
+
+  std::filesystem::remove(path);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupCanReserveOverlapForOutputOnly) {
+  ReconArgs args;
+  args.Nx = 108;
+  args.Ny = 108;
+  args.Nz = 80;
+  args.projPaths = {"Bed1.bin", "Bed2.bin", "Bed3.bin", "Bed4.bin"};
+  args.bedOverlaps = {8, 8, 8, 0, 0};
+  args.bedOverlapInRecon = false;
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{8, 8, 8}));
+  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0, 0}));
+  EXPECT_EQ(result.totalOverlap, 0);
+  EXPECT_EQ(args.Nz, 320);
+  EXPECT_NE(result.summary.find("overlapMode=output-sigmoid"),
+            std::string::npos);
 }
 
 TEST(ReconSetupTest, PrepareBedSetupUsesFixedFiveBedOverlapTable) {
@@ -135,6 +176,7 @@ TEST(ReconSetupTest, PrepareBedSetupUsesFixedFiveBedOverlapTable) {
   args.Nz = 100;
   args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
   args.bedOverlaps = {10, 20, 30, 40, 50};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -151,6 +193,7 @@ TEST(ReconSetupTest, PrepareBedSetupPadsMismatchedOverlapList) {
   args.Nz = 100;
   args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
   args.bedOverlaps = {16, 16};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -168,6 +211,7 @@ TEST(ReconSetupTest, PrepareBedSetupClampsInvalidOverlapValues) {
   args.Nz = 100;
   args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
   args.bedOverlaps = {-4, 120, 16};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -200,6 +244,7 @@ TEST(ReconSetupTest, PrepareBedSetupMatchesFixedOverlapTableForSubsetBeds) {
   args.Nz = 100;
   args.projPaths = {"case_Bed2.bin", "case_Bed3.bin", "case_Bed4.bin"};
   args.bedOverlaps = {11, 22, 33, 44, 55};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -216,6 +261,7 @@ TEST(ReconSetupTest, PrepareBedSetupUsesSequentialBedsWhenPathHasNoBedNumber) {
   args.Nz = 100;
   args.projPaths = {"first.bin", "second.bin", "third.bin"};
   args.bedOverlaps = {5, 6, 7, 8, 9};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -231,6 +277,7 @@ TEST(ReconSetupTest, PrepareBedSetupUsesZeroForNonAdjacentSubsetBeds) {
   args.Nz = 100;
   args.projPaths = {"case_Bed1.bin", "case_Bed3.bin"};
   args.bedOverlaps = {5, 6, 7, 8, 9};
+  args.bedOverlapInRecon = true;
 
   const BedSetupResult result = prepareBedSetup(args);
 

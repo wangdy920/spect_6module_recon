@@ -232,6 +232,8 @@ inline std::vector<double> loadVolume(const std::string &path, int &Nx, int &Ny,
         }
     } else {
         raw.read(reinterpret_cast<char*>(out.data()), numel * sizeof(double));
+        if (!raw)
+            throw std::runtime_error("Unexpected EOF reading RAW file");
     }
     return out;
 }
@@ -275,6 +277,8 @@ inline std::vector<double> loadVolumeWithSpacing(
     if (info.isFloat) {
         std::vector<float> buf(numel);
         raw.read(reinterpret_cast<char*>(buf.data()), numel * sizeof(float));
+        if (!raw)
+            throw std::runtime_error("Unexpected EOF reading RAW file: " + info.rawPath);
 #ifdef _OPENMP
         #pragma omp parallel for schedule(static)
 #endif
@@ -282,6 +286,8 @@ inline std::vector<double> loadVolumeWithSpacing(
             out[i] = static_cast<double>(buf[i]);
     } else {
         raw.read(reinterpret_cast<char*>(out.data()), numel * sizeof(double));
+        if (!raw)
+            throw std::runtime_error("Unexpected EOF reading RAW file: " + info.rawPath);
     }
     return out;
 }

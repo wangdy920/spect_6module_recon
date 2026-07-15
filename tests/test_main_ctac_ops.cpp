@@ -25,8 +25,8 @@ TEST(CTACOpsTest, ComputeAttenFactorsZeroMuAllOnes) {
   const int numAngles = 3;
   const std::vector<double> muMap(static_cast<size_t>(nx) * ny * nz, 0.0);
 
-  const std::vector<uint16_t> factors = computeAttenFactorsPerVoxel(
-      muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, 1);
+  const std::vector<uint16_t> factors = computeAttenFactors(
+      muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, 1, 1);
 
   ASSERT_EQ(factors.size(), static_cast<size_t>(numAngles) * muMap.size());
   for (uint16_t value : factors) {
@@ -88,7 +88,7 @@ TEST(CTACOpsTest, LineIntegralZeroMuAllOnes) {
   const int numAngles = 4;
   const std::vector<double> muMap(static_cast<size_t>(nx) * ny * nz, 0.0);
 
-  const std::vector<uint16_t> factors = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> factors = computeAttenFactors(
       muMap, nx, ny, nz, 0.5, 0.5, 0.5, numAngles, 1, 1);
 
   ASSERT_EQ(factors.size(), static_cast<size_t>(numAngles) * muMap.size());
@@ -112,7 +112,7 @@ TEST(CTACOpsTest, LineIntegralSlabIsAngleDependent) {
     for (int ix = 0; ix < nx; ++ix)
       muMap[static_cast<size_t>(iy) * nx + ix] = mu;
 
-  const std::vector<uint16_t> factors = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> factors = computeAttenFactors(
       muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, 1, 1);
 
   const size_t voxels = muMap.size();
@@ -140,9 +140,9 @@ TEST(CTACOpsTest, LineIntegralScalesWithVoxelSpacing) {
     for (int ix = 0; ix < nx; ++ix)
       muMap[static_cast<size_t>(iy) * nx + ix] = mu;
 
-  const std::vector<uint16_t> f1 = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> f1 = computeAttenFactors(
       muMap, nx, ny, nz, 1.0, 1.0, 1.0, 1, 1, 1);
-  const std::vector<uint16_t> f2 = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> f2 = computeAttenFactors(
       muMap, nx, ny, nz, 2.0, 2.0, 2.0, 1, 1, 1);
 
   const size_t centre = static_cast<size_t>(20) * nx + 20;
@@ -165,9 +165,9 @@ TEST(CTACOpsTest, LineIntegralRotationSignFlipsLateralView) {
     for (int ix = 30; ix <= 40; ++ix)
       muMap[static_cast<size_t>(iy) * nx + ix] = mu;
 
-  const std::vector<uint16_t> plus = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> plus = computeAttenFactors(
       muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, 1, 1);
-  const std::vector<uint16_t> minus = computeAttenFactorsLineIntegral(
+  const std::vector<uint16_t> minus = computeAttenFactors(
       muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, -1, 1);
 
   const size_t voxels = muMap.size();
@@ -176,26 +176,6 @@ TEST(CTACOpsTest, LineIntegralRotationSignFlipsLateralView) {
   EXPECT_GT(factorAt(plus, voxels, 1, centre), 0.99);
   // sign=-1, theta=-90: ray (+1,0) crosses it.
   EXPECT_LT(factorAt(minus, voxels, 1, centre), std::exp(-mu * 9.0));
-}
-
-TEST(CTACOpsTest, DispatchPerVoxelMatchesLegacy) {
-  const int nx = 5;
-  const int ny = 5;
-  const int nz = 2;
-  const int numAngles = 3;
-  std::vector<double> muMap(static_cast<size_t>(nx) * ny * nz, 0.0);
-  for (size_t i = 0; i < muMap.size(); ++i)
-    muMap[i] = 0.01 * static_cast<double>(i % 7);
-
-  const std::vector<uint16_t> legacy = computeAttenFactorsPerVoxel(
-      muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles, 1);
-  const std::vector<uint16_t> dispatched = computeAttenFactors(
-      CTACModel::PerVoxelApprox, muMap, nx, ny, nz, 1.0, 1.0, 1.0, numAngles,
-      1, 1);
-
-  ASSERT_EQ(legacy.size(), dispatched.size());
-  for (size_t i = 0; i < legacy.size(); ++i)
-    EXPECT_EQ(legacy[i], dispatched[i]);
 }
 
 } // namespace spect::main::test

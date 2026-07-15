@@ -73,6 +73,7 @@ compact chunk 矩阵默认识别优先级：
 | `-matrixLayout <standard\|compact-symmetric>` | 矩阵布局；`compact`/`compact_symmetric` 是别名 |
 | `-compactMeta <path>` | compact metadata sidecar；`-loadCSR + -compactMeta` 为 260525 legacy 入口 |
 | `-compactDenomCache <mhd>` | 复用/保存 compact global denominator cache；PSF/FWHM/床位组合需分文件 |
+| `-projectionResidual [on\|off]` | 仅 compact：最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
 
 无 CTAC 的 `-chunkCSRDir + compact-symmetric` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点、Joseph 和 PSF 口径，不匹配时不会复用。
@@ -143,7 +144,15 @@ compact chunk 矩阵默认识别优先级：
 | `TV` / `TVIsotropic` | `-reg TV,0.01,1e-6` |
 | `RDP` | `-reg RDP,beta,gamma,delta` |
 
-公开正则化只保留 TV/RDP。`-regBeta` 和 `-regDelta` 可作为简单覆盖；旧 anatomical/NLM/Tikhonov/MRP/LogCosh 入口与对应细调参数会在 parser 阶段拒绝。
+公开正则化只保留 TV/RDP。`-regBeta` 和 `-regDelta` 可作为简单覆盖；旧 anatomical/NLM/Tikhonov/MRP/LogCosh/Bowsher/PLS 入口与对应细调参数会在 parser 阶段拒绝。
+
+TV/RDP 可选使用已配准到重建网格的 CT（或 mu-map）作为边缘权重：
+
+```powershell
+-regCT registered_ct.mhd -regCtSigma 0.01 -regCtFloor 0.05
+```
+
+邻接体素权重为 `floor + (1-floor)*exp(-0.5*(ΔCT/sigma)^2)`。CT 边缘越强，跨边缘正则耦合越弱；`floor` 防止完全断开。显式 `-regCT` 优先，否则在已提供 `-attMap` 时复用同一配准体；两者均未提供时严格退化为 activity-only TV/RDP。`ct_sigma` 的单位必须与输入 CT 强度一致；HU CT 与 mm^-1 mu-map 不应共用同一数值标度。
 
 ---
 
@@ -161,7 +170,7 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | `-conv <params>` | legacy convolution 参数 |
 | `-joe <n>` | Joseph-like smoothing passes，默认 0 |
 
-注意：旧冻结包 `dist/release_candidates/SPECT_recon_rc_20260706_c1ee948` 的 `PARAMETERS_CN.md` 和二进制仍使用 `-psf <sigma>` 口径；当前最新代码和文档已改为 `-psf [fwhm_mm[,N]]`，新发布包应重新生成 `PARAMETERS_CN.md`。
+注意：`-psf` 单位为 FWHM mm（默认 `1.5,4`）。旧现场/冻结包若仍写 `-psf 0.637`，那是历史 sigma 口径，不要与当前 FWHM 混用。
 
 ---
 
@@ -181,6 +190,8 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 
 默认配置使用 `[CTAC] auto_mu_nuclide = Tc99m`，对应当前历史默认 `0.0152 mm^-1`。支持核素键：`Tc99m`、`I123`、`In111_171`、`In111_245`、`Lu177`、`I131`。`-ctacAutoMuValue` 或 `[CTAC] auto_mu_value` 仅用于调试覆盖。
 
+CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-voxel 实现。108×108×80、360 角度时按 16-angle batch 生成，临时 device factor 输出约 29 MiB；compact 系统矩阵 resident cache 仍可能主动使用其余显存，两者不应混作 factor 峰值。
+
 ---
 
 ## 多床位与输出变换
@@ -188,12 +199,22 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | 参数 | 说明 |
 |---|---|
 | `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` overlap 表；`b1=Bed1-Bed2`，只传一个值时复制到所有固定槽 |
+| `[MultiBed] overlap_in_recon` | `1`：overlap 参与协同重建；`0`：重建床位互不重叠，只在最终输出前拼接；默认 `0` |
+| `[MultiBed] crop_method` / `-bedCropMethod` | `sigmoid`：归一化 `k=12` 权重融合（默认）；`direct`：hard-cut 对照。`sigmoid` 要求 `overlap_in_recon=0` |
+| `[MultiBed] fov_radius_mm` | 最终输出的圆形 XY FOV 半径（mm）；`0` 关闭。当前 0.3 mm 数据的验证候选为 `15.0`（R50），边缘固定使用 4 voxel taper |
 | `-cropEnd <top[,end]>` | 最终输出 Z 轴裁剪，在输出翻转之后执行 |
-| `-zbedflip [0\|1]` | 对 `-dfList` 每个床位段单独 Z 翻转，默认 1 |
+| `-zbedflip [0\|1]` | 反转 `-dfList` 的床位局部 Z。compact 多床联合重建会在 forward/backward 与 denom 累积时使用虚拟映射 `global_z = bed_start + (baseNz - 1 - local_z)`，不再等到输出后翻转。映射范围由 `baseNz` 和 `-bedOverlap` 唯一确定；非联合路径仍按床位输出翻转。配对规则仍必须与矩阵和预处理方向一致 |
 | `-zoutflip [0\|1]` | 对最终整体输出再做 Z 翻转，默认 0 |
 | `-xoutflip [0\|1]` | 对最终整体输出做 X 翻转，默认 0 |
 
-`-dim` 表示单床位维度；最终输出 `Z = Nz * bed_count - sum(overlap)`。保存前处理顺序为：每床 Z 翻转 -> 整体 Z 翻转 -> 整体 X 翻转 -> `cropEnd` 裁剪。
+`-dim` 表示单床位维度；最终输出 `Z = Nz * bed_count - sum(overlap)`。`overlap_in_recon=0` 时迭代体数据暂为 `Nz * bed_count`，保存前按 `crop_method` 执行 hard-cut 或归一化 sigmoid 融合。只处理相邻床位的内部接缝，不裁剪首床起点或末床终点。完整输出顺序为：必要的每床 Z 翻转 -> overlap 输出拼接 -> 整体 Z/X 翻转 -> FOV -> `cropEnd`。
+
+预处理投影变体必须与矩阵入口配对（详见 `Recon_Interface_Migration_Field_CN.md` §2.5）：
+
+| 矩阵入口 | `PROJECTION_VARIANT` | `-zbedflip` |
+|---|---|---|
+| `-chunkCSRDir`（260601） | `identity` | 保留包默认配置 |
+| `-loadCSR` + `-compactMeta`（如 `matrix_6module.csrb`） | `xflip` / `flipx` | **`1`（每床翻转）** |
 
 ---
 
@@ -204,9 +225,10 @@ Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 | `-fout <dir/name>` | 输出路径前缀 |
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
-| `-vb <0\|1\|2>` / `-v <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
+| `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
+| `-v` / `--version` | 打印版本字符串并退出（形如 `20260710+ad3c1d4`） |
 
-默认输出 MHD/RAW 体数据与自动日志 `<outputName>_YYYYMMDD_HHMMSS_mmm.log`。
+默认输出 MHD/RAW 体数据与自动日志 `<outputName>_YYYYMMDD_HHMMSS_mmm.log`。重建开始时 INFO 日志会打印 `=== SPECT_recon <version> ===` 与完整 `Command line:`。
 
 ---
 

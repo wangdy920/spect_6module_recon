@@ -34,6 +34,9 @@ void writeMHD(const std::string &path, const std::vector<float> &data, int Nx,
   mhd << "ElementByteOrderMSB = " << (little_endian ? "False" : "True") << "\n";
   mhd << "HeaderSize = 0\n";
   mhd << "ElementDataFile = " << rawPath.filename().string() << "\n";
+  mhd.flush();
+  if (!mhd)
+    throw std::runtime_error("Failed writing MHD header: " + mhdPath.string());
 }
 
 void writeMHD(const std::string &path, const std::vector<double> &data, int Nx,
@@ -63,6 +66,9 @@ void writeMHD(const std::string &path, const std::vector<double> &data, int Nx,
   mhd << "ElementByteOrderMSB = " << (little_endian ? "False" : "True") << "\n";
   mhd << "HeaderSize = 0\n";
   mhd << "ElementDataFile = " << rawPath.filename().string() << "\n";
+  mhd.flush();
+  if (!mhd)
+    throw std::runtime_error("Failed writing MHD header: " + mhdPath.string());
 }
 
 } // namespace io

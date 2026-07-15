@@ -41,6 +41,7 @@ struct PSFConf {
     double fwhm_y = 0.0;
     double fwhm_z = 0.0;
     double fwhm_mm = 1.5;  // 简化接口，单位 mm
+    bool z_blur = true;     // false: XY-only operator PSF (identity Z kernel)
     
     // 体素尺寸（mm）
     double vox_x = 1.0;

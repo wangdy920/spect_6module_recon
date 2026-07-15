@@ -39,7 +39,7 @@ bool isFiniteAllZero(const std::vector<double> &volume) {
 
 void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
                      const ReconOpts &opts, const PSFKernels *psfKernels,
-                     int threads, bool allowPostSmooth) {
+                     int threads, bool allowPostSmooth, bool adjoint) {
   const bool useCuda = preferCudaVolumeOps(opts);
   if (((opts.psf.mode == PSFMode::Operator) ||
        (allowPostSmooth && opts.psf.mode == PSFMode::PostSmooth)) &&
@@ -47,9 +47,14 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
     if (useCuda) {
       std::vector<double> original = volume;
       const bool inputHasSignal = hasFiniteNonZeroSignal(original);
-      if (cuda::applySeparableConv3DInplaceCUDA(
-              volume, Nx, Ny, Nz, psfKernels->kx, psfKernels->ky,
-              psfKernels->kz)) {
+      const bool applied = adjoint
+                               ? cuda::applySeparableConv3DAdjointInplaceCUDA(
+                                     volume, Nx, Ny, Nz, psfKernels->kx,
+                                     psfKernels->ky, psfKernels->kz)
+                               : cuda::applySeparableConv3DInplaceCUDA(
+                                     volume, Nx, Ny, Nz, psfKernels->kx,
+                                     psfKernels->ky, psfKernels->kz);
+      if (applied) {
         if (!(inputHasSignal && isFiniteAllZero(volume)))
           return;
         static std::atomic<bool> warnedAllZero{false};
@@ -68,9 +73,15 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
         }
       }
     }
-    filters::conv3d_separable_inplace(volume, Nx, Ny, Nz, psfKernels->kx,
-                                      psfKernels->ky, psfKernels->kz,
-                                      threads);
+    if (adjoint) {
+      filters::conv3d_separable_adjoint_inplace(
+          volume, Nx, Ny, Nz, psfKernels->kx, psfKernels->ky,
+          psfKernels->kz, threads);
+    } else {
+      filters::conv3d_separable_inplace(volume, Nx, Ny, Nz, psfKernels->kx,
+                                        psfKernels->ky, psfKernels->kz,
+                                        threads);
+    }
     return;
   }
 
@@ -176,19 +187,20 @@ void apply_psf_forward(const std::vector<double> &f, std::vector<double> &f_blur
                        int Nx, int Ny, int Nz, const ReconOpts &opts,
                        const PSFKernels *psfKernels, int threads) {
   f_blur = f;
-  applyPsfInplace(f_blur, Nx, Ny, Nz, opts, psfKernels, threads, false);
+  applyPsfInplace(f_blur, Nx, Ny, Nz, opts, psfKernels, threads, false,
+                  false);
 }
 
 void apply_psf_backward(std::vector<double> &numer, int Nx, int Ny, int Nz,
                         const ReconOpts &opts, const PSFKernels *psfKernels,
                         int threads) {
-  applyPsfInplace(numer, Nx, Ny, Nz, opts, psfKernels, threads, false);
+  applyPsfInplace(numer, Nx, Ny, Nz, opts, psfKernels, threads, false, true);
 }
 
 void apply_psf_postsmooth(std::vector<double> &volume, int Nx, int Ny, int Nz,
                           const ReconOpts &opts, const PSFKernels *psfKernels,
                           int threads) {
-  applyPsfInplace(volume, Nx, Ny, Nz, opts, psfKernels, threads, true);
+  applyPsfInplace(volume, Nx, Ny, Nz, opts, psfKernels, threads, true, false);
 }
 
 } // namespace spect

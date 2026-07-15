@@ -48,7 +48,7 @@ inline bool writeFile(const std::string& filePath, const char* data, size_t byte
     std::ofstream f(filePath, std::ios::binary);
     if (!f) return false;
     f.write(data, static_cast<std::streamsize>(bytes));
-    return true;
+    return f.good();
 }
 
 template <typename T>
@@ -62,7 +62,7 @@ inline bool writeRawWithEndian(const std::string& filePath,
     if (little_endian == hostLittle) {
         f.write(reinterpret_cast<const char*>(data.data()),
                 static_cast<std::streamsize>(data.size() * sizeof(T)));
-        return true;
+        return f.good();
     }
 
     std::vector<T> swapped;
@@ -71,7 +71,7 @@ inline bool writeRawWithEndian(const std::string& filePath,
         swapped.push_back(byteswapValue(v));
     f.write(reinterpret_cast<const char*>(swapped.data()),
             static_cast<std::streamsize>(swapped.size() * sizeof(T)));
-    return true;
+    return f.good();
 }
 
 /**
@@ -127,34 +127,12 @@ inline void saveMHDRAW(
     bool little_endian = true)
 {
     namespace fs = std::filesystem;
-    fs::create_directories(outdir);
-    
     std::string stem = prefix;
     if (iter >= 0)
         stem += std::string("_it") + std::to_string(iter);
-    
-    const std::string mhdPath = (fs::path(outdir) / (stem + ".mhd")).string();
-    const std::string rawPath = (fs::path(outdir) / (stem + ".raw")).string();
-
-    if (!writeRawWithEndian(rawPath, vol, little_endian)) {
-        std::cerr << "[saveMHDRAW] failed writing raw: " << rawPath << "\n";
-        return;
-    }
-    
-    std::ofstream mhd(mhdPath);
-    if (!mhd) {
-        std::cerr << "[saveMHDRAW] failed writing mhd: " << mhdPath << "\n";
-        return;
-    }
-    
-    mhd << "ObjectType = Image\n";
-    mhd << "NDims = 3\n";
-    mhd << "DimSize = " << Nx << " " << Ny << " " << Nz << "\n";
-    mhd << "ElementSpacing = " << vx << " " << vy << " " << vz << "\n";
-    mhd << "ElementType = " << elementTypeTag(false) << "\n";
-    mhd << "ElementByteOrderMSB = " << (little_endian ? "False" : "True") << "\n";
-    mhd << "HeaderSize = 0\n";
-    mhd << "ElementDataFile = " << (fs::path(stem).filename().string() + ".raw") << "\n";
+    writeMHD((fs::path(outdir) / stem).string(), vol, Nx, Ny, Nz,
+             static_cast<float>(vx), static_cast<float>(vy),
+             static_cast<float>(vz), little_endian);
 }
 
 } // namespace io

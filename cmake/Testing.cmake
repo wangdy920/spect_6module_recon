@@ -145,7 +145,7 @@ if(SPECT_BUILD_TESTS)
     )
     gtest_discover_tests(spect_cuda_scaffold_tests
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-      PROPERTIES LABELS "unit;cuda-scaffold"
+      PROPERTIES LABELS "cuda-scaffold"
       DISCOVERY_TIMEOUT 30
     )
     message(STATUS "CUDA scaffold tests enabled: spect_cuda_scaffold_tests will be built")

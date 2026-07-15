@@ -35,6 +35,14 @@ bool runCompactSymmetricMlemNumerCUDA(
     const double *smoothedImage, int threads, double *numer,
     CompactSymmetricStageTiming *timing = nullptr);
 
+// Expands one final compact forward projection into the native full-angle
+// detector layout. This is diagnostic-only and does not modify reconstruction
+// state. fullExpected must contain meta.fullRows() entries.
+bool computeCompactSymmetricForwardProjectionCUDA(
+    const spect::io::CSRView &compactMatrix,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *smoothedImage, int threads, double *fullExpected);
+
 // attFactors (optional, CTAC): full-angle attenuation table in the unrotated
 // image frame, laid out as att[fullAngle * totalVoxels + voxel] (uint16,
 // scale 1/65535), fullNumAngles * totalVoxels entries. nullptr disables
@@ -55,6 +63,12 @@ bool runCompactChunkMlemNumerCUDA(
     const double *smoothedImage, int threads, double *numer,
     bool reverseChunkOrder = false,
     CompactSymmetricStageTiming *timing = nullptr,
+    const uint16_t *attFactors = nullptr);
+
+bool computeCompactChunkForwardProjectionCUDA(
+    const spect::io::CompactChunkCSRDirectory &chunks,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *smoothedImage, int threads, double *fullExpected,
     const uint16_t *attFactors = nullptr);
 
 // attFactors: optional per-bed pointer array (bedCount entries); each entry

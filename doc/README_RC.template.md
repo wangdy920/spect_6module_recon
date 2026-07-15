@@ -18,6 +18,7 @@ __PACKAGE_NAME__/
       <matrix_name>/          optional, not bundled in this package
   README.md
   PARAMETERS_CN.md
+  CLI_CHANGES_CN.md
   RELEASE_NOTES.md
   SHA256SUMS.txt
   docs/SPECT_recon_help.txt
@@ -70,4 +71,5 @@ For multi-bed input:
 fixed `Bed1..Bed5` table: `b1=Bed1-Bed2`, `b2=Bed2-Bed3`, `b3=Bed3-Bed4`,
 `b4=Bed4-Bed5`, `b5` reserved.
 
-Detailed Chinese parameter notes are in `PARAMETERS_CN.md`.
+Detailed Chinese parameter notes are in `PARAMETERS_CN.md`. Removed or renamed
+CLI entries are summarized in `CLI_CHANGES_CN.md`.

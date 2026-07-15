@@ -36,10 +36,12 @@ inline std::vector<int> computeBedZOffsets(int bedCount, int baseNz,
 inline void accumulateBedVolumeToGlobal(std::vector<double>& global,
                                         const std::vector<double>& local,
                                         int nx, int ny, int baseNz,
-                                        int zStart) {
+                                        int zStart,
+                                        bool flipLocalZ = false) {
     const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
     for (int z = 0; z < baseNz; ++z) {
-        const size_t dstOffset = static_cast<size_t>(zStart + z) * plane;
+        const int globalZ = zStart + (flipLocalZ ? baseNz - 1 - z : z);
+        const size_t dstOffset = static_cast<size_t>(globalZ) * plane;
         const size_t srcOffset = static_cast<size_t>(z) * plane;
         for (size_t xy = 0; xy < plane; ++xy) {
             global[dstOffset + xy] += local[srcOffset + xy];
@@ -49,11 +51,12 @@ inline void accumulateBedVolumeToGlobal(std::vector<double>& global,
 
 inline std::vector<double> extractBedVolumeFromGlobal(
     const std::vector<double>& global, int nx, int ny, int baseNz,
-    int zStart) {
+    int zStart, bool flipLocalZ = false) {
     const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
     std::vector<double> local(plane * static_cast<size_t>(baseNz), 0.0);
     for (int z = 0; z < baseNz; ++z) {
-        const size_t srcOffset = static_cast<size_t>(zStart + z) * plane;
+        const int globalZ = zStart + (flipLocalZ ? baseNz - 1 - z : z);
+        const size_t srcOffset = static_cast<size_t>(globalZ) * plane;
         const size_t dstOffset = static_cast<size_t>(z) * plane;
         std::copy_n(global.data() + srcOffset, plane, local.data() + dstOffset);
     }

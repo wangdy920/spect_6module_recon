@@ -1,5 +1,6 @@
 #include "main/ReconArgsPrinter.h"
 
+#include "cli/Version.h"
 #include "main/RunLogger.h"
 
 #include <sstream>
@@ -61,7 +62,8 @@ std::string ctacSummary(const ReconArgs &args) {
   if (!args.doCTAC)
     return "off";
   std::ostringstream oss;
-  oss << args.ctacModel << ", rotSign=" << args.ctacRotSign;
+  oss << args.ctacModel << ", factorBackend=cuda"
+      << ", rotSign=" << args.ctacRotSign;
   if (!args.attMapPath.empty())
     oss << ", muMap=" << args.attMapPath;
   if (!args.ctacAutoMuFrom.empty())
@@ -73,9 +75,12 @@ std::string ctacSummary(const ReconArgs &args) {
 
 } // namespace
 
-void printReconArgs(const ReconArgs &args) {
+void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
   std::ostringstream oss;
-  oss << "Run configuration:\n"
+  oss << "Run configuration [SPECT_recon " << spect::cli::versionString()
+      << "]:\n"
+      << "  command: " << (commandLine.empty() ? "<unset>" : commandLine)
+      << "\n"
       << "  data: projection=" << projectionSource(args) << "\n"
       << "  matrix: " << matrixSource(args) << "\n"
       << "  output: dir=" << args.outputDir
@@ -89,9 +94,16 @@ void printReconArgs(const ReconArgs &args) {
       << "  physics: ctac=" << ctacSummary(args)
       << ", psf=" << psfModeName(args.psf.mode)
       << " fwhm_mm=" << args.psf.fwhm_mm
+      << " z_blur=" << (args.psf.z_blur ? "on" : "off")
       << " trunc_sigma=" << args.psf.min_sigmas
       << ", butter=" << (args.useButter ? "on" : "off")
       << ", reg=" << (args.useReg ? regTypeToString(args.reg.type) : "off");
+  if (args.useReg) {
+    oss << " regCT="
+        << (args.regCtPath.empty() ? "activity-only" : args.regCtPath)
+        << " ct_sigma=" << args.reg.ct_sigma
+        << " ct_floor=" << args.reg.ct_weight_floor;
+  }
   logInfo(oss.str());
 
   logDebug(std::string("Algorithm: ") + args.getAlgorithmName());

@@ -91,7 +91,7 @@ private:
      * Only affects algorithm-related sections ([Algorithm], [Regularization],
      * [BSREM], [ADMM], [BackendHint]). Does NOT override geometry/IO/detector.
      */
-    static void applyAlgoConf(ReconArgs& args, const std::string& path);
+    static bool applyAlgoConf(ReconArgs& args, const std::string& path);
 
     /**
      * @brief Print merged configuration to stdout (for -dumpConf).

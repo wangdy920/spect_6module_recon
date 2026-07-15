@@ -59,6 +59,7 @@ struct ReconArgs {
     bool configLoaded = false;    ///< Config file loaded successfully
     std::string algoConfPath;     ///< Algorithm config file path (empty = auto-detect)
     bool helpRequested = false;    ///< Print usage and exit successfully
+    bool versionRequested = false; ///< Print version and exit successfully
     bool dumpConf = false;        ///< Print merged config and exit
 
     // ========== Filtering Options ==========
@@ -90,7 +91,7 @@ struct ReconArgs {
     bool Astream = false;         ///< Stream build from disk
     bool ApruneMask = false;      ///< Prune columns outside mask
     bool doCTAC = false;          ///< Iterative CTAC
-    std::string ctacModel = "line-integral"; ///< line-integral | per-voxel (legacy approx)
+    std::string ctacModel = "line-integral"; ///< fixed production model
     int ctacRotSign = 1;          ///< Voxel rotation sign matching sysmat generator (+1/-1)
     std::string ctacAutoMuFrom;   ///< Early-iteration recon volume for auto water mu-map
     double ctacAutoMuThresh = 0.05;  ///< Relative threshold vs P99.9 activity
@@ -99,9 +100,9 @@ struct ReconArgs {
     bool ctacAutoMuValueExplicit = false; ///< true when mu was manually set
     std::string ctacAutoMuValueSource = "Tc99m";
 
-    // ========== Attenuation & Prior ==========
+    // ========== Attenuation & CT guidance ==========
     std::string attMapPath;               ///< Attenuation map file
-    std::string priorPath;                ///< Anatomical prior image
+    std::string regCtPath;                ///< Registered CT/mu-map for TV/RDP weights
     std::string bProjPath;                ///< Background projection
     std::vector<std::string> bProjPaths;  ///< Multi-bed background
 
@@ -121,6 +122,7 @@ struct ReconArgs {
     std::vector<float> voxelSizeMM = {1.0f, 1.0f, 1.0f};
     int josephPasses = 0;
     int verbosity = 1;
+    bool projectionResidual = false; ///< Write final compact projection residual CSV
 
     // ========== Optimization Algorithm ==========
     enum class Algorithm { MLEM, BSREM, ADMM };
@@ -150,7 +152,16 @@ struct ReconArgs {
     // ========== Multi-Bed ==========
     int bedCount = 1;
     std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
-    bool zBedFlip = true;          ///< Flip each dfList bed segment in Z before output
+    std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
+    bool bedOverlapInRecon = false; ///< Use bed overlap in joint reconstruction geometry
+    std::string bedCropMethod = "sigmoid"; ///< direct | sigmoid (output-only)
+    bool bedSeamPostprocess = true; ///< Enable object-aware seam postprocess
+    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | zimu
+    double bedPhantomCloseStrength = 1.0; ///< Phantom contour-interpolation blend, [0,1]
+    double bedZimuCloseStrength = 0.5; ///< Zimu topology-locked smoothing blend, [0,1]
+    int bedSeamHalfWidth = 8; ///< Phantom seam half-width; zimu is capped at 4
+    double fovRadiusMm = 0.0;       ///< Final-output circular XY FOV radius; 0 disables
+    bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
 

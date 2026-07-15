@@ -205,6 +205,22 @@ TEST(BSREMUpdateParityTest, StandardStepMatchesCompactCoreFormula) {
                      updateFactors(image0, standard));
 }
 
+TEST(BSREMUpdateParityTest, ZeroBetaStillAppliesLikelihoodOnlyRelaxation) {
+  const std::vector<double> image0 = {2.0, 2.0};
+  const std::vector<double> numerator = {1.5, 0.5};
+  const std::vector<double> denom = {1.0, 1.0};
+
+  std::vector<double> image = image0;
+  BsremUpdateParams params;
+  params.betaScaled = 0.0;
+  params.alpha = 0.5;
+  params.threads = 1;
+  applyBsremUpdate(image, numerator, denom, denom, params);
+
+  EXPECT_DOUBLE_EQ(image[0], 2.5);
+  EXPECT_DOUBLE_EQ(image[1], 1.5);
+}
+
 TEST(BSREMKappaMapGoldenTest, StandardHistoricalBehavior) {
   cli::ReconArgs args;
   args.bsremUseKappaMap = true;

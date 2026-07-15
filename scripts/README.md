@@ -203,7 +203,18 @@ sum_rel_diff          <= 0.005
 - `scripts/qa_ctac_automu_cylinder.py`：从 260601 reference 圆柱测量直径/高度，生成 true/auto mu-map、Dice/volume/profile 表和 PNG。
 - `scripts/run_ctac_automu_cylinder_debug.ps1`：可选运行 true-mu CTAC 与 auto-mu CTAC，并比较输出差异。
 - `scripts/validate_ctac_pinhole_reference.py`：validation-only 抽样比较当前 `att[angle, voxel]` 与 pinhole-center Siddon reference，不进入生产路径。
-- `scripts/eng_to_6module_projection_bin.py`：把单床 `Bed*/Angle*/data*.eng` 转成 6module compact projection BIN（60 physical angles x 6 modules -> 360 full angles），默认 `projection_variant=identity`；仅为复现旧 `xflip` 结果时显式加 `--xflip`。
+- `scripts/export_recon_volume.py`：重建 `.mhd` 导出 **DICOM 三维序列**（默认 `spect_to_dicom.exe` → `dicom/image_*.dcm`）或 **PNG 切片**（默认全部轴位 `png/axial/`；可选 `views_center.png` 三正交视图）。
+
+```powershell
+python scripts\export_recon_volume.py `
+  --image recon\mouse_mlem_it30.mhd `
+  --out-dir recon\export `
+  --format both `
+  --png-mode slices
+```
+
+- `scripts/run_mouse_spect_multibed.ps1`：小鼠 ENG 预处理 + 多床位 MLEM + 可选 DICOM/PNG 导出（`-ExportFormat both`）。
+- `scripts/stitch_multibed_mhd.py`：实验性单床结果拼接器；自动估计共同 overlap/Z 方向，输出无 overlap reference 与 guarded cosine 融合结果，不进入主线重建路径。
 
 ```powershell
 python scripts\qa_ctac_automu_cylinder.py --self-test
@@ -276,3 +287,13 @@ python scripts\eng_to_6module_projection_bin.py --self-test
 ## 9) MATLAB 工具
 
 `utils/*.m`：PSF map/phantom 相关辅助脚本（依赖 MATLAB/Octave 环境）。
+`render_volume_3d.py` renders a reconstruction MHD as a true 3D isosurface PNG
+for visual QA. It is a debug/validation view, not a replacement for the
+production volume or DICOM export. Example:
+
+```powershell
+python scripts/render_volume_3d.py `
+  --image recon\mouse_mlem_it50.mhd `
+  --output recon\qa\mouse_it50_3d.png `
+  --fov-diameter-mm 30 --percentile 99 --downsample 2
+```
