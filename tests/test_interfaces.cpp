@@ -25,6 +25,7 @@
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "io/MHDWriter.h"
+#include "io/VolumeLoader.h"
 #include "interfaces/ISparseOps.h"
 #include "interfaces/IProjector.h"
 #include "interfaces/IRegularizer.h"
@@ -498,345 +499,37 @@ TEST(SparseOpsCPUTest, CudaAvailabilityFlag) {
     EXPECT_FALSE(isCudaSparseOpsAvailable());
 #endif
 }
+
+TEST(InterfaceTest, TruncatedMhdRawThrows) {
+    const auto tmpDir = std::filesystem::temp_directory_path() /
+                        "spect_mhd_truncated_test";
+    std::filesystem::create_directories(tmpDir);
+    const auto mhdPath = tmpDir / "truncated.mhd";
+    const auto rawPath = tmpDir / "truncated.raw";
+    {
+        std::ofstream mhd(mhdPath);
+        ASSERT_TRUE(mhd.good());
+        mhd << "ObjectType = Image\nNDims = 3\nDimSize = 2 1 1\n"
+               "ElementSpacing = 1 1 1\nElementType = MET_DOUBLE\n"
+               "ElementDataFile = truncated.raw\n";
+    }
+    {
+        std::ofstream raw(rawPath, std::ios::binary);
+        const double oneValue = 1.0;
+        raw.write(reinterpret_cast<const char*>(&oneValue), sizeof(oneValue));
+    }
+
+    int nx = 0, ny = 0, nz = 0;
+    float dx = 0, dy = 0, dz = 0;
+    EXPECT_THROW((void)spect::io::loadVolumeWithSpacing(
+                     mhdPath.string(), nx, ny, nz, dx, dy, dz),
+                 std::runtime_error);
+    std::filesystem::remove_all(tmpDir);
+}
 } // namespace cpu_test
 } // namespace sparse
 } // namespace spect
 
-// ============ 正则化器测试 【T4.1】 ============
-
-// ============ 新正则化器层次结构测试 【T4.1】 ============
-#include "regularizer/RegularizerBase.h"
-#include "regularizer/TVRegularizer.h"
-
-namespace spect {
-namespace regularizer {
-namespace test {
-
-// 使用不同的测试套件名，避免与旧fixture冲突
-TEST(NewRegularizerTest, NoneRegularizer) {
-    NoneRegularizer none;
-    EXPECT_EQ(none.name(), "None");
-    
-    Dims3D dims{4, 4, 4};
-    std::vector<double> f(64, 1.0);
-    std::vector<double> grad(64);
-    
-    EXPECT_DOUBLE_EQ(none.energy(f.data(), dims, nullptr), 0.0);
-    none.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    
-    for (double g : grad) {
-        EXPECT_DOUBLE_EQ(g, 0.0);
-    }
-}
-
-TEST(NewRegularizerTest, TVIsotropicEnergy) {
-    TVIsotropicRegularizer tv;
-    tv.setBeta(1.0);
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 0.0);
-    
-    // 常数图像应有eps导致的微小能量 -> 只验证很小
-    double E0 = tv.energy(f.data(), dims);
-    EXPECT_LT(E0, 1e-3);  // 允许eps导致的误差
-    
-    // 中心设为1，其余为0 -> 有梯度
-    f[13] = 1.0;  // 中心 (1,1,1)
-    double E = tv.energy(f.data(), dims);
-    EXPECT_GT(E, E0);  // 非均匀图像能量更高
-}
-
-TEST(NewRegularizerTest, TVIsotropicGradient) {
-    TVIsotropicRegularizer tv(1e-8);  // 小eps
-    tv.setBeta(1.0);
-    
-    Dims3D dims{5, 5, 5};
-    std::vector<double> f(125, 0.0);
-    std::vector<double> grad(125, 0.0);
-    
-    // 设置中心为1
-    f[62] = 1.0;  // 中心 (2,2,2)
-    
-    tv.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    
-    // 中心梯度应为正（向外）
-    EXPECT_GT(grad[62], 0.0);
-    
-    // 邻居梯度应为负（从中心拉）
-    // 这里只验证不全为0
-    double sum = 0.0;
-    for (double g : grad) sum += std::abs(g);
-    EXPECT_GT(sum, 0.0);
-}
-
-TEST(NewRegularizerTest, TVHuberEnergy) {
-    TVHuberRegularizer huber(0.01);  // delta = 0.01
-    huber.setBeta(1.0);
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 0.0);
-    
-    // 常数图像
-    EXPECT_NEAR(huber.energy(f.data(), dims), 0.0, 1e-10);
-    
-    // 有梯度
-    f[13] = 1.0;
-    double E = huber.energy(f.data(), dims);
-    EXPECT_GT(E, 0.0);
-}
-
-TEST(NewRegularizerTest, RegularizerFactory) {
-    auto& factory = RegularizerFactory::instance();
-    
-    // 注册测试类型
-    factory.registerType("TestNone", []{ return std::make_unique<NoneRegularizer>(); });
-    
-    EXPECT_TRUE(factory.hasType("TestNone"));
-    EXPECT_FALSE(factory.hasType("NonExistent"));
-    
-    auto reg = factory.create("TestNone");
-    ASSERT_NE(reg, nullptr);
-    EXPECT_EQ(reg->name(), "None");
-    
-    // 不存在的类型返回nullptr
-    auto null_reg = factory.create("NonExistent");
-    EXPECT_EQ(null_reg, nullptr);
-}
-
-TEST(NewRegularizerTest, RegularizerRegistrar) {
-    // 使用模板自动注册
-    static RegularizerRegistrar<TVIsotropicRegularizer> reg_tv("TVIso_Test");
-    
-    auto& factory = RegularizerFactory::instance();
-    EXPECT_TRUE(factory.hasType("TVIso_Test"));
-    
-    auto reg = factory.create("TVIso_Test");
-    ASSERT_NE(reg, nullptr);
-    EXPECT_EQ(reg->name(), "TVIsotropic");
-}
-
-} // namespace test
-} // namespace regularizer
-} // namespace spect
-
-// ============ 新增正则化器测试 【T4.2】 ============
-#include "regularizer/TikhonovRegularizer.h"
-#include "regularizer/MRPRegularizer.h"
-#include "regularizer/RDPRegularizer.h"
-#include "regularizer/LogCoshRegularizer.h"
-#include "regularizer/NLMRegularizer.h"
-#include "regularizer/AllRegularizers.h"
-
-namespace spect {
-namespace regularizer {
-namespace test {
-
-// Tikhonov 正则化器测试
-TEST(T42RegularizerTest, TikhonovBasic) {
-    TikhonovRegularizer tik;
-    tik.setBeta(1.0);
-    EXPECT_EQ(tik.name(), "Tikhonov");
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 1.0);  // 常数图像
-    std::vector<double> grad(27);
-    
-    // 常数图像梯度为0
-    tik.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    for (double g : grad) {
-        EXPECT_NEAR(g, 0.0, 1e-10);
-    }
-    
-    // 中心设为2，产生梯度
-    f[13] = 2.0;
-    tik.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    EXPECT_GT(grad[13], 0.0);  // 中心向下
-}
-
-// MRP 正则化器测试
-TEST(T42RegularizerTest, MRPBasic) {
-    MRPRegularizer mrp;
-    mrp.setBeta(1.0);
-    EXPECT_EQ(mrp.name(), "MRP");
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 1.0);
-    std::vector<double> grad(27);
-    
-    mrp.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    
-    // 常数图像，所有邻居相等，梯度约为0
-    for (size_t i = 0; i < 27; ++i) {
-        EXPECT_NEAR(grad[i], 0.0, 1e-6);
-    }
-}
-
-// RDP 正则化器测试
-TEST(T42RegularizerTest, RDPBasic) {
-    RDPRegularizer rdp(1e-6, 0.0);
-    rdp.setBeta(1.0);
-    EXPECT_EQ(rdp.name(), "RDP");
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 1.0);
-    std::vector<double> grad(27);
-    
-    // 常数图像
-    rdp.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    for (double g : grad) {
-        EXPECT_NEAR(g, 0.0, 1e-10);
-    }
-    
-    // 非均匀图像
-    f[13] = 2.0;
-    rdp.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    EXPECT_GT(grad[13], 0.0);
-}
-
-// LogCosh 正则化器测试
-TEST(T42RegularizerTest, LogCoshBasic) {
-    LogCoshRegularizer lc(0.1);
-    lc.setBeta(1.0);
-    EXPECT_EQ(lc.name(), "LogCosh");
-    
-    Dims3D dims{3, 3, 3};
-    std::vector<double> f(27, 0.5);
-    std::vector<double> grad(27);
-    
-    // 常数图像
-    lc.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    for (double g : grad) {
-        EXPECT_NEAR(g, 0.0, 1e-10);
-    }
-    
-    // 能量应为0
-    double E = lc.energy(f.data(), dims);
-    EXPECT_NEAR(E, 0.0, 1e-10);
-}
-
-// NLM 正则化器测试
-TEST(T42RegularizerTest, NLMBasic) {
-    NLMRegularizer nlm(0.1, 2, 1);
-    nlm.setBeta(1.0);
-    EXPECT_EQ(nlm.name(), "NLM");
-    
-    Dims3D dims{5, 5, 5};
-    std::vector<double> f(125, 1.0);
-    std::vector<double> grad(125);
-    
-    // 常数图像，梯度应接近0
-    nlm.gradient(f.data(), grad.data(), dims, nullptr, 1);
-    double maxGrad = 0.0;
-    for (double g : grad) {
-        maxGrad = std::max(maxGrad, std::abs(g));
-    }
-    EXPECT_LT(maxGrad, 1e-8);  // 应该非常小
-}
-
-// AllRegularizers 注册测试
-TEST(T42RegularizerTest, RegisterBuiltinRegularizers) {
-    registerBuiltinRegularizers();
-    
-    auto& factory = RegularizerFactory::instance();
-    
-    // 检查所有内置类型都已注册
-    EXPECT_TRUE(factory.hasType("None"));
-    EXPECT_TRUE(factory.hasType("TVIsotropic"));
-    EXPECT_TRUE(factory.hasType("TVHuber"));
-    EXPECT_TRUE(factory.hasType("Tikhonov"));
-    EXPECT_TRUE(factory.hasType("MRP"));
-    EXPECT_TRUE(factory.hasType("RDP"));
-    EXPECT_TRUE(factory.hasType("LogCosh"));
-    EXPECT_TRUE(factory.hasType("NLM"));
-    EXPECT_TRUE(factory.hasType("Bowsher"));
-    EXPECT_TRUE(factory.hasType("PLS"));
-}
-
-// 便捷创建函数测试
-TEST(T42RegularizerTest, CreateRegularizerFunction) {
-    registerBuiltinRegularizers();
-    
-    auto tv = createRegularizer("TVIsotropic", 0.5);
-    ASSERT_NE(tv, nullptr);
-    EXPECT_EQ(tv->name(), "TVIsotropic");
-    EXPECT_DOUBLE_EQ(tv->beta(), 0.5);
-    
-    auto none = createRegularizer("None", 1.0);
-    ASSERT_NE(none, nullptr);
-    EXPECT_EQ(none->name(), "None");
-    
-    auto invalid = createRegularizer("InvalidType", 1.0);
-    EXPECT_EQ(invalid, nullptr);
-}
-
-} // namespace test
-} // namespace regularizer
-} // namespace spect
-
-// ============ 兼容层测试 【T4.3】 ============
-#include "regularizer/RegularizerCompat.h"
-
-namespace spect {
-namespace regularizer {
-namespace test {
-
-TEST(RegularizerCompatTest, CreateFromRegType) {
-    auto tv = createFromRegType(RegType::TVIsotropic, 0.5);
-    ASSERT_NE(tv, nullptr);
-    EXPECT_EQ(tv->name(), "TVIsotropic");
-    EXPECT_DOUBLE_EQ(tv->beta(), 0.5);
-    
-    auto none = createFromRegType(RegType::None, 1.0);
-    ASSERT_NE(none, nullptr);
-    EXPECT_EQ(none->name(), "None");
-    
-    auto unknown = createFromRegType(RegType::Unknown, 1.0);
-    EXPECT_EQ(unknown, nullptr);
-}
-
-TEST(RegularizerCompatTest, CreateFromRegConf) {
-    RegConf conf;
-    conf.type = RegType::RDP;
-    conf.beta = 0.01;
-    conf.delta = 1e-5;
-    conf.gamma = 0.5;
-    
-    auto rdp = createFromRegConf(conf);
-    ASSERT_NE(rdp, nullptr);
-    EXPECT_EQ(rdp->name(), "RDP");
-    EXPECT_DOUBLE_EQ(rdp->beta(), 0.01);
-}
-
-TEST(RegularizerCompatTest, ComputeGradientNewVsOld) {
-    // 比较新旧API结果一致性
-    const int N = 5;
-    std::vector<double> f(N * N * N);
-    for (size_t i = 0; i < f.size(); ++i) {
-        f[i] = static_cast<double>(i) * 0.01;
-    }
-    
-    RegConf conf;
-    conf.type = RegType::Tikhonov;
-    conf.beta = 1.0;
-    
-    std::vector<double> gradOld(N * N * N);
-    std::vector<double> gradNew(N * N * N);
-    
-    // 旧API
-    compute_reg_gradient(f, N, N, N, conf, nullptr, gradOld, 1);
-    
-    // 新API
-    computeGradientNew(f, N, N, N, conf, nullptr, gradNew, 1);
-    
-    // 比较
-    for (size_t i = 0; i < f.size(); ++i) {
-        EXPECT_NEAR(gradNew[i], gradOld[i], 1e-10) << "Mismatch at index " << i;
-    }
-}
-
-} // namespace test
-} // namespace regularizer
-} // namespace spect
 
 // ============ App模块测试 【T2.3】 ============
 #include "app/ReconContext.h"

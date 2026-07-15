@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <vector>
 
 #include "app/ProjectionOps.h"
@@ -84,12 +85,50 @@ TEST(PSFModeTest, OperatorModeBlursForwardAndBackward) {
     EXPECT_GT(maxAbsDiff(input, backward), 1e-12);
 }
 
+TEST(PSFModeTest, OperatorPsfForwardBackwardAreAdjointAtBoundaries) {
+    const int Nx = 5, Ny = 4, Nz = 3;
+    const size_t total = static_cast<size_t>(Nx) * Ny * Nz;
+    std::vector<double> x(total);
+    std::vector<double> y(total);
+    for (size_t i = 0; i < total; ++i) {
+        x[i] = 0.2 + static_cast<double>((7 * i + 3) % 19) / 11.0;
+        y[i] = 0.1 + static_cast<double>((5 * i + 1) % 23) / 13.0;
+    }
+    x.front() += 3.0;
+    x.back() += 2.0;
+    y[static_cast<size_t>(Nx) * Ny - 1] += 4.0;
+
+    ReconOpts opts;
+    opts.threads = 1;
+    opts.psf = makeBasicPSF();
+    const auto kernels = make_psf_kernels(opts.psf);
+
+    std::vector<double> gx;
+    apply_psf_forward(x, gx, Nx, Ny, Nz, opts, &kernels, opts.threads);
+    auto gty = y;
+    apply_psf_backward(gty, Nx, Ny, Nz, opts, &kernels, opts.threads);
+
+    const double lhs = std::inner_product(gx.begin(), gx.end(), y.begin(), 0.0);
+    const double rhs = std::inner_product(x.begin(), x.end(), gty.begin(), 0.0);
+    const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+    EXPECT_NEAR(lhs, rhs, 1e-12 * scale);
+}
+
 TEST(PSFModeTest, GaussianKernelUsesConfiguredSigmaTruncation) {
     constexpr double fwhmForOneVoxelSigma = 2.354820045;
     EXPECT_EQ(spect::filters::makeGaussian1D(fwhmForOneVoxelSigma, 1.0, 2.0).size(),
               5u);
     EXPECT_EQ(spect::filters::makeGaussian1D(fwhmForOneVoxelSigma, 1.0).size(),
               9u);
+}
+
+TEST(PSFModeTest, XyOnlyModeBuildsIdentityZKernel) {
+    auto psf = makeBasicPSF();
+    psf.z_blur = false;
+    const auto kernels = make_psf_kernels(psf);
+    EXPECT_GT(kernels.kx.size(), 1u);
+    EXPECT_GT(kernels.ky.size(), 1u);
+    EXPECT_EQ(kernels.kz, (std::vector<double>{1.0}));
 }
 
 TEST(PSFModeTest, PostSmoothDoesNotBlurDuringProjection) {

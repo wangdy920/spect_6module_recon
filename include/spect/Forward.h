@@ -36,7 +36,6 @@ struct DetectorHead;
 struct ReconConfig;
 
 // Factories
-class RegularizerFactory;
 class ReconstructorFactory;
 
 } // namespace spect

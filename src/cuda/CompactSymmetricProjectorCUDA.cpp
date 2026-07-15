@@ -552,6 +552,42 @@ void makeProjectionRatioChunkFloat(const spect::io::CompactSymmetryMetadata &met
   }
 }
 
+template <typename ValueType>
+void scatterCompactForwardProjection(
+    const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
+    const std::vector<ValueType> &compactProjection, int symId, bool zMirror,
+    double *fullExpected, std::vector<uint8_t> &coverage) {
+  for (size_t row = 0; row < compactProjection.size(); ++row) {
+    uint64_t fullIndex = 0;
+    if (!spect::io::fullProjectionIndexFromCompactRow(
+            meta, compactRowBase + static_cast<int>(row), symId, zMirror,
+            fullIndex)) {
+      continue;
+    }
+    const size_t index = static_cast<size_t>(fullIndex);
+    if (index >= coverage.size() || coverage[index] != 0) {
+      throw std::runtime_error(
+          "compact forward projection produced duplicate/out-of-range full row.");
+    }
+    const double value = static_cast<double>(compactProjection[row]);
+    if (!std::isfinite(value)) {
+      throw std::runtime_error(
+          "compact forward projection produced a non-finite value.");
+    }
+    fullExpected[index] = value;
+    coverage[index] = 1;
+  }
+}
+
+void requireCompleteForwardProjectionCoverage(
+    const std::vector<uint8_t> &coverage) {
+  if (std::find(coverage.begin(), coverage.end(), uint8_t{0}) !=
+      coverage.end()) {
+    throw std::runtime_error(
+        "compact forward projection did not cover every full projection row.");
+  }
+}
+
 void checkInputs(const spect::io::CSRView &compactMatrix,
                  const spect::io::CompactSymmetryMetadata &meta) {
   if (!compactMatrix.valid()) {
@@ -681,6 +717,38 @@ bool runCompactSymmetricMlemNumerCUDA(
     timing->numeratorSeconds += elapsedSeconds(totalStart);
     ++timing->numeratorCalls;
   }
+  return true;
+}
+
+bool computeCompactSymmetricForwardProjectionCUDA(
+    const spect::io::CSRView &compactMatrix,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *smoothedImage, int threads, double *fullExpected) {
+  checkInputs(compactMatrix, meta);
+  if (smoothedImage == nullptr || fullExpected == nullptr) {
+    throw std::runtime_error(
+        "compact forward projection received null image/output data.");
+  }
+  const ISparseOps &ops = getSparseOpsCUDA();
+  if (ops.backend() != BackendType::CUDA) {
+    return false;
+  }
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  std::fill(fullExpected, fullExpected + fullRows, 0.0);
+  std::vector<uint8_t> coverage(fullRows, 0);
+  std::vector<double> imgRot(nvox, 0.0);
+  std::vector<double> y(static_cast<size_t>(meta.totalRows), 0.0);
+  for (const auto &branch : enumerateCompactBranches(meta)) {
+    transformForward(smoothedImage, imgRot, meta, branch.symId,
+                     branch.zMirror, threads);
+    std::fill(y.begin(), y.end(), 0.0);
+    ops.spmv(compactMatrix, imgRot.data(), y.data(), threads);
+    scatterCompactForwardProjection(meta, 0, y, branch.symId, branch.zMirror,
+                                    fullExpected, coverage);
+  }
+  requireCompleteForwardProjectionCoverage(coverage);
   return true;
 }
 
@@ -961,6 +1029,70 @@ bool runCompactChunkMlemNumerCUDA(
     timing->numeratorSeconds += elapsedSeconds(totalStart);
     ++timing->numeratorCalls;
   }
+  return true;
+}
+
+bool computeCompactChunkForwardProjectionCUDA(
+    const spect::io::CompactChunkCSRDirectory &chunks,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *smoothedImage, int threads, double *fullExpected,
+    const uint16_t *attFactors) {
+  if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
+      chunks.cols() != meta.totalVoxels) {
+    throw std::runtime_error(
+        "compact chunk forward projection matrix/metadata mismatch.");
+  }
+  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
+      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
+    throw std::runtime_error(
+        "compact chunk forward projection only supports SYM_45Z and SYM_90Z.");
+  }
+  if (meta.Nx != meta.Ny) {
+    throw std::runtime_error(
+        "compact chunk forward projection requires Nx == Ny.");
+  }
+  if (smoothedImage == nullptr || fullExpected == nullptr) {
+    throw std::runtime_error(
+        "compact chunk forward projection received null image/output data.");
+  }
+  const ISparseOps &ops = getSparseOpsCUDA();
+  if (ops.backend() != BackendType::CUDA) {
+    return false;
+  }
+  warmCompactChunkResidentDeviceCache(chunks);
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  std::fill(fullExpected, fullExpected + fullRows, 0.0);
+  std::vector<uint8_t> coverage(fullRows, 0);
+  std::vector<float> imgRot(nvox, 0.0f);
+  std::vector<float> y;
+  for (const auto &branch : enumerateCompactBranches(meta)) {
+    transformForwardIntoFloat(smoothedImage, imgRot.data(), meta, branch.symId,
+                              branch.zMirror, threads);
+    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size();
+         ++chunkIndex) {
+      const auto chunk = chunks.loadChunk(chunkIndex);
+      const spect::io::CSRView view = chunk->view();
+      const int compactRowBase =
+          chunk->info.angleOffset * meta.compactRaysPerAngle;
+      y.assign(static_cast<size_t>(view.rows), 0.0f);
+      const bool ok =
+          attFactors != nullptr
+              ? compactAttenSpmvFloatCUDA(
+                    view, attFactors, compactAttenTableCount(meta),
+                    makeCompactAttenBakeParams(meta, compactRowBase,
+                                               branch.symId, branch.zMirror),
+                    imgRot.data(), y.data())
+              : spmvFloatCUDA(view, imgRot.data(), y.data());
+      if (!ok) {
+        return false;
+      }
+      scatterCompactForwardProjection(meta, compactRowBase, y, branch.symId,
+                                      branch.zMirror, fullExpected, coverage);
+    }
+  }
+  requireCompleteForwardProjectionCoverage(coverage);
   return true;
 }
 

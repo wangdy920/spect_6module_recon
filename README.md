@@ -7,14 +7,14 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, NVRTC kernels for PSF/RDP/TV gradients and TV proximal (Chambolle-Pock).
 - **6-module matrix generation reference**: `6module_bak_src/` holds CUDA v2/v4 system-matrix generators and standalone MLEM reference (legacy).
 
-## Project Status (Snapshot: 2026-07-08)
+## Project Status (Snapshot: 2026-07-15)
 
-- **Current release**: `doc/RELEASE_20260708_CN.md` (`SPECT_recon_rc_20260708_*`).
+- **Current release**: `doc/RELEASE_20260715_CN.md` (`SPECT_recon_rc_20260715_*`).
 - **Default system matrix**: 260601 compact chunk (`-chunkCSRDir` / `bin/matrix/260601` auto-discovery). B1 plain 50-iter vs `test_data/sys_260601_recon_ref/recon_iter050.img` signed off (`rmse/ref_mean ≈ 1.06×10⁻⁵`).
 - **260525 / B2**: legacy compatibility / reference-only; not a release hard gate.
 - **Target GPUs**: RTX 4070 (sm_89), RTX 5060/5070 (sm_120).
 - **Public backends**: CUDA-only sparse ops; cuFFT Butterworth; PSF Operator/None; regularizers TV/RDP.
-- **Optimization algorithms**: MLEM/OSEM, BSREM-II, ADMM (TV proximal via Chambolle-Pock). Compact path: MLEM/BSREM, subsets=1 only.
+- **Optimization algorithms**: MLEM/OSEM, BSREM-II, ADMM (TV proximal via Chambolle-Pock). Compact path: MLEM or BSREM with CT-weighted TV/RDP, subsets=1 only.
 - See `doc/Capability_Matrix_CN.md` and `doc/Legacy_MLEM_B1B2_Parity_CN.md`.
 
 **Project Structure**
@@ -75,7 +75,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 
 Use `-dfList` to load multiple bed projections at once. The list may contain 1 to 5 beds. If paths contain `BedN`, `-dfList` and `-bProjList` are sorted by numeric bed order before loading. `-bedOverlap` is a fixed Bed1..Bed5 table: slot `b1` applies to `Bed1-Bed2`, `b2` to `Bed2-Bed3`, `b3` to `Bed3-Bed4`, and `b4` to `Bed4-Bed5`; `b5` is kept as the fixed five-bed placeholder. For example, `Bed2,Bed3,Bed4` uses `b2,b3`. The reconstruction dimensions in `-dim` are **per-bed** sizes; the combined output Z dimension becomes `Nz * beds` when `-bedOverlap=0`, or `Nz * beds - sum(overlaps)` when overlaps are enabled. Beds are processed using **Virtual Bed Stacking**, meaning system matrix memory usage remains identical to a single bed. Background projections can be supplied via `-bProjList`. Memory mapping (`-mapCSR on`) is supported for multi-bed; when `-ctac` is enabled, the recon uses dynamic on-the-fly attenuation factors so the mapped CSR remains read-only.
 
-The shipped multi-bed default is `bed_overlap=16,16,16,0,0` with `crop_end=0,0`; use the same values for the mouse and spiral-hose validation datasets. `crop_end` remains zero so valid signal is not removed at the global ends.
+The shipped multi-bed default is `bed_overlap=16,16,16,0,0`, `overlap_in_recon=0`, and `crop_method=sigmoid`. For an 80-voxel bed this gives an output stride of 64 voxels; the normalized blend uses fixed `k=12` and runs only during final output. `crop_end` remains zero so valid signal is not removed at the global ends.
 
 Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z; `-xoutflip 1` flips the final stitched output in X. `-cropEnd top,end` is applied after those flips and is only responsible for final top/end trimming.
 
@@ -117,7 +117,7 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 
 ### Quick Links
 - **[Documentation Index](doc/README.md)** — maintained docs only
-- **[Release 2026-07-08](doc/RELEASE_20260708_CN.md)** — current release boundary
+- **[Release 2026-07-15](doc/RELEASE_20260715_CN.md)** — current release boundary
 - **[Usage (中文)](doc/USAGE_CN.md)** — CLI reference
 - **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — support boundary and durable decisions
 - **[Field recon migration](doc/Recon_Interface_Migration_Field_CN.md)** — ThreeModalities → current RC

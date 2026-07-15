@@ -18,6 +18,17 @@
 | `-prior ...` / anatomical prior 参数 | 删除；公开正则只保留 TV/RDP |
 | `-reg NLM|Tikhonov|LogCosh|MRP|Bowsher|PLS...` | `-reg TV,...` 或 `-reg RDP,...` |
 
+## 多床接缝
+
+| 参数 | 当前语义 |
+| --- | --- |
+| `[MultiBed] overlap_in_recon=1` | `bed_overlap` 参与联合重建几何、denom/numer 和全局 PSF |
+| `[MultiBed] overlap_in_recon=0` | 重建床位互不重叠；在输出前只拼接相邻床位的内部接缝 |
+| `[MultiBed] crop_method=sigmoid` | 默认：归一化 `sigmoid(k=12)` 权重融合，不做 positive-only fill，不裁剪首尾 overlap |
+| `[MultiBed] crop_method=direct` | 保留 hard-cut 作为控制/回退方法 |
+
+`sigmoid` 只允许与 `overlap_in_recon=0` 配合；默认配置现为 `overlap_in_recon=0 + crop_method=sigmoid`。
+
 ## 仍可用但不推荐
 
 | 参数 | 当前建议 |

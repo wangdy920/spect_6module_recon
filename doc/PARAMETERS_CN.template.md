@@ -70,6 +70,9 @@ cd D:\path\to\<package_root>
   - `b5` 保留占位
 - 如果实际传入 `Bed2,Bed3,Bed4`，使用 `b2,b3`。
 - 如果只传 `-bedOverlap 16`，会复制到所有固定槽位。
+- ini `overlap_in_recon=1`：`bed_overlap` 参与联合重建。
+- ini `overlap_in_recon=0`：重建使用零 overlap，写 MHD 前按 `crop_method` 选择 `direct` hard-cut 或归一化 `sigmoid(k=12)` 融合。
+- `crop_method=sigmoid`：默认方案；只融合相邻床位的内部接缝，不做 positive-only fill，也不裁剪首尾 overlap。
 
 ## 输出方向
 
@@ -77,9 +80,12 @@ cd D:\path\to\<package_root>
 
 ```ini
 [MultiBed]
-bed_overlap = 16,16,16,0,0
+bed_overlap = 16,16,16,0,0  # 80 层单床对应 stride=64
+overlap_in_recon = 0
+crop_method = sigmoid
+fov_radius_mm = 15.0
 crop_end    = 0,0
-z_bed_flip  = 0
+z_bed_flip  = 1  # compact joint consumes this as virtual-Z iteration mapping; non-joint applies output per-bed flip
 z_out_flip  = 0
 x_out_flip  = 0
 ```
@@ -91,6 +97,7 @@ x_out_flip  = 0
 -zoutflip 1
 -xoutflip 1
 -cropEnd top,end
+-bedCropMethod sigmoid
 ```
 
 处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。
@@ -107,7 +114,7 @@ x_out_flip  = 0
 - `-it N[:save]`：迭代次数与保存间隔，例如 `50:5`。
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
-- `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。
+- `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。配置 `[PSF] z_blur=false` 可将 Z 核固定为 `{1}`，用于 XY-only Operator PSF 消融；默认 `true` 保持 XYZ PSF。
 - `-opti mlem|bsrem|admm`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 

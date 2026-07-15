@@ -62,7 +62,8 @@ std::string ctacSummary(const ReconArgs &args) {
   if (!args.doCTAC)
     return "off";
   std::ostringstream oss;
-  oss << args.ctacModel << ", rotSign=" << args.ctacRotSign;
+  oss << args.ctacModel << ", factorBackend=cuda"
+      << ", rotSign=" << args.ctacRotSign;
   if (!args.attMapPath.empty())
     oss << ", muMap=" << args.attMapPath;
   if (!args.ctacAutoMuFrom.empty())
@@ -93,9 +94,16 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
       << "  physics: ctac=" << ctacSummary(args)
       << ", psf=" << psfModeName(args.psf.mode)
       << " fwhm_mm=" << args.psf.fwhm_mm
+      << " z_blur=" << (args.psf.z_blur ? "on" : "off")
       << " trunc_sigma=" << args.psf.min_sigmas
       << ", butter=" << (args.useButter ? "on" : "off")
       << ", reg=" << (args.useReg ? regTypeToString(args.reg.type) : "off");
+  if (args.useReg) {
+    oss << " regCT="
+        << (args.regCtPath.empty() ? "activity-only" : args.regCtPath)
+        << " ct_sigma=" << args.reg.ct_sigma
+        << " ct_floor=" << args.reg.ct_weight_floor;
+  }
   logInfo(oss.str());
 
   logDebug(std::string("Algorithm: ") + args.getAlgorithmName());

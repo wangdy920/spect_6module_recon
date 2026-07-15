@@ -793,18 +793,11 @@ std::vector<double> runStandardReconstructionImpl(
   logCudaChunkTimingSnapshot(cudaChunkTiming);
 
   if (!args.attMapPath.empty() && !args.doCTAC) {
-    const spect::main::CTACModel changModel =
-        (args.ctacModel == "per-voxel") ? spect::main::CTACModel::PerVoxelApprox
-                                        : spect::main::CTACModel::LineIntegral;
-    if (changModel == spect::main::CTACModel::PerVoxelApprox) {
-      logWarn("Chang's AC output uses the legacy per-voxel exp(-mu) "
-              "approximation (-ctacModel per-voxel).");
-    } else {
-      logInfo("Chang's AC output uses angle-averaged parallel-ray line "
-              "integrals of the attenuation map (mu in mm^-1).");
-    }
+    logInfo("Chang's AC output uses angle-averaged parallel-ray line "
+            "integrals of the attenuation map (mu in mm^-1).");
     std::vector<double> muMap;
-    if (!sharedAnatomical.empty() && args.attMapPath == args.priorPath) {
+    if (!sharedAnatomical.empty() &&
+        (args.regCtPath.empty() || args.regCtPath == args.attMapPath)) {
       muMap = sharedAnatomical;
     } else {
       muMap = loadVolumeChecked(args.attMapPath, "Attenuation map", args.Nx,
@@ -812,8 +805,8 @@ std::vector<double> runStandardReconstructionImpl(
     }
     std::vector<double> acImage = image;
     applyChangsAC(acImage, muMap, args.Nx, args.Ny, args.Nz, ctx.spacing.dx,
-                  ctx.spacing.dy, ctx.spacing.dz, args.numAngles, opts.threads,
-                  changModel, args.ctacRotSign);
+                   ctx.spacing.dy, ctx.spacing.dz, args.numAngles, opts.threads,
+                   args.ctacRotSign);
     saveVolumeOutput(acImage, geometry, args.outputDir, outputPrefix + "_AC",
                      -1, maskPtr, ctx.crop, true, ctx.outputTransform);
   }

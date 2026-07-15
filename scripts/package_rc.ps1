@@ -170,7 +170,7 @@ if (Test-Path -LiteralPath $readmeTemplate) {
 
 $releaseNotesPath = Join-Path $repo "doc\RELEASE_${ReleaseDate}_CN.md"
 if (-not (Test-Path -LiteralPath $releaseNotesPath)) {
-    $releaseNotesPath = Join-Path $repo "doc\RELEASE_20260708_CN.md"
+    $releaseNotesPath = Join-Path $repo "doc\RELEASE_20260715_CN.md"
 }
 if (Test-Path -LiteralPath $releaseNotesPath) {
     Copy-Item -LiteralPath $releaseNotesPath -Destination (Join-Path $packageRoot "RELEASE_NOTES.md") -Force

@@ -111,18 +111,16 @@ protected:
      * 使用中心差分: (R(f + eps*e_i) - R(f - eps*e_i)) / (2*eps)
      * 比较解析梯度与数值梯度
      */
-    bool verifyGradientFD(RegType type, double beta = 1.0, 
-                         double rtol = 1e-4, double atol = 1e-6) {
+    bool verifyGradientFD(RegType type, double beta = 1.0,
+                         double rtol = 1e-4, double atol = 1e-6,
+                         const std::vector<double>* ct = nullptr) {
         RegConf conf;
         conf.type = type;
         conf.beta = beta;
         conf.tv_eps = 1e-6;
-        conf.mrp_eps = 1e-8;
         conf.delta = 0.01;
         conf.gamma = 0.1;
-        conf.nlm_h = 0.1;
-        conf.nlm_search = 1;
-        conf.nlm_patch = 1;
+        conf.ct_image = ct;
         
         auto f = createSmoothImage();
         auto mask = createFullMask();
@@ -180,18 +178,14 @@ protected:
 
 TEST_F(RegularizerTest, StringToRegType) {
     EXPECT_EQ(stringToRegType("TVIsotropic"), RegType::TVIsotropic);
-    EXPECT_EQ(stringToRegType("TVHuber"), RegType::TVHuber);
-    EXPECT_EQ(stringToRegType("Tikhonov"), RegType::Tikhonov);
-    EXPECT_EQ(stringToRegType("MRP"), RegType::MRP);
     EXPECT_EQ(stringToRegType("RDP"), RegType::RDP);
-    EXPECT_EQ(stringToRegType("LogCosh"), RegType::LogCosh);
     EXPECT_EQ(stringToRegType("None"), RegType::None);
     EXPECT_EQ(stringToRegType("invalid"), RegType::Unknown);
 }
 
 TEST_F(RegularizerTest, RegTypeToString) {
     EXPECT_EQ(regTypeToString(RegType::TVIsotropic), "TVIsotropic");
-    EXPECT_EQ(regTypeToString(RegType::TVHuber), "TVHuber");
+    EXPECT_EQ(regTypeToString(RegType::RDP), "RDP");
     EXPECT_EQ(regTypeToString(RegType::None), "None");
 }
 
@@ -203,27 +197,24 @@ TEST_F(RegularizerTest, GradientFD_TVIsotropic) {
     EXPECT_TRUE(verifyGradientFD(RegType::TVIsotropic, 1.0, 1e-3, 1e-5));
 }
 
-TEST_F(RegularizerTest, GradientFD_TVHuber) {
-    EXPECT_TRUE(verifyGradientFD(RegType::TVHuber, 1.0, 1e-3, 1e-5));
-}
-
-// Fixed: Tikhonov梯度已修复，添加因子2
-TEST_F(RegularizerTest, GradientFD_Tikhonov) {
-    EXPECT_TRUE(verifyGradientFD(RegType::Tikhonov, 1.0, 1e-3, 1e-5));
-}
-
-TEST_F(RegularizerTest, GradientFD_MRP) {
-    EXPECT_TRUE(verifyGradientFD(RegType::MRP, 1.0, 1e-3, 1e-5));
-}
-
-// Fixed: RDP能量函数已添加gamma项，与梯度一致
 TEST_F(RegularizerTest, GradientFD_RDP) {
     EXPECT_TRUE(verifyGradientFD(RegType::RDP, 1.0, 1e-3, 1e-5));
 }
 
-// Fixed: LogCosh能量和梯度函数已完善
-TEST_F(RegularizerTest, GradientFD_LogCosh) {
-    EXPECT_TRUE(verifyGradientFD(RegType::LogCosh, 1.0, 1e-3, 1e-5));
+TEST_F(RegularizerTest, GradientFD_TVWithRegisteredCT) {
+    std::vector<double> ct(N_, 0.0);
+    for (int z = 0; z < Nz_; ++z)
+        for (int y = 0; y < Ny_; ++y)
+            for (int x = Nx_ / 2; x < Nx_; ++x)
+                ct[x + y * Nx_ + z * Nx_ * Ny_] = 0.03;
+    EXPECT_TRUE(verifyGradientFD(RegType::TVIsotropic, 1.0, 1e-3, 1e-5, &ct));
+}
+
+TEST_F(RegularizerTest, GradientFD_RDPWithRegisteredCT) {
+    std::vector<double> ct(N_, 0.0);
+    for (int i = N_ / 2; i < N_; ++i)
+        ct[i] = 0.03;
+    EXPECT_TRUE(verifyGradientFD(RegType::RDP, 1.0, 1e-3, 1e-5, &ct));
 }
 
 // ============ 基本功能测试 ============

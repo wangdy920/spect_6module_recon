@@ -6,7 +6,7 @@
 
 | File | Purpose |
 |---|---|
-| `RELEASE_20260710_CN.md` | 当前 release 边界、包布局、签收 |
+| `RELEASE_20260715_CN.md` | 当前 release 边界、默认拼接与签收 |
 | `USAGE_CN.md` | 公开 CLI |
 | `CLI_CHANGES_CN.md` | 废弃/改名参数速查 |
 | `PARAMETERS_CN.template.md` | 发布包参数说明模板 |
@@ -16,6 +16,7 @@
 | `Legacy_MLEM_B1B2_Parity_CN.md` | B1/260601 回归；B2 reference-only |
 | `CTAC_AutoMu_Validation_CN.md` | CTAC / auto-mu 调试与主 gate |
 | `Recon_Interface_Migration_Field_CN.md` | 现场 ThreeModalities 重建接口迁移 |
+| `MULTIBED_OVERLAP_RECONSTRUCTION_CN.md` | 多床位联合几何、denom/numerator、PSF、输出裁剪与接缝连续性 |
 
 ## How to decide
 

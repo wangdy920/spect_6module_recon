@@ -213,9 +213,18 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (cfg.load(configPath)) {
             args.configLoaded = true;
             applyConfig(args, cfg);
+        } else if (args.configExplicit) {
+            std::cerr << "Error: Cannot load explicit config file '"
+                      << configPath << "'.\n";
+            return ParseResult::ExitFailure;
         }
     } else {
         args.configFound = false;
+        if (args.configExplicit) {
+            std::cerr << "Error: Explicit config file not found: '"
+                      << configPath << "'.\n";
+            return ParseResult::ExitFailure;
+        }
     }
 
     // 2. Load algorithm config (algo_conf layer)
@@ -240,7 +249,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     }
     if (!algoConfPath.empty()) {
         args.algoConfPath = algoConfPath;
-        applyAlgoConf(args, algoConfPath);
+        if (!applyAlgoConf(args, algoConfPath))
+            return ParseResult::ExitFailure;
     }
 
     // 3. Process command-line arguments (highest priority override)
@@ -570,6 +580,10 @@ void ArgumentParser::registerHandlers() {
     };
     bindHandlerAliases(verbosityHandler, {"-vb"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(
+            i, argc, argv, a.projectionResidual);
+    }, {"-projectionResidual"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)i;
         (void)argc;
         (void)argv;
@@ -714,6 +728,20 @@ void ArgumentParser::registerHandlers() {
     };
     bindHandlerAliases(regValHandler, {"-regBeta"});
     bindHandlerAliases(regValHandler, {"-regDelta"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.regCtPath = ArgumentParser::getRequiredArg(i, argc, argv, "-regCT");
+        return true;
+    }, {"-regCT"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const std::string key = argv[i];
+        const double value = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv, key));
+        if (key == "-regCtSigma")
+            a.reg.ct_sigma = value;
+        else
+            a.reg.ct_weight_floor = value;
+        return true;
+    }, {"-regCtSigma", "-regCtFloor"});
     bindHandlerAliases(
         rejectCliOption("-regPower was removed; use -reg TV or -reg RDP."),
         {"-regPower"});
@@ -770,6 +798,20 @@ void ArgumentParser::registerHandlers() {
         }
         return true;
     }, {"-bedOverlap"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedCropMethod = toLower(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-bedCropMethod"));
+        return true;
+    }, {"-bedCropMethod"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(i, argc, argv,
+                                                  a.bedSeamPostprocess);
+    }, {"-bedSeamPostprocess"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedObjectProfile = toLower(ArgumentParser::getRequiredArg(
+            i, argc, argv, "-bedObjectProfile"));
+        return true;
+    }, {"-bedObjectProfile"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-cropEnd"), ',');
@@ -941,6 +983,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     }
     a.numThreads = cfg.getInt("Basic", "threads", a.numThreads);
     a.verbosity = cfg.getInt("Basic", "verbosity", a.verbosity);
+    a.projectionResidual = cfg.getBool(
+        "Diagnostics", "projection_residual", a.projectionResidual);
 
     // Detector
     std::string detCh = cfg.getString("Detector", "channels");
@@ -1055,9 +1099,14 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         a.reg.beta = cfg.getDouble("Regularization", "beta", a.reg.beta);
         double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
         a.reg.tv_eps = eps;
-        a.reg.mrp_eps = eps;
         a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
         a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
+        a.regCtPath = normalizePath(
+            cfg.getString("Regularization", "ct_image", a.regCtPath));
+        a.reg.ct_sigma =
+            cfg.getDouble("Regularization", "ct_sigma", a.reg.ct_sigma);
+        a.reg.ct_weight_floor = cfg.getDouble(
+            "Regularization", "ct_weight_floor", a.reg.ct_weight_floor);
     }
 
     // PSF
@@ -1078,6 +1127,7 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.usePSF = true;
     }
     a.psf.fwhm_mm = cfg.getDouble("PSF", "fwhm", a.psf.fwhm_mm);
+    a.psf.z_blur = cfg.getBool("PSF", "z_blur", a.psf.z_blur);
 
     std::string minSigmas = cfg.getString("PSF", "min_sigmas");
     if (!minSigmas.empty()) {
@@ -1148,17 +1198,33 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
                 a.cropEndEnd = std::stoi(ce[1]);
             }
         }
+        a.bedOverlapInRecon = cfg.getBool("MultiBed", "overlap_in_recon",
+                                          a.bedOverlapInRecon);
+        a.bedCropMethod = toLower(cfg.getString(
+            "MultiBed", "crop_method", a.bedCropMethod));
+        a.bedSeamPostprocess = cfg.getBool(
+            "MultiBed", "seam_postprocess", a.bedSeamPostprocess);
+        a.bedObjectProfile = toLower(cfg.getString(
+            "MultiBed", "object_profile", a.bedObjectProfile));
+        a.bedPhantomCloseStrength = cfg.getDouble(
+            "MultiBed", "phantom_close_strength", a.bedPhantomCloseStrength);
+        a.bedZimuCloseStrength = cfg.getDouble(
+            "MultiBed", "zimu_close_strength", a.bedZimuCloseStrength);
+        a.bedSeamHalfWidth = cfg.getInt(
+            "MultiBed", "seam_half_width", a.bedSeamHalfWidth);
+        a.fovRadiusMm = cfg.getDouble("MultiBed", "fov_radius_mm",
+                                      a.fovRadiusMm);
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
     }
 }
 
-void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
+bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
     ConfigParser cfg;
     if (!cfg.load(path)) {
-        std::cerr << "Warning: Cannot load algorithm config '" << path << "'.\n";
-        return;
+        std::cerr << "Error: Cannot load algorithm config '" << path << "'.\n";
+        return false;
     }
 
     // [Algorithm] section
@@ -1212,8 +1278,16 @@ void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
     if (cfg.hasKey("Regularization", "epsilon")) {
         double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
         a.reg.tv_eps = eps;
-        a.reg.mrp_eps = eps;
     }
+    if (cfg.hasKey("Regularization", "ct_image"))
+        a.regCtPath = normalizePath(
+            cfg.getString("Regularization", "ct_image", a.regCtPath));
+    if (cfg.hasKey("Regularization", "ct_sigma"))
+        a.reg.ct_sigma =
+            cfg.getDouble("Regularization", "ct_sigma", a.reg.ct_sigma);
+    if (cfg.hasKey("Regularization", "ct_weight_floor"))
+        a.reg.ct_weight_floor = cfg.getDouble(
+            "Regularization", "ct_weight_floor", a.reg.ct_weight_floor);
 
     // [BSREM] section
     if (cfg.hasSection("BSREM")) {
@@ -1245,6 +1319,7 @@ void ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         a.admmAdaptive = cfg.getBool("ADMM", "adaptive", a.admmAdaptive);
     }
 
+    return true;
 }
 
 std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
@@ -1261,7 +1336,7 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
          argName == "-indexMat" || argName == "-weightMat" ||
          argName == "-fout" || argName == "-loadCSR" ||
          argName == "-chunkCSRDir" || argName == "-saveCSR" ||
-         argName == "-attMap" || argName == "-bProj" ||
+         argName == "-attMap" || argName == "-regCT" || argName == "-bProj" ||
          argName == "-config" || argName == "-algoConf");
     
     if (isPathArg) {
@@ -1389,6 +1464,48 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
                   << spect::core::kMaxBeds << " fixed bed slots.\n";
         return false;
     }
+    if (!std::isfinite(args.fovRadiusMm) || args.fovRadiusMm < 0.0) {
+        std::cerr << "Error: [MultiBed] fov_radius_mm must be finite and >= 0.\n";
+        return false;
+    }
+    if (args.bedCropMethod != "direct" && args.bedCropMethod != "sigmoid") {
+        std::cerr << "Error: [MultiBed] crop_method must be direct or sigmoid.\n";
+        return false;
+    }
+    if (args.bedCropMethod == "sigmoid" && args.bedOverlapInRecon) {
+        std::cerr << "Error: [MultiBed] crop_method=sigmoid requires "
+                     "overlap_in_recon=0 (global config: "
+                  << args.configPath << ").\n";
+        return false;
+    }
+    if (args.bedSeamPostprocess &&
+        (args.bedCropMethod != "sigmoid" || args.bedOverlapInRecon)) {
+        std::cerr << "Error: [MultiBed] seam_postprocess requires "
+                     "crop_method=sigmoid and overlap_in_recon=0.\n";
+        return false;
+    }
+    if (args.bedObjectProfile != "auto" &&
+        args.bedObjectProfile != "mouse" &&
+        args.bedObjectProfile != "phantom" &&
+        args.bedObjectProfile != "zimu") {
+        std::cerr << "Error: [MultiBed] object_profile must be auto, mouse, "
+                     "phantom, or zimu.\n";
+        return false;
+    }
+    if (!std::isfinite(args.bedPhantomCloseStrength) ||
+        args.bedPhantomCloseStrength < 0.0 ||
+        args.bedPhantomCloseStrength > 1.0 ||
+        !std::isfinite(args.bedZimuCloseStrength) ||
+        args.bedZimuCloseStrength < 0.0 ||
+        args.bedZimuCloseStrength > 1.0) {
+        std::cerr << "Error: [MultiBed] phantom_close_strength and "
+                     "zimu_close_strength must be finite and in [0,1].\n";
+        return false;
+    }
+    if (args.bedSeamHalfWidth < 0) {
+        std::cerr << "Error: [MultiBed] seam_half_width must be >= 0.\n";
+        return false;
+    }
     if (!args.chunkCSRDir.empty() && !args.loadCSRPath.empty()) {
         std::cerr << "Error: Use either -loadCSR or -chunkCSRDir, not both.\n";
         return false;
@@ -1452,6 +1569,12 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: -compactDenomCache requires -matrixLayout compact-symmetric.\n";
         return false;
     }
+    if (args.projectionResidual &&
+        args.matrixLayout != "compact-symmetric") {
+        std::cerr << "Error: -projectionResidual currently requires "
+                     "-matrixLayout compact-symmetric.\n";
+        return false;
+    }
     if (args.matrixLayout == "compact-symmetric") {
         if (args.loadCSRPath.empty() && args.chunkCSRDir.empty()) {
             std::cerr << "Error: compact-symmetric layout requires -loadCSR, -chunkCSRDir, [SystemMatrix] default_chunk_csr_dir, or exactly one exe-local matrix directory.\n";
@@ -1470,18 +1593,11 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
                          "(single-file compact matrix does not support it).\n";
             return false;
         }
-        if (args.doCTAC && args.projPaths.size() > 1) {
-            std::cerr << "Error: compact-symmetric CTAC currently supports a "
-                         "single bed (device attenuation-table cache holds one "
-                         "bed).\n";
-            return false;
-        }
         const bool compactHasReg =
             args.useReg && args.reg.type != RegType::None;
         if (compactHasReg &&
-            (args.algorithm != ReconArgs::Algorithm::BSREM ||
-             args.reg.type != RegType::RDP)) {
-            std::cerr << "Error: compact-symmetric regularization currently supports only -opti bsrem -reg RDP,...\n";
+            args.algorithm != ReconArgs::Algorithm::BSREM) {
+            std::cerr << "Error: compact-symmetric regularization requires -opti bsrem with TV or RDP.\n";
             return false;
         }
         if (args.psfProj || args.psf.mode == PSFMode::ProjDomain ||
@@ -1559,6 +1675,16 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
                          "be non-negative.\n";
             return false;
         }
+        if ((!args.regCtPath.empty() || !args.attMapPath.empty()) &&
+            !(args.reg.ct_sigma > 0.0)) {
+            std::cerr << "Error: -regCtSigma must be positive.\n";
+            return false;
+        }
+        if (args.reg.ct_weight_floor < 0.0 ||
+            args.reg.ct_weight_floor > 1.0) {
+            std::cerr << "Error: -regCtFloor must be in [0,1].\n";
+            return false;
+        }
     }
 
     if (args.useSmooth && args.smoothSigma <= 0) {
@@ -1597,6 +1723,10 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "threads    = " << a.numThreads << "\n";
     std::cout << "verbosity  = " << a.verbosity << "\n\n";
 
+    std::cout << "[Diagnostics]\n";
+    std::cout << "projection_residual = "
+              << (a.projectionResidual ? "true" : "false") << "\n\n";
+
     std::cout << "[Detector]\n";
     std::cout << "channels = " << a.detNz;
     if (a.detNx != a.detNz) std::cout << "," << a.detNx;
@@ -1608,12 +1738,15 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "subsets    = " << a.numSubsets << "\n\n";
 
     std::cout << "[Regularization]\n";
-    const char* regNames[] = {"None","TVIsotropic","TVHuber","Tikhonov","MRP",
-                              "NLM","Bowsher","PLS","RDP","LogCosh"};
-    int regIdx = static_cast<int>(a.reg.type);
-    std::cout << "type  = " << (regIdx >= 0 && regIdx <= 9 ? regNames[regIdx] : "Unknown") << "\n";
+    std::cout << "type  = " << regTypeToString(a.reg.type) << "\n";
     std::cout << "beta  = " << a.reg.beta << "\n";
-    std::cout << "delta = " << a.reg.delta << "\n\n";
+    std::cout << "delta = " << a.reg.delta << "\n";
+    if (!a.regCtPath.empty()) {
+        std::cout << "ct_image = " << a.regCtPath << "\n";
+        std::cout << "ct_sigma = " << a.reg.ct_sigma << "\n";
+        std::cout << "ct_weight_floor = " << a.reg.ct_weight_floor << "\n";
+    }
+    std::cout << "\n";
 
     if (a.algorithm == ReconArgs::Algorithm::BSREM) {
         std::cout << "[BSREM]\n";
@@ -1648,6 +1781,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     int psfIdx = static_cast<int>(a.psf.mode);
     std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 5 ? psfModes[psfIdx] : "Unknown") << "\n";
     std::cout << "fwhm = " << a.psf.fwhm_mm << "\n";
+    std::cout << "z_blur = " << (a.psf.z_blur ? "true" : "false") << "\n";
     std::cout << "min_sigmas = " << a.psf.min_sigmas << "\n\n";
 
     std::cout << "[CTAC]\n";
@@ -1681,6 +1815,21 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         }
     }
     std::cout << "\n";
+    std::cout << "overlap_in_recon = " << (a.bedOverlapInRecon ? 1 : 0)
+              << "  # 0=output stitching only\n";
+    std::cout << "crop_method = " << a.bedCropMethod
+              << "  # direct|sigmoid; sigmoid uses normalized k=12 weights\n";
+    std::cout << "seam_postprocess = " << (a.bedSeamPostprocess ? 1 : 0)
+              << "  # phantom contour interpolation / zimu topology lock\n";
+    std::cout << "object_profile = " << a.bedObjectProfile
+              << "  # auto|mouse|phantom|zimu\n";
+    std::cout << "phantom_close_strength = " << a.bedPhantomCloseStrength
+              << "  # contour interpolation blend [0,1]\n";
+    std::cout << "zimu_close_strength = " << a.bedZimuCloseStrength
+              << "  # topology-locked Gaussian sigma=0.3mm blend [0,1]\n";
+    std::cout << "seam_half_width = " << a.bedSeamHalfWidth
+              << "  # phantom +/- slices; zimu capped at 4\n";
+    std::cout << "fov_radius_mm = " << a.fovRadiusMm << "  # 0=off\n";
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
@@ -1760,6 +1909,9 @@ void ArgumentParser::printUsage() {
     std::cout << "  -reg <type[,beta,delta]> TV | RDP\n";
     std::cout << "  -regBeta <beta>          Regularization weight\n";
     std::cout << "  -regDelta <delta>        Transition parameter\n\n";
+    std::cout << "  -regCT <path>            Registered CT/mu-map for TV/RDP edge weights\n";
+    std::cout << "  -regCtSigma <value>      CT edge scale (default 0.01 for mu mm^-1)\n";
+    std::cout << "  -regCtFloor <0..1>       Minimum CT edge weight (default 0.05)\n\n";
 
     std::cout << "=== Filtering ===\n";
     std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2)\n";
@@ -1780,8 +1932,11 @@ void ArgumentParser::printUsage() {
 
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
+    std::cout << "  -bedCropMethod <direct|sigmoid> Output stitching for overlap_in_recon=0\n";
+    std::cout << "  -bedSeamPostprocess <0|1> Object-aware contour/topology seam postprocess (default 1)\n";
+    std::cout << "  -bedObjectProfile <auto|mouse|phantom|zimu> Override automatic object profile\n";
     std::cout << "  -cropEnd <top[,end]>      Final output Z cropping after output flips\n";
-    std::cout << "  -zbedflip <0|1>           Flip each dfList bed segment on output (default 0)\n";
+    std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
@@ -1802,6 +1957,7 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Advanced ===\n";
     std::cout << "  -config <path>            Global config (default search: exe/config, exe, cwd/config, cwd)\n";
     std::cout << "  -dumpConf                 Print merged config and exit\n";
+    std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
     std::cout << "  -Aprune <eps>             Prune system-matrix weights (default 1e-10)\n";
     std::cout << "  -Astream on|off           Stream build from disk (default off)\n";
     std::cout << "  -ApruneMask on|off        Prune columns outside mask (default on)\n";

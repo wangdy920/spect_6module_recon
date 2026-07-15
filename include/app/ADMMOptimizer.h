@@ -206,7 +206,9 @@ private:
   bool tryComputeTVProxCUDA(const std::vector<double> &v, double lambda) {
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
     return cuda::computeTVProxCUDA(v, Nx_, Ny_, Nz_, lambda,
-                                   cfg_.tvInnerIters, u_);
+                                   cfg_.tvInnerIters, u_, cfg_.reg.ct_image,
+                                   cfg_.reg.ct_sigma,
+                                   cfg_.reg.ct_weight_floor);
 #else
     (void)v;
     (void)lambda;

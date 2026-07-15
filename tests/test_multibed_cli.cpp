@@ -23,6 +23,16 @@ namespace spect {
 namespace io {
 namespace test {
 
+TEST(IOTest, MultiBedCodeDefaultsMatchShippedSigmoidMode) {
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(args.bedOverlapInRecon);
+    EXPECT_EQ(args.bedCropMethod, "sigmoid");
+    EXPECT_TRUE(args.bedSeamPostprocess);
+    EXPECT_EQ(args.bedObjectProfile, "auto");
+    EXPECT_EQ(args.bedSeamHalfWidth, 8);
+    EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.5);
+}
+
 TEST(IOTest, MultiBedParserSortsDfListAndBProjListByBedNumber) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
@@ -94,11 +104,49 @@ TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     argv.push_back("1");
     argv.push_back("-xoutflip");
     argv.push_back("1");
+    argv.push_back("-bedCropMethod");
+    argv.push_back("direct");
+    argv.push_back("-bedSeamPostprocess");
+    argv.push_back("0");
+    argv.push_back("-bedObjectProfile");
+    argv.push_back("zimu");
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);
+    EXPECT_EQ(args.bedCropMethod, "direct");
+    EXPECT_EQ(args.bedObjectProfile, "zimu");
+}
+TEST(IOTest, MultiBedParserRejectsLegacyBlendFill) {
+    spect::cli::ReconArgs args;
+    auto argv = compactBaseArgs();
+    argv.push_back("-bedCropMethod");
+    argv.push_back("blendfill");
+
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+TEST(IOTest, MultiBedParserAcceptsCompactChunkCtac) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon",
+        "-config", "__missing_compact_test_config__.ini",
+        "-dfList", "Bed1.bin;Bed2.bin",
+        "-chunkCSRDir", "chunks",
+        "-matrixLayout", "compact-symmetric",
+        "-opti", "mlem",
+        "-subsets", "1",
+        "-it", "1",
+        "-dim", "108,108,80",
+        "-vox", "0.3",
+        "-ang", "360",
+        "-ctac",
+        "-attMap", "mu.mhd"
+    };
+
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.doCTAC);
+    EXPECT_EQ(args.bedCount, 2);
 }
 TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
     const auto dir = std::filesystem::temp_directory_path() / "spect_multibed_config_tests";
@@ -110,7 +158,15 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         ASSERT_TRUE(out);
         out << "[MultiBed]\n";
         out << "bed_overlap = 5\n";
+        out << "overlap_in_recon = 0\n";
+        out << "crop_method = sigmoid\n";
+        out << "seam_postprocess = 1\n";
+        out << "object_profile = phantom\n";
+        out << "phantom_close_strength = 0.9\n";
+        out << "zimu_close_strength = 0.8\n";
+        out << "seam_half_width = 5\n";
         out << "crop_end = 2,3\n";
+        out << "fov_radius_mm = 15.0\n";
         out << "z_bed_flip = 0\n";
         out << "z_out_flip = 1\n";
         out << "x_out_flip = 1\n";
@@ -132,8 +188,16 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_EQ(args.bedOverlaps, (std::vector<int>{5}));
+    EXPECT_FALSE(args.bedOverlapInRecon);
+    EXPECT_EQ(args.bedCropMethod, "sigmoid");
+    EXPECT_TRUE(args.bedSeamPostprocess);
+    EXPECT_EQ(args.bedObjectProfile, "phantom");
+    EXPECT_DOUBLE_EQ(args.bedPhantomCloseStrength, 0.9);
+    EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.8);
+    EXPECT_EQ(args.bedSeamHalfWidth, 5);
     EXPECT_EQ(args.cropEndStart, 2);
     EXPECT_EQ(args.cropEndEnd, 3);
+    EXPECT_DOUBLE_EQ(args.fovRadiusMm, 15.0);
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);

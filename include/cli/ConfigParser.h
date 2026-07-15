@@ -6,6 +6,7 @@
 #include <cctype>
 #include <fstream>
 #include <map>
+#include <stdexcept>
 #include <string>
 
 namespace spect {
@@ -91,25 +92,26 @@ public:
      * @brief Get an integer value from the configuration.
      * @param sec Section name.
      * @param key Key name within the section.
-     * @param def Default value if key not found or invalid.
+     * @param def Default value if key not found.
      * @return The integer value or default.
      */
     int getInt(const std::string& sec, const std::string& key, int def) const {
         std::string val = getString(sec, key);
         if (val.empty())
             return def;
-        try {
-            return std::stoi(val);
-        } catch (...) {
-            return def;
-        }
+        size_t parsed = 0;
+        const int result = std::stoi(val, &parsed);
+        if (parsed != val.size())
+            throw std::invalid_argument("Invalid integer config value [" + sec +
+                                        "] " + key + "=" + val);
+        return result;
     }
 
     /**
      * @brief Get a double value from the configuration.
      * @param sec Section name.
      * @param key Key name within the section.
-     * @param def Default value if key not found or invalid.
+     * @param def Default value if key not found.
      * @return The double value or default.
      */
     double getDouble(const std::string& sec, const std::string& key,
@@ -117,18 +119,19 @@ public:
         std::string val = getString(sec, key);
         if (val.empty())
             return def;
-        try {
-            return std::stod(val);
-        } catch (...) {
-            return def;
-        }
+        size_t parsed = 0;
+        const double result = std::stod(val, &parsed);
+        if (parsed != val.size())
+            throw std::invalid_argument("Invalid floating-point config value [" +
+                                        sec + "] " + key + "=" + val);
+        return result;
     }
 
     /**
      * @brief Get a boolean value from the configuration.
      * @param sec Section name.
      * @param key Key name within the section.
-     * @param def Default value if key not found or invalid.
+     * @param def Default value if key not found.
      * @return The boolean value or default.
      * 
      * Recognizes: true/True/1/on as true, false/False/0/off as false.
@@ -141,7 +144,8 @@ public:
             return true;
         if (val == "false" || val == "False" || val == "0" || val == "off")
             return false;
-        return def;
+        throw std::invalid_argument("Invalid boolean config value [" + sec +
+                                    "] " + key + "=" + val);
     }
 
     /**

@@ -68,6 +68,21 @@ void conv3d_separable_inplace(
 );
 
 /**
+ * @brief Exact transpose of conv3d_separable_inplace.
+ *
+ * Mirror extension is not a symmetric boundary operator, so the adjoint must
+ * accumulate boundary samples with the transpose of each 1D pass.
+ */
+void conv3d_separable_adjoint_inplace(
+    std::vector<double>& f,
+    int Nx, int Ny, int Nz,
+    const std::vector<double>& kx,
+    const std::vector<double>& ky,
+    const std::vector<double>& kz,
+    int threads
+);
+
+/**
  * @brief 2D 可分离卷积（原地操作）
  * 
  * 先沿 Y 方向，再沿 X 方向。

@@ -320,19 +320,16 @@ int runProgram(int argc, char **argv) {
                       spacing.dy, spacing.dz};
 
     std::vector<double> sharedAnatomical;
-    if (!args.priorPath.empty() && args.priorPath != "none") {
-      logInfo("Loading anatomical prior from " + args.priorPath);
-      sharedAnatomical = loadVolumeChecked(args.priorPath, "Prior volume", args.Nx,
-                                          args.Ny, args.Nz);
-    } else if ((args.useReg && (args.reg.type == RegType::Bowsher ||
-                                args.reg.type == RegType::PLS)) &&
-               !args.attMapPath.empty()) {
-      logInfo("No explicit prior was provided. Reusing attenuation map as anatomical prior.");
-      sharedAnatomical = loadVolumeChecked(args.attMapPath, "Attenuation volume",
+    if (args.useReg && !args.regCtPath.empty()) {
+      logInfo("Loading registered CT for TV/RDP weights from " + args.regCtPath);
+      sharedAnatomical = loadVolumeChecked(args.regCtPath, "Registered CT",
+                                          args.Nx, args.Ny, args.Nz);
+    } else if (!args.doCTAC && !args.attMapPath.empty() &&
+               (args.useReg || !std::isnan(args.maskFromAttThreshold))) {
+      logInfo("Reusing registered attenuation map for TV/RDP weights.");
+      sharedAnatomical = loadVolumeChecked(args.attMapPath, "Attenuation map",
                                           args.Nx, args.Ny, args.Nz);
     }
-    if (!sharedAnatomical.empty())
-      args.reg.anatomical_image = &sharedAnatomical;
 
     std::vector<uint8_t> mask;
     const std::vector<uint8_t> *maskPtr =
@@ -374,6 +371,19 @@ int runProgram(int argc, char **argv) {
       } else {
         throw std::runtime_error(
             "CTAC requires -attMap <file> or -ctacAutoMu <early recon volume>.");
+      }
+    }
+    if (args.useReg) {
+      if (!sharedAnatomical.empty())
+        args.reg.ct_image = &sharedAnatomical;
+      else if (!args.attMapPath.empty() && !ctacMuMap.empty())
+        args.reg.ct_image = &ctacMuMap;
+      if (args.reg.ct_image) {
+        logInfo("TV/RDP CT weighting enabled: sigma=" +
+                std::to_string(args.reg.ct_sigma) + ", floor=" +
+                std::to_string(args.reg.ct_weight_floor) + ".");
+      } else {
+        logInfo("TV/RDP uses activity-only neighborhood weights.");
       }
     }
     if (!std::isnan(args.maskFromAttThreshold)) {
@@ -581,21 +591,12 @@ int runProgram(int argc, char **argv) {
 
     std::vector<std::vector<uint16_t>> dynamicAttenFactors;
     if (args.doCTAC) {
-      const spect::main::CTACModel ctacModel =
-          (args.ctacModel == "per-voxel")
-              ? spect::main::CTACModel::PerVoxelApprox
-              : spect::main::CTACModel::LineIntegral;
-      if (ctacModel == spect::main::CTACModel::PerVoxelApprox) {
-        logWarn("CTAC model 'per-voxel' is the legacy exp(-mu) approximation "
-                "replicated per angle; it is not quantitative line-integral "
-                "CTAC. Use -ctacModel line-integral for the physical model.");
-      } else {
-        logInfo("CTAC model: angle-dependent parallel-ray line integral "
-                "(rotation sign " + std::to_string(args.ctacRotSign) +
-                "). Attenuation map must be mu in mm^-1.");
-      }
+      logInfo("CTAC model: angle-dependent parallel-ray line integral "
+              "(rotation sign " + std::to_string(args.ctacRotSign) +
+              "). Attenuation map must be mu in mm^-1.");
       if (useMappedCSR || bedCount > 1 || compactChunkLayout) {
         logInfo("Using dynamic CTAC attenuation factors.");
+        const auto attenuationStart = std::chrono::steady_clock::now();
         dynamicAttenFactors.resize(static_cast<size_t>(bedCount));
         const size_t plane = static_cast<size_t>(baseNx) * static_cast<size_t>(baseNy);
         for (int bed = 0; bed < bedCount; ++bed) {
@@ -606,17 +607,22 @@ int runProgram(int argc, char **argv) {
             const size_t dstOffset = static_cast<size_t>(z) * plane;
             std::copy_n(ctacMuMap.data() + srcOffset, plane, localMu.data() + dstOffset);
           }
-          dynamicAttenFactors[static_cast<size_t>(bed)] =
-              computeAttenFactors(ctacModel, localMu, baseNx, baseNy, baseNz,
-                                  spacing.dx, spacing.dy, spacing.dz,
-                                  args.numAngles, args.ctacRotSign,
-                                  args.numThreads);
+          auto &factors = dynamicAttenFactors[static_cast<size_t>(bed)];
+          factors = computeAttenFactors(
+              localMu, baseNx, baseNy, baseNz, spacing.dx, spacing.dy,
+              spacing.dz, args.numAngles, args.ctacRotSign, args.numThreads);
         }
+        logDebug(formatProfileEntry(
+            "ctac_attenuation_factors",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                          attenuationStart)
+                .count(),
+            static_cast<size_t>(bedCount)));
       } else {
         logInfo("Applying CTAC directly to in-memory CSR.");
         applyCTACToCSR(sysCSR, ctacMuMap, baseNx, baseNy, baseNz, spacing.dx,
                        spacing.dy, spacing.dz, args.numAngles, args.numThreads,
-                       ctacModel, args.ctacRotSign);
+                       args.ctacRotSign);
       }
     }
 
@@ -663,18 +669,48 @@ int runProgram(int argc, char **argv) {
       psfPtr = &prepared.psfKernels;
     }
     const CropSettings crop = sanitizeCropSettings(args.cropEndStart, args.cropEndEnd);
-    if ((crop.start != 0 || crop.end != 0) && !isCropSettingsValid(args.Nz, crop))
+    int outputNzBeforeCrop = args.Nz;
+    if (!args.bedOverlapInRecon) {
+      for (int overlap : args.outputBedOverlaps)
+        outputNzBeforeCrop -= overlap;
+    }
+    if ((crop.start != 0 || crop.end != 0) &&
+        !isCropSettingsValid(outputNzBeforeCrop, crop))
       throw std::runtime_error("Invalid output crop range.");
     OutputTransform outputTransform;
     const OutputTransform *outputTransformPtr = nullptr;
     const bool dfListMode = !args.projPaths.empty();
-    const bool enableBedZFlip = args.zBedFlip && dfListMode;
-    if (enableBedZFlip || args.zOutFlip || args.xOutFlip) {
+    const bool jointVirtualZFlip =
+        args.zBedFlip && dfListMode && bedCount > 1 && compactLayout;
+    const bool enableBedZFlip =
+        args.zBedFlip && dfListMode && !jointVirtualZFlip;
+    if (args.bedSeamPostprocess &&
+        std::any_of(args.outputBedOverlaps.begin(), args.outputBedOverlaps.end(),
+                    [](int overlap) { return overlap != 16; })) {
+      throw std::runtime_error(
+          "Object-aware seam postprocess currently requires overlap=16 at every joint.");
+    }
+    if (jointVirtualZFlip) {
+      logInfo("Multi-bed virtual Z mapping: local bed Z is reversed before "
+              "joint overlap accumulation.");
+    }
+    if (enableBedZFlip || args.zOutFlip || args.xOutFlip ||
+        !args.bedOverlapInRecon || args.fovRadiusMm > 0.0) {
       outputTransform.flipZPerBed = enableBedZFlip;
+      outputTransform.jointVirtualZFlip = jointVirtualZFlip;
       outputTransform.flipZWholeOutput = args.zOutFlip;
       outputTransform.flipXWholeOutput = args.xOutFlip;
+      outputTransform.bedOverlapInRecon = args.bedOverlapInRecon;
+      outputTransform.sigmoidBlendOutput = args.bedCropMethod == "sigmoid";
+      outputTransform.objectAwareSeamPostprocess = args.bedSeamPostprocess;
+      outputTransform.objectProfile = args.bedObjectProfile;
+      outputTransform.phantomCloseStrength = args.bedPhantomCloseStrength;
+      outputTransform.zimuCloseStrength = args.bedZimuCloseStrength;
+      outputTransform.seamHalfWidth = args.bedSeamHalfWidth;
       outputTransform.baseNz = baseNz;
       outputTransform.bedZStarts = bedZStarts;
+      outputTransform.outputBedOverlaps = args.outputBedOverlaps;
+      outputTransform.fovRadiusMm = args.fovRadiusMm;
       outputTransformPtr = &outputTransform;
       if (enableBedZFlip)
         logInfo("Output transform: per-bed Z flip enabled for dfList bed segments.");
@@ -682,6 +718,23 @@ int runProgram(int argc, char **argv) {
         logInfo("Output transform: whole-output Z flip enabled.");
       if (args.xOutFlip)
         logInfo("Output transform: whole-output X flip enabled.");
+      if (!args.bedOverlapInRecon) {
+        logInfo("Output transform: reconstruction beds are non-overlapping; "
+                "crop_method=" + args.bedCropMethod);
+      }
+      if (args.bedSeamPostprocess)
+        logInfo("Output transform: object-aware seam postprocess enabled; "
+                "profile=" + args.bedObjectProfile +
+                ", phantom_interp_strength=" +
+                std::to_string(args.bedPhantomCloseStrength) +
+                ", zimu_smooth_strength=" +
+                std::to_string(args.bedZimuCloseStrength) +
+                ", zimu_sigma_mm=0.3" +
+                ", seam_half_width=" +
+                std::to_string(args.bedSeamHalfWidth) + ".");
+      if (args.fovRadiusMm > 0.0)
+        logInfo("Output transform: circular XY FOV radius=" +
+                std::to_string(args.fovRadiusMm) + " mm (4-voxel taper).");
     }
 
     const auto runReconstruction = [&](const auto &matrix) {

@@ -147,6 +147,51 @@ struct VectorStats {
   double sum = 0.0;
 };
 
+struct ProjectionResidualStats {
+  size_t count = 0;
+  double measuredSum = 0.0;
+  double expectedSum = 0.0;
+  double poissonDeviance = 0.0;
+  double pearsonSquaredSum = 0.0;
+};
+
+void addProjectionResidualSample(ProjectionResidualStats &stats,
+                                 double measured, double expected) {
+  constexpr double kEps = 1e-10;
+  if (!std::isfinite(measured) || !std::isfinite(expected) || measured < 0.0) {
+    throw std::runtime_error(
+        "projection residual diagnostic received invalid projection data.");
+  }
+  const double q = std::max(expected, kEps);
+  ++stats.count;
+  stats.measuredSum += measured;
+  stats.expectedSum += q;
+  stats.poissonDeviance +=
+      measured > 0.0
+          ? 2.0 * (q - measured + measured * std::log(measured / q))
+          : 2.0 * q;
+  const double residual = measured - q;
+  stats.pearsonSquaredSum += residual * residual / q;
+}
+
+double projectionRelativeBias(const ProjectionResidualStats &stats) {
+  return (stats.measuredSum - stats.expectedSum) /
+         std::max(stats.measuredSum, 1e-10);
+}
+
+double projectionPearsonRms(const ProjectionResidualStats &stats) {
+  return stats.count > 0
+             ? std::sqrt(stats.pearsonSquaredSum /
+                         static_cast<double>(stats.count))
+             : 0.0;
+}
+
+double projectionDeviancePerBin(const ProjectionResidualStats &stats) {
+  return stats.count > 0
+             ? stats.poissonDeviance / static_cast<double>(stats.count)
+             : 0.0;
+}
+
 VectorStats computeVectorStats(const std::vector<double> &values) {
   VectorStats stats;
   stats.count = values.size();
@@ -391,10 +436,17 @@ std::string buildCompactDenomCacheManifest(
   }
   oss << "bed_count=" << bedZStarts.size() << '\n';
   appendVectorLine(oss, "bed_z_starts", bedZStarts);
+  oss << "bed_overlap_in_recon=" << (args.bedOverlapInRecon ? 1 : 0) << '\n';
+  appendVectorLine(oss, "output_bed_overlaps", args.outputBedOverlaps);
+  if (args.zBedFlip && !args.projPaths.empty() && bedZStarts.size() > 1) {
+    oss << "joint_virtual_z_flip=1\n";
+    oss << "joint_overlap_accumulation=direct\n";
+  }
   oss << "joseph_passes=" << args.josephPasses << '\n';
   oss << "psf_mode=" << psfModeKey(args.psf.mode) << '\n';
   oss << "psf_fwhm=" << args.psf.fwhm_x << ',' << args.psf.fwhm_y << ','
       << args.psf.fwhm_z << ',' << args.psf.fwhm_mm << '\n';
+  oss << "psf_z_blur=" << (args.psf.z_blur ? 1 : 0) << '\n';
   oss << "psf_vox=" << args.psf.vox_x << ',' << args.psf.vox_y << ','
       << args.psf.vox_z << '\n';
   oss << "psf_truncation_mm=" << args.psf.truncation_mm << '\n';
@@ -403,7 +455,10 @@ std::string buildCompactDenomCacheManifest(
   oss << "psf_min_sigmas=" << args.psf.min_sigmas << '\n';
   if (args.psf.mode == spect::filters::PSFMode::Operator &&
       bedZStarts.size() > 1) {
-    oss << "psf_multibed_scope=global_volume\n";
+    oss << "psf_multibed_scope="
+        << (args.bedOverlapInRecon ? "global_volume"
+                                   : "per_bed_output_hardcut")
+        << '\n';
   }
   if (psfKernels != nullptr) {
     appendVectorLine(oss, "psf_kernel_x", psfKernels->kx);
@@ -531,8 +586,10 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
   const size_t baseNvox = ctx.baseNvox;
   const size_t globalNvox = ctx.globalNvox;
   const std::vector<int> &bedZStarts = *ctx.bedZStarts;
-        spect::io::CSRView compactMatrix{};
-        if (!compactChunkLayout) {
+  const bool jointVirtualZFlip =
+      args.zBedFlip && !args.projPaths.empty() && bedCount > 1;
+  spect::io::CSRView compactMatrix{};
+  if (!compactChunkLayout) {
           if constexpr (std::is_same_v<MatrixType, spect::io::CSRView>) {
             compactMatrix = matrix;
           } else {
@@ -551,23 +608,30 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
 #else
         const OutputGeometry geometry = outputGeometry;
         const std::string outputPrefix = outputPrefixFromArgs(args);
-        const uint16_t *compactAttFactors = nullptr;
+        std::vector<const uint16_t *> compactAttFactorPtrs;
         if (!opts.bedAttenFactors.empty()) {
           if (!compactChunkLayout) {
             throw std::runtime_error(
                 "compact-symmetric CTAC requires the chunk directory layout.");
           }
-          if (bedCount > 1) {
+          if (opts.bedAttenFactors.size() != static_cast<size_t>(bedCount)) {
             throw std::runtime_error(
-                "compact-symmetric CTAC currently supports a single bed.");
+                "compact-symmetric CTAC attenuation table count does not "
+                "match the bed count.");
           }
-          compactAttFactors = opts.bedAttenFactors[0].data();
-          logInfo("compact CTAC: attenuation factors fused in native CUDA "
-                  "forward/backward/sensitivity kernels.");
+          compactAttFactorPtrs.reserve(static_cast<size_t>(bedCount));
+          for (const auto &factors : opts.bedAttenFactors) {
+            compactAttFactorPtrs.push_back(factors.empty() ? nullptr
+                                                           : factors.data());
+          }
+          logInfo("compact CTAC: per-bed attenuation factors fused in native "
+                  "CUDA forward/backward/sensitivity kernels.");
         }
+        const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
-        const bool compactMultiBedGlobalPsf = compactPsfActive && bedCount > 1;
+        const bool compactMultiBedGlobalPsf =
+            compactPsfActive && bedCount > 1 && args.bedOverlapInRecon;
         spect::cuda::CompactSymmetricStageTiming compactCudaTiming;
         MemoryUsageSnapshot compactPeakMemory;
         auto observeCompactMemory = [&]() {
@@ -579,13 +643,13 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             resolveCompactDenomCacheMhdPath(args);
         std::string compactDenomManifest;
         if (!compactDenomCachePath.empty() ||
-            (compactChunkLayout && compactAttFactors == nullptr)) {
+            (compactChunkLayout && !compactHasAttenuation)) {
           compactDenomManifest = buildCompactDenomCacheManifest(
               args, geometry, compactMeta, compactMetaPath, compactChunkLayout,
               compactChunks, bedZStarts, psfPtr);
         }
         if (compactDenomCachePath.empty() && compactChunkLayout &&
-            compactAttFactors == nullptr) {
+            !compactHasAttenuation) {
           compactDenomCachePath =
               autoCompactDenomCachePath(compactDenomManifest);
           logDebug("compact denom auto-cache path: " +
@@ -617,41 +681,58 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         }
         if (!loadedCompactDenomCache) {
           std::vector<double> localDenom(baseNvox, 0.0);
-          const bool ok =
-              compactChunkLayout
-                  ? spect::cuda::computeCompactChunkSensitivityCUDA(
-                        *compactChunks, compactMeta, opts.threads,
-                        localDenom.data(), &compactCudaTiming,
-                        compactAttFactors)
-                  : spect::cuda::computeCompactSymmetricSensitivityCUDA(
-                        compactMatrix, compactMeta, opts.threads,
-                        localDenom.data(), &compactCudaTiming);
-          if (!ok) {
-            throw std::runtime_error(
-                "compact-symmetric sensitivity requires CUDA sparse backend.");
+          auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
+            std::fill(localDenom.begin(), localDenom.end(), 0.0);
+            const bool ok =
+                compactChunkLayout
+                    ? spect::cuda::computeCompactChunkSensitivityCUDA(
+                          *compactChunks, compactMeta, opts.threads,
+                          localDenom.data(), &compactCudaTiming, attenuation)
+                    : spect::cuda::computeCompactSymmetricSensitivityCUDA(
+                          compactMatrix, compactMeta, opts.threads,
+                          localDenom.data(), &compactCudaTiming);
+            if (!ok) {
+              throw std::runtime_error(
+                  "compact-symmetric sensitivity requires CUDA sparse backend.");
+            }
+          };
+          if (compactHasAttenuation) {
+            for (int bed = 0; bed < bedCount; ++bed) {
+              computeLocalSensitivity(
+                  compactAttFactorPtrs[static_cast<size_t>(bed)]);
+              if (!compactMultiBedGlobalPsf) {
+                apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
+                                   psfPtr, opts.threads);
+              }
+              spect::app::accumulateBedVolumeToGlobal(
+                  denom, localDenom, baseNx, baseNy, baseNz,
+                  bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+              observeCompactMemory();
+            }
+            if (compactMultiBedGlobalPsf) {
+              apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts,
+                                 psfPtr, opts.threads);
+            }
+          } else {
+            computeLocalSensitivity(nullptr);
+            if (!compactMultiBedGlobalPsf) {
+              apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
+                                 psfPtr, opts.threads);
+            }
+            for (int bed = 0; bed < bedCount; ++bed) {
+              spect::app::accumulateBedVolumeToGlobal(
+                  denom, localDenom, baseNx, baseNy, baseNz,
+                  bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+              observeCompactMemory();
+            }
+            if (compactMultiBedGlobalPsf) {
+              apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts,
+                                 psfPtr, opts.threads);
+            }
           }
           if (compactMultiBedGlobalPsf) {
-            for (int bed = 0; bed < bedCount; ++bed) {
-              spect::app::accumulateBedVolumeToGlobal(
-                  denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)]);
-              observeCompactMemory();
-            }
-            logDebug(formatStatsEntry("compact_denom_pre_psf_global",
-                                     computeVectorStats(denom)));
-            apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts, psfPtr,
-                               opts.threads);
             logDebug(formatStatsEntry("compact_denom_post_psf_global",
                                      computeVectorStats(denom)));
-          } else {
-            apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts, psfPtr,
-                               opts.threads);
-            for (int bed = 0; bed < bedCount; ++bed) {
-              spect::app::accumulateBedVolumeToGlobal(
-                  denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)]);
-              observeCompactMemory();
-            }
           }
 
           if (args.josephPasses > 0) {
@@ -698,8 +779,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         const bool useRegularization =
             args.algorithm == ReconArgs::Algorithm::BSREM && args.useReg &&
             args.reg.beta > 0.0 && args.reg.type != RegType::None;
-        const bool useBsremPenaltyUpdate =
-            args.algorithm == ReconArgs::Algorithm::BSREM && useRegularization;
+        const bool useBsremUpdate =
+            args.algorithm == ReconArgs::Algorithm::BSREM;
         const std::vector<uint8_t> *maskForReg =
             (maskPtr && useRegularization && args.reg.skip_outside_mask)
                 ? maskPtr
@@ -747,7 +828,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               const int zStart = bedZStarts[static_cast<size_t>(bed)];
               localImages[static_cast<size_t>(bed)] =
                   spect::app::extractBedVolumeFromGlobal(
-                      *bedImageSource, baseNx, baseNy, baseNz, zStart);
+                      *bedImageSource, baseNx, baseNy, baseNz, zStart,
+                      jointVirtualZFlip);
               imagePtrs[static_cast<size_t>(bed)] =
                   localImages[static_cast<size_t>(bed)].data();
               if (compactMultiBedGlobalPsf) {
@@ -784,18 +866,14 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                   localNumers[static_cast<size_t>(bed)].data();
             }
 
-            std::vector<const uint16_t *> attPtrs;
-            if (compactAttFactors != nullptr) {
-              attPtrs.assign(static_cast<size_t>(bedCount), nullptr);
-              attPtrs[0] = compactAttFactors;
-            }
             const auto numerStart = ProfileClock::now();
             const bool ok = spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
                 *compactChunks, compactMeta, projectionPtrs.data(),
                 backgroundProj.empty() ? nullptr : backgroundPtrs.data(),
                 imagePtrs.data(), bedCount, opts.threads, numerPtrs.data(),
                 compactChunkReverseOrderNext, &compactCudaTiming,
-                attPtrs.empty() ? nullptr : attPtrs.data());
+                compactAttFactorPtrs.empty() ? nullptr
+                                             : compactAttFactorPtrs.data());
             if (!ok) {
               throw std::runtime_error(
                   "compact-symmetric numerator requires CUDA sparse backend.");
@@ -817,7 +895,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               }
               if (compactMultiBedGlobalPsf) {
                 spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart);
+                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                    jointVirtualZFlip);
               } else {
                 apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                    psfPtr, opts.threads);
@@ -828,7 +907,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                       computeVectorStats(localNumer)));
                 }
                 spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart);
+                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                    jointVirtualZFlip);
               }
             }
             if (compactMultiBedGlobalPsf) {
@@ -846,7 +926,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               const int zStart = bedZStarts[static_cast<size_t>(bed)];
               std::vector<double> localImage =
                   spect::app::extractBedVolumeFromGlobal(
-                      *bedImageSource, baseNx, baseNy, baseNz, zStart);
+                      *bedImageSource, baseNx, baseNy, baseNz, zStart,
+                      jointVirtualZFlip);
               std::vector<double> localUsed;
               const double *localImageForProjection = localImage.data();
               if (compactMultiBedGlobalPsf) {
@@ -898,7 +979,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               }
               if (compactMultiBedGlobalPsf) {
                 spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart);
+                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                    jointVirtualZFlip);
               } else {
                 apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                    psfPtr, opts.threads);
@@ -909,7 +991,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                       computeVectorStats(localNumer)));
                 }
                 spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart);
+                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                    jointVirtualZFlip);
               }
             }
             if (compactMultiBedGlobalPsf) {
@@ -953,7 +1036,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           double bsremBeta = 0.0;
           const std::vector<double> *curvPtr = nullptr;
           const std::vector<double> *kappaPtr = nullptr;
-          if (useBsremPenaltyUpdate) {
+          if (useBsremUpdate) {
             const int k = it - 1;
             bsremAlpha =
                 args.bsrem_alpha0 /
@@ -980,7 +1063,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
 
           const auto updateStart = ProfileClock::now();
           constexpr double eps = 1e-12;
-          if (!useBsremPenaltyUpdate) {
+          if (!useBsremUpdate) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(opts.threads)
 #endif
@@ -1055,6 +1138,126 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           }
         }
 
+        if (args.projectionResidual) {
+          std::error_code outputDirError;
+          std::filesystem::create_directories(args.outputDir, outputDirError);
+          if (outputDirError) {
+            throw std::runtime_error(
+                "Failed creating projection residual output directory: " +
+                outputDirError.message());
+          }
+          const std::filesystem::path residualPath =
+              std::filesystem::path(args.outputDir) /
+              (outputPrefix + "_projection_residual.csv");
+          std::ofstream residualOut(residualPath, std::ios::binary);
+          if (!residualOut) {
+            throw std::runtime_error(
+                "Failed opening projection residual CSV: " +
+                residualPath.string());
+          }
+          residualOut
+              << "bed,angle,det_z,count,measured_sum,expected_sum,relative_"
+                 "bias,poisson_deviance_per_bin,pearson_rms\n";
+          residualOut << std::setprecision(12);
+
+          std::vector<double> diagnosticGlobalPsfImage;
+          const std::vector<double> *diagnosticBedSource = &image;
+          if (compactMultiBedGlobalPsf) {
+            apply_psf_forward(image, diagnosticGlobalPsfImage, args.Nx,
+                              args.Ny, args.Nz, opts, psfPtr, opts.threads);
+            diagnosticBedSource = &diagnosticGlobalPsfImage;
+          }
+
+          const size_t fullRows =
+              static_cast<size_t>(compactMeta.fullRows());
+          for (int bed = 0; bed < bedCount; ++bed) {
+            std::vector<double> localImage =
+                spect::app::extractBedVolumeFromGlobal(
+                    *diagnosticBedSource, baseNx, baseNy, baseNz,
+                    bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+            std::vector<double> localUsed;
+            const double *localImageForProjection = localImage.data();
+            if (!compactMultiBedGlobalPsf && compactPsfActive) {
+              apply_psf_forward(localImage, localUsed, baseNx, baseNy, baseNz,
+                                opts, psfPtr, opts.threads);
+              localImageForProjection = localUsed.data();
+            }
+
+            std::vector<double> expected(fullRows, 0.0);
+            const uint16_t *bedAttenuation =
+                compactAttFactorPtrs.empty()
+                    ? nullptr
+                    : compactAttFactorPtrs[static_cast<size_t>(bed)];
+            const bool forwardOk =
+                compactChunkLayout
+                    ? spect::cuda::computeCompactChunkForwardProjectionCUDA(
+                          *compactChunks, compactMeta, localImageForProjection,
+                          opts.threads, expected.data(), bedAttenuation)
+                    : spect::cuda::computeCompactSymmetricForwardProjectionCUDA(
+                          compactMatrix, compactMeta, localImageForProjection,
+                          opts.threads, expected.data());
+            if (!forwardOk) {
+              throw std::runtime_error(
+                  "compact projection residual diagnostic requires CUDA "
+                  "sparse backend.");
+            }
+
+            const size_t projectionOffset =
+                static_cast<size_t>(bed) * fullRows;
+            const double *measured = projections.data() + projectionOffset;
+            const double *background =
+                backgroundProj.empty()
+                    ? nullptr
+                    : backgroundProj.data() + projectionOffset;
+            ProjectionResidualStats bedStats;
+            for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
+              for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
+                ProjectionResidualStats rowStats;
+                const size_t rowBase =
+                    static_cast<size_t>(angle) *
+                        static_cast<size_t>(compactMeta.fullRaysPerAngle()) +
+                    static_cast<size_t>(detZ) *
+                        static_cast<size_t>(compactMeta.detNx);
+                for (int detX = 0; detX < compactMeta.detNx; ++detX) {
+                  const size_t index = rowBase + static_cast<size_t>(detX);
+                  const double totalExpected =
+                      expected[index] +
+                      (background == nullptr ? 0.0 : background[index]);
+                  addProjectionResidualSample(rowStats, measured[index],
+                                              totalExpected);
+                  addProjectionResidualSample(bedStats, measured[index],
+                                              totalExpected);
+                }
+                residualOut << bed << ',' << angle << ',' << detZ << ','
+                            << rowStats.count << ',' << rowStats.measuredSum
+                            << ',' << rowStats.expectedSum << ','
+                            << projectionRelativeBias(rowStats) << ','
+                            << projectionDeviancePerBin(rowStats) << ','
+                            << projectionPearsonRms(rowStats) << '\n';
+              }
+            }
+            std::ostringstream metric;
+            metric << std::setprecision(12)
+                   << "[METRIC] compact_projection_residual bed=" << bed
+                   << " count=" << bedStats.count
+                   << " measured_sum=" << bedStats.measuredSum
+                   << " expected_sum=" << bedStats.expectedSum
+                   << " relative_bias=" << projectionRelativeBias(bedStats)
+                   << " poisson_deviance_per_bin="
+                   << projectionDeviancePerBin(bedStats)
+                   << " pearson_rms=" << projectionPearsonRms(bedStats);
+            logInfo(metric.str());
+          }
+          residualOut.flush();
+          if (!residualOut) {
+            throw std::runtime_error(
+                "Failed writing projection residual CSV: " +
+                residualPath.string());
+          }
+          logInfo("compact projection residual CSV: " +
+                  residualPath.string());
+        }
+
         if (args.saveInterval <= 0 ||
             (args.numIters % args.saveInterval) != 0) {
           const auto saveStart = ProfileClock::now();
@@ -1113,7 +1316,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                                      compactTiming.regGradientSeconds,
                                      compactTiming.regGradientCalls));
         }
-        logDebug(formatProfileEntry(useBsremPenaltyUpdate
+        logDebug(formatProfileEntry(useBsremUpdate
                                        ? "bsrem_update"
                                        : "mlem_update",
                                    compactTiming.mlemUpdateSeconds,

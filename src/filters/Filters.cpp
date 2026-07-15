@@ -10,6 +10,20 @@
 namespace spect {
 namespace filters {
 
+namespace {
+
+int mirrorIndex(int index, int size) {
+  if (size <= 1)
+    return 0;
+  const int period = 2 * size - 2;
+  index %= period;
+  if (index < 0)
+    index += period;
+  return index < size ? index : period - index;
+}
+
+} // namespace
+
 std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm,
                                    double min_sigmas) {
   if (fwhm_mm <= 0.0 || vox_mm <= 0.0)
@@ -46,14 +60,11 @@ static void conv1d_x_avx2(const std::vector<double> &in, std::vector<double> &ou
       double *dst_row = &out[idx3(0, static_cast<size_t>(j), static_cast<size_t>(k), Nx, Ny)];
 
       ptrdiff_t i = 0;
-      for (; i < radius; ++i) {
+      for (; i < std::min<ptrdiff_t>(radius, static_cast<ptrdiff_t>(Nx)); ++i) {
         double sum = 0.0;
         for (int t = -radius; t <= radius; ++t) {
-          int ii = static_cast<int>(i) + t;
-          if (ii < 0)
-            ii = -ii;
-          if (ii >= static_cast<int>(Nx))
-            ii = 2 * static_cast<int>(Nx) - 2 - ii;
+          const int ii = mirrorIndex(static_cast<int>(i) + t,
+                                     static_cast<int>(Nx));
           sum += src_row[ii] * kx[static_cast<size_t>(t + radius)];
         }
         dst_row[i] = sum;
@@ -72,11 +83,8 @@ static void conv1d_x_avx2(const std::vector<double> &in, std::vector<double> &ou
       for (; i < static_cast<ptrdiff_t>(Nx); ++i) {
         double sum = 0.0;
         for (int t = -radius; t <= radius; ++t) {
-          int ii = static_cast<int>(i) + t;
-          if (ii < 0)
-            ii = -ii;
-          if (ii >= static_cast<int>(Nx))
-            ii = 2 * static_cast<int>(Nx) - 2 - ii;
+          const int ii = mirrorIndex(static_cast<int>(i) + t,
+                                     static_cast<int>(Nx));
           sum += src_row[ii] * kx[static_cast<size_t>(t + radius)];
         }
         dst_row[i] = sum;
@@ -106,11 +114,8 @@ void conv1d_y_mirror(const std::vector<double> &in, std::vector<double> &out,
       for (; i <= static_cast<ptrdiff_t>(Nx) - 4; i += 4) {
         __m256d v_sum = _mm256_setzero_pd();
         for (int t = -radius; t <= radius; ++t) {
-          int jj = static_cast<int>(j) + t;
-          if (jj < 0)
-            jj = -jj;
-          if (jj >= static_cast<int>(Ny))
-            jj = 2 * static_cast<int>(Ny) - 2 - jj;
+          const int jj = mirrorIndex(static_cast<int>(j) + t,
+                                     static_cast<int>(Ny));
 
           __m256d v_k = _mm256_broadcast_sd(&ky[static_cast<size_t>(t + radius)]);
           __m256d v_in = _mm256_loadu_pd(&in[idx3(static_cast<size_t>(i), static_cast<size_t>(jj), static_cast<size_t>(k), Nx, Ny)]);
@@ -122,11 +127,8 @@ void conv1d_y_mirror(const std::vector<double> &in, std::vector<double> &out,
       for (; i < static_cast<ptrdiff_t>(Nx); ++i) {
         double sum = 0.0;
         for (int t = -radius; t <= radius; ++t) {
-          int jj = static_cast<int>(j) + t;
-          if (jj < 0)
-            jj = -jj;
-          if (jj >= static_cast<int>(Ny))
-            jj = 2 * static_cast<int>(Ny) - 2 - jj;
+          const int jj = mirrorIndex(static_cast<int>(j) + t,
+                                     static_cast<int>(Ny));
           sum += in[idx3(static_cast<size_t>(i), static_cast<size_t>(jj), static_cast<size_t>(k), Nx, Ny)] *
                  ky[static_cast<size_t>(t + radius)];
         }
@@ -151,11 +153,8 @@ void conv1d_z_mirror(const std::vector<double> &in, std::vector<double> &out,
       for (; i <= static_cast<ptrdiff_t>(Nx) - 4; i += 4) {
         __m256d v_sum = _mm256_setzero_pd();
         for (int t = -radius; t <= radius; ++t) {
-          int kk = static_cast<int>(k) + t;
-          if (kk < 0)
-            kk = -kk;
-          if (kk >= static_cast<int>(Nz))
-            kk = 2 * static_cast<int>(Nz) - 2 - kk;
+          const int kk = mirrorIndex(static_cast<int>(k) + t,
+                                     static_cast<int>(Nz));
 
           __m256d v_k = _mm256_broadcast_sd(&kz[static_cast<size_t>(t + radius)]);
           __m256d v_in = _mm256_loadu_pd(&in[idx3(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(kk), Nx, Ny)]);
@@ -167,11 +166,8 @@ void conv1d_z_mirror(const std::vector<double> &in, std::vector<double> &out,
       for (; i < static_cast<ptrdiff_t>(Nx); ++i) {
         double sum = 0.0;
         for (int t = -radius; t <= radius; ++t) {
-          int kk = static_cast<int>(k) + t;
-          if (kk < 0)
-            kk = -kk;
-          if (kk >= static_cast<int>(Nz))
-            kk = 2 * static_cast<int>(Nz) - 2 - kk;
+          const int kk = mirrorIndex(static_cast<int>(k) + t,
+                                     static_cast<int>(Nz));
           sum += in[idx3(static_cast<size_t>(i), static_cast<size_t>(j), static_cast<size_t>(kk), Nx, Ny)] *
                  kz[static_cast<size_t>(t + radius)];
         }
@@ -222,6 +218,74 @@ void conv3d_separable_inplace(std::vector<double> &f, int Nx, int Ny, int Nz,
   conv1d_x_avx2(f, tmp, static_cast<size_t>(Nx), static_cast<size_t>(Ny), static_cast<size_t>(Nz), kx);
   conv1d_y_mirror(tmp, f, static_cast<size_t>(Nx), static_cast<size_t>(Ny), static_cast<size_t>(Nz), ky);
   conv1d_z_mirror(f, tmp, static_cast<size_t>(Nx), static_cast<size_t>(Ny), static_cast<size_t>(Nz), kz);
+  f.swap(tmp);
+}
+
+void conv3d_separable_adjoint_inplace(
+    std::vector<double> &f, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz, int threads) {
+  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
+                       static_cast<size_t>(Nz);
+  if (f.size() != total)
+    throw std::invalid_argument("PSF adjoint input size mismatch");
+
+  std::vector<double> tmp(total, 0.0);
+  const int rz = static_cast<int>(kz.size()) / 2;
+#pragma omp parallel for collapse(2) schedule(static) num_threads(threads)
+  for (int y = 0; y < Ny; ++y) {
+    for (int x = 0; x < Nx; ++x) {
+      for (int z = 0; z < Nz; ++z) {
+        const double value = f[idx3(static_cast<size_t>(x),
+                                    static_cast<size_t>(y),
+                                    static_cast<size_t>(z), Nx, Ny)];
+        for (int t = -rz; t <= rz; ++t) {
+          const int zz = mirrorIndex(z + t, Nz);
+          tmp[idx3(static_cast<size_t>(x), static_cast<size_t>(y),
+                   static_cast<size_t>(zz), Nx, Ny)] +=
+              kz[static_cast<size_t>(t + rz)] * value;
+        }
+      }
+    }
+  }
+
+  std::fill(f.begin(), f.end(), 0.0);
+  const int ry = static_cast<int>(ky.size()) / 2;
+#pragma omp parallel for collapse(2) schedule(static) num_threads(threads)
+  for (int z = 0; z < Nz; ++z) {
+    for (int x = 0; x < Nx; ++x) {
+      for (int y = 0; y < Ny; ++y) {
+        const double value = tmp[idx3(static_cast<size_t>(x),
+                                      static_cast<size_t>(y),
+                                      static_cast<size_t>(z), Nx, Ny)];
+        for (int t = -ry; t <= ry; ++t) {
+          const int yy = mirrorIndex(y + t, Ny);
+          f[idx3(static_cast<size_t>(x), static_cast<size_t>(yy),
+                 static_cast<size_t>(z), Nx, Ny)] +=
+              ky[static_cast<size_t>(t + ry)] * value;
+        }
+      }
+    }
+  }
+
+  std::fill(tmp.begin(), tmp.end(), 0.0);
+  const int rx = static_cast<int>(kx.size()) / 2;
+#pragma omp parallel for collapse(2) schedule(static) num_threads(threads)
+  for (int z = 0; z < Nz; ++z) {
+    for (int y = 0; y < Ny; ++y) {
+      for (int x = 0; x < Nx; ++x) {
+        const double value = f[idx3(static_cast<size_t>(x),
+                                    static_cast<size_t>(y),
+                                    static_cast<size_t>(z), Nx, Ny)];
+        for (int t = -rx; t <= rx; ++t) {
+          const int xx = mirrorIndex(x + t, Nx);
+          tmp[idx3(static_cast<size_t>(xx), static_cast<size_t>(y),
+                   static_cast<size_t>(z), Nx, Ny)] +=
+              kx[static_cast<size_t>(t + rx)] * value;
+        }
+      }
+    }
+  }
   f.swap(tmp);
 }
 
@@ -277,7 +341,8 @@ PSFKernels make_psf_kernels(const PSFConf &psf) {
   PSFKernels kernels;
   const double fwhm_x = (psf.fwhm_x > 0.0) ? psf.fwhm_x : psf.fwhm_mm;
   const double fwhm_y = (psf.fwhm_y > 0.0) ? psf.fwhm_y : psf.fwhm_mm;
-  const double fwhm_z = (psf.fwhm_z > 0.0) ? psf.fwhm_z : psf.fwhm_mm;
+  const double fwhm_z =
+      psf.z_blur ? ((psf.fwhm_z > 0.0) ? psf.fwhm_z : psf.fwhm_mm) : 0.0;
   kernels.kx = makeGaussian1D(fwhm_x, psf.vox_x, psf.min_sigmas);
   kernels.ky = makeGaussian1D(fwhm_y, psf.vox_y, psf.min_sigmas);
   kernels.kz = makeGaussian1D(fwhm_z, psf.vox_z, psf.min_sigmas);

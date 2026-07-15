@@ -11,7 +11,7 @@
 | **B1（260601）plain 50 iter** | **已签收**：vs `sys_260601_recon_ref/recon_iter050.img`，`rmse/ref_mean ≈ 1.06×10⁻⁵` |
 | **B2（260525）** | 归档 `legacy_ref/recon_iter050.img` **来源暂无法确认**；本阶段**不以 B2 作为 release hard gate** |
 
-Release 构建与 GPU 目标见 `doc/RELEASE_20260708_CN.md`。
+Release 构建与 GPU 目标见 `doc/RELEASE_20260715_CN.md`。
 
 ## 1. 目的
 
@@ -106,7 +106,7 @@ Codex 复核（2026-07-06）：`scripts/run_6module_legacy_b1b2_parity.ps1 -Spec
 
 ## 8. 相关文件
 
-- `doc/RELEASE_20260708_CN.md`
+- `doc/RELEASE_20260715_CN.md`
 - `scripts/run_6module_legacy_b1b2_parity.ps1`
 - `test_data/sys_260601_recon_ref/`
 - `test_data/6module/260601/`

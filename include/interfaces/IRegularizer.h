@@ -2,9 +2,8 @@
  * @file IRegularizer.h
  * @brief 正则化器统一接口
  * 
- * 设计约束:
- * - 不允许用switch-case扩展正则，必须新增派生类+工厂注册
- * - 先落地grad()，prox()作为扩展位(ADMM/PDHG)
+ * Compatibility interface for external callers. Production reconstruction
+ * dispatches the supported TV/RDP implementations through RegConf.
  */
 
 #pragma once
@@ -12,7 +11,6 @@
 #include "../core/Types.h"
 #include <vector>
 #include <string>
-#include <memory>
 
 namespace spect {
 
@@ -93,25 +91,6 @@ public:
      * @brief 是否支持prox操作
      */
     virtual bool hasProx() const { return false; }
-};
-
-/**
- * @brief 正则化器工厂
- */
-class RegularizerFactory {
-public:
-    /**
-     * @brief 创建正则化器实例
-     * 
-     * @param type 正则化器类型名称 (如 "TVIsotropic", "Tikhonov")
-     * @param beta 正则化权重
-     * @param params 额外参数 (如 delta, eps 等)
-     * @return 正则化器实例
-     */
-    static std::unique_ptr<IRegularizer> create(
-        const std::string& type,
-        double beta = 1.0,
-        const std::vector<double>& params = {});
 };
 
 } // namespace spect

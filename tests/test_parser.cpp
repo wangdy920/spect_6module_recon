@@ -70,6 +70,24 @@ TEST(CLITest, ConfigParserMethods) {
     EXPECT_FALSE(cfg.hasKey("Section", "key"));
 }
 
+TEST(CLITest, ConfigParserRejectsInvalidTypedValues) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_invalid_typed_config.ini";
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out.good());
+        out << "[Invalid]\nint = 12x\ndouble = 1.2mm\nbool = maybe\n";
+    }
+    ConfigParser cfg;
+    ASSERT_TRUE(cfg.load(path.string()));
+    EXPECT_THROW((void)cfg.getInt("Invalid", "int", 0), std::invalid_argument);
+    EXPECT_THROW((void)cfg.getDouble("Invalid", "double", 0.0),
+                 std::invalid_argument);
+    EXPECT_THROW((void)cfg.getBool("Invalid", "bool", false),
+                 std::invalid_argument);
+    std::filesystem::remove(path);
+}
+
 } // namespace test
 } // namespace cli
 } // namespace spect
@@ -122,7 +140,6 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
     {
         std::vector<std::string> storage = {
             "SPECT_recon",
-            "-config", "__missing_compact_test_config__.ini",
             "-dumpConf"
         };
         std::vector<char*> argv;
@@ -131,6 +148,53 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
         EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), dumpArgs),
                   spect::cli::ArgumentParser::ParseResult::ExitSuccess);
     }
+}
+
+TEST(IOTest, ExplicitMissingConfigReturnsExitFailure) {
+    spect::cli::ArgumentParser parser;
+    spect::cli::ReconArgs args;
+    std::vector<std::string> storage = {
+        "SPECT_recon", "-config", "__missing_explicit_config__.ini", "-dumpConf"};
+    std::vector<char*> argv;
+    for (std::string& arg : storage)
+        argv.push_back(arg.data());
+
+    EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+              spect::cli::ArgumentParser::ParseResult::ExitFailure);
+}
+
+TEST(IOTest, ExplicitMissingAlgoConfigReturnsExitFailure) {
+    spect::cli::ArgumentParser parser;
+    spect::cli::ReconArgs args;
+    std::vector<std::string> storage = {
+        "SPECT_recon", "-algoConf", "__missing_algo_config__.conf", "-dumpConf"};
+    std::vector<char*> argv;
+    for (std::string& arg : storage)
+        argv.push_back(arg.data());
+
+    EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+              spect::cli::ArgumentParser::ParseResult::ExitFailure);
+}
+
+TEST(IOTest, ProjectionResidualDiagnosticIsExplicitlyOptIn) {
+    spect::cli::ArgumentParser parser;
+    spect::cli::ReconArgs args;
+    std::vector<std::string> storage = {
+        "SPECT_recon", "-projectionResidual", "on", "-dumpConf"};
+    std::vector<char*> argv;
+    for (std::string& arg : storage)
+        argv.push_back(arg.data());
+    EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+              spect::cli::ArgumentParser::ParseResult::ExitSuccess);
+    EXPECT_TRUE(args.projectionResidual);
+}
+
+TEST(IOTest, ProjectionResidualDiagnosticRejectsStandardLayout) {
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon", "-df", "proj.bin", "-loadCSR", "matrix.csrb",
+        "-dim", "2,2,2", "-projectionResidual", "on"};
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
 TEST(IOTest, ParserMissingRequiredArgReturnsExitFailure) {
@@ -308,6 +372,22 @@ TEST(IOTest, PublicRegularizationRejectsNonTvRdp) {
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
+TEST(IOTest, RegisteredCtRegularizationOptionsParse) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-opti", "bsrem",
+                             "-reg", "RDP,0.01,0.2,0.001",
+                             "-regCT", "registered_ct.mhd",
+                             "-regCtSigma", "0.025",
+                             "-regCtFloor", "0.15"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.reg.type, spect::RegType::RDP);
+    EXPECT_NE(args.regCtPath.find("registered_ct.mhd"), std::string::npos);
+    EXPECT_DOUBLE_EQ(args.reg.ct_sigma, 0.025);
+    EXPECT_DOUBLE_EQ(args.reg.ct_weight_floor, 0.15);
+}
+
 TEST(IOTest, PublicPsfProjFlagIsRejected) {
     auto argv = compactBaseArgs();
     argv.push_back("-psf");
@@ -438,6 +518,24 @@ TEST(IOTest, PsfFlagWithoutValueUsesDefaultFwhmAndTruncation) {
     EXPECT_NEAR(args.psf.fwhm_mm, 1.5, 1e-12);
     EXPECT_NEAR(args.psf.min_sigmas, 4.0, 1e-12);
 }
+TEST(IOTest, ConfigSupportsXyOnlyOperatorPsf) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_xy_only_psf_config.ini";
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out);
+        out << "[PSF]\nmode = Operator\nfwhm = 1.5\nz_blur = false\n";
+    }
+
+    auto argv = compactBaseArgs();
+    argv[2] = path.string();
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.usePSF);
+    EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::Operator);
+    EXPECT_FALSE(args.psf.z_blur);
+    std::filesystem::remove(path);
+}
 TEST(IOTest, ExplicitPsfModeNoneOverridesPsfDefaultOperator) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();
@@ -515,15 +613,6 @@ TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
     }
     {
         auto argv = compactBaseArgs();
-        auto it = std::find(argv.begin(), argv.end(), "mlem");
-        ASSERT_NE(it, argv.end());
-        *it = "bsrem";
-        argv.push_back("-reg");
-        argv.push_back("TV,0.01,1e-6");
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
         argv.push_back("-psf");
         argv.push_back("1.5");
         argv.push_back("-psfProj");
@@ -557,6 +646,24 @@ TEST(IOTest, CompactSymmetricParserAcceptsBSREMRDP) {
     EXPECT_DOUBLE_EQ(args.reg.delta, 2.0);
     EXPECT_FLOAT_EQ(args.bsrem_alpha0, 1.0f);
     EXPECT_FLOAT_EQ(args.bsrem_gamma, 0.0f);
+}
+TEST(IOTest, CompactSymmetricParserAcceptsBSREMTV) {
+    auto argv = compactBaseArgs();
+    auto it = std::find(argv.begin(), argv.end(), "mlem");
+    ASSERT_NE(it, argv.end());
+    *it = "bsrem";
+    argv.push_back("-reg");
+    argv.push_back("TV,0.01,1e-6");
+    argv.push_back("-bsrem");
+    argv.push_back("1.0,0.0");
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.algorithm, spect::cli::ReconArgs::Algorithm::BSREM);
+    EXPECT_TRUE(args.useReg);
+    EXPECT_EQ(args.reg.type, spect::RegType::TVIsotropic);
+    EXPECT_DOUBLE_EQ(args.reg.beta, 0.01);
+    EXPECT_DOUBLE_EQ(args.reg.tv_eps, 1e-6);
 }
 TEST(IOTest, CompactSymmetricParserAcceptsBackgroundProjection) {
     auto argv = compactBaseArgs();

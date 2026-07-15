@@ -134,8 +134,7 @@ endif()
 add_library(spect::filters ALIAS spect_filters)
 
 # ----------------------------------
-# spect_regularizer: 正则化器库 (TV, Tikhonov, LogCosh等)
-# 【T4.1】正则化器继承体系 + 从 original_source_backup 迁移实现
+# spect_regularizer: 生产正则化器库（仅 TV / RDP）
 # ----------------------------------
 add_library(spect_regularizer STATIC
   src/regularizer/Regularizers.cpp
@@ -294,6 +293,18 @@ add_executable(spect_convert_6module_sysmat_to_csrb
 )
 target_include_directories(spect_convert_6module_sysmat_to_csrb PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_executable(spect_seam_postprocess
+  tools/seam_postprocess.cpp
+  src/main/VolumeOutput.cpp
+)
+target_include_directories(spect_seam_postprocess PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(spect_seam_postprocess PRIVATE spect_io)
+set_target_properties(spect_seam_postprocess PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 set_target_properties(spect_convert_6module_sysmat_to_csrb PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

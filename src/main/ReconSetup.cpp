@@ -21,14 +21,11 @@ std::string selectReconDimHintPath(const ReconArgs &args) {
   if (args.doCTAC && !args.attMapPath.empty())
     return args.attMapPath;
 
-  if (!args.priorPath.empty() && args.priorPath != "none")
-    return args.priorPath;
+  if (args.useReg && !args.regCtPath.empty())
+    return args.regCtPath;
 
-  const bool needsAnatomicalHint =
-      !std::isnan(args.maskFromAttThreshold) ||
-      (args.useReg &&
-       (args.reg.type == RegType::Bowsher || args.reg.type == RegType::PLS));
-  if (needsAnatomicalHint && !args.attMapPath.empty())
+  if ((!std::isnan(args.maskFromAttThreshold) || args.useReg) &&
+      !args.attMapPath.empty())
     return args.attMapPath;
 
   return {};
@@ -191,6 +188,8 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
 
   const int joints = std::max(0, result.bedCount - 1);
   if (joints == 0) {
+    args.bedOverlaps.clear();
+    args.outputBedOverlaps.clear();
     result.summary = "Single-bed reconstruction";
     return result;
   }
@@ -198,20 +197,18 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   const std::vector<int> bedNumbers = inferBedNumbers(result.projectionPaths);
   const std::vector<int> fixedOverlapTable =
       normalizeFixedBedOverlapTable(args.bedOverlaps, result.warnings);
-  args.bedOverlaps =
+  args.outputBedOverlaps =
       selectActualBedOverlaps(fixedOverlapTable, bedNumbers, result.warnings);
-  if (static_cast<int>(args.bedOverlaps.size()) != joints)
+  if (static_cast<int>(args.outputBedOverlaps.size()) != joints)
     throw std::runtime_error("Internal bed overlap normalization failed.");
 
-  result.totalOverlap = 0;
   bool clampedAnyOverlap = false;
-  for (int &overlap : args.bedOverlaps) {
+  for (int &overlap : args.outputBedOverlaps) {
     const int clamped = std::max(0, std::min(overlap, std::max(0, result.baseNz - 1)));
     if (clamped != overlap) {
       overlap = clamped;
       clampedAnyOverlap = true;
     }
-    result.totalOverlap += overlap;
   }
   if (clampedAnyOverlap) {
     result.warnings.emplace_back(
@@ -219,10 +216,28 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     );
   }
 
+  args.bedOverlaps = args.bedOverlapInRecon
+                         ? args.outputBedOverlaps
+                         : std::vector<int>(static_cast<size_t>(joints), 0);
+  result.totalOverlap = 0;
+  for (int overlap : args.bedOverlaps)
+    result.totalOverlap += overlap;
+
   args.Nz = result.baseNz * result.bedCount - result.totalOverlap;
   std::ostringstream summary;
   summary << "Multi-bed setup: beds=" << result.bedCount << ", baseNz=" << result.baseNz
-          << ", totalOverlap=" << result.totalOverlap << ", Nz=" << args.Nz;
+          << ", overlapMode="
+          << (args.bedOverlapInRecon
+                  ? "reconstruction"
+                  : "output-" + args.bedCropMethod)
+          << ", reconOverlap=" << result.totalOverlap;
+  if (!args.bedOverlapInRecon) {
+    int outputOverlap = 0;
+    for (int overlap : args.outputBedOverlaps)
+      outputOverlap += overlap;
+    summary << ", outputOverlap=" << outputOverlap;
+  }
+  summary << ", reconNz=" << args.Nz;
   result.summary = summary.str();
   return result;
 }

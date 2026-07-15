@@ -116,7 +116,7 @@ CLI 显式参数  >  algo_*.conf  >  bin/config/spect_config.ini  >  硬编码�
 | 算法 | `algo_mlem.conf` → MLEM，`subsets=1` | **始终传 `-opti mlem`**（后续切 BSREM 改为 `-opti bsrem`）；`-subsets` 与 algo conf 一致时可省略 |
 | 迭代 | `iterations=30:5` | 仅当现场要 **20** 时传 `-it 20:5` |
 | 几何 | metadata / ini 占位 | **默认传** `-dim`/`-vox`/`-ang`/`-detN`；省略条件见 §2.3 |
-| 多床 overlap | `bed_overlap=16,16,16,0,0` | 与现场一致则**可不传** `-bedOverlap` |
+| 多床 overlap | `bed_overlap=16,16,16,0,0` | 当前输出拼接默认 stride=64；其他物理步进需显式传 `-bedOverlap` |
 | 裁剪 | `crop_end=0,0` | 可不传 `-cropEnd` |
 | 方向 | **`z_bed_flip=1`**，`z_out_flip=0`，`x_out_flip=0` | **保留开启**；**不要**写 `-zbedflip 0`。Legacy 单文件同样 **`-zbedflip 1`**（§2.5） |
 | PSF FWHM / N | `fwhm=1.5`，`min_sigmas=4` | **默认传** `-psf 1.5,4`（同时启用 PSF 并写入 FWHM/N） |
@@ -289,7 +289,7 @@ cd /d "E:\software\ThreeModalitiesBin\SPECT_recon_rc_20260708_ad3c1d4"
 - **`-dim/-vox/-ang/-detN`**：默认传入；若已按 §2.3 确认 metadata 覆盖，可省略这四项  
 - `-it 20:5`：覆盖包内默认 `30:5`，对齐现场 `spect_it=20:5`  
 - **`-psf 1.5,4 -psfMode Operator`**：默认显式传入（FWHM/N + mode；勿再写旧 sigma `0.637`）  
-- 默认含 `bed_overlap=16,...`、**`z_bed_flip=1`**
+- 默认含 `bed_overlap=16,...`（stride=64）、**`z_bed_flip=1`**
 
 ### 5.2 何时才加回显式参数
 
@@ -447,7 +447,7 @@ z_bed_flip = 1
 ### 已核对（2026-07-10）
 
 - 现场旧流程报告  
-- RC `bin/config/spect_config.ini`、`algo_mlem.conf` 与同包 `-dumpConf`（`bed_overlap=16,16,16,0,0`、**`z_bed_flip=1`**、`PSF mode=None fwhm=1.5`）  
+- RC `bin/config/spect_config.ini`、`algo_mlem.conf` 与同包 `-dumpConf`（新包目标为 `bed_overlap=16,16,16,0,0`、**`z_bed_flip=1`**；旧 RC 需以包内 `-dumpConf` 为准）
 - `CLI_CHANGES_CN.md`：`-psf <sigma>` → `-psf <fwhm_mm[,N]>`  
 - S 软管实验（§12）：Spect_preprocess 配对、PSF、eng_to 拒收、identity 线 `zbedflip0` vs `zbedflip1` DICOM  
 - 6Module release 重建 ini 亦为 **`z_bed_flip=1`**；预处理 ini 仍可能默认 `flipx`（包装债，见 §2.5）
@@ -472,7 +472,7 @@ z_bed_flip = 1
 | 发布包 `CLI_CHANGES_CN.md` | 废弃参数 / PSF 语义 |
 | 发布包 `PARAMETERS_CN.md` | 包说明 |
 | `doc/USAGE_CN.md` | 公开 CLI |
-| `doc/RELEASE_20260708_CN.md` | 当前 RC |
+| `doc/RELEASE_20260715_CN.md` | 当前 RC |
 | `doc/RELEASE_260707_CN.md`（6Module） | 预处理 + 260601 发布说明 |
 | `doc/Capability_Matrix_CN.md` | 能力边界 |
 
