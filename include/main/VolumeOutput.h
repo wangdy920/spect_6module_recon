@@ -31,6 +31,14 @@ struct OutputTransform {
   bool objectAwareSeamPostprocess = false;
   std::string objectProfile = "auto";
   double phantomCloseStrength = 1.0;
+  double epguanCloseStrength = 1.0;
+  bool epguanWallMaxPreserve = false;
+  double epguanSeamEdgeStrength = 0.60;
+  int epguanSeamFeatherSlices = 4;
+  bool epguanBackgroundFilter = true;
+  double epguanBackgroundRetain = 0.08;
+  double epguanSupportThreshold = 0.06;
+  double epguanSupportMarginMm = 1.5;
   double zimuCloseStrength = 0.5;
   int seamHalfWidth = 8;
   int baseNz = 0;
@@ -43,7 +51,9 @@ CropSettings sanitizeCropSettings(int cropStart, int cropEnd);
 bool isCropSettingsValid(int nz, const CropSettings &crop);
 
 void postprocessStitchedOutput(std::vector<double> &volume, int nx, int ny,
-                               int nz, const OutputTransform &transform);
+                               int nz, const OutputTransform &transform,
+                               double voxelSizeXmm = 1.0,
+                               double voxelSizeYmm = 1.0);
 
 std::vector<double> prepareOutputVolume(const std::vector<double> &source,
                                         int nx, int ny, int nz,

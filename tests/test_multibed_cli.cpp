@@ -30,6 +30,13 @@ TEST(IOTest, MultiBedCodeDefaultsMatchShippedSigmoidMode) {
     EXPECT_TRUE(args.bedSeamPostprocess);
     EXPECT_EQ(args.bedObjectProfile, "auto");
     EXPECT_EQ(args.bedSeamHalfWidth, 8);
+    EXPECT_TRUE(args.bedEpguanBackgroundFilter);
+    EXPECT_FALSE(args.bedEpguanWallMaxPreserve);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSeamEdgeStrength, 0.60);
+    EXPECT_EQ(args.bedEpguanSeamFeatherSlices, 4);
+    EXPECT_DOUBLE_EQ(args.bedEpguanBackgroundRetain, 0.08);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSupportThreshold, 0.06);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSupportMarginMm, 1.5);
     EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.5);
 }
 
@@ -161,8 +168,16 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         out << "overlap_in_recon = 0\n";
         out << "crop_method = sigmoid\n";
         out << "seam_postprocess = 1\n";
-        out << "object_profile = phantom\n";
+        out << "object_profile = epguan\n";
         out << "phantom_close_strength = 0.9\n";
+        out << "epguan_close_strength = 0.85\n";
+        out << "epguan_wall_max_preserve = 1\n";
+        out << "epguan_seam_edge_strength = 0.7\n";
+        out << "epguan_seam_feather_slices = 3\n";
+        out << "epguan_background_filter = 1\n";
+        out << "epguan_background_retain = 0.12\n";
+        out << "epguan_support_threshold = 0.07\n";
+        out << "epguan_support_margin_mm = 1.8\n";
         out << "zimu_close_strength = 0.8\n";
         out << "seam_half_width = 5\n";
         out << "crop_end = 2,3\n";
@@ -191,8 +206,16 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
     EXPECT_FALSE(args.bedOverlapInRecon);
     EXPECT_EQ(args.bedCropMethod, "sigmoid");
     EXPECT_TRUE(args.bedSeamPostprocess);
-    EXPECT_EQ(args.bedObjectProfile, "phantom");
+    EXPECT_EQ(args.bedObjectProfile, "epguan");
     EXPECT_DOUBLE_EQ(args.bedPhantomCloseStrength, 0.9);
+    EXPECT_DOUBLE_EQ(args.bedEpguanCloseStrength, 0.85);
+    EXPECT_TRUE(args.bedEpguanWallMaxPreserve);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSeamEdgeStrength, 0.7);
+    EXPECT_EQ(args.bedEpguanSeamFeatherSlices, 3);
+    EXPECT_TRUE(args.bedEpguanBackgroundFilter);
+    EXPECT_DOUBLE_EQ(args.bedEpguanBackgroundRetain, 0.12);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSupportThreshold, 0.07);
+    EXPECT_DOUBLE_EQ(args.bedEpguanSupportMarginMm, 1.8);
     EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.8);
     EXPECT_EQ(args.bedSeamHalfWidth, 5);
     EXPECT_EQ(args.cropEndStart, 2);

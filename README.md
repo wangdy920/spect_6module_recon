@@ -65,7 +65,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds. |
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
-| `-cropEnd <top[,end]>` | Crop final output Z top/end slices after output flips. |
+| `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default; single-file `-loadCSR`+`-compactMeta` + `xflip` → **`-zbedflip 1`**. |
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
 | `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI args override config. |
@@ -75,9 +75,11 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 
 Use `-dfList` to load multiple bed projections at once. The list may contain 1 to 5 beds. If paths contain `BedN`, `-dfList` and `-bProjList` are sorted by numeric bed order before loading. `-bedOverlap` is a fixed Bed1..Bed5 table: slot `b1` applies to `Bed1-Bed2`, `b2` to `Bed2-Bed3`, `b3` to `Bed3-Bed4`, and `b4` to `Bed4-Bed5`; `b5` is kept as the fixed five-bed placeholder. For example, `Bed2,Bed3,Bed4` uses `b2,b3`. The reconstruction dimensions in `-dim` are **per-bed** sizes; the combined output Z dimension becomes `Nz * beds` when `-bedOverlap=0`, or `Nz * beds - sum(overlaps)` when overlaps are enabled. Beds are processed using **Virtual Bed Stacking**, meaning system matrix memory usage remains identical to a single bed. Background projections can be supplied via `-bProjList`. Memory mapping (`-mapCSR on`) is supported for multi-bed; when `-ctac` is enabled, the recon uses dynamic on-the-fly attenuation factors so the mapped CSR remains read-only.
 
-The shipped multi-bed default is `bed_overlap=16,16,16,0,0`, `overlap_in_recon=0`, and `crop_method=sigmoid`. For an 80-voxel bed this gives an output stride of 64 voxels; the normalized blend uses fixed `k=12` and runs only during final output. `crop_end` remains zero so valid signal is not removed at the global ends.
+The shipped multi-bed default is `bed_overlap=16,16,16,0,0`, `overlap_in_recon=0`, and `crop_method=sigmoid`. For an 80-voxel bed this gives an output stride of 64 voxels; the normalized blend uses fixed `k=12` and runs only during final output. `crop_end` remains zero so valid signal is not zeroed at the global ends.
 
-Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z; `-xoutflip 1` flips the final stitched output in X. `-cropEnd top,end` is applied after those flips and is only responsible for final top/end trimming.
+`-bedOverlap` is specified in Z voxels. With the production `80 × 0.3 mm` bed, any positive step that is a multiple of `0.6 mm` maps exactly to `stride_voxels = step_mm / 0.3` and `overlap = 80 - stride_voxels`; object-aware seam processing accepts every positive overlap and caps its working half-width to `overlap / 2`. For example, `16.8 mm -> overlap 24`, `17.7 mm -> overlap 21`, and `19.2 mm -> overlap 16`.
+
+Output orientation controls are explicit. `-zbedflip 1` flips each `-dfList` bed segment in Z before writing; `-zoutflip 1` then flips the final stitched output in Z; `-xoutflip 1` flips the final stitched output in X. `-cropEnd top,end` is applied after those flips and zeros the requested top/end slices without changing Z size.
 
 ## Release package layout
 

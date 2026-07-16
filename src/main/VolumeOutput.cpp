@@ -1,6 +1,7 @@
 #include "main/VolumeOutput.h"
 
 #include "io/MHDWriter.h"
+#include "main/RunLogger.h"
 
 #include <algorithm>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <deque>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 
 namespace spect {
@@ -257,8 +259,18 @@ std::vector<int> componentSizes2D(const std::vector<uint8_t> &mask,
   return sizes;
 }
 
-std::string classifyOutputObject(const std::vector<double> &volume, int nx,
-                                 int ny, int nz) {
+struct ObjectClassification {
+  std::string profile = "unknown";
+  int projectionComponents = 0;
+  double highFraction = 0.0;
+  double p90Components = 0.0;
+  double medianComponents = 0.0;
+  double mainFraction = 0.0;
+};
+
+ObjectClassification classifyOutputObject(const std::vector<double> &volume,
+                                           int nx, int ny, int nz) {
+  ObjectClassification result;
   std::vector<double> positive;
   positive.reserve(volume.size() / 8);
   for (double value : volume) {
@@ -266,7 +278,7 @@ std::string classifyOutputObject(const std::vector<double> &volume, int nx,
       positive.push_back(value);
   }
   if (positive.empty())
-    return "unknown";
+    return result;
   const double p995 = percentile(positive, 99.5);
   const double threshold = 0.10 * p995;
   const double highThreshold = 0.50 * p995;
@@ -302,25 +314,43 @@ std::string classifyOutputObject(const std::vector<double> &volume, int nx,
       coronal[static_cast<size_t>(z) * nx + x] = maximum >= threshold;
     }
   }
-  const int projectionComponents =
-      static_cast<int>(componentSizes2D(coronal, nz, nx).size());
-  const double highFraction = maskCount > 0
-                                  ? static_cast<double>(highCount) / maskCount
-                                  : 0.0;
-  const double p90Components = percentile(componentCounts, 90.0);
+  const auto coronalSizes = componentSizes2D(coronal, nz, nx);
+  result.projectionComponents = static_cast<int>(coronalSizes.size());
+  result.highFraction = maskCount > 0
+                            ? static_cast<double>(highCount) / maskCount
+                            : 0.0;
+  result.p90Components = percentile(componentCounts, 90.0);
+  result.medianComponents = percentile(componentCounts, 50.0);
+  if (!coronalSizes.empty()) {
+    const double total = std::accumulate(coronalSizes.begin(),
+                                         coronalSizes.end(), 0.0);
+    const double largest = static_cast<double>(
+        *std::max_element(coronalSizes.begin(), coronalSizes.end()));
+    result.mainFraction = total > 0.0 ? largest / total : 0.0;
+  }
 
-  // ponytail: provisional gate from capillary, tube, mouse, and zimu; unknown
-  // remains a no-op and the explicit profile override is the safety valve.
-  if (projectionComponents >= 12 && highFraction <= 0.25 &&
-      p90Components >= 4.0)
-    return "mouse";
-  if (projectionComponents >= 4 && projectionComponents <= 12 &&
-      highFraction >= 0.30 && p90Components <= 3.0)
-    return "zimu";
-  if (projectionComponents <= 3 && highFraction >= 0.30 &&
-      p90Components <= 3.0)
-    return "phantom";
-  return "unknown";
+  // ponytail: provisional gate from capillary, tube/ruanguan, EPguan, mouse,
+  // and zimu. Bed-seam intensity drops can fragment an otherwise compact
+  // coronal support (EPguan), so dominant-component phantoms are accepted
+  // even when raw projection_components is inflated. Unknown remains a
+  // no-op; explicit object_profile is the safety valve.
+  const bool dominantCompact =
+      result.highFraction >= 0.20 && result.mainFraction >= 0.95 &&
+      result.medianComponents <= 2.0 && result.p90Components <= 5.0 &&
+      result.projectionComponents >= 4;
+  if (dominantCompact)
+    result.profile = "epguan";
+  else if (result.projectionComponents >= 12 && result.highFraction <= 0.25 &&
+           result.p90Components >= 4.0)
+    result.profile = "mouse";
+  else if (result.projectionComponents >= 4 &&
+           result.projectionComponents <= 12 && result.highFraction >= 0.30 &&
+           result.p90Components <= 3.0)
+    result.profile = "zimu";
+  else if (result.projectionComponents <= 3 && result.highFraction >= 0.30 &&
+           result.p90Components <= 3.0)
+    result.profile = "phantom";
+  return result;
 }
 
 struct SeamComponent {
@@ -402,11 +432,37 @@ seamComponents(const std::vector<double> &plane, int ny, int nx,
         component.centerY /= sum;
         component.centerX /= sum;
       }
-      component.softMask = dilateMask(component.mask, ny, nx, 3);
+      component.softMask = dilateMask(component.mask, ny, nx, 5);
       components.push_back(std::move(component));
     }
   }
   return components;
+}
+
+// Drop FOV-edge / grain speckles that are tiny versus the dominant support.
+// Real multi-tube phantoms keep peers at similar area (tube/ruanguan ~1:1).
+std::vector<SeamComponent>
+filterSignificantSeamComponents(std::vector<SeamComponent> components) {
+  if (components.size() <= 1)
+    return components;
+  std::vector<size_t> sizes(components.size(), 0);
+  size_t largest = 0;
+  for (size_t i = 0; i < components.size(); ++i) {
+    sizes[i] = static_cast<size_t>(std::count(components[i].mask.begin(),
+                                              components[i].mask.end(),
+                                              static_cast<uint8_t>(1)));
+    largest = std::max(largest, sizes[i]);
+  }
+  if (largest == 0)
+    return components;
+  const size_t minSize = std::max<size_t>(8, (largest + 9) / 10);
+  std::vector<SeamComponent> kept;
+  kept.reserve(components.size());
+  for (size_t i = 0; i < components.size(); ++i) {
+    if (sizes[i] >= minSize)
+      kept.push_back(std::move(components[i]));
+  }
+  return kept;
 }
 
 std::vector<double> squaredDistanceTransform1D(const std::vector<double> &input) {
@@ -502,20 +558,145 @@ double bilinearSample(const std::vector<double> &image, int ny, int nx,
          fy * ((1.0 - fx) * at(y0 + 1, x0) + fx * at(y0 + 1, x0 + 1));
 }
 
+std::vector<double> gaussianBlur2D(const std::vector<double> &input, int ny,
+                                   int nx, double sigmaY, double sigmaX) {
+  const auto makeKernel = [](double sigma) {
+    if (sigma <= 0.0)
+      return std::vector<double>{1.0};
+    const int radius = std::max(1, static_cast<int>(std::ceil(4.0 * sigma)));
+    std::vector<double> kernel(static_cast<size_t>(2 * radius + 1));
+    double sum = 0.0;
+    for (int i = -radius; i <= radius; ++i) {
+      const double value = std::exp(-0.5 * i * i / (sigma * sigma));
+      kernel[static_cast<size_t>(i + radius)] = value;
+      sum += value;
+    }
+    for (double &value : kernel)
+      value /= sum;
+    return kernel;
+  };
+  const auto ky = makeKernel(sigmaY);
+  const auto kx = makeKernel(sigmaX);
+  const int ry = static_cast<int>(ky.size() / 2);
+  const int rx = static_cast<int>(kx.size() / 2);
+  std::vector<double> horizontal(input.size(), 0.0);
+  std::vector<double> output(input.size(), 0.0);
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      double sum = 0.0;
+      for (int dx = -rx; dx <= rx; ++dx) {
+        const int xx = std::clamp(x + dx, 0, nx - 1);
+        sum += kx[static_cast<size_t>(dx + rx)] *
+               input[static_cast<size_t>(y) * nx + xx];
+      }
+      horizontal[static_cast<size_t>(y) * nx + x] = sum;
+    }
+  }
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      double sum = 0.0;
+      for (int dy = -ry; dy <= ry; ++dy) {
+        const int yy = std::clamp(y + dy, 0, ny - 1);
+        sum += ky[static_cast<size_t>(dy + ry)] *
+               horizontal[static_cast<size_t>(yy) * nx + x];
+      }
+      output[static_cast<size_t>(y) * nx + x] = sum;
+    }
+  }
+  return output;
+}
+
+void applyEpguanBackgroundFilter(std::vector<double> &volume, int nx, int ny,
+                                 int nz, double voxelSizeXmm,
+                                 double voxelSizeYmm,
+                                 const OutputTransform &transform) {
+  if (!transform.epguanBackgroundFilter)
+    return;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> positive;
+  positive.reserve(volume.size() / 8);
+  for (double value : volume) {
+    if (value > 0.0)
+      positive.push_back(value);
+  }
+  if (positive.empty())
+    return;
+  const double clip = percentile(positive, 99.5);
+  std::vector<double> projection(plane, 0.0);
+  std::vector<double> column(static_cast<size_t>(nz));
+  for (size_t xy = 0; xy < plane; ++xy) {
+    for (int z = 0; z < nz; ++z)
+      column[static_cast<size_t>(z)] =
+          std::min(volume[static_cast<size_t>(z) * plane + xy], clip);
+    projection[xy] = percentile(column, 85.0);
+  }
+  constexpr double smoothMm = 2.0;
+  const auto smooth = gaussianBlur2D(projection, ny, nx,
+                                     smoothMm / voxelSizeYmm,
+                                     smoothMm / voxelSizeXmm);
+  const double reference = percentile(smooth, 99.5);
+  if (reference <= 0.0)
+    return;
+  auto components = filterSignificantSeamComponents(seamComponents(
+      smooth, ny, nx, transform.epguanSupportThreshold * reference));
+  if (components.empty()) {
+    logInfo("EPguan background filter: skipped reason=no_support");
+    return;
+  }
+  std::vector<uint8_t> support(plane, 0);
+  for (const auto &component : components) {
+    for (size_t xy = 0; xy < plane; ++xy)
+      support[xy] = support[xy] || component.mask[xy];
+  }
+  const auto distancePixels = euclideanDistanceTo(support, ny, nx, 1);
+  const double pixelMm = std::min(voxelSizeXmm, voxelSizeYmm);
+  const double marginMm = transform.epguanSupportMarginMm;
+  size_t changedVoxels = 0;
+  for (int z = 0; z < nz; ++z) {
+    const size_t offset = static_cast<size_t>(z) * plane;
+    for (size_t xy = 0; xy < plane; ++xy) {
+      const double distanceMm = distancePixels[xy] * pixelMm;
+      double weight = 1.0;
+      if (!support[xy] && distanceMm > marginMm) {
+        const double feather = marginMm > 0.0
+                                   ? std::clamp(2.0 - distanceMm / marginMm,
+                                                0.0, 1.0)
+                                   : 0.0;
+        weight = transform.epguanBackgroundRetain +
+                 (1.0 - transform.epguanBackgroundRetain) * feather;
+      }
+      if (weight < 1.0 && volume[offset + xy] != 0.0) {
+        volume[offset + xy] *= weight;
+        ++changedVoxels;
+      }
+    }
+  }
+  logInfo("EPguan background filter: components=" +
+          std::to_string(components.size()) + ", changed_voxels=" +
+          std::to_string(changedVoxels));
+}
+
 void applyPhantomContourInterpolation(std::vector<double> &volume, int nx,
                                       int ny, int nz, double threshold,
                                       const OutputTransform &transform) {
   constexpr int anchorWidth = 3;
-  constexpr double contourMargin = 1.0;
+  constexpr double contourMargin = 3.0;
   const size_t planeSize = static_cast<size_t>(nx) * ny;
   const std::vector<double> input = volume;
   const std::vector<int> starts = outputBedStarts(transform);
   for (size_t bed = 1; bed < starts.size(); ++bed) {
-    const int seam = starts[bed] + transform.outputBedOverlaps[bed - 1] / 2;
-    const int z0 = seam - transform.seamHalfWidth;
-    const int z1 = seam + transform.seamHalfWidth + 1;
-    if (z0 - anchorWidth < 0 || z1 + anchorWidth > nz)
+    const int overlap = transform.outputBedOverlaps[bed - 1];
+    if (overlap <= 0)
       continue;
+    const int seam = starts[bed] + overlap / 2;
+    const int halfWidth = std::min(transform.seamHalfWidth, overlap / 2);
+    const int z0 = seam - halfWidth;
+    const int z1 = seam + halfWidth + 1;
+    if (z0 - anchorWidth < 0 || z1 + anchorWidth > nz) {
+      logInfo("Seam postprocess: seam_z=" + std::to_string(seam) +
+              " skipped reason=missing_endpoint");
+      continue;
+    }
     std::vector<double> left(planeSize, 0.0), right(planeSize, 0.0);
     for (int dz = 0; dz < anchorWidth; ++dz) {
       const size_t leftOffset = static_cast<size_t>(z0 - anchorWidth + dz) * planeSize;
@@ -525,11 +706,18 @@ void applyPhantomContourInterpolation(std::vector<double> &volume, int nx,
         right[xy] += input[rightOffset + xy] / anchorWidth;
       }
     }
-    auto leftComponents = seamComponents(left, ny, nx, threshold);
-    auto rightComponents = seamComponents(right, ny, nx, threshold);
+    auto leftComponents = filterSignificantSeamComponents(
+        seamComponents(left, ny, nx, threshold));
+    auto rightComponents = filterSignificantSeamComponents(
+        seamComponents(right, ny, nx, threshold));
     if (leftComponents.empty() || leftComponents.size() != rightComponents.size() ||
-        leftComponents.size() > 3)
+        leftComponents.size() > 3) {
+      logInfo("Seam postprocess: seam_z=" + std::to_string(seam) +
+              " skipped reason=component_gate left_components=" +
+              std::to_string(leftComponents.size()) + " right_components=" +
+              std::to_string(rightComponents.size()));
       continue;
+    }
 
     std::vector<int> permutation(rightComponents.size());
     std::iota(permutation.begin(), permutation.end(), 0);
@@ -569,8 +757,8 @@ void applyPhantomContourInterpolation(std::vector<double> &volume, int nx,
         pair.leftImage[xy] = pair.left->softMask[xy] ? left[xy] : 0.0;
         pair.rightImage[xy] = pair.right->softMask[xy] ? right[xy] : 0.0;
       }
-      pair.leftDistance = signedEuclideanDistance(pair.left->mask, ny, nx);
-      pair.rightDistance = signedEuclideanDistance(pair.right->mask, ny, nx);
+      pair.leftDistance = signedEuclideanDistance(pair.left->softMask, ny, nx);
+      pair.rightDistance = signedEuclideanDistance(pair.right->softMask, ny, nx);
       pairs.push_back(std::move(pair));
     }
 
@@ -603,8 +791,9 @@ void applyPhantomContourInterpolation(std::vector<double> &volume, int nx,
                 (1.0 - fraction) * distanceLeft + fraction * distanceRight +
                     contourMargin,
                 0.0, 1.0);
-            candidate[offset + xy] +=
-                ((1.0 - fraction) * imageLeft + fraction * imageRight) * gate;
+            candidate[offset + xy] = std::max(
+                candidate[offset + xy],
+                ((1.0 - fraction) * imageLeft + fraction * imageRight) * gate);
           }
         }
       }
@@ -621,26 +810,64 @@ void applyPhantomContourInterpolation(std::vector<double> &volume, int nx,
         break;
       }
     }
-    if (!topologyValid)
+    if (!topologyValid) {
+      logInfo("Seam postprocess: seam_z=" + std::to_string(seam) +
+              " skipped reason=topology_gate components=" +
+              std::to_string(pairs.size()));
       continue;
+    }
 
+    // C4: near-wall never digs below original (kills residual outer notches).
+    constexpr double wallInnerPx = 3.0;
+    constexpr double wallOuterPx = 2.0;
+    size_t changedVoxels = 0;
     for (int index = 0; index < z1 - z0; ++index) {
       const int z = z0 + index;
+      double axialBlend = 1.0;
+      if (transform.objectProfile == "epguan" &&
+          transform.epguanSeamFeatherSlices > 0) {
+        const int edgeDistance =
+            std::min(index, z1 - z0 - 1 - index);
+        const double phase = std::clamp(
+            static_cast<double>(edgeDistance) /
+                transform.epguanSeamFeatherSlices,
+            0.0, 1.0);
+        axialBlend = transform.epguanSeamEdgeStrength +
+                     (1.0 - transform.epguanSeamEdgeStrength) * phase;
+      }
       const size_t inputOffset = static_cast<size_t>(z) * planeSize;
       const size_t candidateOffset = static_cast<size_t>(index) * planeSize;
       std::vector<uint8_t> support(planeSize, 0);
       for (size_t xy = 0; xy < planeSize; ++xy)
-        support[xy] = input[inputOffset + xy] >= 0.5 * threshold;
-      support = dilateMask(std::move(support), ny, nx, 3);
+        support[xy] = candidate[candidateOffset + xy] > 0.05 * threshold;
+      const auto distIn = euclideanDistanceTo(support, ny, nx, 0);
+      const auto distOut = euclideanDistanceTo(support, ny, nx, 1);
       for (size_t xy = 0; xy < planeSize; ++xy) {
-        if (!support[xy] && candidate[candidateOffset + xy] <= 0.0)
-          continue;
+        // Preserve exterior halo/scatter: never blend toward candidate zeros
+        // over positive original voxels (avoids rectangular vacuum bands at
+        // seams outside the tube). Only adopt positive candidate samples.
         const double interpolated = candidate[candidateOffset + xy];
-        volume[inputOffset + xy] =
-            input[inputOffset + xy] + transform.phantomCloseStrength *
-                                          (interpolated - input[inputOffset + xy]);
+        if (interpolated <= 0.0)
+          continue;
+        double updated =
+            input[inputOffset + xy] +
+            transform.phantomCloseStrength * axialBlend *
+                (interpolated - input[inputOffset + xy]);
+        const bool wall =
+            support[xy] != 0 && distIn[xy] <= wallInnerPx;
+        const bool outer = support[xy] == 0 && distOut[xy] <= wallOuterPx &&
+                           input[inputOffset + xy] > 0.0;
+        if ((wall || outer) &&
+            (transform.objectProfile != "epguan" ||
+             transform.epguanWallMaxPreserve))
+          updated = std::max(updated, input[inputOffset + xy]);
+        changedVoxels += updated != input[inputOffset + xy];
+        volume[inputOffset + xy] = updated;
       }
     }
+    logInfo("Seam postprocess: seam_z=" + std::to_string(seam) +
+            " processed components=" + std::to_string(pairs.size()) +
+            " changed_voxels=" + std::to_string(changedVoxels));
   }
 }
 
@@ -661,14 +888,19 @@ void applyZimuTopologyLockedSmooth(std::vector<double> &volume, int nx, int ny,
   for (double &weight : weights)
     weight /= weightSum;
   const std::vector<int> starts = outputBedStarts(transform);
-  const int halfWidth = std::min(transform.seamHalfWidth, 4);
   for (size_t bed = 1; bed < starts.size(); ++bed) {
-    const int seam = starts[bed] + transform.outputBedOverlaps[bed - 1] / 2;
+    const int overlap = transform.outputBedOverlaps[bed - 1];
+    if (overlap <= 0)
+      continue;
+    const int seam = starts[bed] + overlap / 2;
+    const int halfWidth =
+        std::min({transform.seamHalfWidth, 4, overlap / 2});
     const int z0 = std::max(0, seam - halfWidth);
     const int z1 = std::min(nz, seam + halfWidth + 1);
     std::vector<double> candidate(static_cast<size_t>(z1 - z0) * planeSize);
     double beforeSum = 0.0;
     double afterSum = 0.0;
+    size_t changedVoxels = 0;
     for (int z = z0; z < z1; ++z) {
       const size_t inputOffset = static_cast<size_t>(z) * planeSize;
       const size_t candidateOffset = static_cast<size_t>(z - z0) * planeSize;
@@ -698,33 +930,54 @@ void applyZimuTopologyLockedSmooth(std::vector<double> &volume, int nx, int ny,
       const size_t candidateOffset = static_cast<size_t>(z - z0) * planeSize;
       for (size_t xy = 0; xy < planeSize; ++xy) {
         const double original = input[inputOffset + xy];
-        if (original >= threshold)
-          volume[inputOffset + xy] =
-              std::max(threshold, candidate[candidateOffset + xy] * scale);
-        else
-          volume[inputOffset + xy] =
-              std::min(original, std::nextafter(threshold, 0.0));
+        const double updated = original >= threshold
+                                   ? std::max(threshold,
+                                              candidate[candidateOffset + xy] * scale)
+                                   : std::min(original,
+                                              std::nextafter(threshold, 0.0));
+        changedVoxels += updated != original;
+        volume[inputOffset + xy] = updated;
       }
     }
+    logInfo("Seam postprocess: seam_z=" + std::to_string(seam) +
+            " processed mode=topology_locked changed_voxels=" +
+            std::to_string(changedVoxels));
   }
 }
 
 void applyObjectAwareSeamPostprocessImpl(std::vector<double> &volume, int nx,
                                          int ny, int nz,
-                                         const OutputTransform &transform) {
-  const std::string profile = transform.objectProfile == "auto"
-                                  ? classifyOutputObject(volume, nx, ny, nz)
-                                  : transform.objectProfile;
+                                         const OutputTransform &transform,
+                                         double voxelSizeXmm,
+                                         double voxelSizeYmm) {
+  ObjectClassification classification;
+  if (transform.objectProfile == "auto")
+    classification = classifyOutputObject(volume, nx, ny, nz);
+  else
+    classification.profile = transform.objectProfile;
+  const std::string &profile = classification.profile;
+  std::ostringstream classifierLog;
+  classifierLog << "Seam classifier: selected_profile=" << profile;
+  if (transform.objectProfile == "auto")
+    classifierLog << ", projection_components="
+                  << classification.projectionComponents
+                  << ", high_fraction=" << classification.highFraction
+                  << ", p90_components=" << classification.p90Components
+                  << ", median_components=" << classification.medianComponents
+                  << ", main_fraction=" << classification.mainFraction;
+  else
+    classifierLog << ", source=explicit";
+  logInfo(classifierLog.str());
+  const bool epguanNoop =
+      profile == "epguan" && transform.epguanCloseStrength == 0.0 &&
+      !transform.epguanBackgroundFilter;
   if ((profile == "phantom" && transform.phantomCloseStrength == 0.0) ||
+      epguanNoop ||
       (profile == "zimu" && transform.zimuCloseStrength == 0.0) ||
-      (profile != "phantom" && profile != "zimu"))
+      (profile != "phantom" && profile != "epguan" && profile != "zimu")) {
+    logInfo("Seam postprocess: skipped reason=profile_noop");
     return;
-  for (int overlap : transform.outputBedOverlaps) {
-    if (overlap != 16)
-      throw std::invalid_argument(
-          "prepareOutputVolume: seam postprocess requires overlap=16");
   }
-
   std::vector<double> positive;
   positive.reserve(volume.size() / 8);
   for (double value : volume) {
@@ -734,10 +987,44 @@ void applyObjectAwareSeamPostprocessImpl(std::vector<double> &volume, int nx,
   if (positive.empty())
     return;
   const double threshold = 0.10 * percentile(positive, 99.5);
-  if (profile == "phantom")
+  const std::vector<double> before = volume;
+  if (profile == "phantom") {
     applyPhantomContourInterpolation(volume, nx, ny, nz, threshold, transform);
-  else
+  } else if (profile == "epguan") {
+    if (transform.epguanCloseStrength > 0.0) {
+      OutputTransform epguanTransform = transform;
+      epguanTransform.objectProfile = "epguan";
+      epguanTransform.phantomCloseStrength = transform.epguanCloseStrength;
+      applyPhantomContourInterpolation(volume, nx, ny, nz, threshold,
+                                       epguanTransform);
+    }
+    applyEpguanBackgroundFilter(volume, nx, ny, nz, voxelSizeXmm,
+                                voxelSizeYmm, transform);
+  } else {
     applyZimuTopologyLockedSmooth(volume, nx, ny, nz, threshold, transform);
+  }
+  size_t changedVoxels = 0;
+  size_t changedSlices = 0;
+  double maxAbs = 0.0;
+  const size_t planeSize = static_cast<size_t>(nx) * ny;
+  for (int z = 0; z < nz; ++z) {
+    bool sliceChanged = false;
+    for (size_t xy = 0; xy < planeSize; ++xy) {
+      const size_t index = static_cast<size_t>(z) * planeSize + xy;
+      const double difference = std::abs(volume[index] - before[index]);
+      if (difference > 0.0) {
+        ++changedVoxels;
+        sliceChanged = true;
+        maxAbs = std::max(maxAbs, difference);
+      }
+    }
+    changedSlices += sliceChanged;
+  }
+  std::ostringstream summary;
+  summary << "Seam postprocess summary: total_changed_slices=" << changedSlices
+          << ", changed_voxels=" << changedVoxels
+          << ", input_output_max_abs=" << maxAbs;
+  logInfo(summary.str());
 }
 
 std::vector<uint8_t> blendOutputMask(const std::vector<uint8_t> &source,
@@ -838,15 +1125,49 @@ std::vector<T> flipXWholeOutput(const std::vector<T> &source, int nx, int ny,
   return out;
 }
 
+std::vector<double> applyCircularFov(const std::vector<double> &source, int nx,
+                                     int ny, int nz, double radiusMm,
+                                     double voxelSizeXmm,
+                                     double voxelSizeYmm) {
+  if (voxelSizeXmm <= 0.0 || voxelSizeYmm <= 0.0)
+    throw std::invalid_argument(
+        "prepareOutputVolume: voxel size must be positive for XY FOV");
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> weights(plane);
+  const double centerX = 0.5 * (nx - 1);
+  const double centerY = 0.5 * (ny - 1);
+  const double taperMm = 4.0 * std::min(voxelSizeXmm, voxelSizeYmm);
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      const double dx = (x - centerX) * voxelSizeXmm;
+      const double dy = (y - centerY) * voxelSizeYmm;
+      weights[static_cast<size_t>(y) * nx + x] = std::clamp(
+          (radiusMm + taperMm - std::hypot(dx, dy)) / taperMm, 0.0, 1.0);
+    }
+  }
+  std::vector<double> output(source);
+  for (int z = 0; z < nz; ++z) {
+    const size_t offset = static_cast<size_t>(z) * plane;
+    for (size_t xy = 0; xy < plane; ++xy)
+      output[offset + xy] *= weights[xy];
+  }
+  return output;
+}
+
 } // namespace
 
 void postprocessStitchedOutput(std::vector<double> &volume, int nx, int ny,
-                               int nz, const OutputTransform &transform) {
+                               int nz, const OutputTransform &transform,
+                               double voxelSizeXmm, double voxelSizeYmm) {
   const size_t expected = static_cast<size_t>(nx) * ny * nz;
   if (nx <= 0 || ny <= 0 || nz <= 0 || volume.size() != expected)
     throw std::invalid_argument(
         "postprocessStitchedOutput: invalid volume dimensions");
-  applyObjectAwareSeamPostprocessImpl(volume, nx, ny, nz, transform);
+  if (voxelSizeXmm <= 0.0 || voxelSizeYmm <= 0.0)
+    throw std::invalid_argument(
+        "postprocessStitchedOutput: voxel sizes must be positive");
+  applyObjectAwareSeamPostprocessImpl(volume, nx, ny, nz, transform,
+                                      voxelSizeXmm, voxelSizeYmm);
 }
 
 std::vector<double> prepareOutputVolume(const std::vector<double> &source, int nx,
@@ -895,12 +1216,19 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
       maskForOutput = &transformedMask;
     }
   }
+  // The seam classifier must see the same FOV support that is written.
+  if (transform && transform->fovRadiusMm > 0.0) {
+    transformedSource = applyCircularFov(
+        *sourceForOutput, nx, ny, transformedNz, transform->fovRadiusMm,
+        voxelSizeXmm, voxelSizeYmm);
+    sourceForOutput = &transformedSource;
+  }
   if (transform && transform->objectAwareSeamPostprocess) {
     if (!transform->sigmoidBlendOutput || transform->bedOverlapInRecon)
       throw std::invalid_argument(
           "prepareOutputVolume: seam postprocess requires output sigmoid stitching");
     postprocessStitchedOutput(transformedSource, nx, ny, transformedNz,
-                              *transform);
+                              *transform, voxelSizeXmm, voxelSizeYmm);
     sourceForOutput = &transformedSource;
   }
   if (shouldFlipZWholeOutput(transform)) {
@@ -925,40 +1253,20 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
   if (!isCropSettingsValid(transformedNz, crop) &&
       !(crop.start == 0 && crop.end == 0))
     throw std::invalid_argument("prepareOutputVolume: invalid crop range");
-  const int croppedNz = transformedNz - crop.start - crop.end;
   if (outNz)
-    *outNz = croppedNz;
+    *outNz = transformedNz;
 
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<double> fovWeights;
-  if (transform && transform->fovRadiusMm > 0.0) {
-    if (voxelSizeXmm <= 0.0 || voxelSizeYmm <= 0.0)
-      throw std::invalid_argument("prepareOutputVolume: voxel size must be positive for XY FOV");
-    fovWeights.resize(plane);
-    const double centerX = 0.5 * (nx - 1);
-    const double centerY = 0.5 * (ny - 1);
-    const double taperMm = 4.0 * std::min(voxelSizeXmm, voxelSizeYmm);
-    for (int y = 0; y < ny; ++y) {
-      for (int x = 0; x < nx; ++x) {
-        const double dx = (x - centerX) * voxelSizeXmm;
-        const double dy = (y - centerY) * voxelSizeYmm;
-        fovWeights[static_cast<size_t>(y) * nx + x] = std::clamp(
-            (transform->fovRadiusMm + taperMm - std::hypot(dx, dy)) /
-                taperMm,
-            0.0, 1.0);
-      }
-    }
-  }
-  std::vector<double> out(static_cast<size_t>(croppedNz) * plane, 0.0);
-  for (int z = 0; z < croppedNz; ++z) {
-    const int srcZ = z + crop.start;
+  std::vector<double> out(static_cast<size_t>(transformedNz) * plane, 0.0);
+  for (int z = 0; z < transformedNz; ++z) {
+    if (z < crop.start || z >= transformedNz - crop.end)
+      continue;
     for (size_t xy = 0; xy < plane; ++xy) {
-      const size_t srcIdx = static_cast<size_t>(srcZ) * plane + xy;
+      const size_t srcIdx = static_cast<size_t>(z) * plane + xy;
       const double value = (maskForOutput && !(*maskForOutput)[srcIdx])
                                ? 0.0
                                : (*sourceForOutput)[srcIdx];
-      out[static_cast<size_t>(z) * plane + xy] =
-          fovWeights.empty() ? value : value * fovWeights[xy];
+      out[static_cast<size_t>(z) * plane + xy] = value;
     }
   }
   return out;

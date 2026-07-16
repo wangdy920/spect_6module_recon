@@ -117,7 +117,7 @@ CLI 显式参数  >  algo_*.conf  >  bin/config/spect_config.ini  >  硬编码�
 | 迭代 | `iterations=30:5` | 仅当现场要 **20** 时传 `-it 20:5` |
 | 几何 | metadata / ini 占位 | **默认传** `-dim`/`-vox`/`-ang`/`-detN`；省略条件见 §2.3 |
 | 多床 overlap | `bed_overlap=16,16,16,0,0` | 当前输出拼接默认 stride=64；其他物理步进需显式传 `-bedOverlap` |
-| 裁剪 | `crop_end=0,0` | 可不传 `-cropEnd` |
+| 首尾层置零 | `crop_end=0,0` | 可不传 `-cropEnd`；启用时不改变输出层数 |
 | 方向 | **`z_bed_flip=1`**，`z_out_flip=0`，`x_out_flip=0` | **保留开启**；**不要**写 `-zbedflip 0`。Legacy 单文件同样 **`-zbedflip 1`**（§2.5） |
 | PSF FWHM / N | `fwhm=1.5`，`min_sigmas=4` | **默认传** `-psf 1.5,4`（同时启用 PSF 并写入 FWHM/N） |
 | PSF mode | `mode=None`（包内默认关） | **默认传** `-psfMode Operator`（与 `-psf` 一起；勿只传 mode 不传 `-psf`） |

@@ -202,12 +202,14 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `[MultiBed] overlap_in_recon` | `1`：overlap 参与协同重建；`0`：重建床位互不重叠，只在最终输出前拼接；默认 `0` |
 | `[MultiBed] crop_method` / `-bedCropMethod` | `sigmoid`：归一化 `k=12` 权重融合（默认）；`direct`：hard-cut 对照。`sigmoid` 要求 `overlap_in_recon=0` |
 | `[MultiBed] fov_radius_mm` | 最终输出的圆形 XY FOV 半径（mm）；`0` 关闭。当前 0.3 mm 数据的验证候选为 `15.0`（R50），边缘固定使用 4 voxel taper |
-| `-cropEnd <top[,end]>` | 最终输出 Z 轴裁剪，在输出翻转之后执行 |
+| `-cropEnd <top[,end]>` | 将最终输出 Z 轴首尾指定层置零，在输出翻转之后执行；不改变层数 |
 | `-zbedflip [0\|1]` | 反转 `-dfList` 的床位局部 Z。compact 多床联合重建会在 forward/backward 与 denom 累积时使用虚拟映射 `global_z = bed_start + (baseNz - 1 - local_z)`，不再等到输出后翻转。映射范围由 `baseNz` 和 `-bedOverlap` 唯一确定；非联合路径仍按床位输出翻转。配对规则仍必须与矩阵和预处理方向一致 |
 | `-zoutflip [0\|1]` | 对最终整体输出再做 Z 翻转，默认 0 |
 | `-xoutflip [0\|1]` | 对最终整体输出做 X 翻转，默认 0 |
 
 `-dim` 表示单床位维度；最终输出 `Z = Nz * bed_count - sum(overlap)`。`overlap_in_recon=0` 时迭代体数据暂为 `Nz * bed_count`，保存前按 `crop_method` 执行 hard-cut 或归一化 sigmoid 融合。只处理相邻床位的内部接缝，不裁剪首床起点或末床终点。完整输出顺序为：必要的每床 Z 翻转 -> overlap 输出拼接 -> 整体 Z/X 翻转 -> FOV -> `cropEnd`。
+
+`-bedOverlap` 的单位是 Z 体素。对当前单床80层、层厚0.3 mm的数据，任意0.6 mm倍数的正步进都可精确换算为 `stride=step_mm/0.3`、`overlap=80-stride`；对象感知接缝后处理允许任意正 overlap，并将处理半宽自动限制为 `overlap/2`。例如16.8/17.7/19.2 mm分别对应overlap 24/21/16。
 
 预处理投影变体必须与矩阵入口配对（详见 `Recon_Interface_Migration_Field_CN.md` §2.5）：
 

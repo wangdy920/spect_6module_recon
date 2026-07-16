@@ -22,7 +22,7 @@ TEST(VolumeOutputTest, ValidatesCropRangeAgainstNz) {
   EXPECT_FALSE(isCropSettingsValid(4, CropSettings{4, 0}));
 }
 
-TEST(VolumeOutputTest, PrepareOutputAppliesMaskAndCrop) {
+TEST(VolumeOutputTest, PrepareOutputAppliesMaskAndZeroesEndSlices) {
   const int nx = 2;
   const int ny = 1;
   const int nz = 4;
@@ -33,12 +33,10 @@ TEST(VolumeOutputTest, PrepareOutputAppliesMaskAndCrop) {
   const std::vector<double> output = prepareOutputVolume(
       source, nx, ny, nz, &mask, CropSettings{1, 1}, &outNz);
 
-  EXPECT_EQ(outNz, 2);
-  ASSERT_EQ(output.size(), 4u);
-  EXPECT_DOUBLE_EQ(output[0], 2.0);
-  EXPECT_DOUBLE_EQ(output[1], 0.0);
-  EXPECT_DOUBLE_EQ(output[2], 0.0);
-  EXPECT_DOUBLE_EQ(output[3], 5.0);
+  EXPECT_EQ(outNz, 4);
+  ASSERT_EQ(output.size(), source.size());
+  EXPECT_EQ(output,
+            (std::vector<double>{0, 0, 2, 0, 0, 5, 0, 0}));
 }
 
 TEST(VolumeOutputTest, PrepareOutputFlipsZWithinEachBedBeforeCrop) {
@@ -98,7 +96,7 @@ TEST(VolumeOutputTest, HardCutsMaskWithTheSameSlices) {
   EXPECT_EQ(output, (std::vector<double>{1, 2, 3, 0, 7, 8}));
 }
 
-TEST(VolumeOutputTest, HardCutPrecedesWholeZFlipAndCrop) {
+TEST(VolumeOutputTest, HardCutAndWholeZFlipPrecedeEndSliceZeroing) {
   const int nx = 1;
   const int ny = 1;
   const int nz = 8;
@@ -113,7 +111,7 @@ TEST(VolumeOutputTest, HardCutPrecedesWholeZFlipAndCrop) {
   const std::vector<double> output = prepareOutputVolume(
       source, nx, ny, nz, nullptr, CropSettings{1, 1}, nullptr, &transform);
 
-  EXPECT_EQ(output, (std::vector<double>{7, 6, 3, 2}));
+  EXPECT_EQ(output, (std::vector<double>{0, 7, 6, 3, 2, 0}));
 }
 
 TEST(VolumeOutputTest, SigmoidBlendMatchesNormalizedK12Reference) {
@@ -194,6 +192,56 @@ TEST(VolumeOutputTest, ObjectAwarePhantomContourInterpolationFillsSeamGap) {
   EXPECT_EQ(processed.front(), baseline.front());
 }
 
+TEST(VolumeOutputTest, ObjectAwarePostprocessAcceptsSupportedStepOverlaps) {
+  const int nx = 5;
+  const int ny = 5;
+  const int baseNz = 80;
+  const int nz = 2 * baseNz;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<int> overlaps = {21}; // 17.7 mm stride at 0.3 mm/voxel.
+  for (int stride = 2; stride <= baseNz; stride += 2)
+    overlaps.push_back(baseNz - stride); // Every 0.6 mm step through 24 mm.
+  for (int overlap : overlaps) {
+    std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+    for (int z = 0; z < nz; ++z) {
+      for (int y = 1; y <= 3; ++y) {
+        for (int x = 1; x <= 3; ++x)
+          source[static_cast<size_t>(z) * plane +
+                 static_cast<size_t>(y) * nx + x] = 1.0;
+      }
+    }
+    if (overlap > 0) {
+      for (int localZ : {baseNz - (overlap + 1) / 2,
+                         baseNz + overlap / 2}) {
+        for (int y = 1; y <= 3; ++y) {
+          for (int x = 1; x <= 3; ++x)
+            source[static_cast<size_t>(localZ) * plane +
+                   static_cast<size_t>(y) * nx + x] = 0.0;
+        }
+      }
+    }
+
+    OutputTransform transform;
+    transform.bedOverlapInRecon = false;
+    transform.sigmoidBlendOutput = true;
+    transform.objectAwareSeamPostprocess = true;
+    transform.objectProfile = "phantom";
+    transform.baseNz = baseNz;
+    transform.bedZStarts = {0, baseNz};
+    transform.outputBedOverlaps = {overlap};
+    transform.seamHalfWidth = 8;
+
+    int outNz = 0;
+    const auto output = prepareOutputVolume(
+        source, nx, ny, nz, nullptr, CropSettings{0, 0}, &outNz, &transform);
+
+    EXPECT_EQ(outNz, nz - overlap);
+    const int seam = baseNz - overlap + overlap / 2;
+    const size_t seamCenter = static_cast<size_t>(seam) * plane + 2 * nx + 2;
+    EXPECT_NEAR(output[seamCenter], 1.0, 1e-12);
+  }
+}
+
 TEST(VolumeOutputTest, PhantomContourInterpolationKeepsTwoComponentsSeparate) {
   const int nx = 9;
   const int ny = 5;
@@ -229,6 +277,321 @@ TEST(VolumeOutputTest, PhantomContourInterpolationKeepsTwoComponentsSeparate) {
   EXPECT_NEAR(output[seam + 2 * nx + 1], 1.0, 1e-12);
   EXPECT_NEAR(output[seam + 2 * nx + 7], 1.0, 1e-12);
   EXPECT_DOUBLE_EQ(output[seam + 2 * nx + 4], 0.0);
+}
+
+TEST(VolumeOutputTest, FovPrecedesPhantomComponentGate) {
+  const int nx = 21;
+  const int ny = 21;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 9; y <= 11; ++y) {
+      for (int x : {6, 7, 8, 12, 13, 14})
+        source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx + x] = 1.0;
+    }
+  }
+  // Unequal corner artifacts would make the phantom gate see 3 vs 4
+  // components if the final circular FOV were applied too late.
+  for (int z = 0; z < 40; ++z) {
+    for (int y = 0; y <= 2; ++y) {
+      for (int x = 0; x <= 2; ++x)
+        source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx + x] = 1.0;
+      if (z >= 20) {
+        for (int x = 18; x <= 20; ++x)
+          source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx + x] = 1.0;
+      }
+    }
+  }
+  for (int localZ : {12, 28}) {
+    for (int y = 9; y <= 11; ++y) {
+      for (int x : {6, 7, 8, 12, 13, 14})
+        source[static_cast<size_t>(localZ) * plane + static_cast<size_t>(y) * nx + x] = 0.0;
+    }
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "phantom";
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+  transform.fovRadiusMm = 7.0;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform,
+      1.0, 1.0);
+  const size_t seam = static_cast<size_t>(12) * plane;
+  EXPECT_GT(output[seam + 10 * nx + 7], 0.9);
+  EXPECT_GT(output[seam + 10 * nx + 13], 0.9);
+  EXPECT_DOUBLE_EQ(output[seam], 0.0);
+}
+
+TEST(VolumeOutputTest, AutoClassifiesEpTubeAsPhantomWhenFovComesFirst) {
+  // Single-cylinder EPguan-like support: one compact coronal component.
+  // Peripheral FOV-outside arcs must not push auto classification into the
+  // gray zone or skip the phantom contour gate.
+  const int nx = 21;
+  const int ny = 21;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 8; y <= 12; ++y) {
+      for (int x = 8; x <= 12; ++x) {
+        const double dy = y - 10.0;
+        const double dx = x - 10.0;
+        if (dy * dy + dx * dx <= 6.25)
+          source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx +
+                 x] = 1.0;
+      }
+    }
+  }
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 0; y <= 2; ++y) {
+      for (int x = 0; x <= 2; ++x)
+        source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx +
+               x] = 0.8;
+      if (z >= 20) {
+        for (int x = 18; x <= 20; ++x)
+          source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx +
+                 x] = 0.8;
+      }
+    }
+  }
+  for (int localZ : {12, 28}) {
+    for (int y = 8; y <= 12; ++y) {
+      for (int x = 8; x <= 12; ++x)
+        source[static_cast<size_t>(localZ) * plane +
+               static_cast<size_t>(y) * nx + x] = 0.0;
+    }
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "auto";
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+  transform.fovRadiusMm = 7.0;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform,
+      1.0, 1.0);
+  const size_t seam = static_cast<size_t>(12) * plane;
+  EXPECT_GT(output[seam + 10 * nx + 10], 0.9);
+  EXPECT_DOUBLE_EQ(output[seam], 0.0);
+  EXPECT_DOUBLE_EQ(output[seam + 2], 0.0);
+}
+
+TEST(VolumeOutputTest, AutoClassifiesSeamFragmentedEpTubeViaDominantSupport) {
+  // Mimic EPguan: one bright tube plus many tiny coronal speckles that would
+  // inflate projection_components past the compact proj<=3 gate.
+  const int nx = 21;
+  const int ny = 21;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 8; y <= 12; ++y) {
+      for (int x = 8; x <= 12; ++x) {
+        const double dy = y - 10.0;
+        const double dx = x - 10.0;
+        if (dy * dy + dx * dx <= 6.25)
+          source[static_cast<size_t>(z) * plane + static_cast<size_t>(y) * nx +
+                 x] = 1.0;
+      }
+    }
+  }
+  for (int z = 0; z < nz; z += 3) {
+    const int x = 2 + (z % 5);
+    const int y = 2 + ((z / 3) % 4);
+    for (int dy = 0; dy < 3; ++dy)
+      for (int dx = 0; dx < 3; ++dx)
+        source[static_cast<size_t>(z) * plane +
+               static_cast<size_t>(y + dy) * nx + (x + dx)] = 0.85;
+  }
+  for (int localZ : {12, 28}) {
+    for (int y = 8; y <= 12; ++y) {
+      for (int x = 8; x <= 12; ++x)
+        source[static_cast<size_t>(localZ) * plane +
+               static_cast<size_t>(y) * nx + x] = 0.0;
+    }
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "auto";
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+  transform.fovRadiusMm = 8.0;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform,
+      1.0, 1.0);
+  const size_t seam = static_cast<size_t>(12) * plane;
+  EXPECT_GT(output[seam + 10 * nx + 10], 0.9);
+}
+
+TEST(VolumeOutputTest, AutoKeepsLowHighFractionDominantTubeOnEpguanPath) {
+  const int nx = 61;
+  const int ny = 61;
+  const int nz = 272;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.005);
+  for (int z = 0; z < nz; ++z) {
+    const double value = z % 5 == 0 ? 1.0 : 0.3;
+    for (int y = 20; y <= 40; ++y)
+      for (int x = 20; x <= 40; ++x)
+        source[static_cast<size_t>(z) * plane +
+               static_cast<size_t>(y) * nx + x] = value;
+  }
+  for (int block = 0; block < 5; ++block) {
+    const int z0 = 10 + 50 * block;
+    const int x0 = 2;
+    for (int z = z0; z < z0 + 3; ++z)
+      for (int y = 2; y <= 4; ++y)
+        for (int x = x0; x < x0 + 3; ++x)
+          source[static_cast<size_t>(z) * plane +
+                 static_cast<size_t>(y) * nx + x] = 0.3;
+  }
+
+  OutputTransform transform;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "auto";
+  transform.baseNz = 80;
+  transform.bedZStarts = {0, 80, 160, 240};
+  transform.outputBedOverlaps = {16, 16, 16};
+  transform.seamHalfWidth = 8;
+
+  postprocessStitchedOutput(source, nx, ny, nz, transform, 0.3, 0.3);
+  EXPECT_NEAR(source[0], 0.005 * transform.epguanBackgroundRetain, 1e-12);
+}
+
+TEST(VolumeOutputTest, EpguanBackgroundFilterPreservesTubeAndAttenuatesFarField) {
+  const int nx = 61;
+  const int ny = 61;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.005);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 24; y <= 36; ++y) {
+      for (int x = 24; x <= 36; ++x) {
+        const double dy = y - 30.0;
+        const double dx = x - 30.0;
+        if (dy * dy + dx * dx <= 36.0)
+          source[static_cast<size_t>(z) * plane +
+                 static_cast<size_t>(y) * nx + x] = 1.0;
+      }
+    }
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "epguan";
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+  transform.epguanBackgroundRetain = 0.08;
+  transform.epguanSupportThreshold = 0.06;
+  transform.epguanSupportMarginMm = 1.5;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform,
+      0.3, 0.3);
+  EXPECT_DOUBLE_EQ(output[30 * nx + 30], 1.0);
+  EXPECT_NEAR(output[0], 0.005 * 0.08, 1e-12);
+}
+
+TEST(VolumeOutputTest, EpguanDoesNotPreserveBrightSeamCollarByDefault) {
+  const int nx = 9;
+  const int ny = 9;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 2; y <= 6; ++y)
+      for (int x = 2; x <= 6; ++x)
+        source[static_cast<size_t>(z) * plane +
+               static_cast<size_t>(y) * nx + x] = 1.0;
+  }
+  for (int localZ : {12, 28}) {
+    for (int y = 2; y <= 6; ++y)
+      for (int x = 2; x <= 6; ++x)
+        source[static_cast<size_t>(localZ) * plane +
+               static_cast<size_t>(y) * nx + x] = 2.0;
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "epguan";
+  transform.epguanBackgroundFilter = false;
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform);
+  const size_t seam = static_cast<size_t>(12) * plane;
+  EXPECT_NEAR(output[seam + 4 * nx + 4], 1.0, 1e-12);
+}
+
+TEST(VolumeOutputTest, EpguanFeathersC4AtSeamWindowEdges) {
+  const int nx = 9;
+  const int ny = 9;
+  const int nz = 40;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(static_cast<size_t>(nz) * plane, 0.0);
+  for (int z = 0; z < nz; ++z) {
+    for (int y = 2; y <= 6; ++y)
+      for (int x = 2; x <= 6; ++x)
+        source[static_cast<size_t>(z) * plane +
+               static_cast<size_t>(y) * nx + x] = 1.0;
+  }
+  for (const auto [localZ, value] :
+       std::vector<std::pair<int, double>>{{4, 2.0}, {0, 2.0}}) {
+    const int bed = localZ == 0 ? 1 : 0;
+    const int z = bed * 20 + localZ;
+    for (int y = 2; y <= 6; ++y)
+      for (int x = 2; x <= 6; ++x)
+        source[static_cast<size_t>(z) * plane +
+               static_cast<size_t>(y) * nx + x] = value;
+  }
+
+  OutputTransform transform;
+  transform.bedOverlapInRecon = false;
+  transform.sigmoidBlendOutput = true;
+  transform.objectAwareSeamPostprocess = true;
+  transform.objectProfile = "epguan";
+  transform.epguanBackgroundFilter = false;
+  transform.baseNz = 20;
+  transform.bedZStarts = {0, 20};
+  transform.outputBedOverlaps = {16};
+  transform.seamHalfWidth = 8;
+  transform.epguanSeamEdgeStrength = 0.60;
+  transform.epguanSeamFeatherSlices = 4;
+
+  const auto output = prepareOutputVolume(
+      source, nx, ny, nz, nullptr, CropSettings{0, 0}, nullptr, &transform);
+  const size_t edge = static_cast<size_t>(4) * plane;
+  EXPECT_NEAR(output[edge + 4 * nx + 4], 1.4, 1e-12);
 }
 
 TEST(VolumeOutputTest, ZimuSmoothingDoesNotExpandBinarySupport) {
@@ -295,7 +658,7 @@ TEST(VolumeOutputTest, PrepareOutputFlipsWholeZAfterPerBedFlip) {
   EXPECT_EQ(output, expected);
 }
 
-TEST(VolumeOutputTest, PrepareOutputWholeZFlipPrecedesCrop) {
+TEST(VolumeOutputTest, PrepareOutputWholeZFlipPrecedesEndSliceZeroing) {
   const int nx = 1;
   const int ny = 1;
   const int nz = 4;
@@ -307,8 +670,8 @@ TEST(VolumeOutputTest, PrepareOutputWholeZFlipPrecedesCrop) {
   const std::vector<double> output = prepareOutputVolume(
       source, nx, ny, nz, nullptr, CropSettings{1, 1}, &outNz, &transform);
 
-  EXPECT_EQ(outNz, 2);
-  const std::vector<double> expected = {3, 2};
+  EXPECT_EQ(outNz, 4);
+  const std::vector<double> expected = {0, 3, 2, 0};
   EXPECT_EQ(output, expected);
 }
 

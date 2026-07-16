@@ -298,6 +298,7 @@ target_include_directories(spect_convert_6module_sysmat_to_csrb PRIVATE
 add_executable(spect_seam_postprocess
   tools/seam_postprocess.cpp
   src/main/VolumeOutput.cpp
+  src/main/RunLogger.cpp
 )
 target_include_directories(spect_seam_postprocess PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include

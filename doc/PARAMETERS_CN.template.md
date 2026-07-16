@@ -84,7 +84,7 @@ bed_overlap = 16,16,16,0,0  # 80 层单床对应 stride=64
 overlap_in_recon = 0
 crop_method = sigmoid
 fov_radius_mm = 15.0
-crop_end    = 0,0
+crop_end    = 0,0  # 将最终 Z 首尾指定层置零，不改变层数
 z_bed_flip  = 1  # compact joint consumes this as virtual-Z iteration mapping; non-joint applies output per-bed flip
 z_out_flip  = 0
 x_out_flip  = 0

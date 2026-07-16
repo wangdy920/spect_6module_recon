@@ -1208,6 +1208,29 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             "MultiBed", "object_profile", a.bedObjectProfile));
         a.bedPhantomCloseStrength = cfg.getDouble(
             "MultiBed", "phantom_close_strength", a.bedPhantomCloseStrength);
+        a.bedEpguanCloseStrength = cfg.getDouble(
+            "MultiBed", "epguan_close_strength", a.bedEpguanCloseStrength);
+        a.bedEpguanWallMaxPreserve = cfg.getBool(
+            "MultiBed", "epguan_wall_max_preserve",
+            a.bedEpguanWallMaxPreserve);
+        a.bedEpguanSeamEdgeStrength = cfg.getDouble(
+            "MultiBed", "epguan_seam_edge_strength",
+            a.bedEpguanSeamEdgeStrength);
+        a.bedEpguanSeamFeatherSlices = cfg.getInt(
+            "MultiBed", "epguan_seam_feather_slices",
+            a.bedEpguanSeamFeatherSlices);
+        a.bedEpguanBackgroundFilter = cfg.getBool(
+            "MultiBed", "epguan_background_filter",
+            a.bedEpguanBackgroundFilter);
+        a.bedEpguanBackgroundRetain = cfg.getDouble(
+            "MultiBed", "epguan_background_retain",
+            a.bedEpguanBackgroundRetain);
+        a.bedEpguanSupportThreshold = cfg.getDouble(
+            "MultiBed", "epguan_support_threshold",
+            a.bedEpguanSupportThreshold);
+        a.bedEpguanSupportMarginMm = cfg.getDouble(
+            "MultiBed", "epguan_support_margin_mm",
+            a.bedEpguanSupportMarginMm);
         a.bedZimuCloseStrength = cfg.getDouble(
             "MultiBed", "zimu_close_strength", a.bedZimuCloseStrength);
         a.bedSeamHalfWidth = cfg.getInt(
@@ -1487,19 +1510,45 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     if (args.bedObjectProfile != "auto" &&
         args.bedObjectProfile != "mouse" &&
         args.bedObjectProfile != "phantom" &&
+        args.bedObjectProfile != "epguan" &&
         args.bedObjectProfile != "zimu") {
         std::cerr << "Error: [MultiBed] object_profile must be auto, mouse, "
-                     "phantom, or zimu.\n";
+                     "phantom, epguan, or zimu.\n";
         return false;
     }
     if (!std::isfinite(args.bedPhantomCloseStrength) ||
         args.bedPhantomCloseStrength < 0.0 ||
         args.bedPhantomCloseStrength > 1.0 ||
+        !std::isfinite(args.bedEpguanCloseStrength) ||
+        args.bedEpguanCloseStrength < 0.0 ||
+        args.bedEpguanCloseStrength > 1.0 ||
         !std::isfinite(args.bedZimuCloseStrength) ||
         args.bedZimuCloseStrength < 0.0 ||
         args.bedZimuCloseStrength > 1.0) {
-        std::cerr << "Error: [MultiBed] phantom_close_strength and "
-                     "zimu_close_strength must be finite and in [0,1].\n";
+        std::cerr << "Error: [MultiBed] phantom_close_strength, "
+                     "epguan_close_strength, and zimu_close_strength must be "
+                     "finite and in [0,1].\n";
+        return false;
+    }
+    if (!std::isfinite(args.bedEpguanSeamEdgeStrength) ||
+        args.bedEpguanSeamEdgeStrength < 0.0 ||
+        args.bedEpguanSeamEdgeStrength > 1.0 ||
+        args.bedEpguanSeamFeatherSlices < 0) {
+        std::cerr << "Error: [MultiBed] epguan_seam_edge_strength must be "
+                     "finite and in [0,1], and epguan_seam_feather_slices "
+                     "must be >= 0.\n";
+        return false;
+    }
+    if (!std::isfinite(args.bedEpguanBackgroundRetain) ||
+        args.bedEpguanBackgroundRetain < 0.0 ||
+        args.bedEpguanBackgroundRetain > 1.0 ||
+        !std::isfinite(args.bedEpguanSupportThreshold) ||
+        args.bedEpguanSupportThreshold <= 0.0 ||
+        args.bedEpguanSupportThreshold > 1.0 ||
+        !std::isfinite(args.bedEpguanSupportMarginMm) ||
+        args.bedEpguanSupportMarginMm < 0.0) {
+        std::cerr << "Error: [MultiBed] EPguan background parameters require "
+                     "retain in [0,1], threshold in (0,1], and margin_mm >= 0.\n";
         return false;
     }
     if (args.bedSeamHalfWidth < 0) {
@@ -1820,17 +1869,33 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "crop_method = " << a.bedCropMethod
               << "  # direct|sigmoid; sigmoid uses normalized k=12 weights\n";
     std::cout << "seam_postprocess = " << (a.bedSeamPostprocess ? 1 : 0)
-              << "  # phantom contour interpolation / zimu topology lock\n";
+              << "  # request; active only for multi-bed output overlap stitch\n";
     std::cout << "object_profile = " << a.bedObjectProfile
-              << "  # auto|mouse|phantom|zimu\n";
+              << "  # auto|mouse|phantom|epguan|zimu\n";
     std::cout << "phantom_close_strength = " << a.bedPhantomCloseStrength
               << "  # contour interpolation blend [0,1]\n";
+    std::cout << "epguan_close_strength = " << a.bedEpguanCloseStrength
+              << "  # EP tube contour interpolation blend [0,1]\n";
+    std::cout << "epguan_wall_max_preserve = "
+              << (a.bedEpguanWallMaxPreserve ? 1 : 0) << "\n";
+    std::cout << "epguan_seam_edge_strength = "
+              << a.bedEpguanSeamEdgeStrength << "  # [0,1]\n";
+    std::cout << "epguan_seam_feather_slices = "
+              << a.bedEpguanSeamFeatherSlices << "\n";
+    std::cout << "epguan_background_filter = "
+              << (a.bedEpguanBackgroundFilter ? 1 : 0) << "\n";
+    std::cout << "epguan_background_retain = "
+              << a.bedEpguanBackgroundRetain << "  # [0,1]\n";
+    std::cout << "epguan_support_threshold = "
+              << a.bedEpguanSupportThreshold << "  # (0,1]\n";
+    std::cout << "epguan_support_margin_mm = "
+              << a.bedEpguanSupportMarginMm << "\n";
     std::cout << "zimu_close_strength = " << a.bedZimuCloseStrength
               << "  # topology-locked Gaussian sigma=0.3mm blend [0,1]\n";
     std::cout << "seam_half_width = " << a.bedSeamHalfWidth
-              << "  # phantom +/- slices; zimu capped at 4\n";
+              << "  # capped at overlap/2; zimu additionally capped at 4\n";
     std::cout << "fov_radius_mm = " << a.fovRadiusMm << "  # 0=off\n";
-    std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end\n";
+    std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end slices zeroed\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
     std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n\n";
@@ -1933,9 +1998,9 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
     std::cout << "  -bedCropMethod <direct|sigmoid> Output stitching for overlap_in_recon=0\n";
-    std::cout << "  -bedSeamPostprocess <0|1> Object-aware contour/topology seam postprocess (default 1)\n";
-    std::cout << "  -bedObjectProfile <auto|mouse|phantom|zimu> Override automatic object profile\n";
-    std::cout << "  -cropEnd <top[,end]>      Final output Z cropping after output flips\n";
+    std::cout << "  -bedSeamPostprocess <0|1> Request seam postprocess (default 1; only runs with multi-bed output overlap)\n";
+    std::cout << "  -bedObjectProfile <auto|mouse|phantom|epguan|zimu> Override automatic object profile\n";
+    std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";

@@ -684,27 +684,51 @@ int runProgram(int argc, char **argv) {
         args.zBedFlip && dfListMode && bedCount > 1 && compactLayout;
     const bool enableBedZFlip =
         args.zBedFlip && dfListMode && !jointVirtualZFlip;
-    if (args.bedSeamPostprocess &&
+    const bool hasOutputOverlapStitch =
+        bedCount > 1 && !args.bedOverlapInRecon &&
         std::any_of(args.outputBedOverlaps.begin(), args.outputBedOverlaps.end(),
-                    [](int overlap) { return overlap != 16; })) {
-      throw std::runtime_error(
-          "Object-aware seam postprocess currently requires overlap=16 at every joint.");
-    }
+                    [](int overlap) { return overlap > 0; });
+    // Seam closing only runs when multi-bed output stitching actually uses
+    // overlap. Zero-overlap joints or single-bed keep cut/sigmoid only.
+    const bool enableSeamPostprocess =
+        args.bedSeamPostprocess && hasOutputOverlapStitch &&
+        args.bedCropMethod == "sigmoid";
     if (jointVirtualZFlip) {
       logInfo("Multi-bed virtual Z mapping: local bed Z is reversed before "
               "joint overlap accumulation.");
     }
+    if (args.bedSeamPostprocess && !enableSeamPostprocess) {
+      logInfo("Output transform: seam postprocess requested but skipped "
+              "(requires multi-bed output overlap stitching with "
+              "crop_method=sigmoid).");
+    }
     if (enableBedZFlip || args.zOutFlip || args.xOutFlip ||
-        !args.bedOverlapInRecon || args.fovRadiusMm > 0.0) {
+        !args.bedOverlapInRecon || args.fovRadiusMm > 0.0 ||
+        enableSeamPostprocess) {
       outputTransform.flipZPerBed = enableBedZFlip;
       outputTransform.jointVirtualZFlip = jointVirtualZFlip;
       outputTransform.flipZWholeOutput = args.zOutFlip;
       outputTransform.flipXWholeOutput = args.xOutFlip;
       outputTransform.bedOverlapInRecon = args.bedOverlapInRecon;
       outputTransform.sigmoidBlendOutput = args.bedCropMethod == "sigmoid";
-      outputTransform.objectAwareSeamPostprocess = args.bedSeamPostprocess;
+      outputTransform.objectAwareSeamPostprocess = enableSeamPostprocess;
       outputTransform.objectProfile = args.bedObjectProfile;
       outputTransform.phantomCloseStrength = args.bedPhantomCloseStrength;
+      outputTransform.epguanCloseStrength = args.bedEpguanCloseStrength;
+      outputTransform.epguanWallMaxPreserve =
+          args.bedEpguanWallMaxPreserve;
+      outputTransform.epguanSeamEdgeStrength =
+          args.bedEpguanSeamEdgeStrength;
+      outputTransform.epguanSeamFeatherSlices =
+          args.bedEpguanSeamFeatherSlices;
+      outputTransform.epguanBackgroundFilter =
+          args.bedEpguanBackgroundFilter;
+      outputTransform.epguanBackgroundRetain =
+          args.bedEpguanBackgroundRetain;
+      outputTransform.epguanSupportThreshold =
+          args.bedEpguanSupportThreshold;
+      outputTransform.epguanSupportMarginMm =
+          args.bedEpguanSupportMarginMm;
       outputTransform.zimuCloseStrength = args.bedZimuCloseStrength;
       outputTransform.seamHalfWidth = args.bedSeamHalfWidth;
       outputTransform.baseNz = baseNz;
@@ -722,11 +746,27 @@ int runProgram(int argc, char **argv) {
         logInfo("Output transform: reconstruction beds are non-overlapping; "
                 "crop_method=" + args.bedCropMethod);
       }
-      if (args.bedSeamPostprocess)
+      if (enableSeamPostprocess)
         logInfo("Output transform: object-aware seam postprocess enabled; "
                 "profile=" + args.bedObjectProfile +
                 ", phantom_interp_strength=" +
                 std::to_string(args.bedPhantomCloseStrength) +
+                ", epguan_interp_strength=" +
+                std::to_string(args.bedEpguanCloseStrength) +
+                ", epguan_wall_max_preserve=" +
+                std::to_string(args.bedEpguanWallMaxPreserve ? 1 : 0) +
+                ", epguan_seam_edge_strength=" +
+                std::to_string(args.bedEpguanSeamEdgeStrength) +
+                ", epguan_seam_feather_slices=" +
+                std::to_string(args.bedEpguanSeamFeatherSlices) +
+                ", epguan_background_filter=" +
+                std::to_string(args.bedEpguanBackgroundFilter ? 1 : 0) +
+                ", epguan_background_retain=" +
+                std::to_string(args.bedEpguanBackgroundRetain) +
+                ", epguan_support_threshold=" +
+                std::to_string(args.bedEpguanSupportThreshold) +
+                ", epguan_support_margin_mm=" +
+                std::to_string(args.bedEpguanSupportMarginMm) +
                 ", zimu_smooth_strength=" +
                 std::to_string(args.bedZimuCloseStrength) +
                 ", zimu_sigma_mm=0.3" +

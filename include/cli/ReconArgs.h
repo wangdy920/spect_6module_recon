@@ -155,9 +155,17 @@ struct ReconArgs {
     std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
     bool bedOverlapInRecon = false; ///< Use bed overlap in joint reconstruction geometry
     std::string bedCropMethod = "sigmoid"; ///< direct | sigmoid (output-only)
-    bool bedSeamPostprocess = true; ///< Enable object-aware seam postprocess
-    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | zimu
+    bool bedSeamPostprocess = true; ///< Request seam postprocess; active only with multi-bed output overlap stitch
+    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | epguan | zimu
     double bedPhantomCloseStrength = 1.0; ///< Phantom contour-interpolation blend, [0,1]
+    double bedEpguanCloseStrength = 1.0; ///< EP tube contour-interpolation blend, [0,1]
+    bool bedEpguanWallMaxPreserve = false; ///< Keep brighter original EP wall at seams
+    double bedEpguanSeamEdgeStrength = 0.60; ///< C4 blend at seam-window edges, [0,1]
+    int bedEpguanSeamFeatherSlices = 4; ///< Slices from edge to full C4 blend
+    bool bedEpguanBackgroundFilter = true; ///< Attenuate signal outside EP tube support
+    double bedEpguanBackgroundRetain = 0.08; ///< Far-background retained fraction, [0,1]
+    double bedEpguanSupportThreshold = 0.06; ///< Smoothed projection threshold fraction, (0,1]
+    double bedEpguanSupportMarginMm = 1.5; ///< Fully protected margin and feather width in mm
     double bedZimuCloseStrength = 0.5; ///< Zimu topology-locked smoothing blend, [0,1]
     int bedSeamHalfWidth = 8; ///< Phantom seam half-width; zimu is capped at 4
     double fovRadiusMm = 0.0;       ///< Final-output circular XY FOV radius; 0 disables
@@ -173,9 +181,9 @@ struct ReconArgs {
     bool symReverseXY = false;     ///< Reverse Sym90Z/Sym45Z XY rotation handedness
 
     // ========== Output Z-axis Cropping ==========
-    // For final output edge trimming (crop from top/end of Z after flips)
-    int cropEndStart = 0; // Number of slices to crop from top (z=0)
-    int cropEndEnd = 0;   // Number of slices to crop from end (z=Nz-1)
+    // For zeroing final output edge slices after output flips (Z size unchanged)
+    int cropEndStart = 0; // Number of top slices to zero (z=0)
+    int cropEndEnd = 0;   // Number of end slices to zero (z=Nz-1)
 
     // ========== Helper Methods ==========
     

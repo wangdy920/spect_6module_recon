@@ -13,6 +13,7 @@ __pycache__/
 # ========= Build / cache =========
 build/
 build_*/
+cmake/
 out/
 release/
 dist/
@@ -22,8 +23,10 @@ recon_output/
 output/
 recon_out/
 test-output/
+scripts/
 cmake_test_discovery_*.json
 CMakeUserPresets.json
+utils/
 
 # ========= Data (large / generated) =========
 test_data/
