@@ -603,6 +603,25 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
   return true;
 }
 
+bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix, const float *x, const uint16_t *attFactors,
+    size_t attCount, const cuda::CompactAttenBakeParams &attenParams,
+    const double *fullProjection, size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &ratioParams,
+    const cuda::CompactDeviceTransformParams &transformParams,
+    cuda::CompactDeviceRatioTiming *ratioTiming,
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
+    int cacheSlot) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactDeviceRatioAttenSpmvTAccumulateFloat(
+      matrix, x, attFactors, attCount, attenParams, fullProjection,
+      fullProjectionCount, ratioParams, transformParams, ratioTiming,
+      backwardTiming, accumulatorIndex, cacheSlot);
+  return true;
+}
+
 bool compactDeviceRatioSpmvTFloatCUDA(
     const io::CSRView &matrix, const float *x, const double *fullProjection,
     size_t fullProjectionCount, const cuda::CompactDeviceRatioParams &params,

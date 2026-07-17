@@ -1169,11 +1169,12 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   const auto branches = enumerateCompactBranches(meta);
   const size_t branchCount = branches.size();
   const size_t chunkCount = chunks.chunks().size();
-  // Fused kernels have no attenuation semantics; CTAC forces the generic
-  // bake + spmv route.
-  const bool useDeviceBackward = compactDeviceBackwardEnabled() && !hasAtten;
+  // The fused device-ratio path now supports CTAC. When device-ratio is
+  // enabled with CTAC, the device-backward accumulator is still required.
   const bool useDeviceRatio =
-      compactDeviceRatioEnabled() && !hasBackground && !hasAtten;
+      compactDeviceRatioEnabled() && !hasBackground;
+  const bool useDeviceBackward =
+      compactDeviceBackwardEnabled() && (!hasAtten || useDeviceRatio);
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
 
   std::vector<float> rotatedImages(static_cast<size_t>(bedCount) *
@@ -1229,10 +1230,25 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
             const CompactDeviceTransformParams transformParams =
                 makeCompactDeviceTransformParams(meta, branch.symId,
                                                  branch.zMirror);
-            if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
-                    view, imgRot, fullProjection, fullProjectionCount, params,
-                    transformParams, &deviceTiming, &backwardTiming, bed, bed)) {
-              return false;
+            const uint16_t *bedAtt =
+                attFactors == nullptr ? nullptr : attFactors[bed];
+            if (bedAtt != nullptr) {
+              if (!compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+                      view, imgRot, bedAtt, compactAttenTableCount(meta),
+                      makeCompactAttenBakeParams(meta, compactRowBase,
+                                                 branch.symId, branch.zMirror),
+                      fullProjection, fullProjectionCount, params,
+                      transformParams, &deviceTiming, &backwardTiming, bed,
+                      bed)) {
+                return false;
+              }
+            } else {
+              if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
+                      view, imgRot, fullProjection, fullProjectionCount, params,
+                      transformParams, &deviceTiming, &backwardTiming, bed,
+                      bed)) {
+                return false;
+              }
             }
             if (timing) {
               timing->forwardSeconds += deviceTiming.forwardSeconds;
@@ -1287,7 +1303,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
         if (timing)
           addTiming(timing->ratioSeconds, stageStart);
 
-        if (useDeviceBackward) {
+        if (useDeviceBackward && bedAtt == nullptr) {
           CompactDeviceBackwardTiming deviceTiming;
           const CompactDeviceTransformParams transformParams =
               makeCompactDeviceTransformParams(meta, branch.symId,

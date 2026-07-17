@@ -125,6 +125,23 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
+/// Device-ratio + device-backward accumulator path with on-the-fly CTAC
+/// attenuation. attFactors is the full-angle table (fullNumAngles * nx*ny*nz
+/// uint16) cached by host pointer per cacheSlot.
+bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView& matrix,
+    const float* x,
+    const uint16_t* attFactors,
+    size_t attCount,
+    const cuda::CompactAttenBakeParams& attenParams,
+    const double* fullProjection,
+    size_t fullProjectionCount,
+    const CompactDeviceRatioParams& ratioParams,
+    const CompactDeviceTransformParams& transformParams,
+    CompactDeviceRatioTiming* ratioTiming = nullptr,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
 bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
                                       const float* x,
                                       const double* fullProjection,
@@ -176,6 +193,14 @@ inline bool compactDeviceBackwardDownloadCUDA(double*, size_t, int = 0) {
 }
 inline bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     const io::CSRView&, const float*, const double*, size_t,
+    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
+    CompactDeviceRatioTiming* = nullptr,
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
+    return false;
+}
+inline bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView&, const float*, const uint16_t*, size_t,
+    const cuda::CompactAttenBakeParams&, const double*, size_t,
     const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
     CompactDeviceRatioTiming* = nullptr,
     CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {

@@ -797,6 +797,120 @@ public:
     }
   }
 
+  void executeCompactDeviceRatioAttenSpmvTAccumulateFloat(
+      const io::CSRView &matrix, const float *x, const uint16_t *attFactors,
+      size_t attCount, const cuda::CompactAttenBakeParams &attenParams,
+      const double *fullProjection, size_t fullProjectionCount,
+      const cuda::CompactDeviceRatioParams &ratioParams,
+      const cuda::CompactDeviceTransformParams &transformParams,
+      cuda::CompactDeviceRatioTiming *ratioTimingOut,
+      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
+      int accumulatorIndex, int cacheSlot) {
+    ensureCudaRuntimeAvailable();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error(
+          "compact device-ratio attenuation cache slot out of range.");
+    }
+    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
+    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
+    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
+    const size_t accumSize = compactBackwardAccumSize_[slot];
+    if (accumSize == 0 || accum.get() == nullptr) {
+      throw std::runtime_error(
+          "compact device accumulator was not initialized.");
+    }
+    if (ratioParams.symmetryMode != 45 && ratioParams.symmetryMode != 90) {
+      throw std::runtime_error(
+          "compact device-ratio attenuation helper requires symmetryMode 45 or 90.");
+    }
+    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
+    const int64_t rows = cached.rows;
+    const int64_t cols = cached.cols;
+    if (static_cast<size_t>(cols) != accumSize) {
+      throw std::runtime_error(
+          "compact device accumulator size does not match matrix columns.");
+    }
+
+    // Upload/cache the per-bed attenuation table by host pointer.
+    auto &dAtten = dAttenTable_[projectionSlot];
+    if (attenTableHostPtr_[projectionSlot] != attFactors ||
+        attenTableCount_[projectionSlot] != attCount) {
+      dAtten.copyFromHost(attFactors, attCount);
+      attenTableHostPtr_[projectionSlot] = attFactors;
+      attenTableCount_[projectionSlot] = attCount;
+      bakedValid_[projectionSlot] = false;
+    }
+
+    const auto inputStart = std::chrono::steady_clock::now();
+    dInput_.copyFromHost(x, static_cast<size_t>(cols));
+    noteCudaCompactInputH2D(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      inputStart)
+            .count());
+    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
+                                        cacheSlot);
+    ensureProjDomainKernelsLoaded();
+
+    dOutput_.allocate(static_cast<size_t>(rows));
+    dChunkInput_.allocate(static_cast<size_t>(rows));
+    dFullOutput_.allocate(static_cast<size_t>(cols));
+    if (cols > 0) {
+      CUDA_CHECK(cudaMemset(dFullOutput_.get(), 0,
+                            static_cast<size_t>(cols) * sizeof(float)));
+    }
+
+    TimedCudaStagePair forwardTiming;
+    forwardTiming.recordStart(nullptr);
+    launchCompactAttenFusedForwardKernel(
+        cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+        dAtten.get(), dInput_.get(), dOutput_.get(),
+        static_cast<int>(cached.rows), attenParams);
+    forwardTiming.recordStop(nullptr);
+
+    TimedCudaStagePair ratioTiming;
+    ratioTiming.recordStart(nullptr);
+    launchCompactRatioKernel(dOutput_.get(),
+                             dCompactProjectionInput_[projectionSlot].get(),
+                             fullProjectionCount, ratioParams,
+                             dChunkInput_.get(), static_cast<size_t>(rows),
+                             1e-10f);
+    ratioTiming.recordStop(nullptr);
+
+    TimedCudaStagePair backwardTiming;
+    backwardTiming.recordStart(nullptr);
+    launchCompactAttenFusedBackwardKernel(
+        cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+        dAtten.get(), dChunkInput_.get(), dFullOutput_.get(),
+        static_cast<int>(cached.rows), attenParams);
+    backwardTiming.recordStop(nullptr);
+
+    TimedCudaStagePair transformTiming;
+    transformTiming.recordStart(nullptr);
+    launchCompactTransformBackwardAddKernel(
+        dFullOutput_.get(), accum.get(), accumSize, transformParams);
+    transformTiming.recordStop(nullptr);
+
+    transformTiming.synchronizeStop();
+    const double forwardSeconds = forwardTiming.elapsedSeconds();
+    const double ratioSeconds = ratioTiming.elapsedSeconds();
+    const double backwardSeconds = backwardTiming.elapsedSeconds();
+    const double transformSeconds = transformTiming.elapsedSeconds();
+    noteCudaCusparseForward(forwardSeconds, 1);
+    noteCudaRatio(ratioSeconds, 1);
+    noteCudaCusparseBackward(backwardSeconds, 1);
+    if (ratioTimingOut != nullptr) {
+      ratioTimingOut->forwardSeconds += forwardSeconds;
+      ratioTimingOut->ratioSeconds += ratioSeconds;
+      ratioTimingOut->backwardSeconds += backwardSeconds;
+    }
+    if (backwardTimingOut != nullptr) {
+      backwardTimingOut->backwardSeconds += backwardSeconds;
+      backwardTimingOut->transformBackwardSeconds += transformSeconds;
+    }
+  }
+
   void downloadCompactDeviceBackward(double *y, size_t voxelCount,
                                      int accumulatorIndex) {
     ensureCudaRuntimeAvailable();
