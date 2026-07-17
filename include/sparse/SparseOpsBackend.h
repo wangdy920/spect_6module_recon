@@ -125,6 +125,20 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
+/// Same as compactDeviceRatioSpmvTAccumulateFloatCUDA but launches on a
+/// per-bed CUDA stream and skips the final synchronization, allowing the
+/// caller to overlap multiple beds. The caller must later synchronize the
+/// stream (e.g. via compactDeviceRatioSynchronizeBedCUDA).
+bool compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
+    const io::CSRView& matrix,
+    const float* x,
+    const double* fullProjection,
+    size_t fullProjectionCount,
+    const CompactDeviceRatioParams& ratioParams,
+    const CompactDeviceTransformParams& transformParams,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
+bool compactDeviceRatioSynchronizeBedCUDA(int cacheSlot);
 /// Device-ratio + device-backward accumulator path with on-the-fly CTAC
 /// attenuation. attFactors is the full-angle table (fullNumAngles * nx*ny*nz
 /// uint16) cached by host pointer per cacheSlot.
@@ -150,6 +164,37 @@ bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
                                       float* y,
                                       CompactDeviceRatioTiming* timing = nullptr,
                                       int cacheSlot = 0);
+/// Branch-batch compact device-ratio + device-backward accumulator path.
+/// xBatch is cols x batchSize column-major (one rotated-image branch per
+/// column). symIds/zMirrors describe the branch symmetry for each column.
+bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView& matrix,
+    const float* xBatch,
+    const double* fullProjection,
+    size_t fullProjectionCount,
+    const CompactDeviceRatioParams& commonRatioParams,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int batchSize,
+    CompactDeviceRatioTiming* ratioTiming = nullptr,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
+/// Branch-batch compact sensitivity accumulator path.  Computes A^T * 1 for all
+/// symmetry branches in one SpMM call and scatters the results into the device
+/// backward accumulator.  symIds/zMirrors describe the branch symmetry for each
+/// column.  Only used when attenuation is not enabled; otherwise falls back to
+/// the per-branch attenuated path.
+bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView& matrix,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int batchSize,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
 }
 #endif
 
@@ -198,6 +243,13 @@ inline bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
     return false;
 }
+inline bool compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
+    const io::CSRView&, const float*, const double*, size_t,
+    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
+    int = 0, int = 0) {
+    return false;
+}
+inline bool compactDeviceRatioSynchronizeBedCUDA(int) { return false; }
 inline bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
     const io::CSRView&, const float*, const uint16_t*, size_t,
     const cuda::CompactAttenBakeParams&, const double*, size_t,
@@ -210,6 +262,20 @@ inline bool compactDeviceRatioSpmvTFloatCUDA(
     const io::CSRView&, const float*, const double*, size_t,
     const CompactDeviceRatioParams&, float*,
     CompactDeviceRatioTiming* = nullptr, int = 0) {
+    return false;
+}
+inline bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView&, const float*, const double*, size_t,
+    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
+    const int*, const int*, int,
+    CompactDeviceRatioTiming* = nullptr,
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
+    return false;
+}
+inline bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView&, const CompactDeviceTransformParams&,
+    const int*, const int*, int,
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
     return false;
 }
 }

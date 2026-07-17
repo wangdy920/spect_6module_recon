@@ -107,6 +107,84 @@ extern "C" __global__ void compute_compact_ratio_chunk(
   ratio[index] = fullProjection[fullIndex] / denom;
 }
 
+extern "C" __global__ void compute_compact_ratio_chunk_batch(
+    const float *yhatBatch, const float *fullProjection,
+    unsigned long long fullProjectionCount, int symmetryMode,
+    int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
+    int detNx, int detNz, int compactDetZ, int fullNumAngles,
+    int fullRaysPerAngle, const int *symIds, const int *zMirrors,
+    int batchSize, float *ratioBatch, unsigned long long rows, float eps) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      rows * static_cast<unsigned long long>(batchSize);
+  if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / rows);
+  const unsigned long long rowInBranch = index % rows;
+  const int symId = symIds[branch];
+  const int zMirror = zMirrors[branch];
+
+  const int compactRow = compactRowBase + static_cast<int>(rowInBranch);
+  const int compactAngle = compactRow / compactRaysPerAngle;
+  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  const int ix = rr % detNx;
+  const int izCompact = rr / detNx;
+  bool valid = true;
+  int fullAngle = 0;
+  if (symmetryMode == 45) {
+    const int q = fullNumAngles / 8;
+    if ((symId & 1) == 0) {
+      if (compactAngle >= q) {
+        valid = false;
+      } else {
+        fullAngle = symId * q + compactAngle;
+      }
+    } else {
+      if (compactAngle <= 0) {
+        valid = false;
+      } else {
+        fullAngle = symId * q + (q - compactAngle);
+      }
+    }
+  } else {
+    if (compactAngle < 0 || compactAngle >= compactNumAngles) {
+      valid = false;
+    } else {
+      fullAngle = compactAngle + symId * compactNumAngles;
+    }
+  }
+  int izFull = izCompact;
+  if (zMirror != 0) {
+    izFull = detNz - 1 - izCompact;
+    if (izFull < compactDetZ) {
+      valid = false;
+    }
+  }
+  if (!valid || fullAngle < 0 || fullAngle >= fullNumAngles ||
+      izFull < 0 || izFull >= detNz) {
+    ratioBatch[index] = 0.0f;
+    return;
+  }
+
+  const unsigned long long fullIndex =
+      static_cast<unsigned long long>(fullAngle) *
+          static_cast<unsigned long long>(fullRaysPerAngle) +
+      static_cast<unsigned long long>(izFull) *
+          static_cast<unsigned long long>(detNx) +
+      static_cast<unsigned long long>(ix);
+  if (fullIndex >= fullProjectionCount) {
+    ratioBatch[index] = 0.0f;
+    return;
+  }
+  float denom = yhatBatch[index];
+  if (denom < eps) {
+    denom = eps;
+  }
+  ratioBatch[index] = fullProjection[fullIndex] / denom;
+}
+
 )CU") + R"CU(
 extern "C" __global__ void compact_transform_backward_add(
     const float *rotated, double *accum, unsigned long long nvox,
@@ -186,6 +264,94 @@ extern "C" __global__ void compact_transform_backward_add(
       static_cast<unsigned long long>(y) * static_cast<unsigned long long>(nx) +
       static_cast<unsigned long long>(x);
   accum[mapped] += static_cast<double>(rotated[index]);
+}
+
+extern "C" __global__ void compact_transform_backward_add_batch(
+    const float *rotatedBatch, double *accum, unsigned long long nvox,
+    int batchSize, int symmetryMode, int nx, int ny, int nz,
+    const int *symIds, const int *zMirrors) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      nvox * static_cast<unsigned long long>(batchSize);
+  if (index >= total || nx <= 0 || ny <= 0 || nz <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / nvox);
+  const unsigned long long voxel = index % nvox;
+  const int symId = symIds[branch];
+  const int zMirror = zMirrors[branch];
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  const int iz = static_cast<int>(voxel / plane);
+  const unsigned long long rem =
+      voxel - static_cast<unsigned long long>(iz) * plane;
+  const int iy = static_cast<int>(rem / static_cast<unsigned long long>(nx));
+  const int ix = static_cast<int>(
+      rem - static_cast<unsigned long long>(iy) *
+                static_cast<unsigned long long>(nx));
+  int x = ix;
+  int y = iy;
+  if (symmetryMode == 45) {
+    switch (symId) {
+    case 1:
+      x = iy;
+      y = ix;
+      break;
+    case 2:
+      x = nx - 1 - iy;
+      y = ix;
+      break;
+    case 3:
+      x = nx - 1 - ix;
+      y = iy;
+      break;
+    case 4:
+      x = nx - 1 - ix;
+      y = ny - 1 - iy;
+      break;
+    case 5:
+      x = nx - 1 - iy;
+      y = ny - 1 - ix;
+      break;
+    case 6:
+      x = iy;
+      y = ny - 1 - ix;
+      break;
+    case 7:
+      x = ix;
+      y = ny - 1 - iy;
+      break;
+    default:
+      break;
+    }
+  } else {
+    switch (symId) {
+    case 1:
+      x = nx - 1 - iy;
+      y = ix;
+      break;
+    case 2:
+      x = nx - 1 - ix;
+      y = ny - 1 - iy;
+      break;
+    case 3:
+      x = iy;
+      y = ny - 1 - ix;
+      break;
+    default:
+      break;
+    }
+  }
+  const int z = zMirror != 0 ? (nz - 1 - iz) : iz;
+  if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) {
+    return;
+  }
+  const unsigned long long mapped =
+      static_cast<unsigned long long>(z) * plane +
+      static_cast<unsigned long long>(y) * static_cast<unsigned long long>(nx) +
+      static_cast<unsigned long long>(x);
+  atomicAdd(&accum[mapped], static_cast<double>(rotatedBatch[index]));
 }
 
 )CU" + R"CU(

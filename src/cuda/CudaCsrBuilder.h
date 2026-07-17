@@ -105,6 +105,34 @@ private:
   cusparseDnVecDescr_t vec_ = nullptr;
 };
 
+class CuSparseDnMatGuard {
+public:
+  CuSparseDnMatGuard() = default;
+  ~CuSparseDnMatGuard() {
+    if (mat_ != nullptr) {
+      cusparseDestroyDnMat(mat_);
+    }
+  }
+
+  CuSparseDnMatGuard(const CuSparseDnMatGuard &) = delete;
+  CuSparseDnMatGuard &operator=(const CuSparseDnMatGuard &) = delete;
+
+  void create(int64_t rows, int64_t cols, int64_t ld, float *data,
+              cudaDataType type, cusparseOrder_t order) {
+    if (mat_ != nullptr) {
+      cusparseDestroyDnMat(mat_);
+      mat_ = nullptr;
+    }
+    SPECT_CUSPARSE_CHECK(
+        cusparseCreateDnMat(&mat_, rows, cols, ld, data, type, order));
+  }
+
+  cusparseDnMatDescr_t get() const { return mat_; }
+
+private:
+  cusparseDnMatDescr_t mat_ = nullptr;
+};
+
 struct HostCSRData {
   int64_t rows = 0;
   int64_t cols = 0;

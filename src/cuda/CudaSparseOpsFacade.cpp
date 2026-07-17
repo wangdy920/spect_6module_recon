@@ -603,6 +603,29 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
   return true;
 }
 
+bool compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
+    const io::CSRView &matrix, const float *x, const double *fullProjection,
+    size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &ratioParams,
+    const cuda::CompactDeviceTransformParams &transformParams,
+    int accumulatorIndex, int cacheSlot) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactDeviceRatioSpmvTAccumulateFloat(
+      matrix, x, fullProjection, fullProjectionCount, ratioParams,
+      transformParams, nullptr, nullptr, accumulatorIndex, cacheSlot, false);
+  return true;
+}
+
+bool compactDeviceRatioSynchronizeBedCUDA(int cacheSlot) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().synchronizeCompactBedStream(cacheSlot);
+  return true;
+}
+
 bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
     const io::CSRView &matrix, const float *x, const uint16_t *attFactors,
     size_t attCount, const cuda::CompactAttenBakeParams &attenParams,
@@ -632,6 +655,40 @@ bool compactDeviceRatioSpmvTFloatCUDA(
   cudaState().executeCompactDeviceRatioSpmvTFloat(
       matrix, x, fullProjection, fullProjectionCount, params, y, timing,
       cacheSlot);
+  return true;
+}
+
+bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix, const float *xBatch,
+    const double *fullProjection, size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &commonRatioParams,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int batchSize,
+    cuda::CompactDeviceRatioTiming *ratioTiming,
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
+    int cacheSlot) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactBranchBatchDeviceRatioSpmvTAccumulateFloat(
+      matrix, xBatch, fullProjection, fullProjectionCount, commonRatioParams,
+      commonTransformParams, symIds, zMirrors, batchSize, ratioTiming,
+      backwardTiming, accumulatorIndex, cacheSlot);
+  return true;
+}
+
+bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int batchSize,
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
+    int cacheSlot) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactSensitivityBranchBatchSpmvTAccumulateFloat(
+      matrix, commonTransformParams, symIds, zMirrors, batchSize,
+      backwardTiming, accumulatorIndex, cacheSlot);
   return true;
 }
 
