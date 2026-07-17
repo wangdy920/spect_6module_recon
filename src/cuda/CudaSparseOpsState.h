@@ -5,6 +5,7 @@
 
 #include "CudaChunkCache.h"
 #include "CudaProjKernelLauncher.h"
+#include "core/ReconLimits.h"
 #include "cuda/CudaLaunchConfig.h"
 
 bool isContiguousAscending(const std::vector<int> &rows) {
@@ -377,10 +378,15 @@ public:
                                     size_t attCount,
                                     const cuda::CompactAttenBakeParams &params,
                                     const float *x, float *y,
-                                    cusparseOperation_t operation) {
+                                    cusparseOperation_t operation,
+                                    int cacheSlot) {
     ensureCudaRuntimeAvailable();
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error("compact attenuation cache slot out of range.");
+    }
+    const size_t slot = static_cast<size_t>(cacheSlot);
     if (params.symmetryMode != 45 && params.symmetryMode != 90) {
       throw std::runtime_error(
           "compact fused CTAC SpMV requires symmetryMode 45 or 90.");
@@ -391,39 +397,44 @@ public:
     }
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
 
-    // Upload the full-angle attenuation table once; cache by host pointer.
-    if (attenTableHostPtr_ != attFactors || attenTableCount_ != attCount) {
-      dAttenTable_.copyFromHost(attFactors, attCount);
-      attenTableHostPtr_ = attFactors;
-      attenTableCount_ = attCount;
-      bakedValid_ = false;
+    // Upload the full-angle attenuation table once per bed slot; cache by host
+    // pointer so repeated branches/chunks for the same bed reuse it.
+    auto &dAtten = dAttenTable_[slot];
+    if (attenTableHostPtr_[slot] != attFactors ||
+        attenTableCount_[slot] != attCount) {
+      dAtten.copyFromHost(attFactors, attCount);
+      attenTableHostPtr_[slot] = attFactors;
+      attenTableCount_[slot] = attCount;
+      bakedValid_[slot] = false;
     }
     if (compactCtacBakedReferenceEnabled()) {
       const bool bakeHit =
-          bakedValid_ && bakedMatrixKey_ == cached.key &&
-          bakedRowPtrDev_ == static_cast<const void *>(cached.dRowPtr.get()) &&
-          bakedColIdxDev_ == static_cast<const void *>(cached.dColIdx.get()) &&
-          bakedAttPtr_ == static_cast<const void *>(attFactors) &&
-          bakedParams_.symmetryMode == params.symmetryMode &&
-          bakedParams_.compactRowBase == params.compactRowBase &&
-          bakedParams_.symId == params.symId &&
-          bakedParams_.zMirror == params.zMirror;
+          bakedValid_[slot] && bakedMatrixKey_[slot] == cached.key &&
+          bakedRowPtrDev_[slot] == static_cast<const void *>(cached.dRowPtr.get()) &&
+          bakedColIdxDev_[slot] == static_cast<const void *>(cached.dColIdx.get()) &&
+          bakedAttPtr_[slot] == static_cast<const void *>(attFactors) &&
+          bakedParams_[slot].symmetryMode == params.symmetryMode &&
+          bakedParams_[slot].compactRowBase == params.compactRowBase &&
+          bakedParams_[slot].symId == params.symId &&
+          bakedParams_[slot].zMirror == params.zMirror;
       if (!bakeHit) {
-        dBakedValues_.allocate(static_cast<size_t>(cached.nnz));
+        auto &dBaked = dBakedValues_[slot];
+        dBaked.allocate(static_cast<size_t>(cached.nnz));
         launchCompactBakeAttenKernel(
             cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-            dAttenTable_.get(), dBakedValues_.get(),
+            dAtten.get(), dBaked.get(),
             static_cast<int>(cached.rows), params, computeStream_.get());
-        bakedMat_.create(cached.rows, cached.cols, cached.nnz,
-                         cached.dRowPtr.get(), cached.dColIdx.get(),
-                         dBakedValues_.get());
-        bakedBufferSizeValid_ = {};
-        bakedMatrixKey_ = cached.key;
-        bakedRowPtrDev_ = cached.dRowPtr.get();
-        bakedColIdxDev_ = cached.dColIdx.get();
-        bakedAttPtr_ = attFactors;
-        bakedParams_ = params;
-        bakedValid_ = true;
+        auto &bakedMat = bakedMat_[slot];
+        bakedMat.create(cached.rows, cached.cols, cached.nnz,
+                        cached.dRowPtr.get(), cached.dColIdx.get(),
+                        dBaked.get());
+        bakedBufferSizeValid_[slot] = {};
+        bakedMatrixKey_[slot] = cached.key;
+        bakedRowPtrDev_[slot] = cached.dRowPtr.get();
+        bakedColIdxDev_[slot] = cached.dColIdx.get();
+        bakedAttPtr_[slot] = attFactors;
+        bakedParams_[slot] = params;
+        bakedValid_[slot] = true;
         CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
       }
 
@@ -450,9 +461,9 @@ public:
       TimedCudaStagePair deviceTiming;
       deviceTiming.recordStart(nullptr);
       const size_t bufferIndex = spmvBufferIndex(operation);
-      executeSpMVDescriptorLocked(bakedMat_.get(),
-                                  bakedBufferSizes_[bufferIndex],
-                                  bakedBufferSizeValid_[bufferIndex],
+      executeSpMVDescriptorLocked(bakedMat_[slot].get(),
+                                  bakedBufferSizes_[slot][bufferIndex],
+                                  bakedBufferSizeValid_[slot][bufferIndex],
                                   operation, vecX.get(), vecY.get(), 0.0f,
                                   backward);
       deviceTiming.recordStop(nullptr);
@@ -499,12 +510,12 @@ public:
     if (backward) {
       launchCompactAttenFusedBackwardKernel(
           cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-          dAttenTable_.get(), dInput_.get(), dOutput_.get(),
+          dAtten.get(), dInput_.get(), dOutput_.get(),
           static_cast<int>(cached.rows), params);
     } else {
       launchCompactAttenFusedForwardKernel(
           cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-          dAttenTable_.get(), dInput_.get(), dOutput_.get(),
+          dAtten.get(), dInput_.get(), dOutput_.get(),
           static_cast<int>(cached.rows), params);
     }
     deviceTiming.recordStop(nullptr);
@@ -529,10 +540,14 @@ public:
       const io::CSRView &matrix, const float *x, const double *fullProjection,
       size_t fullProjectionCount,
       const cuda::CompactDeviceRatioParams &params, float *y,
-      cuda::CompactDeviceRatioTiming *timing) {
+      cuda::CompactDeviceRatioTiming *timing, int cacheSlot) {
     ensureCudaRuntimeAvailable();
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error("compact device-ratio cache slot out of range.");
+    }
+    const size_t slot = static_cast<size_t>(cacheSlot);
     if (params.symmetryMode != 45 && params.symmetryMode != 90) {
       throw std::runtime_error(
           "compact device-ratio CUDA helper requires symmetryMode 45 or 90.");
@@ -547,7 +562,8 @@ public:
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       inputStart)
             .count());
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount);
+    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
+                                        cacheSlot);
     ensureProjDomainKernelsLoaded();
 
     dOutput_.allocate(static_cast<size_t>(rows));
@@ -566,7 +582,7 @@ public:
 
     TimedCudaStagePair ratioTiming;
     ratioTiming.recordStart(nullptr);
-    launchCompactRatioKernel(dOutput_.get(), dCompactProjectionInput_.get(),
+    launchCompactRatioKernel(dOutput_.get(), dCompactProjectionInput_[slot].get(),
                              fullProjectionCount, params, dChunkInput_.get(),
                              static_cast<size_t>(rows), 1e-10f);
     ratioTiming.recordStop(nullptr);
@@ -685,10 +701,15 @@ public:
       const cuda::CompactDeviceTransformParams &transformParams,
       cuda::CompactDeviceRatioTiming *ratioTimingOut,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex) {
+      int accumulatorIndex, int cacheSlot) {
     ensureCudaRuntimeAvailable();
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error(
+          "compact device-ratio accumulator cache slot out of range.");
+    }
+    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
     const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
     DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
     const size_t accumSize = compactBackwardAccumSize_[slot];
@@ -714,7 +735,8 @@ public:
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       inputStart)
             .count());
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount);
+    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
+                                        cacheSlot);
     ensureProjDomainKernelsLoaded();
 
     dOutput_.allocate(static_cast<size_t>(rows));
@@ -733,7 +755,8 @@ public:
 
     TimedCudaStagePair ratioTiming;
     ratioTiming.recordStart(nullptr);
-    launchCompactRatioKernel(dOutput_.get(), dCompactProjectionInput_.get(),
+    launchCompactRatioKernel(dOutput_.get(),
+                             dCompactProjectionInput_[projectionSlot].get(),
                              fullProjectionCount, ratioParams,
                              dChunkInput_.get(), static_cast<size_t>(rows),
                              1e-10f);
@@ -994,21 +1017,25 @@ private:
     dev.copyFromHost(hostFloatScratch_.data(), count);
   }
 
-  void ensureCompactFullProjectionUploaded(const double *src, size_t count) {
+  void ensureCompactFullProjectionUploaded(const double *src, size_t count,
+                                           int cacheSlot) {
     if (src == nullptr || count == 0) {
       throw std::runtime_error(
           "compact device-ratio CUDA helper received an empty projection.");
     }
-    if (compactProjectionHostKey_ == src &&
-        compactProjectionCount_ == count &&
-        dCompactProjectionInput_.get() != nullptr &&
-        dCompactProjectionInput_.size() >= count) {
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error("compact projection cache slot out of range.");
+    }
+    auto &dProjection = dCompactProjectionInput_[static_cast<size_t>(cacheSlot)];
+    if (compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] == src &&
+        compactProjectionCount_[static_cast<size_t>(cacheSlot)] == count &&
+        dProjection.get() != nullptr && dProjection.size() >= count) {
       return;
     }
     const auto uploadStart = std::chrono::steady_clock::now();
-    uploadDouble(dCompactProjectionInput_, src, count);
-    compactProjectionHostKey_ = src;
-    compactProjectionCount_ = count;
+    uploadDouble(dProjection, src, count);
+    compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = src;
+    compactProjectionCount_[static_cast<size_t>(cacheSlot)] = count;
     noteCudaCompactProjectionH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       uploadStart)
@@ -2688,7 +2715,7 @@ private:
   DeviceArray<float> dInput_;
   DeviceArray<float> dOutput_;
   DeviceArray<float> dProjectionInput_;
-  DeviceArray<float> dCompactProjectionInput_;
+  std::array<DeviceArray<float>, spect::core::kMaxBeds> dCompactProjectionInput_;
   DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
   PinnedHostArray<float> pinnedOutputStage_;
@@ -2702,26 +2729,26 @@ private:
   std::vector<float> projKernelXHost_;
   std::vector<float> projKernelYHost_;
   std::vector<float> hostFloatScratch_;
-  const double *compactProjectionHostKey_ = nullptr;
-  size_t compactProjectionCount_ = 0;
+  std::array<const double *, spect::core::kMaxBeds> compactProjectionHostKey_{};
+  std::array<size_t, spect::core::kMaxBeds> compactProjectionCount_{};
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
   DeviceBuffer dBuffer_;
   // Compact CTAC: resident attenuation table plus explicit debug/reference
   // baked-values scratch. Default CTAC uses fused kernels above.
-  DeviceArray<uint16_t> dAttenTable_;
-  const void *attenTableHostPtr_ = nullptr;
-  size_t attenTableCount_ = 0;
-  DeviceArray<float> dBakedValues_;
-  CuSparseMatGuard bakedMat_;
-  MatrixCacheKey bakedMatrixKey_{};
-  cuda::CompactAttenBakeParams bakedParams_{};
-  const void *bakedAttPtr_ = nullptr;
-  const void *bakedRowPtrDev_ = nullptr;
-  const void *bakedColIdxDev_ = nullptr;
-  bool bakedValid_ = false;
-  std::array<size_t, 2> bakedBufferSizes_{};
-  std::array<bool, 2> bakedBufferSizeValid_{};
+  std::array<DeviceArray<uint16_t>, spect::core::kMaxBeds> dAttenTable_;
+  std::array<const void *, spect::core::kMaxBeds> attenTableHostPtr_{};
+  std::array<size_t, spect::core::kMaxBeds> attenTableCount_{};
+  std::array<DeviceArray<float>, spect::core::kMaxBeds> dBakedValues_;
+  std::array<CuSparseMatGuard, spect::core::kMaxBeds> bakedMat_;
+  std::array<MatrixCacheKey, spect::core::kMaxBeds> bakedMatrixKey_{};
+  std::array<cuda::CompactAttenBakeParams, spect::core::kMaxBeds> bakedParams_{};
+  std::array<const void *, spect::core::kMaxBeds> bakedAttPtr_{};
+  std::array<const void *, spect::core::kMaxBeds> bakedRowPtrDev_{};
+  std::array<const void *, spect::core::kMaxBeds> bakedColIdxDev_{};
+  std::array<bool, spect::core::kMaxBeds> bakedValid_{};
+  std::array<std::array<size_t, 2>, spect::core::kMaxBeds> bakedBufferSizes_{};
+  std::array<std::array<bool, 2>, spect::core::kMaxBeds> bakedBufferSizeValid_{};
   CudaStreamGuard computeStream_;
   std::array<CudaStreamGuard, kTransientRangeSlotCount> transientUploadStreams_;
   std::mutex mutex_;

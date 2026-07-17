@@ -73,6 +73,7 @@ compact chunk 矩阵默认识别优先级：
 | `-matrixLayout <standard\|compact-symmetric>` | 矩阵布局；`compact`/`compact_symmetric` 是别名 |
 | `-compactMeta <path>` | compact metadata sidecar；`-loadCSR + -compactMeta` 为 260525 legacy 入口 |
 | `-compactDenomCache <mhd>` | 复用/保存 compact global denominator cache；PSF/FWHM/床位组合需分文件 |
+| `-ctacFactorCacheDir <dir>` | 复用/保存 CTAC 逐床位、逐角度衰减系数表缓存；默认 `recon_out/ctac_factor_cache` |
 | `-projectionResidual [on\|off]` | 仅 compact：最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
 

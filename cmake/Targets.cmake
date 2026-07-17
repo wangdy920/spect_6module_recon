@@ -226,6 +226,7 @@ add_library(spect::app ALIAS spect_app)
 add_executable(SPECT_recon
   src/main/AutoMuMap.cpp
   src/main/BsremKappaMap.cpp
+  src/main/CTACFactorCache.cpp
   src/main/CTACOps.cpp
   src/main/CompactSymmetricReconLoop.cpp
   src/main/MainProgram.cpp

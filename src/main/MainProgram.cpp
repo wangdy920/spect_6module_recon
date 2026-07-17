@@ -29,6 +29,7 @@
 #include "io/ProjectionLoader.h"
 #include "io/VolumeLoader.h"
 #include "main/AutoMuMap.h"
+#include "main/CTACFactorCache.h"
 #include "main/CTACOps.h"
 #include "main/MatVarPath.h"
 #include "main/ReconDataLoader.h"
@@ -128,9 +129,9 @@ int parseRequestedCudaDevice(const ReconArgs &args, int deviceCount) {
   return static_cast<int>(parsed);
 }
 
-void selectCudaDeviceIfRequested(const ReconArgs &args) {
+int selectCudaDeviceIfRequested(const ReconArgs &args) {
   if (!args.cudaDeviceRequested)
-    return;
+    return 0;
 
 #if defined(SPECT_HAS_CUDA)
   const int deviceCount = spect::cuda::getDeviceCount();
@@ -140,10 +141,61 @@ void selectCudaDeviceIfRequested(const ReconArgs &args) {
   logInfo("CUDA device selected from " + source + ": " +
           std::to_string(deviceId) + " (device count=" +
           std::to_string(deviceCount) + ")");
+  return deviceId;
 #else
   const int deviceCount = 0;
   (void)parseRequestedCudaDevice(args, deviceCount);
+  return 0;
 #endif
+}
+
+void appendCTACCacheFileIdentity(std::ostringstream &oss,
+                                 const std::string &label,
+                                 const std::filesystem::path &path) {
+  oss << label << "=" << path.string() << '\n';
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  if (ec) {
+    oss << label << "_size=UNAVAILABLE\n";
+  } else {
+    oss << label << "_size=" << size << '\n';
+  }
+  ec.clear();
+  const auto writeTime = std::filesystem::last_write_time(path, ec);
+  if (ec) {
+    oss << label << "_mtime=UNAVAILABLE\n";
+  } else {
+    oss << label << "_mtime=" << writeTime.time_since_epoch().count() << '\n';
+  }
+}
+
+std::string buildCTACFactorManifest(const ReconArgs &args, int baseNx,
+                                    int baseNy, int baseNz,
+                                    const filters::Spacing3 &spacing,
+                                    int bedZStart) {
+  std::ostringstream oss;
+  oss << std::setprecision(17);
+  oss << "cache_schema=ctac_atten_factors_v1\n";
+  oss << "ctac_model=" << args.ctacModel << '\n';
+  oss << "nx=" << baseNx << '\n';
+  oss << "ny=" << baseNy << '\n';
+  oss << "nz=" << baseNz << '\n';
+  oss << "dx=" << spacing.dx << '\n';
+  oss << "dy=" << spacing.dy << '\n';
+  oss << "dz=" << spacing.dz << '\n';
+  oss << "num_angles=" << args.numAngles << '\n';
+  oss << "rotation_sign=" << args.ctacRotSign << '\n';
+  oss << "bed_z_start=" << bedZStart << '\n';
+  oss << "ctac_auto_mu_value=" << args.ctacAutoMuValue << '\n';
+  oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
+  if (!args.attMapPath.empty()) {
+    appendCTACCacheFileIdentity(oss, "att_map", args.attMapPath);
+  }
+  if (!args.ctacAutoMuFrom.empty()) {
+    appendCTACCacheFileIdentity(oss, "auto_mu_from", args.ctacAutoMuFrom);
+    oss << "ctac_auto_mu_thresh=" << args.ctacAutoMuThresh << '\n';
+  }
+  return oss.str();
 }
 
 } // namespace
@@ -189,8 +241,9 @@ int runProgram(int argc, char **argv) {
   logInfo("Command line: " + commandLine);
   reportConfigStatus(args);
 
+  int cudaDeviceId = 0;
   try {
-    selectCudaDeviceIfRequested(args);
+    cudaDeviceId = selectCudaDeviceIfRequested(args);
   } catch (const std::exception &ex) {
     std::cerr << "Error: " << ex.what() << "\n";
     return spect::cli::kExitUserError;
@@ -590,6 +643,7 @@ int runProgram(int argc, char **argv) {
         spect::app::computeBedZOffsets(bedCount, baseNz, args.bedOverlaps);
 
     std::vector<std::vector<uint16_t>> dynamicAttenFactors;
+    std::unique_ptr<CTACFactorCache> ctacFactorCache;
     if (args.doCTAC) {
       logInfo("CTAC model: angle-dependent parallel-ray line integral "
               "(rotation sign " + std::to_string(args.ctacRotSign) +
@@ -598,20 +652,69 @@ int runProgram(int argc, char **argv) {
         logInfo("Using dynamic CTAC attenuation factors.");
         const auto attenuationStart = std::chrono::steady_clock::now();
         dynamicAttenFactors.resize(static_cast<size_t>(bedCount));
-        const size_t plane = static_cast<size_t>(baseNx) * static_cast<size_t>(baseNy);
+        const std::filesystem::path cacheDir =
+            args.ctacFactorCacheDir.empty()
+                ? (std::filesystem::path("recon_out") / "ctac_factor_cache")
+                : std::filesystem::path(args.ctacFactorCacheDir);
+        ctacFactorCache = std::make_unique<CTACFactorCache>(cacheDir);
+        const size_t plane =
+            static_cast<size_t>(baseNx) * static_cast<size_t>(baseNy);
+
+        std::vector<std::vector<double>> localMuMaps(
+            static_cast<size_t>(bedCount));
+        std::vector<std::string> bedManifests(
+            static_cast<size_t>(bedCount));
         for (int bed = 0; bed < bedCount; ++bed) {
-          std::vector<double> localMu(baseNvox, 0.0);
+          auto &localMu = localMuMaps[static_cast<size_t>(bed)];
+          localMu.assign(baseNvox, 0.0);
           for (int z = 0; z < baseNz; ++z) {
             const int globalZ = bedZStarts[static_cast<size_t>(bed)] + z;
             const size_t srcOffset = static_cast<size_t>(globalZ) * plane;
             const size_t dstOffset = static_cast<size_t>(z) * plane;
-            std::copy_n(ctacMuMap.data() + srcOffset, plane, localMu.data() + dstOffset);
+            std::copy_n(ctacMuMap.data() + srcOffset, plane,
+                        localMu.data() + dstOffset);
           }
-          auto &factors = dynamicAttenFactors[static_cast<size_t>(bed)];
-          factors = computeAttenFactors(
-              localMu, baseNx, baseNy, baseNz, spacing.dx, spacing.dy,
-              spacing.dz, args.numAngles, args.ctacRotSign, args.numThreads);
+          bedManifests[static_cast<size_t>(bed)] = buildCTACFactorManifest(
+              args, baseNx, baseNy, baseNz, spacing,
+              bedZStarts[static_cast<size_t>(bed)]);
         }
+
+        const size_t expectedCount =
+            static_cast<size_t>(args.numAngles) * baseNvox;
+        std::vector<std::vector<double>> muToGenerate;
+        std::vector<int> bedsToGenerate;
+        for (int bed = 0; bed < bedCount; ++bed) {
+          const auto cached = ctacFactorCache->tryLoad(
+              bedManifests[static_cast<size_t>(bed)]);
+          if (cached.has_value() && cached->size() == expectedCount) {
+            dynamicAttenFactors[static_cast<size_t>(bed)] =
+                std::move(*cached);
+          } else {
+            muToGenerate.push_back(localMuMaps[static_cast<size_t>(bed)]);
+            bedsToGenerate.push_back(bed);
+          }
+        }
+
+        if (!muToGenerate.empty()) {
+          logInfo("Generating CTAC attenuation factors for " +
+                  std::to_string(muToGenerate.size()) + " of " +
+                  std::to_string(bedCount) + " beds.");
+          auto generated = computeAttenFactorsMultiBed(
+              muToGenerate, baseNx, baseNy, baseNz, spacing.dx, spacing.dy,
+              spacing.dz, args.numAngles, args.ctacRotSign, args.numThreads,
+              cudaDeviceId);
+          for (size_t i = 0; i < generated.size(); ++i) {
+            const int bed = bedsToGenerate[i];
+            dynamicAttenFactors[static_cast<size_t>(bed)] =
+                std::move(generated[i]);
+            ctacFactorCache->save(bedManifests[static_cast<size_t>(bed)],
+                                  dynamicAttenFactors[static_cast<size_t>(bed)],
+                                  expectedCount);
+          }
+        } else {
+          logInfo("All CTAC attenuation factors loaded from cache.");
+        }
+
         logDebug(formatProfileEntry(
             "ctac_attenuation_factors",
             std::chrono::duration<double>(std::chrono::steady_clock::now() -

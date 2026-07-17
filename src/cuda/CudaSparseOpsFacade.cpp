@@ -531,26 +531,28 @@ bool spmvTFloatCUDA(const io::CSRView &matrix, const float *x, float *y) {
 bool compactAttenSpmvFloatCUDA(const io::CSRView &matrix,
                                const uint16_t *attFactors, size_t attCount,
                                const cuda::CompactAttenBakeParams &params,
-                               const float *x, float *y) {
+                               const float *x, float *y, int cacheSlot) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactAttenSpMVFloat(matrix, attFactors, attCount,
                                            params, x, y,
-                                           CUSPARSE_OPERATION_NON_TRANSPOSE);
+                                           CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                           cacheSlot);
   return true;
 }
 
 bool compactAttenSpmvTFloatCUDA(const io::CSRView &matrix,
                                 const uint16_t *attFactors, size_t attCount,
                                 const cuda::CompactAttenBakeParams &params,
-                                const float *x, float *y) {
+                                const float *x, float *y, int cacheSlot) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactAttenSpMVFloat(matrix, attFactors, attCount,
                                            params, x, y,
-                                           CUSPARSE_OPERATION_TRANSPOSE);
+                                           CUSPARSE_OPERATION_TRANSPOSE,
+                                           cacheSlot);
   return true;
 }
 
@@ -590,25 +592,27 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     const cuda::CompactDeviceRatioParams &ratioParams,
     const cuda::CompactDeviceTransformParams &transformParams,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
+    int cacheSlot) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactDeviceRatioSpmvTAccumulateFloat(
       matrix, x, fullProjection, fullProjectionCount, ratioParams,
-      transformParams, ratioTiming, backwardTiming, accumulatorIndex);
+      transformParams, ratioTiming, backwardTiming, accumulatorIndex, cacheSlot);
   return true;
 }
 
 bool compactDeviceRatioSpmvTFloatCUDA(
     const io::CSRView &matrix, const float *x, const double *fullProjection,
     size_t fullProjectionCount, const cuda::CompactDeviceRatioParams &params,
-    float *y, cuda::CompactDeviceRatioTiming *timing) {
+    float *y, cuda::CompactDeviceRatioTiming *timing, int cacheSlot) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactDeviceRatioSpmvTFloat(
-      matrix, x, fullProjection, fullProjectionCount, params, y, timing);
+      matrix, x, fullProjection, fullProjectionCount, params, y, timing,
+      cacheSlot);
   return true;
 }
 

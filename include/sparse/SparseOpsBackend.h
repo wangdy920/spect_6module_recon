@@ -96,12 +96,14 @@ bool compactAttenSpmvFloatCUDA(const io::CSRView& matrix,
                                const uint16_t* attFactors,
                                size_t attCount,
                                const CompactAttenBakeParams& params,
-                               const float* x, float* y);
+                               const float* x, float* y,
+                               int cacheSlot = 0);
 bool compactAttenSpmvTFloatCUDA(const io::CSRView& matrix,
                                 const uint16_t* attFactors,
                                 size_t attCount,
                                 const CompactAttenBakeParams& params,
-                                const float* x, float* y);
+                                const float* x, float* y,
+                                int cacheSlot = 0);
 bool compactDeviceBackwardBeginCUDA(size_t voxelCount,
                                     int accumulatorIndex = 0);
 bool compactDeviceBackwardSpmvTAccumulateFloatCUDA(
@@ -121,14 +123,16 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     const CompactDeviceTransformParams& transformParams,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0);
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
 bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
                                       const float* x,
                                       const double* fullProjection,
                                       size_t fullProjectionCount,
                                       const CompactDeviceRatioParams& params,
                                       float* y,
-                                      CompactDeviceRatioTiming* timing = nullptr);
+                                      CompactDeviceRatioTiming* timing = nullptr,
+                                      int cacheSlot = 0);
 }
 #endif
 
@@ -151,12 +155,12 @@ inline bool spmvTFloatCUDA(const io::CSRView&, const float*, float*) {
 }
 inline bool compactAttenSpmvFloatCUDA(const io::CSRView&, const uint16_t*,
                                       size_t, const CompactAttenBakeParams&,
-                                      const float*, float*) {
+                                      const float*, float*, int = 0) {
     return false;
 }
 inline bool compactAttenSpmvTFloatCUDA(const io::CSRView&, const uint16_t*,
                                        size_t, const CompactAttenBakeParams&,
-                                       const float*, float*) {
+                                       const float*, float*, int = 0) {
     return false;
 }
 inline bool compactDeviceBackwardBeginCUDA(size_t, int = 0) {
@@ -174,13 +178,13 @@ inline bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     const io::CSRView&, const float*, const double*, size_t,
     const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
     CompactDeviceRatioTiming* = nullptr,
-    CompactDeviceBackwardTiming* = nullptr, int = 0) {
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
     return false;
 }
 inline bool compactDeviceRatioSpmvTFloatCUDA(
     const io::CSRView&, const float*, const double*, size_t,
     const CompactDeviceRatioParams&, float*,
-    CompactDeviceRatioTiming* = nullptr) {
+    CompactDeviceRatioTiming* = nullptr, int = 0) {
     return false;
 }
 }

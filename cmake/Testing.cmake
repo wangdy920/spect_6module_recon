@@ -13,6 +13,7 @@ if(SPECT_BUILD_TESTS)
   add_executable(spect_tests
     src/main/AutoMuMap.cpp
     src/main/BsremKappaMap.cpp
+    src/main/CTACFactorCache.cpp
     src/main/CTACOps.cpp
     src/main/CompactSymmetricReconLoop.cpp
     src/main/MatVarPath.cpp
@@ -43,9 +44,12 @@ if(SPECT_BUILD_TESTS)
     tests/test_compact_symmetry.cpp
     tests/test_parser.cpp
     tests/test_multibed_cli.cpp
+    tests/test_multibed_compact_numerator.cpp
     tests/test_convert_6module_sysmat.cpp
     tests/test_bed_offsets.cpp
     tests/test_main_auto_mu_map.cpp
+    tests/test_ctac_factor_cache.cpp
+    tests/test_ctac_factor_parallel.cpp
     tests/test_main_ctac_ops.cpp
     tests/test_main_mat_var_path.cpp
     tests/test_main_recon_preparation.cpp
@@ -127,10 +131,10 @@ if(SPECT_BUILD_TESTS)
   if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
     add_executable(spect_cuda_scaffold_tests
       tests/test_cuda_scaffold.cpp
+      tests/test_cuda_scaffold_main.cpp
     )
     target_link_libraries(spect_cuda_scaffold_tests PRIVATE
       GTest::gtest
-      GTest::gtest_main
       spect_sparse
       spect_app
       spect_sparse_cuda

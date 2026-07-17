@@ -268,6 +268,15 @@ TEST(IOTest, CompactSymmetricParserAcceptsDenomCachePath) {
     EXPECT_EQ(args.compactDenomCachePath,
               "cache/psc_260601_global_denom.mhd");
 }
+TEST(IOTest, ParserAcceptsCtacFactorCacheDir) {
+    spect::cli::ReconArgs args;
+    auto argv = compactBaseArgs();
+    argv.push_back("-ctacFactorCacheDir");
+    argv.push_back("cache/ctac_factors");
+
+    EXPECT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.ctacFactorCacheDir, "cache/ctac_factors");
+}
 TEST(IOTest, CompactSymmetricParserAcceptsChunkCSRDirWithoutManualGeometry) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {

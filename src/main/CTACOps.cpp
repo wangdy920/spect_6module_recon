@@ -1,6 +1,7 @@
 #include "main/CTACOps.h"
 
 #include "core/AttenuationConstants.h"
+#include "cuda/CudaConfig.h"
 #include "cuda/VolumeOpsCUDA.h"
 
 #include <algorithm>
@@ -32,6 +33,33 @@ std::vector<uint16_t> computeAttenFactors(
   if (!spect::cuda::computeAttenFactorsLineIntegralCUDA(
           muMap, nx, ny, nz, dx, dy, numAngles, rotationSign, factors))
     throw std::runtime_error("CUDA CTAC factor generation is unavailable");
+  return factors;
+}
+
+std::vector<std::vector<uint16_t>> computeAttenFactorsMultiBed(
+    const std::vector<std::vector<double>> &localMuMaps, int nx, int ny, int nz,
+    double dx, double dy, double dz, int numAngles, int rotationSign,
+    int threads, int cudaDeviceId) {
+  const int bedCount = static_cast<int>(localMuMaps.size());
+  std::vector<std::vector<uint16_t>> factors(
+      static_cast<size_t>(bedCount));
+
+  const int usedThreads =
+      std::max(1, threads > 0 ? threads : 1);
+  const int usedBedThreads = std::min(bedCount, usedThreads);
+
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(usedBedThreads)
+#endif
+  for (int bed = 0; bed < bedCount; ++bed) {
+#if defined(SPECT_HAS_CUDA)
+    spect::cuda::setDevice(cudaDeviceId);
+#endif
+    factors[static_cast<size_t>(bed)] = computeAttenFactors(
+        localMuMaps[static_cast<size_t>(bed)], nx, ny, nz, dx, dy, dz,
+        numAngles, rotationSign, 1);
+  }
+
   return factors;
 }
 

@@ -34,6 +34,18 @@ std::vector<uint16_t> computeAttenFactors(
     const std::vector<double> &muMap, int nx, int ny, int nz, double dx,
     double dy, double dz, int numAngles, int rotationSign, int threads);
 
+/**
+ * @brief Compute per-bed attenuation factors in parallel.
+ *
+ * This is a convenience wrapper around computeAttenFactors() that generates
+ * factors for multiple beds concurrently. Each thread sets the requested CUDA
+ * device before launching the line-integral kernel.
+ */
+std::vector<std::vector<uint16_t>> computeAttenFactorsMultiBed(
+    const std::vector<std::vector<double>> &localMuMaps, int nx, int ny, int nz,
+    double dx, double dy, double dz, int numAngles, int rotationSign,
+    int threads, int cudaDeviceId = 0);
+
 void applyCTACToCSR(spect::io::CSR &csr, const std::vector<double> &muMap,
                      int nx, int ny, int nz, double dx, double dy, double dz,
                      int numAngles, int threads, int rotationSign = 1);

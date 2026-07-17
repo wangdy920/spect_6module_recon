@@ -12,7 +12,7 @@ namespace spect {
 namespace io {
 namespace test {
 
-spect::io::CompactSymmetryMetadata makeToySym45ZMeta() {
+inline spect::io::CompactSymmetryMetadata makeToySym45ZMeta() {
     spect::io::CompactSymmetryMetadata meta;
     meta.Nx = 2;
     meta.Ny = 2;
@@ -39,7 +39,7 @@ struct ToyCompactCSR {
     std::vector<float> values;
 };
 
-ToyCompactCSR makeToyCompactCSR() {
+inline ToyCompactCSR makeToyCompactCSR() {
     ToyCompactCSR csr;
     csr.rowPtr = {0, 2, 3, 5, 6, 8, 10};
     csr.colIdx = {0, 3, 5, 1, 6, 2, 4, 7, 0, 6};
@@ -48,7 +48,7 @@ ToyCompactCSR makeToyCompactCSR() {
     return csr;
 }
 
-std::vector<double> expandCompactToyToFullDense(
+inline std::vector<double> expandCompactToyToFullDense(
     const spect::io::CompactSymmetryMetadata& meta,
     const ToyCompactCSR& compact) {
     std::vector<double> full(static_cast<size_t>(meta.fullRows()) *
@@ -78,7 +78,7 @@ std::vector<double> expandCompactToyToFullDense(
     return full;
 }
 
-std::vector<double> denseDenom(const std::vector<double>& full, int rows,
+inline std::vector<double> denseDenom(const std::vector<double>& full, int rows,
                                int cols) {
     std::vector<double> denom(static_cast<size_t>(cols), 0.0);
     for (int row = 0; row < rows; ++row) {
@@ -91,7 +91,7 @@ std::vector<double> denseDenom(const std::vector<double>& full, int rows,
     return denom;
 }
 
-std::vector<double> compactToyDenom(
+inline std::vector<double> compactToyDenom(
     const spect::io::CompactSymmetryMetadata& meta,
     const ToyCompactCSR& compact) {
     std::vector<double> denom(static_cast<size_t>(meta.totalVoxels), 0.0);
@@ -117,7 +117,7 @@ std::vector<double> compactToyDenom(
     return denom;
 }
 
-std::vector<double> denseNumerator(const std::vector<double>& full,
+inline std::vector<double> denseNumerator(const std::vector<double>& full,
                                    const std::vector<double>& projection,
                                    const std::vector<double>& image, int rows,
                                    int cols) {
@@ -144,7 +144,7 @@ std::vector<double> denseNumerator(const std::vector<double>& full,
     return numer;
 }
 
-std::vector<double> compactToyNumerator(
+inline std::vector<double> compactToyNumerator(
     const spect::io::CompactSymmetryMetadata& meta,
     const ToyCompactCSR& compact, const std::vector<double>& projection,
     const std::vector<double>& image) {
@@ -186,7 +186,7 @@ std::vector<double> compactToyNumerator(
     return numer;
 }
 
-std::vector<double> transformedImage(const std::vector<double>& image, int nx,
+inline std::vector<double> transformedImage(const std::vector<double>& image, int nx,
                                      int ny, int nz, int sym,
                                      bool zMirror) {
     std::vector<double> out(image.size(), 0.0);
@@ -197,7 +197,7 @@ std::vector<double> transformedImage(const std::vector<double>& image, int nx,
     return out;
 }
 
-void expectVectorsNear(const std::vector<double>& a,
+inline void expectVectorsNear(const std::vector<double>& a,
                        const std::vector<double>& b, double tol) {
     ASSERT_EQ(a.size(), b.size());
     for (size_t i = 0; i < a.size(); ++i) {

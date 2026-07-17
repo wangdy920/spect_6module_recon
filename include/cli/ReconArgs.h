@@ -105,6 +105,7 @@ struct ReconArgs {
     std::string regCtPath;                ///< Registered CT/mu-map for TV/RDP weights
     std::string bProjPath;                ///< Background projection
     std::vector<std::string> bProjPaths;  ///< Multi-bed background
+    std::string ctacFactorCacheDir;       ///< Directory for cached CTAC attenuation factor tables
 
     // ========== CSR Cache ==========
     std::string saveCSRPath;  ///< Save CSR to binary

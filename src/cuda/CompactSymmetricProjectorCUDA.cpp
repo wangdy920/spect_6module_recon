@@ -1231,7 +1231,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
                                                  branch.zMirror);
             if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
                     view, imgRot, fullProjection, fullProjectionCount, params,
-                    transformParams, &deviceTiming, &backwardTiming, bed)) {
+                    transformParams, &deviceTiming, &backwardTiming, bed, bed)) {
               return false;
             }
             if (timing) {
@@ -1245,7 +1245,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
           }
           if (!compactDeviceRatioSpmvTFloatCUDA(
                   view, imgRot, fullProjection, fullProjectionCount, params,
-                  bpRot.data(), &deviceTiming)) {
+                  bpRot.data(), &deviceTiming, bed)) {
             return false;
           }
           if (timing) {
@@ -1272,7 +1272,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
                       view, bedAtt, compactAttenTableCount(meta),
                       makeCompactAttenBakeParams(meta, compactRowBase,
                                                  branch.symId, branch.zMirror),
-                      imgRot, y.data())
+                      imgRot, y.data(), bed)
                 : spmvFloatCUDA(view, imgRot, y.data());
         if (!forwardOk) {
           return false;
@@ -1312,7 +1312,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
                       view, bedAtt, compactAttenTableCount(meta),
                       makeCompactAttenBakeParams(meta, compactRowBase,
                                                  branch.symId, branch.zMirror),
-                      ratio.data(), bpRot.data())
+                      ratio.data(), bpRot.data(), bed)
                 : spmvTFloatCUDA(view, ratio.data(), bpRot.data());
         if (!backwardOk) {
           return false;

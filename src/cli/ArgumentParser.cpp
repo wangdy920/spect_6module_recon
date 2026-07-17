@@ -373,6 +373,11 @@ void ArgumentParser::registerHandlers() {
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactDenomCache");
         return true;
     }, {"-compactDenomCache"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.ctacFactorCacheDir =
+            ArgumentParser::getRequiredArg(i, argc, argv, "-ctacFactorCacheDir");
+        return true;
+    }, {"-ctacFactorCacheDir"});
 
     // --- Dimensions & Spacing ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1934,6 +1939,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -compactMeta <path>      metadata.bin for compact-symmetric layout\n";
     std::cout << "                           Legacy: -loadCSR + -compactMeta single-file CSRB (260525, 76B metadata) remains supported; prefer -chunkCSRDir for 260601 production.\n";
     std::cout << "  -compactDenomCache <mhd> Reuse/save compact global denominator cache; use separate files for PSF/no-PSF/FWHM/bed variants\n";
+    std::cout << "  -ctacFactorCacheDir <dir> Directory for cached CTAC attenuation factor tables (default: recon_out/ctac_factor_cache)\n";
     std::cout << "  -saveCSR <path>          Save CSR binary after build\n";
     std::cout << "  -indexMat <file>         System matrix voxel index file\n";
     std::cout << "  -weightMat <file>        System matrix weight file\n";
