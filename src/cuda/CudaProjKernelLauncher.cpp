@@ -5,11 +5,13 @@
 
 #include "cuda/CudaDriverHelpers.h"
 #include "cuda/CudaLaunchConfig.h"
+#include "cuda/CudaNvrtcArch.h"
 #include "cuda/CudaNvrtcLoader.h"
 #include "cuda/SparseOpsCudaKernels.h"
 
 #include <cuda.h>
 
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -29,6 +31,8 @@ struct ProjDomainKernelCache {
   CUfunction compactAttenBackwardFunction = nullptr;
   CUfunction convYFunction = nullptr;
   CUfunction convXFunction = nullptr;
+  CUfunction compactBranchBatchForwardScaledU16Function = nullptr;
+  CUfunction compactBranchBatchBackwardScaledU16Function = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -66,6 +70,10 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactAttenBackwardFunction != nullptr &&
       g_projDomainKernelCache.convYFunction != nullptr &&
       g_projDomainKernelCache.convXFunction != nullptr &&
+      g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function !=
+          nullptr &&
+      g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function !=
+          nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -74,9 +82,7 @@ void ensureProjDomainKernelsLoaded() {
 
   const char *source = cuda::projectionDomainKernelSource();
 
-  std::string arch = "--gpu-architecture=compute_" +
-                     std::to_string(props.major) +
-                     std::to_string(props.minor);
+  const std::string arch = cuda::nvrtcGpuArchitectureOption(props);
   const char *options[] = {arch.c_str()};
   const std::string ptx = cuda::compileNvrtcProgramToPtx(
       source, "projdomain_chunk_ops.cu", 1, options);
@@ -101,6 +107,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
     g_projDomainKernelCache.convYFunction = nullptr;
     g_projDomainKernelCache.convXFunction = nullptr;
+    g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function = nullptr;
+    g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function = nullptr;
   }
 
   cuda::loadNvrtcPtxModule(&g_projDomainKernelCache.module, ptx);
@@ -135,6 +143,14 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.convXFunction, g_projDomainKernelCache.module,
       "conv2d_x_mirror_frames"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function,
+      g_projDomainKernelCache.module,
+      "compact_branch_batch_forward_scaled_u16"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function,
+      g_projDomainKernelCache.module,
+      "compact_branch_batch_backward_scaled_u16"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -501,6 +517,64 @@ void launchProjDomainConvXKernel(const float *input, float *output,
                                    gridSize, 1, 1, blockSize, 1, 1, 0,
                                    reinterpret_cast<CUstream>(stream),
                                    args, nullptr));
+}
+
+void launchCompactBranchBatchForwardScaledU16(
+    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
+    const float *rowScales, const float *x, int cols, int batchSize, float *y,
+    int rows, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0 || batchSize <= 0) {
+    return;
+  }
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(colIdx));
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(values));
+  CUdeviceptr rowScalesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(rowScales));
+  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x));
+  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(y);
+  void *args[] = {&rowPtrPtr, &colIdxPtr, &valuesPtr, &rowScalesPtr, &xPtr,
+                  &cols, &batchSize, &yPtr, &rows};
+  const unsigned int blockSize =
+      static_cast<unsigned int>(std::max(32, std::min(batchSize * 4, 256)));
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function,
+      gridSize, 1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream),
+      args, nullptr));
+}
+
+void launchCompactBranchBatchBackwardScaledU16(
+    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
+    const float *rowScales, const float *y, int rows, int batchSize, float *x,
+    int cols, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0 || batchSize <= 0) {
+    return;
+  }
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(colIdx));
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(values));
+  CUdeviceptr rowScalesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(rowScales));
+  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(y));
+  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(x);
+  void *args[] = {&rowPtrPtr, &colIdxPtr, &valuesPtr, &rowScalesPtr, &yPtr,
+                  &rows, &batchSize, &xPtr, &cols};
+  const unsigned int blockSize =
+      static_cast<unsigned int>(std::max(32, std::min(batchSize * 4, 256)));
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function,
+      gridSize, 1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream),
+      args, nullptr));
 }
 
 } // namespace spect

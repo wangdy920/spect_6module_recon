@@ -266,6 +266,17 @@ MatrixCacheKey makeCacheKey(const io::CSRView &matrix) {
   return key;
 }
 
+MatrixCacheKey makeCacheKey(const io::CSRQuantizedView &matrix) {
+  MatrixCacheKey key;
+  key.rowPtr = matrix.row_ptr;
+  key.colIdx = matrix.col_idx;
+  key.values = matrix.quantized_values;
+  key.rows = matrix.rows;
+  key.cols = matrix.cols;
+  key.nnz = static_cast<int64_t>(matrix.nnz);
+  return key;
+}
+
 SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
                                   const std::vector<int> &subset_rows) {
   SubsetCacheKey key;

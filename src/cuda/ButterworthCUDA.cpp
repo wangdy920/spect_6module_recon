@@ -5,6 +5,7 @@
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
 #include "cuda/CudaLaunchConfig.h"
+#include "cuda/CudaNvrtcArch.h"
 #include "cuda/CudaNvrtcLoader.h"
 
 #if CUDA_ENABLED
@@ -189,8 +190,7 @@ extern "C" __global__ void apply_butterworth_mask_f(
 }
 )CU";
 
-  std::string arch = "--gpu-architecture=compute_" +
-                     std::to_string(props.major) + std::to_string(props.minor);
+  const std::string arch = spect::cuda::nvrtcGpuArchitectureOption(props);
   const char *options[] = {arch.c_str()};
   const std::string ptx = spect::cuda::compileNvrtcProgramToPtx(
       source, "butterworth_mask.cu", 1, options);

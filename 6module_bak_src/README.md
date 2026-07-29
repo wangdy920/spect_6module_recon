@@ -59,4 +59,4 @@ nvcc -O3 -arch=sm_86 spect_sysmat_PSC_6module_24pin_YSO_v4.cu -o spect_sysmat_v4
 
 **已知且接受的限制**：v4 `.csrb` 矩阵**无法直接喂给独立 `spect_recon_mlem.cu`**（后者只解析 v2 row-wise `.bin`）。独立 MLEM 已标 deprecated / reference-only，不再跟进新格式；需要 legacy 数值对齐时，用 v2 生成端重新产出 `.bin`，或直接使用 `test_data/legacy_ref/` 中的既有参考输出。
 
-详见 `doc/SystemMatrix_6module_compact_vs_CSRB_CN.md`。
+详见 `doc/Format_Reader_Matrix_CN.md`（格式 × 读者能力矩阵）与 `doc/Capability_Matrix_CN.md`（能力边界）。

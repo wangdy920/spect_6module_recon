@@ -707,6 +707,7 @@ std::vector<double> runStandardReconstructionImpl(
     clampNonNegativeInPlace(image, opts.threads);
     if (maskPtr)
       spect::core::applyMaskInplace(image, *maskPtr);
+    guardZeroMaxCheckpoint(image, "standard iteration " + std::to_string(it));
 
     if (args.saveInterval > 0 &&
         (it % args.saveInterval == 0 || it == args.numIters)) {

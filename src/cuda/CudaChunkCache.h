@@ -7,6 +7,7 @@
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
 #include "io/CSRTypes.h"
+#include "io/CompactChunkCSR.h"
 #include "sparse/SparseOpsBackend.h"
 
 #include <atomic>
@@ -276,6 +277,7 @@ uint64_t selectPreparedChunkHostCacheBudgetBytes(
 
 MatrixCacheKey makeCacheKey(const CSRView &matrix);
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
+MatrixCacheKey makeCacheKey(const io::CSRQuantizedView &matrix);
 SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
                                   const std::vector<int> &subset_rows);
 AttenCacheKey makeAttenCacheKey(const io::CSRView &matrix,

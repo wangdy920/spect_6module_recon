@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include <nvrtc.h>
 
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -14,6 +15,20 @@ inline std::string compileNvrtcProgramToPtx(const char *source,
                                            const char *programName,
                                            int optionCount,
                                            const char *const *options) {
+  int nvrtcMajor = 0;
+  int nvrtcMinor = 0;
+  SPECT_NVRTC_CHECK(nvrtcVersion(&nvrtcMajor, &nvrtcMinor));
+
+  std::fprintf(stderr, "[INFO] NVRTC compile %s (NVRTC %d.%d",
+               programName ? programName : "(unnamed)", nvrtcMajor,
+               nvrtcMinor);
+  for (int i = 0; i < optionCount; ++i) {
+    if (options && options[i]) {
+      std::fprintf(stderr, ", %s", options[i]);
+    }
+  }
+  std::fprintf(stderr, ")\n");
+
   nvrtcProgram program = nullptr;
   SPECT_NVRTC_CHECK(
       nvrtcCreateProgram(&program, source, programName, 0, nullptr, nullptr));

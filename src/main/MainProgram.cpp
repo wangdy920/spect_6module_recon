@@ -23,6 +23,7 @@
 #include "filters/ButterworthFilter.h"
 #include "filters/Convolution.h"
 #include "io/CSRBuilder.h"
+#include "io/BadDetectorMask.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "io/MHDWriter.h"
@@ -129,22 +130,70 @@ int parseRequestedCudaDevice(const ReconArgs &args, int deviceCount) {
   return static_cast<int>(parsed);
 }
 
-int selectCudaDeviceIfRequested(const ReconArgs &args) {
-  if (!args.cudaDeviceRequested)
-    return 0;
+#if defined(SPECT_HAS_CUDA)
+void reportCudaRuntimeEnvironment(int deviceId) {
+  const auto info = spect::cuda::queryEnvironment(deviceId);
+  spect::cuda::ensureDriverSupportsBundledRuntime(info);
 
+  const std::string smTag = "sm_" + std::to_string(info.computeMajor) +
+                            std::to_string(info.computeMinor);
+  logInfo("CUDA environment: device=" + std::to_string(info.deviceId) + "/" +
+          std::to_string(info.deviceCount) + " name=\"" + info.deviceName +
+          "\" " + smTag + ", driver_cuda=" +
+          spect::cuda::formatCudaApiVersion(info.driverVersion) +
+          ", runtime_cuda=" +
+          spect::cuda::formatCudaApiVersion(info.runtimeVersion) +
+          " (bundled runtime requires driver CUDA >= 13.0 / R580+)");
+
+  if (info.driverVersion < info.runtimeVersion) {
+    logWarn("CUDA driver (" +
+            spect::cuda::formatCudaApiVersion(info.driverVersion) +
+            ") is older than bundled runtime (" +
+            spect::cuda::formatCudaApiVersion(info.runtimeVersion) +
+            "). Prefer upgrading the display driver to the CUDA " +
+            spect::cuda::formatCudaApiVersion(info.runtimeVersion) +
+            " toolkit driver floor or newer for maximum stability.");
+  }
+
+  // Consumer GeForce targets for this release package.
+  const bool knownConsumerArch =
+      (info.computeMajor == 7 && info.computeMinor == 5) || // RTX 20
+      (info.computeMajor == 8 && info.computeMinor == 6) || // RTX 30
+      (info.computeMajor == 8 && info.computeMinor == 9) || // RTX 40
+      (info.computeMajor == 12 && info.computeMinor == 0);  // RTX 50
+  if (!knownConsumerArch) {
+    logWarn("GPU compute capability " + smTag +
+            " is outside the primary consumer RTX set "
+            "(sm_75/86/89/120). NVRTC will still JIT for this device if the "
+            "bundled toolkit supports it.");
+  }
+}
+#endif
+
+int selectCudaDeviceIfRequested(const ReconArgs &args) {
 #if defined(SPECT_HAS_CUDA)
   const int deviceCount = spect::cuda::getDeviceCount();
-  const int deviceId = parseRequestedCudaDevice(args, deviceCount);
+  int deviceId = 0;
+  if (args.cudaDeviceRequested) {
+    deviceId = parseRequestedCudaDevice(args, deviceCount);
+    const std::string source =
+        args.cudaDeviceFromCli ? "-cudaDevice" : "SPECT_CUDA_DEVICE";
+    logInfo("CUDA device selected from " + source + ": " +
+            std::to_string(deviceId) + " (device count=" +
+            std::to_string(deviceCount) + ")");
+  } else if (deviceCount > 1) {
+    logInfo("CUDA device defaulted to 0 (device count=" +
+            std::to_string(deviceCount) +
+            "); override with -cudaDevice or SPECT_CUDA_DEVICE.");
+  }
   spect::cuda::setDevice(deviceId);
-  const std::string source = args.cudaDeviceFromCli ? "-cudaDevice" : "SPECT_CUDA_DEVICE";
-  logInfo("CUDA device selected from " + source + ": " +
-          std::to_string(deviceId) + " (device count=" +
-          std::to_string(deviceCount) + ")");
+  reportCudaRuntimeEnvironment(deviceId);
   return deviceId;
 #else
-  const int deviceCount = 0;
-  (void)parseRequestedCudaDevice(args, deviceCount);
+  if (args.cudaDeviceRequested) {
+    const int deviceCount = 0;
+    (void)parseRequestedCudaDevice(args, deviceCount);
+  }
   return 0;
 #endif
 }
@@ -639,6 +688,94 @@ int runProgram(int argc, char **argv) {
       throw std::runtime_error("Background projection size does not match projection size.");
     }
 
+    if (!args.badDetectorFile.empty()) {
+      const auto badDetectors =
+          spect::io::loadBadDetectorList(args.badDetectorFile);
+      if (!badDetectors.empty()) {
+        if (!compactChunkLayout) {
+          throw std::runtime_error(
+              "bad detector masking requires the canonical compact chunk "
+              "layout with identity projections.");
+        }
+        const std::vector<uint8_t> badDetectorMask =
+            spect::io::buildBadDetectorProjectionMask(
+                badDetectors, compactMeta.fullNumAngles, compactMeta.detNz,
+                compactMeta.detNx);
+        const size_t fullRows = static_cast<size_t>(compactMeta.fullRows());
+        const size_t maskedRows = static_cast<size_t>(std::count(
+            badDetectorMask.begin(), badDetectorMask.end(), uint8_t{1}));
+        for (int bed = 0; bed < bedCount; ++bed) {
+          const size_t bedOffset = static_cast<size_t>(bed) * fullRows;
+          for (size_t row = 0; row < fullRows; ++row) {
+            if (!badDetectorMask[row])
+              continue;
+            projections[bedOffset + row] = 0.0;
+            if (!backgroundProj.empty())
+              backgroundProj[bedOffset + row] = 0.0;
+          }
+        }
+        std::ostringstream detectorNames;
+        for (size_t index = 0; index < badDetectors.size(); ++index) {
+          if (index != 0)
+            detectorNames << ',';
+          detectorNames
+              << spect::io::badDetectorGlobalNumber(badDetectors[index]) << '='
+              << spect::io::badDetectorName(badDetectors[index]);
+        }
+        logInfo("Bad detector mask: skipped " +
+                std::to_string(badDetectors.size()) + " detector blocks (" +
+                std::to_string(maskedRows) + " projection rows per bed): " +
+                detectorNames.str());
+      }
+    }
+
+    if (args.detZEdgeCensor > 0) {
+      // CLI validation restricts detZEdgeCensor to the compact-symmetric chunk
+      // layout, so compactMeta is loaded and projections are per-bed blocks of
+      // fullRows. Censored detZ edge rows are unreliable: zero the measured
+      // bins so the MLEM ratio y/(Ax) contributes nothing (numerator
+      // censoring); the matching masked sensitivity is computed in
+      // CompactSymmetricReconLoop.
+      if (!compactLayout) {
+        throw std::runtime_error(
+            "-detZEdgeCensor requires the compact-symmetric chunk layout.");
+      }
+      const int censorK = args.detZEdgeCensor;
+      if (2 * censorK >= compactMeta.detNz) {
+        throw std::runtime_error(
+            "-detZEdgeCensor must satisfy 2*k < detNz (k=" +
+            std::to_string(censorK) +
+            ", detNz=" + std::to_string(compactMeta.detNz) + ").");
+      }
+      const size_t fullRows =
+          static_cast<size_t>(compactMeta.fullRows());
+      const size_t raysPerAngle =
+          static_cast<size_t>(compactMeta.fullRaysPerAngle());
+      for (int bed = 0; bed < bedCount; ++bed) {
+        double *bedProj =
+            projections.data() + static_cast<size_t>(bed) * fullRows;
+        size_t zeroedBins = 0;
+        for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
+          double *angleBase =
+              bedProj + static_cast<size_t>(angle) * raysPerAngle;
+          for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
+            if (detZ >= censorK && detZ < compactMeta.detNz - censorK)
+              continue;
+            double *row =
+                angleBase + static_cast<size_t>(detZ) * compactMeta.detNx;
+            std::fill(row, row + compactMeta.detNx, 0.0);
+            zeroedBins += static_cast<size_t>(compactMeta.detNx);
+          }
+        }
+        logInfo("detZ edge censoring: zeroed " + std::to_string(zeroedBins) +
+                " measured bins in bed " + std::to_string(bed) +
+                " (k=" + std::to_string(censorK) + ", detZ rows 0.." +
+                std::to_string(censorK - 1) + " and " +
+                std::to_string(compactMeta.detNz - censorK) + ".." +
+                std::to_string(compactMeta.detNz - 1) + ").");
+      }
+    }
+
     const std::vector<int> bedZStarts =
         spect::app::computeBedZOffsets(bedCount, baseNz, args.bedOverlaps);
 
@@ -795,7 +932,10 @@ int runProgram(int argc, char **argv) {
     // overlap. Zero-overlap joints or single-bed keep cut/sigmoid only.
     const bool enableSeamPostprocess =
         args.bedSeamPostprocess && hasOutputOverlapStitch &&
-        args.bedCropMethod == "sigmoid";
+        args.bedCropMethod == "sigmoid" &&
+        args.bedObjectProfile != "derenzo";
+    const bool enableDerenzoPostprocess =
+        args.bedDerenzoPostprocess && args.bedObjectProfile == "derenzo";
     if (jointVirtualZFlip) {
       logInfo("Multi-bed virtual Z mapping: local bed Z is reversed before "
               "joint overlap accumulation.");
@@ -807,7 +947,7 @@ int runProgram(int argc, char **argv) {
     }
     if (enableBedZFlip || args.zOutFlip || args.xOutFlip ||
         !args.bedOverlapInRecon || args.fovRadiusMm > 0.0 ||
-        enableSeamPostprocess) {
+        enableSeamPostprocess || enableDerenzoPostprocess) {
       outputTransform.flipZPerBed = enableBedZFlip;
       outputTransform.jointVirtualZFlip = jointVirtualZFlip;
       outputTransform.flipZWholeOutput = args.zOutFlip;
@@ -816,6 +956,8 @@ int runProgram(int argc, char **argv) {
       outputTransform.sigmoidBlendOutput = args.bedCropMethod == "sigmoid";
       outputTransform.objectAwareSeamPostprocess = enableSeamPostprocess;
       outputTransform.objectProfile = args.bedObjectProfile;
+      outputTransform.derenzoAxialPostprocess = enableDerenzoPostprocess;
+      outputTransform.derenzoAxialStrength = args.bedDerenzoAxialStrength;
       outputTransform.phantomCloseStrength = args.bedPhantomCloseStrength;
       outputTransform.epguanCloseStrength = args.bedEpguanCloseStrength;
       outputTransform.epguanWallMaxPreserve =
@@ -833,11 +975,13 @@ int runProgram(int argc, char **argv) {
       outputTransform.epguanSupportMarginMm =
           args.bedEpguanSupportMarginMm;
       outputTransform.zimuCloseStrength = args.bedZimuCloseStrength;
+      outputTransform.mouseSeamStrength = args.bedMouseSeamStrength;
       outputTransform.seamHalfWidth = args.bedSeamHalfWidth;
       outputTransform.baseNz = baseNz;
       outputTransform.bedZStarts = bedZStarts;
       outputTransform.outputBedOverlaps = args.outputBedOverlaps;
       outputTransform.fovRadiusMm = args.fovRadiusMm;
+      outputTransform.analysisFovRadiusMm = args.analysisFovRadiusMm;
       outputTransformPtr = &outputTransform;
       if (enableBedZFlip)
         logInfo("Output transform: per-bed Z flip enabled for dfList bed segments.");
@@ -872,12 +1016,27 @@ int runProgram(int argc, char **argv) {
                 std::to_string(args.bedEpguanSupportMarginMm) +
                 ", zimu_smooth_strength=" +
                 std::to_string(args.bedZimuCloseStrength) +
+                ", mouse_seam_strength=" +
+                std::to_string(args.bedMouseSeamStrength) +
                 ", zimu_sigma_mm=0.3" +
                 ", seam_half_width=" +
                 std::to_string(args.bedSeamHalfWidth) + ".");
+      if (enableDerenzoPostprocess)
+        logInfo("Output transform: Derenzo per-rod axial continuity enabled; "
+                "positive_only=1, axial_strength=" +
+                std::to_string(args.bedDerenzoAxialStrength) +
+                ", z_morph_mm=1.5, rod_support_margin=0.");
       if (args.fovRadiusMm > 0.0)
         logInfo("Output transform: circular XY FOV radius=" +
                 std::to_string(args.fovRadiusMm) + " mm (4-voxel taper).");
+      if (enableSeamPostprocess) {
+        const double analysisRadiusMm = args.analysisFovRadiusMm > 0.0
+                                            ? args.analysisFovRadiusMm
+                                            : args.fovRadiusMm;
+        logInfo("Output transform: seam analysis XY FOV radius=" +
+                std::to_string(analysisRadiusMm) +
+                " mm (0 follows output radius).");
+      }
     }
 
     const auto runReconstruction = [&](const auto &matrix) {

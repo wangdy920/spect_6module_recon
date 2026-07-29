@@ -36,6 +36,8 @@ struct ReconArgs {
     int detectorChannels = 40;    ///< Detector channels (fallback)
     int detNz = 0, detNx = 0;     ///< 2D detector dimensions
     int numAngles = 72;           ///< Number of projection angles
+    std::string badDetectorFile;   ///< Global numbers or hardware IDs; empty list disables masking
+    bool badDetectorFileExplicit = false; ///< CLI path is resolved from cwd, not config dir
     int numIters = 50;            ///< Total iterations
     int saveInterval = 5;         ///< Save every N iterations
     int numSubsets = 1;           ///< Subsets (1 = MLEM)
@@ -157,7 +159,12 @@ struct ReconArgs {
     bool bedOverlapInRecon = false; ///< Use bed overlap in joint reconstruction geometry
     std::string bedCropMethod = "sigmoid"; ///< direct | sigmoid (output-only)
     bool bedSeamPostprocess = true; ///< Request seam postprocess; active only with multi-bed output overlap stitch
-    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | epguan | zimu
+    int detZEdgeCensor = 0;    ///< Censor k detZ edge rows per side in compact numerator+denominator (0 = off)
+    std::string detZRowWeightsFile; ///< Detector efficiency weights applied to compact sensitivity only (empty = off)
+    std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
+    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | epguan | zimu | derenzo
+    bool bedDerenzoPostprocess = true; ///< Enable explicit Derenzo axial continuity processing
+    double bedDerenzoAxialStrength = 0.30; ///< Positive-only high-confidence rod fill, [0,1]
     double bedPhantomCloseStrength = 1.0; ///< Phantom contour-interpolation blend, [0,1]
     double bedEpguanCloseStrength = 1.0; ///< EP tube contour-interpolation blend, [0,1]
     bool bedEpguanWallMaxPreserve = false; ///< Keep brighter original EP wall at seams
@@ -168,8 +175,10 @@ struct ReconArgs {
     double bedEpguanSupportThreshold = 0.06; ///< Smoothed projection threshold fraction, (0,1]
     double bedEpguanSupportMarginMm = 1.5; ///< Fully protected margin and feather width in mm
     double bedZimuCloseStrength = 0.5; ///< Zimu topology-locked smoothing blend, [0,1]
+    double bedMouseSeamStrength = 0.0; ///< Bilateral confidence fusion blend, [0,1]
     int bedSeamHalfWidth = 8; ///< Phantom seam half-width; zimu is capped at 4
     double fovRadiusMm = 0.0;       ///< Final-output circular XY FOV radius; 0 disables
+    double analysisFovRadiusMm = 0.0; ///< Classifier/support FOV; 0 follows fovRadiusMm
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X

@@ -650,6 +650,53 @@ extern "C" __global__ void conv2d_x_mirror_frames(
   output[index] = sum;
 }
 
+)CU" + R"CU(
+// Quantized branch-batch SpMM kernels (CSR with per-row scaled uint16 values).
+// Dense matrices are column-major: X[cols x batchSize], Y[rows x batchSize].
+extern "C" __global__ void compact_branch_batch_forward_scaled_u16(
+    const unsigned int *row_ptr, const unsigned int *col_idx,
+    const unsigned short *values, const float *row_scales, const float *x,
+    int cols, int batch_size, float *y, int rows) {
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  const unsigned int start = row_ptr[row];
+  const unsigned int end = row_ptr[row + 1];
+  const float scale = row_scales[row];
+  for (int b = threadIdx.x; b < batch_size; b += blockDim.x) {
+    float sum = 0.0f;
+    const int x_batch_offset = b * cols;
+    for (unsigned int i = start; i < end; ++i) {
+      const unsigned int col = col_idx[i];
+      sum += static_cast<float>(values[i]) * x[x_batch_offset + col];
+    }
+    y[b * rows + row] = sum * scale;
+  }
+}
+
+extern "C" __global__ void compact_branch_batch_backward_scaled_u16(
+    const unsigned int *row_ptr, const unsigned int *col_idx,
+    const unsigned short *values, const float *row_scales, const float *y,
+    int rows, int batch_size, float *x, int cols) {
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  const unsigned int start = row_ptr[row];
+  const unsigned int end = row_ptr[row + 1];
+  const float scale = row_scales[row];
+  for (int b = threadIdx.x; b < batch_size; b += blockDim.x) {
+    const float y_scaled = y[b * rows + row] * scale;
+    const int x_batch_offset = b * cols;
+    for (unsigned int i = start; i < end; ++i) {
+      const unsigned int col = col_idx[i];
+      atomicAdd(&x[x_batch_offset + col],
+                static_cast<float>(values[i]) * y_scaled);
+    }
+  }
+}
+
 )CU";
   return source.c_str();
 }

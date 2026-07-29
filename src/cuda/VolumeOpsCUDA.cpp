@@ -5,12 +5,16 @@
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaDriverHelpers.h"
 #include "cuda/CudaLaunchConfig.h"
+#include "cuda/CudaNvrtcArch.h"
 #include "cuda/CudaNvrtcLoader.h"
 
 #include <cuda.h>
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -46,8 +50,39 @@ struct VolumeKernelCache {
 };
 
 VolumeKernelCache g_volumeKernelCache;
+std::atomic<bool> g_volumeOpsDisabled{false};
 
+bool envFlag(const char *name, bool defaultValue) {
+  const char *value = std::getenv(name);
+  if (!value || value[0] == '\0')
+    return defaultValue;
+  return std::string(value) != "0" && std::string(value) != "false" &&
+         std::string(value) != "off";
+}
+
+bool cudaVolumeOpsRequested() {
+  return envFlag("SPECT_CUDA_VOLUME_OPS", true);
+}
+
+bool cudaPsfUseFloat(bool requested) {
+  return requested && !envFlag("SPECT_CUDA_PSF_DOUBLE", false);
+}
+
+bool runVolumeKernelGoldenSelfTest(CUfunction convX, CUfunction convXF);
+
+void disableVolumeOps(const char *reason) {
+  g_volumeOpsDisabled.store(true, std::memory_order_relaxed);
+  std::fprintf(stderr,
+               "[WARN] CUDA volume ops disabled after NVRTC self-test/load "
+               "failure: %s\n",
+               reason);
+}
 void ensureVolumeKernelsLoaded() {
+  if (!cudaVolumeOpsRequested() ||
+      g_volumeOpsDisabled.load(std::memory_order_relaxed)) {
+    throw std::runtime_error(
+        "CUDA volume ops disabled by SPECT_CUDA_VOLUME_OPS or prior load failure.");
+  }
   CUDA_CHECK(cudaFree(nullptr));
   SPECT_CUDRV_CHECK(cuInit(0));
 
@@ -847,68 +882,79 @@ extern "C" __global__ void tv_prox_primal_update_3d(
 }
 )CU";
 
-  std::string arch = "--gpu-architecture=compute_" +
-                     std::to_string(props.major) +
-                     std::to_string(props.minor);
-  const char *options[] = {arch.c_str()};
-  const std::string ptx = compileNvrtcProgramToPtx(
-      source, "volume_ops_cuda.cu", 1, options);
+  try {
+    const std::string arch = nvrtcGpuArchitectureOption(props);
+    const char *options[] = {arch.c_str()};
+    const std::string ptx = compileNvrtcProgramToPtx(
+        source, "volume_ops_cuda.cu", 1, options);
 
-  CUcontext context = nullptr;
-  SPECT_CUDRV_CHECK(cuCtxGetCurrent(&context));
-  if (context == nullptr) {
-    throw std::runtime_error(
-        "CUDA context is not initialized for volume helper kernels.");
+    CUcontext context = nullptr;
+    SPECT_CUDRV_CHECK(cuCtxGetCurrent(&context));
+    if (context == nullptr) {
+      throw std::runtime_error(
+          "CUDA context is not initialized for volume helper kernels.");
+    }
+
+    if (g_volumeKernelCache.module) {
+      SPECT_CUDRV_CHECK(cuModuleUnload(g_volumeKernelCache.module));
+      g_volumeKernelCache.module = nullptr;
+    }
+
+    loadNvrtcPtxModule(&g_volumeKernelCache.module, ptx);
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convX,
+                                          g_volumeKernelCache.module,
+                                          "conv_x_mirror_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convY,
+                                          g_volumeKernelCache.module,
+                                          "conv_y_mirror_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZ,
+                                          g_volumeKernelCache.module,
+                                          "conv_z_mirror_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convXF,
+                                          g_volumeKernelCache.module,
+                                          "conv_x_mirror_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convYF,
+                                          g_volumeKernelCache.module,
+                                          "conv_y_mirror_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZF,
+                                          g_volumeKernelCache.module,
+                                          "conv_z_mirror_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convAdjoint,
+                                          g_volumeKernelCache.module,
+                                          "conv_mirror_adjoint_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convAdjointF,
+                                          g_volumeKernelCache.module,
+                                          "conv_mirror_adjoint_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(
+        &g_volumeKernelCache.attenLineIntegral, g_volumeKernelCache.module,
+        "atten_line_integral_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.rdpGrad,
+                                          g_volumeKernelCache.module,
+                                          "rdp_grad_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvGrad,
+                                          g_volumeKernelCache.module,
+                                          "tv_grad_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxDual,
+                                          g_volumeKernelCache.module,
+                                          "tv_prox_dual_update_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxPrimal,
+                                          g_volumeKernelCache.module,
+                                          "tv_prox_primal_update_3d"));
+    if (!runVolumeKernelGoldenSelfTest(g_volumeKernelCache.convX,
+                                       g_volumeKernelCache.convXF)) {
+      throw std::runtime_error("volume convolution golden self-test failed");
+    }
+    g_volumeKernelCache.device = device;
+    g_volumeKernelCache.computeMajor = props.major;
+    g_volumeKernelCache.computeMinor = props.minor;
+  } catch (const std::exception &ex) {
+    if (g_volumeKernelCache.module) {
+      cuModuleUnload(g_volumeKernelCache.module);
+      g_volumeKernelCache.module = nullptr;
+    }
+    disableVolumeOps(ex.what());
+    throw;
   }
-
-  if (g_volumeKernelCache.module) {
-    SPECT_CUDRV_CHECK(cuModuleUnload(g_volumeKernelCache.module));
-    g_volumeKernelCache.module = nullptr;
-  }
-
-  loadNvrtcPtxModule(&g_volumeKernelCache.module, ptx);
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convX,
-                                        g_volumeKernelCache.module,
-                                        "conv_x_mirror_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convY,
-                                        g_volumeKernelCache.module,
-                                        "conv_y_mirror_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZ,
-                                        g_volumeKernelCache.module,
-                                        "conv_z_mirror_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convXF,
-                                        g_volumeKernelCache.module,
-                                        "conv_x_mirror_3d_f"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convYF,
-                                        g_volumeKernelCache.module,
-                                        "conv_y_mirror_3d_f"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZF,
-                                        g_volumeKernelCache.module,
-                                        "conv_z_mirror_3d_f"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convAdjoint,
-                                        g_volumeKernelCache.module,
-                                        "conv_mirror_adjoint_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convAdjointF,
-                                        g_volumeKernelCache.module,
-                                        "conv_mirror_adjoint_3d_f"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_volumeKernelCache.attenLineIntegral, g_volumeKernelCache.module,
-      "atten_line_integral_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.rdpGrad,
-                                        g_volumeKernelCache.module,
-                                        "rdp_grad_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvGrad,
-                                        g_volumeKernelCache.module,
-                                        "tv_grad_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxDual,
-                                        g_volumeKernelCache.module,
-                                        "tv_prox_dual_update_3d"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxPrimal,
-                                        g_volumeKernelCache.module,
-                                        "tv_prox_primal_update_3d"));
-  g_volumeKernelCache.device = device;
-  g_volumeKernelCache.computeMajor = props.major;
-  g_volumeKernelCache.computeMinor = props.minor;
 }
 
 template <typename T> class DeviceBuffer {
@@ -955,6 +1001,75 @@ private:
   T *ptr_ = nullptr;
   size_t capacity_ = 0;
 };
+
+bool runVolumeKernelGoldenSelfTest(CUfunction convX, CUfunction convXF) {
+  constexpr int nx = 3;
+  constexpr int ny = 2;
+  constexpr int nz = 2;
+  constexpr size_t total = static_cast<size_t>(nx) * ny * nz;
+
+  auto run = [&](auto function, auto input, auto kernel, double tolerance) {
+    using T = typename std::decay_t<decltype(input)>::value_type;
+    T *deviceInput = nullptr;
+    T *deviceOutput = nullptr;
+    T *deviceKernel = nullptr;
+    try {
+      CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&deviceInput),
+                            total * sizeof(T)));
+      CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&deviceOutput),
+                            total * sizeof(T)));
+      CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&deviceKernel),
+                            kernel.size() * sizeof(T)));
+      CUDA_CHECK(cudaMemcpy(deviceInput, input.data(), total * sizeof(T),
+                            cudaMemcpyHostToDevice));
+      CUDA_CHECK(cudaMemcpy(deviceKernel, kernel.data(),
+                            kernel.size() * sizeof(T),
+                            cudaMemcpyHostToDevice));
+      const int radius = 1;
+      const unsigned long long totalCount = total;
+      CUdeviceptr inputPtr = reinterpret_cast<CUdeviceptr>(deviceInput);
+      CUdeviceptr outputPtr = reinterpret_cast<CUdeviceptr>(deviceOutput);
+      CUdeviceptr kernelPtr = reinterpret_cast<CUdeviceptr>(deviceKernel);
+      void *args[] = {&inputPtr, &outputPtr, const_cast<int *>(&nx),
+                      const_cast<int *>(&ny), const_cast<int *>(&nz),
+                      &kernelPtr, const_cast<int *>(&radius),
+                      const_cast<unsigned long long *>(&totalCount)};
+      const unsigned int blockSize = kCudaLaunchBlockSize;
+      const unsigned int gridSize =
+          static_cast<unsigned int>((total + blockSize - 1) / blockSize);
+      SPECT_CUDRV_CHECK(cuLaunchKernel(function, gridSize, 1, 1, blockSize, 1,
+                                       1, 0, nullptr, args, nullptr));
+      SPECT_CUDRV_CHECK(cuCtxSynchronize());
+      std::vector<T> output(total);
+      CUDA_CHECK(cudaMemcpy(output.data(), deviceOutput, total * sizeof(T),
+                            cudaMemcpyDeviceToHost));
+      cudaFree(deviceKernel);
+      cudaFree(deviceOutput);
+      cudaFree(deviceInput);
+      for (const T value : output) {
+        if (!std::isfinite(static_cast<double>(value)) ||
+            std::abs(static_cast<double>(value) - 1.0) > tolerance)
+          return false;
+      }
+      return true;
+    } catch (...) {
+      if (deviceKernel)
+        cudaFree(deviceKernel);
+      if (deviceOutput)
+        cudaFree(deviceOutput);
+      if (deviceInput)
+        cudaFree(deviceInput);
+      return false;
+    }
+  };
+
+  const std::vector<double> inputD(total, 1.0);
+  const std::vector<double> kernelD = {0.25, 0.5, 0.25};
+  const std::vector<float> inputF(total, 1.0F);
+  const std::vector<float> kernelF = {0.25F, 0.5F, 0.25F};
+  return run(convX, inputD, kernelD, 1e-12) &&
+         run(convXF, inputF, kernelF, 1e-5);
+}
 
 struct VolumeOpsState {
   DeviceBuffer<double> primary;
@@ -1133,7 +1248,11 @@ void launchTvProxPrimalKernel(double *u, double *u_bar, const double *v,
   launchVolumeKernel(g_volumeKernelCache.tvProxPrimal, args, total);
 }
 
-bool shouldUseCudaVolumeOps() { return isCudaAvailable(); }
+bool shouldUseCudaVolumeOps() {
+  return cudaVolumeOpsRequested() &&
+         !g_volumeOpsDisabled.load(std::memory_order_relaxed) &&
+         isCudaAvailable();
+}
 
 } // namespace
 
@@ -1223,7 +1342,7 @@ bool applySeparableConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
   const int radiusY = static_cast<int>(ky.size()) / 2;
   const int radiusZ = static_cast<int>(kz.size()) / 2;
 
-  if (useFloat) {
+  if (cudaPsfUseFloat(useFloat)) {
     // Float path: CPU double->float conversion, halved GPU memory bandwidth
     std::vector<float> ff(f.begin(), f.end());
     state.primaryF.upload(ff.data(), total);
@@ -1293,7 +1412,7 @@ bool applySeparableConv3DAdjointInplaceCUDA(
   const int radiusY = static_cast<int>(ky.size()) / 2;
   const int radiusZ = static_cast<int>(kz.size()) / 2;
 
-  if (useFloat) {
+  if (cudaPsfUseFloat(useFloat)) {
     std::vector<float> ff(f.begin(), f.end());
     state.primaryF.upload(ff.data(), total);
     state.secondaryF.ensure(total);

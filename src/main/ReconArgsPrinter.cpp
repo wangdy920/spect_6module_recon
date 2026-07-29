@@ -3,6 +3,7 @@
 #include "cli/Version.h"
 #include "main/RunLogger.h"
 
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -96,6 +97,16 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
       << " fwhm_mm=" << args.psf.fwhm_mm
       << " z_blur=" << (args.psf.z_blur ? "on" : "off")
       << " trunc_sigma=" << args.psf.min_sigmas
+      << ", cuda_psf_precision="
+      << ((std::getenv("SPECT_CUDA_PSF_DOUBLE") &&
+           std::string(std::getenv("SPECT_CUDA_PSF_DOUBLE")) == "1")
+              ? "double"
+              : "float")
+      << ", cuda_volume_ops="
+      << ((std::getenv("SPECT_CUDA_VOLUME_OPS") &&
+           std::string(std::getenv("SPECT_CUDA_VOLUME_OPS")) == "0")
+              ? "disabled"
+              : "enabled")
       << ", butter=" << (args.useButter ? "on" : "off")
       << ", reg=" << (args.useReg ? regTypeToString(args.reg.type) : "off");
   if (args.useReg) {

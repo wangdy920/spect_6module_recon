@@ -31,7 +31,8 @@ namespace spect::io {
 namespace {
 
 constexpr uint32_t kChunkCSRMagic = 0x42525343u;
-constexpr uint32_t kChunkCSRVersion = 1u;
+constexpr uint32_t kChunkCSRVersion1 = 1u;
+constexpr uint32_t kChunkCSRVersion2 = 2u;
 constexpr uint64_t kChunkHeaderBytes = 28ull;
 
 enum class ChunkColIdxValidationMode { Off, Sample, Strict };
@@ -313,7 +314,7 @@ CompactChunkCSRInfo readChunkHeader(const std::filesystem::path &path) {
   if (magic != kChunkCSRMagic) {
     throw std::runtime_error("Invalid chunk CSR magic in " + path.string());
   }
-  if (version != kChunkCSRVersion) {
+  if (version != kChunkCSRVersion1 && version != kChunkCSRVersion2) {
     throw std::runtime_error("Unsupported chunk CSR version in " + path.string());
   }
   if (rows <= 0 || angleOffset < 0 || angleCount <= 0) {
@@ -328,7 +329,11 @@ CompactChunkCSRInfo readChunkHeader(const std::filesystem::path &path) {
 
   const uint64_t rows64 = static_cast<uint64_t>(rows);
   const uint64_t expectedSize =
-      28ull + 8ull * (rows64 + 1ull) + 4ull * nnz + 4ull * nnz;
+      (version == kChunkCSRVersion2)
+          ? kChunkHeaderBytes + 8ull * (rows64 + 1ull) + 4ull * nnz +
+                4ull * rows64 + 2ull * nnz
+          : kChunkHeaderBytes + 8ull * (rows64 + 1ull) + 4ull * nnz +
+                4ull * nnz;
   const uint64_t actualSize = fileSize(path);
   if (actualSize != expectedSize) {
     std::ostringstream oss;
@@ -339,6 +344,7 @@ CompactChunkCSRInfo readChunkHeader(const std::filesystem::path &path) {
 
   CompactChunkCSRInfo info;
   info.path = path;
+  info.version = version;
   info.rows = rows;
   info.angleOffset = angleOffset;
   info.angleCount = angleCount;
@@ -449,9 +455,19 @@ CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,
   loadChunkRowPtr32(info, in, data.rowPtr);
 
   data.colIdx.resize(static_cast<size_t>(info.nnz));
-  data.values.resize(static_cast<size_t>(info.nnz));
   readExact(in, data.colIdx.data(), data.colIdx.size(), "chunk col_idx");
-  readExact(in, data.values.data(), data.values.size(), "chunk values");
+
+  if (info.version == kChunkCSRVersion2) {
+    data.rowScales.resize(static_cast<size_t>(info.rows));
+    data.quantizedValues.resize(static_cast<size_t>(info.nnz));
+    readExact(in, data.rowScales.data(), data.rowScales.size(),
+              "chunk row_scales");
+    readExact(in, data.quantizedValues.data(), data.quantizedValues.size(),
+              "chunk quantized values");
+  } else {
+    data.values.resize(static_cast<size_t>(info.nnz));
+    readExact(in, data.values.data(), data.values.size(), "chunk values");
+  }
 
   validateChunkColIdxRange(info, data.colIdx.data(), info.nnz, cols);
 
@@ -471,11 +487,9 @@ CompactChunkCSRData loadChunkDataMapped(const CompactChunkCSRInfo &info,
   const size_t row64Bytes =
       (static_cast<size_t>(info.rows) + 1u) * sizeof(int64_t);
   const size_t colIdxBytes = static_cast<size_t>(info.nnz) * sizeof(uint32_t);
-  const size_t valuesBytes = static_cast<size_t>(info.nnz) * sizeof(float);
   const std::byte *base = mapping->bytes();
   const std::byte *row64Base = base + kChunkHeaderBytes;
   const std::byte *colIdxBase = row64Base + row64Bytes;
-  const std::byte *valuesBase = colIdxBase + colIdxBytes;
 
   CompactChunkCSRData data;
   data.info = info;
@@ -487,8 +501,25 @@ CompactChunkCSRData loadChunkDataMapped(const CompactChunkCSRInfo &info,
   }
   data.mappedPayloadOwner = mapping;
   data.mappedColIdx = reinterpret_cast<const uint32_t *>(colIdxBase);
-  data.mappedValues = reinterpret_cast<const float *>(valuesBase);
-  data.mappedPayloadBytes = static_cast<uint64_t>(colIdxBytes + valuesBytes);
+
+  if (info.version == kChunkCSRVersion2) {
+    const size_t rowScalesBytes = static_cast<size_t>(info.rows) * sizeof(float);
+    const size_t valuesBytes = static_cast<size_t>(info.nnz) * sizeof(uint16_t);
+    const std::byte *rowScalesBase = colIdxBase + colIdxBytes;
+    const std::byte *valuesBase = rowScalesBase + rowScalesBytes;
+    data.mappedRowScales = reinterpret_cast<const float *>(rowScalesBase);
+    data.mappedQuantizedValues =
+        reinterpret_cast<const uint16_t *>(valuesBase);
+    data.mappedPayloadBytes = static_cast<uint64_t>(
+        colIdxBytes + rowScalesBytes + valuesBytes);
+  } else {
+    const size_t valuesBytes = static_cast<size_t>(info.nnz) * sizeof(float);
+    const std::byte *valuesBase = colIdxBase + colIdxBytes;
+    data.mappedValues = reinterpret_cast<const float *>(valuesBase);
+    data.mappedPayloadBytes =
+        static_cast<uint64_t>(colIdxBytes + valuesBytes);
+  }
+
   validateChunkColIdxRange(info, data.mappedColIdx, info.nnz, cols);
   return data;
 }
@@ -520,13 +551,37 @@ CSRView CompactChunkCSRData::view() const {
   return out;
 }
 
+CSRQuantizedView CompactChunkCSRData::quantizedView() const {
+  CSRQuantizedView out;
+  out.rows = info.rows;
+  out.cols = cols;
+  out.row_ptr = rowPtr.data();
+  out.col_idx = colIdxData();
+  out.quantized_values = quantizedValuesData();
+  out.row_scales = rowScalesData();
+  out.nnz = static_cast<uint64_t>(quantizedValuesCount());
+  return out;
+}
+
+bool CompactChunkCSRData::isQuantized() const {
+  return info.version == kChunkCSRVersion2;
+}
+
 uint64_t CompactChunkCSRData::residentBytes() const {
-  return static_cast<uint64_t>(rowPtr.size()) * sizeof(uint32_t) +
-         (mappedPayloadOwner ? mappedPayloadBytes
-                             : static_cast<uint64_t>(colIdx.size()) *
-                                       sizeof(uint32_t) +
-                                   static_cast<uint64_t>(values.size()) *
-                                       sizeof(float));
+  const uint64_t rowPtrBytes =
+      static_cast<uint64_t>(rowPtr.size()) * sizeof(uint32_t);
+  if (mappedPayloadOwner) {
+    return rowPtrBytes + mappedPayloadBytes;
+  }
+  if (isQuantized()) {
+    return rowPtrBytes +
+           static_cast<uint64_t>(colIdx.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(rowScales.size()) * sizeof(float) +
+           static_cast<uint64_t>(quantizedValues.size()) * sizeof(uint16_t);
+  }
+  return rowPtrBytes +
+         static_cast<uint64_t>(colIdx.size()) * sizeof(uint32_t) +
+         static_cast<uint64_t>(values.size()) * sizeof(float);
 }
 
 const uint32_t *CompactChunkCSRData::colIdxData() const {
@@ -537,12 +592,31 @@ const float *CompactChunkCSRData::valuesData() const {
   return mappedValues != nullptr ? mappedValues : values.data();
 }
 
+const uint16_t *CompactChunkCSRData::quantizedValuesData() const {
+  return mappedQuantizedValues != nullptr ? mappedQuantizedValues
+                                          : quantizedValues.data();
+}
+
+const float *CompactChunkCSRData::rowScalesData() const {
+  return mappedRowScales != nullptr ? mappedRowScales : rowScales.data();
+}
+
 size_t CompactChunkCSRData::colIdxCount() const {
   return mappedColIdx != nullptr ? static_cast<size_t>(info.nnz) : colIdx.size();
 }
 
 size_t CompactChunkCSRData::valuesCount() const {
   return mappedValues != nullptr ? static_cast<size_t>(info.nnz) : values.size();
+}
+
+size_t CompactChunkCSRData::quantizedValuesCount() const {
+  return mappedQuantizedValues != nullptr ? static_cast<size_t>(info.nnz)
+                                          : quantizedValues.size();
+}
+
+size_t CompactChunkCSRData::rowScalesCount() const {
+  return mappedRowScales != nullptr ? static_cast<size_t>(info.rows)
+                                    : rowScales.size();
 }
 
 CompactChunkCSRDirectory::CompactChunkCSRDirectory(

@@ -36,6 +36,11 @@ void applySeparableConvRuntime(std::vector<double> &volume, int nx, int ny,
                                const std::vector<double> &kz,
                                const ReconOpts &opts, int threads);
 
+/// Warn on an all-zero iteration checkpoint; optionally fail closed via
+/// SPECT_FAIL_ON_ZERO_CHECKPOINT=1 to avoid writing a zero DICOM.
+void guardZeroMaxCheckpoint(const std::vector<double> &volume,
+                            const std::string &label);
+
 void applyJosephLike(std::vector<double> &buffer, int nx, int ny, int nz,
                      int passes, int threads, bool clampImage);
 

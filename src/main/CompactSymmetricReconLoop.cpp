@@ -6,7 +6,9 @@
 #include "core/Masks.h"
 #include "cuda/CompactSymmetricProjector.h"
 #include "filters/ButterworthFilter.h"
+#include "io/BadDetectorMask.h"
 #include "io/MHDWriter.h"
+#include "io/DetZRowWeights.h"
 #include "io/VolumeLoader.h"
 #include "main/BsremKappaMap.h"
 #include "main/ReconLoopHelpers.h"
@@ -434,6 +436,46 @@ std::string buildCompactDenomCacheManifest(
       oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
     }
   }
+  // detZ edge censoring masks rows out of the sensitivity, so the denom
+  // depends on k; emit only when active so pre-existing caches keep matching
+  // their stored manifests (same convention as the CTAC lines above).
+  if (args.detZEdgeCensor > 0) {
+    oss << "detz_edge_censor=" << args.detZEdgeCensor << '\n';
+  }
+  // Efficiency weights likewise change the sensitivity; record the file
+  // identity and value count only when active (same convention as above).
+  if (!args.detZRowWeightsFile.empty()) {
+    appendFileIdentity(oss, "detz_row_weights", args.detZRowWeightsFile);
+    oss << "detz_row_weights_count="
+        << spect::io::loadDetZRowWeights(args.detZRowWeightsFile,
+                                         compactMeta.detNz, compactMeta.detNx,
+                                         compactMeta.fullNumAngles)
+               .size()
+        << '\n';
+  }
+  if (!args.normFactorFile.empty()) {
+    appendFileIdentity(oss, "normalization_factor", args.normFactorFile);
+    oss << "normalization_factor_count="
+        << spect::io::loadDetZRowWeights(
+               args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
+               compactMeta.fullNumAngles)
+               .size()
+        << '\n';
+    oss << "normalization_factor_semantics="
+           "projection_correction_c_to_efficiency_1_over_c\n";
+  }
+  if (!args.badDetectorFile.empty()) {
+    const auto badDetectors =
+        spect::io::loadBadDetectorList(args.badDetectorFile);
+    if (!badDetectors.empty()) {
+      appendFileIdentity(oss, "bad_detector_list", args.badDetectorFile);
+      oss << "bad_detector_count=" << badDetectors.size() << '\n';
+      for (size_t index = 0; index < badDetectors.size(); ++index)
+        oss << "bad_detector_" << index << '='
+            << spect::io::badDetectorGlobalNumber(badDetectors[index]) << ':'
+            << spect::io::badDetectorName(badDetectors[index]) << '\n';
+    }
+  }
   oss << "bed_count=" << bedZStarts.size() << '\n';
   appendVectorLine(oss, "bed_z_starts", bedZStarts);
   oss << "bed_overlap_in_recon=" << (args.bedOverlapInRecon ? 1 : 0) << '\n';
@@ -681,8 +723,155 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         }
         if (!loadedCompactDenomCache) {
           std::vector<double> localDenom(baseNvox, 0.0);
+          // Weighted sensitivity A^T w (opt-in, compact chunk layout only; CLI
+          // validation enforces this). w starts at 1; detZ edge-row censoring
+          // zeroes the censored detZ edge rows, and an efficiency-weights file
+          // multiplies in per-row, per-detector-bin, or full projection-bin
+          // factors. Hardware detector masking then zeroes complete
+          // angle/block row sets; all zero masks win.
+          // Computed
+          // without new CUDA kernels via the numerator identity
+          // A^T (y*/(A x*)) with x* = 1 and y* = w . (A 1); rows where
+          // A 1 == 0 are zero in y* and contribute nothing via the ratio
+          // guard. Measured bins are never scaled here: censoring zeroes them
+          // in MainProgram, and the efficiency weights are denominator-only.
+          // When the final w is all ones the plain sensitivity path below is
+          // kept, so the default stays bit-identical.
+          const int detZEdgeCensor = compactChunkLayout ? args.detZEdgeCensor : 0;
+          if (!compactChunkLayout &&
+              (!args.detZRowWeightsFile.empty() ||
+               !args.normFactorFile.empty())) {
+            throw std::runtime_error(
+                "normalization weights require the compact-symmetric chunk "
+                "layout.");
+          }
+          std::vector<double> detZRowWeights;
+          if (!args.normFactorFile.empty()) {
+            detZRowWeights = spect::io::loadDetZRowWeights(
+                args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
+                compactMeta.fullNumAngles);
+            if (detZRowWeights.size() !=
+                static_cast<size_t>(compactMeta.fullRows())) {
+              throw std::runtime_error(
+                  "-normFactorFile must contain one correction factor per "
+                  "projection bin.");
+            }
+            for (double &correction : detZRowWeights)
+              correction = 1.0 / correction;
+            logInfo("normalization correction factors: loaded " +
+                    std::to_string(detZRowWeights.size()) + " values from " +
+                    args.normFactorFile +
+                    "; applying reciprocal efficiency 1/c to the "
+                    "sensitivity (denominator) only.");
+          } else if (!args.detZRowWeightsFile.empty()) {
+            detZRowWeights = spect::io::loadDetZRowWeights(
+                args.detZRowWeightsFile, compactMeta.detNz, compactMeta.detNx,
+                compactMeta.fullNumAngles);
+            logInfo("detZ efficiency weights: loaded " +
+                    std::to_string(detZRowWeights.size()) + " values from " +
+                    args.detZRowWeightsFile +
+                    "; applying to the sensitivity (denominator) only.");
+          }
+          std::vector<spect::io::BadDetectorId> badDetectors;
+          std::vector<uint8_t> badDetectorMask;
+          if (!args.badDetectorFile.empty()) {
+            badDetectors =
+                spect::io::loadBadDetectorList(args.badDetectorFile);
+            badDetectorMask = spect::io::buildBadDetectorProjectionMask(
+                badDetectors, compactMeta.fullNumAngles, compactMeta.detNz,
+                compactMeta.detNx);
+          }
+          std::vector<double> detZSensWeights;
+          if (detZEdgeCensor > 0 || !detZRowWeights.empty() ||
+              !badDetectorMask.empty()) {
+            detZSensWeights.assign(
+                static_cast<size_t>(compactMeta.fullRows()), 1.0);
+            const size_t raysPerAngle =
+                static_cast<size_t>(compactMeta.fullRaysPerAngle());
+            const bool perBinWeights =
+                detZRowWeights.size() ==
+                static_cast<size_t>(compactMeta.detNz) *
+                    static_cast<size_t>(compactMeta.detNx);
+            const bool perProjectionWeights =
+                detZRowWeights.size() ==
+                static_cast<size_t>(compactMeta.fullRows());
+            for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
+              double *angleBase = detZSensWeights.data() +
+                                  static_cast<size_t>(angle) * raysPerAngle;
+              for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
+                double *row = angleBase +
+                              static_cast<size_t>(detZ) * compactMeta.detNx;
+                if (detZ < detZEdgeCensor ||
+                    detZ >= compactMeta.detNz - detZEdgeCensor) {
+                  std::fill(row, row + compactMeta.detNx, 0.0);
+                  continue;
+                }
+                if (!detZRowWeights.empty()) {
+                  for (int detX = 0; detX < compactMeta.detNx; ++detX) {
+                    const size_t wIndex =
+                        perProjectionWeights
+                            ? static_cast<size_t>(angle) * raysPerAngle +
+                                  static_cast<size_t>(detZ) *
+                                      compactMeta.detNx +
+                                  static_cast<size_t>(detX)
+                        : perBinWeights
+                            ? static_cast<size_t>(detZ) * compactMeta.detNx +
+                                  static_cast<size_t>(detX)
+                            : static_cast<size_t>(detZ);
+                    row[detX] *= detZRowWeights[wIndex];
+                  }
+                }
+              }
+            }
+            if (!badDetectorMask.empty()) {
+              for (size_t row = 0; row < badDetectorMask.size(); ++row) {
+                if (badDetectorMask[row])
+                  detZSensWeights[row] = 0.0;
+              }
+              logInfo("Bad detector mask: removed " +
+                      std::to_string(badDetectors.size()) +
+                      " detector blocks from the sensitivity denominator.");
+            }
+          }
+          const bool useWeightedSensitivity =
+              !detZSensWeights.empty() &&
+              !std::all_of(detZSensWeights.begin(), detZSensWeights.end(),
+                           [](double w) { return w == 1.0; });
+          std::vector<double> detZSensOnes;
+          std::vector<double> detZSensFwd;
+          if (useWeightedSensitivity) {
+            detZSensOnes.assign(baseNvox, 1.0);
+            detZSensFwd.assign(
+                static_cast<size_t>(compactMeta.fullRows()), 0.0);
+            if (detZEdgeCensor > 0) {
+              logInfo("detZ edge censoring: using masked sensitivity (k=" +
+                      std::to_string(detZEdgeCensor) + ", " +
+                      std::to_string(detZEdgeCensor) +
+                      " detZ rows censored per side) for the denominator.");
+            }
+          }
           auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
             std::fill(localDenom.begin(), localDenom.end(), 0.0);
+            if (useWeightedSensitivity) {
+              if (!spect::cuda::computeCompactChunkForwardProjectionCUDA(
+                      *compactChunks, compactMeta, detZSensOnes.data(),
+                      opts.threads, detZSensFwd.data(), attenuation)) {
+                throw std::runtime_error(
+                    "detZ weighted sensitivity requires CUDA sparse backend.");
+              }
+              for (size_t row = 0; row < detZSensFwd.size(); ++row) {
+                detZSensFwd[row] *= detZSensWeights[row];
+              }
+              if (!spect::cuda::runCompactChunkMlemNumerCUDA(
+                      *compactChunks, compactMeta, detZSensFwd.data(),
+                      nullptr, detZSensOnes.data(), opts.threads,
+                      localDenom.data(), false, &compactCudaTiming,
+                      attenuation)) {
+                throw std::runtime_error(
+                    "detZ weighted sensitivity requires CUDA sparse backend.");
+              }
+              return;
+            }
             const bool ok =
                 compactChunkLayout
                     ? spect::cuda::computeCompactChunkSensitivityCUDA(
@@ -1124,6 +1313,8 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           clampNonNegativeInPlace(image, opts.threads);
           if (maskPtr)
             spect::core::applyMaskInplace(image, *maskPtr);
+          guardZeroMaxCheckpoint(
+              image, "compact iteration " + std::to_string(it));
           lastIterationDone = ProfileClock::now();
           observeCompactMemory();
 

@@ -4,6 +4,8 @@
 
 #include "cli/Version.h"
 #include "core/AttenuationCoefficients.h"
+#include "io/BadDetectorMask.h"
+#include "io/DetZRowWeights.h"
 
 namespace spect {
 namespace cli {
@@ -813,10 +815,41 @@ void ArgumentParser::registerHandlers() {
                                                   a.bedSeamPostprocess);
     }, {"-bedSeamPostprocess"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.detZEdgeCensor = std::stoi(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-detZEdgeCensor"));
+        return true;
+    }, {"-detZEdgeCensor"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.detZRowWeightsFile = ArgumentParser::getRequiredArg(
+            i, argc, argv, "-detZRowWeightsFile");
+        return true;
+    }, {"-detZRowWeightsFile"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.normFactorFile = ArgumentParser::getRequiredArg(
+            i, argc, argv, "-normFactorFile");
+        return true;
+    }, {"-normFactorFile"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.badDetectorFile = ArgumentParser::getRequiredArg(
+            i, argc, argv, "-badDetectorFile");
+        a.badDetectorFileExplicit = true;
+        return true;
+    }, {"-badDetectorFile"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bedObjectProfile = toLower(ArgumentParser::getRequiredArg(
             i, argc, argv, "-bedObjectProfile"));
         return true;
     }, {"-bedObjectProfile"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(
+            i, argc, argv, a.bedDerenzoPostprocess);
+    }, {"-derenzoPostprocess"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedDerenzoAxialStrength = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv,
+                                           "-derenzoAxialStrength"));
+        return true;
+    }, {"-derenzoAxialStrength"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-cropEnd"), ',');
@@ -1005,6 +1038,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         }
     }
     a.numAngles = cfg.getInt("Detector", "angles", a.numAngles);
+    a.badDetectorFile = cfg.getString(
+        "Detector", "bad_detector_file", a.badDetectorFile);
 
     // Recon
     std::string alg = cfg.getString("Reconstruction", "algorithm");
@@ -1209,8 +1244,19 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             "MultiBed", "crop_method", a.bedCropMethod));
         a.bedSeamPostprocess = cfg.getBool(
             "MultiBed", "seam_postprocess", a.bedSeamPostprocess);
+        a.detZEdgeCensor = cfg.getInt(
+            "MultiBed", "detz_edge_censor", a.detZEdgeCensor);
+        a.detZRowWeightsFile = cfg.getString(
+            "MultiBed", "detz_row_weights_file", a.detZRowWeightsFile);
+        a.normFactorFile = cfg.getString(
+            "MultiBed", "normalization_factor_file", a.normFactorFile);
         a.bedObjectProfile = toLower(cfg.getString(
             "MultiBed", "object_profile", a.bedObjectProfile));
+        a.bedDerenzoPostprocess = cfg.getBool(
+            "MultiBed", "derenzo_postprocess", a.bedDerenzoPostprocess);
+        a.bedDerenzoAxialStrength = cfg.getDouble(
+            "MultiBed", "derenzo_axial_strength",
+            a.bedDerenzoAxialStrength);
         a.bedPhantomCloseStrength = cfg.getDouble(
             "MultiBed", "phantom_close_strength", a.bedPhantomCloseStrength);
         a.bedEpguanCloseStrength = cfg.getDouble(
@@ -1238,10 +1284,14 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.bedEpguanSupportMarginMm);
         a.bedZimuCloseStrength = cfg.getDouble(
             "MultiBed", "zimu_close_strength", a.bedZimuCloseStrength);
+        a.bedMouseSeamStrength = cfg.getDouble(
+            "MultiBed", "mouse_seam_strength", a.bedMouseSeamStrength);
         a.bedSeamHalfWidth = cfg.getInt(
             "MultiBed", "seam_half_width", a.bedSeamHalfWidth);
         a.fovRadiusMm = cfg.getDouble("MultiBed", "fov_radius_mm",
                                       a.fovRadiusMm);
+        a.analysisFovRadiusMm = cfg.getDouble(
+            "MultiBed", "analysis_fov_radius_mm", a.analysisFovRadiusMm);
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
@@ -1365,6 +1415,8 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
          argName == "-fout" || argName == "-loadCSR" ||
          argName == "-chunkCSRDir" || argName == "-saveCSR" ||
          argName == "-attMap" || argName == "-regCT" || argName == "-bProj" ||
+         argName == "-detZRowWeightsFile" || argName == "-normFactorFile" ||
+         argName == "-badDetectorFile" ||
          argName == "-config" || argName == "-algoConf");
     
     if (isPathArg) {
@@ -1449,6 +1501,16 @@ void ArgumentParser::normalizeArgs(ReconArgs& args) {
             }
         }
     }
+    if (!args.badDetectorFile.empty() && !args.badDetectorFileExplicit) {
+        const std::filesystem::path raw(args.badDetectorFile);
+        if (!raw.is_absolute()) {
+            const std::filesystem::path configDir =
+                std::filesystem::path(args.configPath).parent_path();
+            if (!configDir.empty())
+                args.badDetectorFile =
+                    (configDir / raw).lexically_normal().string();
+        }
+    }
 }
 
 bool ArgumentParser::parseOutputPath(const std::string& path, ReconArgs& args) {
@@ -1496,6 +1558,11 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         std::cerr << "Error: [MultiBed] fov_radius_mm must be finite and >= 0.\n";
         return false;
     }
+    if (!std::isfinite(args.analysisFovRadiusMm) ||
+        args.analysisFovRadiusMm < 0.0) {
+        std::cerr << "Error: [MultiBed] analysis_fov_radius_mm must be finite and >= 0.\n";
+        return false;
+    }
     if (args.bedCropMethod != "direct" && args.bedCropMethod != "sigmoid") {
         std::cerr << "Error: [MultiBed] crop_method must be direct or sigmoid.\n";
         return false;
@@ -1516,9 +1583,10 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         args.bedObjectProfile != "mouse" &&
         args.bedObjectProfile != "phantom" &&
         args.bedObjectProfile != "epguan" &&
-        args.bedObjectProfile != "zimu") {
+        args.bedObjectProfile != "zimu" &&
+        args.bedObjectProfile != "derenzo") {
         std::cerr << "Error: [MultiBed] object_profile must be auto, mouse, "
-                     "phantom, epguan, or zimu.\n";
+                     "phantom, epguan, zimu, or derenzo.\n";
         return false;
     }
     if (!std::isfinite(args.bedPhantomCloseStrength) ||
@@ -1529,9 +1597,20 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         args.bedEpguanCloseStrength > 1.0 ||
         !std::isfinite(args.bedZimuCloseStrength) ||
         args.bedZimuCloseStrength < 0.0 ||
-        args.bedZimuCloseStrength > 1.0) {
+        args.bedZimuCloseStrength > 1.0 ||
+        !std::isfinite(args.bedMouseSeamStrength) ||
+        args.bedMouseSeamStrength < 0.0 ||
+        args.bedMouseSeamStrength > 1.0) {
         std::cerr << "Error: [MultiBed] phantom_close_strength, "
-                     "epguan_close_strength, and zimu_close_strength must be "
+                     "epguan_close_strength, zimu_close_strength, and "
+                     "mouse_seam_strength must be "
+                     "finite and in [0,1].\n";
+        return false;
+    }
+    if (!std::isfinite(args.bedDerenzoAxialStrength) ||
+        args.bedDerenzoAxialStrength < 0.0 ||
+        args.bedDerenzoAxialStrength > 1.0) {
+        std::cerr << "Error: [MultiBed] derenzo_axial_strength must be "
                      "finite and in [0,1].\n";
         return false;
     }
@@ -1628,6 +1707,92 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: -projectionResidual currently requires "
                      "-matrixLayout compact-symmetric.\n";
         return false;
+    }
+    if (args.detZEdgeCensor < 0) {
+        std::cerr << "Error: -detZEdgeCensor must be >= 0.\n";
+        return false;
+    }
+    if (args.detZEdgeCensor > 0) {
+        if (args.matrixLayout != "compact-symmetric" ||
+            args.chunkCSRDir.empty()) {
+            std::cerr << "Error: -detZEdgeCensor requires the compact-symmetric "
+                         "chunk layout (-matrixLayout compact-symmetric with "
+                         "-chunkCSRDir).\n";
+            return false;
+        }
+        if (args.detNz > 0 && 2 * args.detZEdgeCensor >= args.detNz) {
+            std::cerr << "Error: -detZEdgeCensor must satisfy 2*k < detNz.\n";
+            return false;
+        }
+    }
+    if (!args.detZRowWeightsFile.empty()) {
+        if (args.matrixLayout != "compact-symmetric" ||
+            args.chunkCSRDir.empty()) {
+            std::cerr << "Error: -detZRowWeightsFile requires the "
+                         "compact-symmetric chunk layout (-matrixLayout "
+                         "compact-symmetric with -chunkCSRDir).\n";
+            return false;
+        }
+        try {
+            (void)spect::io::loadDetZRowWeights(args.detZRowWeightsFile,
+                                                args.detNz, args.detNx,
+                                                args.numAngles);
+        } catch (const std::exception& ex) {
+            std::cerr << "Error: " << ex.what() << "\n";
+            return false;
+        }
+    }
+    if (!args.normFactorFile.empty()) {
+        if (!args.detZRowWeightsFile.empty()) {
+            std::cerr << "Error: -normFactorFile and -detZRowWeightsFile are "
+                         "mutually exclusive.\n";
+            return false;
+        }
+        if (args.matrixLayout != "compact-symmetric" ||
+            args.chunkCSRDir.empty()) {
+            std::cerr << "Error: -normFactorFile requires the "
+                         "compact-symmetric chunk layout (-matrixLayout "
+                         "compact-symmetric with -chunkCSRDir).\n";
+            return false;
+        }
+        if (!args.bProjPath.empty() || !args.bProjPaths.empty()) {
+            std::cerr << "Error: -normFactorFile currently supports only "
+                         "background-free reconstruction (no -bProj/"
+                         "-bProjList).\n";
+            return false;
+        }
+        try {
+            const auto values = spect::io::loadDetZRowWeights(
+                args.normFactorFile, args.detNz, args.detNx, args.numAngles);
+            if (args.detNz > 0 && args.detNx > 0 && args.numAngles > 0 &&
+                values.size() != static_cast<size_t>(args.detNz) *
+                                     static_cast<size_t>(args.detNx) *
+                                     static_cast<size_t>(args.numAngles)) {
+                std::cerr << "Error: -normFactorFile must contain one "
+                             "correction factor per projection bin.\n";
+                return false;
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "Error: " << ex.what() << "\n";
+            return false;
+        }
+    }
+    if (!args.badDetectorFile.empty()) {
+        try {
+            const auto badDetectors =
+                spect::io::loadBadDetectorList(args.badDetectorFile);
+            if (!badDetectors.empty() &&
+                (args.matrixLayout != "compact-symmetric" ||
+                 args.chunkCSRDir.empty())) {
+                std::cerr << "Error: a non-empty -badDetectorFile requires "
+                             "the canonical compact-symmetric chunk layout "
+                             "with identity projections.\n";
+                return false;
+            }
+        } catch (const std::exception& ex) {
+            std::cerr << "Error: " << ex.what() << "\n";
+            return false;
+        }
     }
     if (args.matrixLayout == "compact-symmetric") {
         if (args.loadCSRPath.empty() && args.chunkCSRDir.empty()) {
@@ -1784,7 +1949,10 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[Detector]\n";
     std::cout << "channels = " << a.detNz;
     if (a.detNx != a.detNz) std::cout << "," << a.detNx;
-    std::cout << "\nangles   = " << a.numAngles << "\n\n";
+    std::cout << "\nangles   = " << a.numAngles << "\n";
+    std::cout << "bad_detector_file = "
+              << (a.badDetectorFile.empty() ? "(none)" : a.badDetectorFile)
+              << "\n\n";
 
     std::cout << "[Algorithm]\n";
     std::cout << "name       = " << a.getAlgorithmName() << "\n";
@@ -1875,8 +2043,22 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
               << "  # direct|sigmoid; sigmoid uses normalized k=12 weights\n";
     std::cout << "seam_postprocess = " << (a.bedSeamPostprocess ? 1 : 0)
               << "  # request; active only for multi-bed output overlap stitch\n";
+    std::cout << "detz_edge_censor = " << a.detZEdgeCensor
+              << "  # detZ edge rows censored per side (0=off; compact chunk layout only)\n";
+    std::cout << "detz_row_weights_file = "
+              << (a.detZRowWeightsFile.empty() ? "(none)" : a.detZRowWeightsFile)
+              << "  # detZ efficiency weights (detNz or detNz*detNx floats); sensitivity only\n";
+    std::cout << "normalization_factor_file = "
+              << (a.normFactorFile.empty() ? "(none)" : a.normFactorFile)
+              << "  # full projection correction c; reciprocal 1/c enters sensitivity\n";
     std::cout << "object_profile = " << a.bedObjectProfile
-              << "  # auto|mouse|phantom|epguan|zimu\n";
+              << "  # auto|mouse|phantom|epguan|zimu|derenzo\n";
+    std::cout << "derenzo_postprocess = "
+              << (a.bedDerenzoPostprocess ? 1 : 0)
+              << "  # explicit derenzo profile only\n";
+    std::cout << "derenzo_axial_strength = "
+              << a.bedDerenzoAxialStrength
+              << "  # positive-only per-rod fill [0,1]\n";
     std::cout << "phantom_close_strength = " << a.bedPhantomCloseStrength
               << "  # contour interpolation blend [0,1]\n";
     std::cout << "epguan_close_strength = " << a.bedEpguanCloseStrength
@@ -1897,9 +2079,13 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
               << a.bedEpguanSupportMarginMm << "\n";
     std::cout << "zimu_close_strength = " << a.bedZimuCloseStrength
               << "  # topology-locked Gaussian sigma=0.3mm blend [0,1]\n";
+    std::cout << "mouse_seam_strength = " << a.bedMouseSeamStrength
+              << "  # bilateral confidence fusion blend [0,1]\n";
     std::cout << "seam_half_width = " << a.bedSeamHalfWidth
               << "  # capped at overlap/2; zimu additionally capped at 4\n";
     std::cout << "fov_radius_mm = " << a.fovRadiusMm << "  # 0=off\n";
+    std::cout << "analysis_fov_radius_mm = " << a.analysisFovRadiusMm
+              << "  # 0=follows fov_radius_mm\n";
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end slices zeroed\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
@@ -1994,18 +2180,26 @@ void ArgumentParser::printUsage() {
     std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.5,4)\n";
     std::cout << "  -psfMode <mode>          None | Operator\n";
     std::cout << "\n";
+    std::cout << "  SPECT_CUDA_PSF_DOUBLE=1  Force double-precision CUDA PSF (default float)\n";
+    std::cout << "  SPECT_CUDA_VOLUME_OPS=0  Disable CUDA volume ops; PSF uses CPU fallback\n";
 
     std::cout << "=== Geometry ===\n";
     std::cout << "  -dim <Nx,Ny,Nz>          Reconstruction grid (voxels)\n";
     std::cout << "  -vox <Vx,Vy,Vz>          Voxel size (mm)\n";
     std::cout << "  -ang <N>                 Projection angles\n";
     std::cout << "  -detN <Nz[,Nx]>          Detector channels\n\n";
+    std::cout << "  -badDetectorFile <file>  Skip global 0..95 or link/FPGA/dector blocks in compact identity reconstruction\n\n";
 
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
     std::cout << "  -bedCropMethod <direct|sigmoid> Output stitching for overlap_in_recon=0\n";
     std::cout << "  -bedSeamPostprocess <0|1> Request seam postprocess (default 1; only runs with multi-bed output overlap)\n";
-    std::cout << "  -bedObjectProfile <auto|mouse|phantom|epguan|zimu> Override automatic object profile\n";
+    std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
+    std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
+    std::cout << "  -normFactorFile <f>       Full projection correction factors c; applies reciprocal 1/c to sensitivity\n";
+    std::cout << "  -bedObjectProfile <auto|mouse|phantom|epguan|zimu|derenzo> Override automatic object profile\n";
+    std::cout << "  -derenzoPostprocess <0|1> Enable explicit Derenzo axial continuity processing\n";
+    std::cout << "  -derenzoAxialStrength <s> Positive-only per-rod fill strength [0,1]\n";
     std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
@@ -2038,6 +2232,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -v, --version             Print version string and exit\n";
     std::cout << "  -th <N>                   Thread count\n";
     std::cout << "  -h, -help, --help         Show this help\n\n";
+    std::cout << "  SPECT_FAIL_ON_ZERO_CHECKPOINT=1  Abort before writing an all-zero checkpoint\n";
 
     std::cout << "  Algorithm-specific defaults are loaded beside the global config or from config/algo_<name>.conf.\n";
     std::cout << "  Override any value with CLI flags. Use -dumpConf to inspect.\n";

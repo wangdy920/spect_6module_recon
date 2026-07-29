@@ -67,6 +67,76 @@ inline void setDevice(int deviceId) {
 }
 
 /**
+ * @brief Format CUDA API version integers (e.g. 13020 -> "13.2").
+ */
+inline std::string formatCudaApiVersion(int version) {
+    const int major = version / 1000;
+    const int minor = (version % 1000) / 10;
+    return std::to_string(major) + "." + std::to_string(minor);
+}
+
+/**
+ * @brief Snapshot of driver / runtime / device identity for startup logs.
+ */
+struct CudaEnvironmentInfo {
+    int driverVersion = 0;
+    int runtimeVersion = 0;
+    int deviceId = 0;
+    int deviceCount = 0;
+    int computeMajor = 0;
+    int computeMinor = 0;
+    std::string deviceName;
+};
+
+inline CudaEnvironmentInfo queryEnvironment(int deviceId = 0) {
+    CudaEnvironmentInfo info;
+    CUDA_CHECK(cudaDriverGetVersion(&info.driverVersion));
+    CUDA_CHECK(cudaRuntimeGetVersion(&info.runtimeVersion));
+    info.deviceCount = getDeviceCount();
+    if (info.deviceCount <= 0) {
+        throw std::runtime_error("No CUDA devices are available.");
+    }
+    if (deviceId < 0 || deviceId >= info.deviceCount) {
+        throw std::runtime_error("CUDA device id " + std::to_string(deviceId) +
+                                 " is out of range (device count=" +
+                                 std::to_string(info.deviceCount) + ").");
+    }
+    info.deviceId = deviceId;
+    cudaDeviceProp props{};
+    CUDA_CHECK(cudaGetDeviceProperties(&props, deviceId));
+    info.deviceName = props.name ? props.name : "(unknown)";
+    info.computeMajor = props.major;
+    info.computeMinor = props.minor;
+    return info;
+}
+
+/**
+ * @brief Ensure the installed driver can host the bundled CUDA 13.x runtime
+ *        (minor-version compatibility floor: driver CUDA >= 13.0).
+ */
+inline void ensureDriverSupportsBundledRuntime(const CudaEnvironmentInfo &info) {
+    // Bundled cudart/nvrtc from CUDA 13.x require a CUDA 13-capable driver
+    // (display driver family >= R580 per NVIDIA minor-version compatibility).
+#if defined(SPECT_CUDA_MIN_DRIVER_API_VERSION)
+    constexpr int kMinDriverCudaVersion = SPECT_CUDA_MIN_DRIVER_API_VERSION;
+#else
+    constexpr int kMinDriverCudaVersion = 13000; // 13.0
+#endif
+    if (info.driverVersion < kMinDriverCudaVersion) {
+        throw std::runtime_error(
+            "CUDA driver supported version is " +
+            formatCudaApiVersion(info.driverVersion) +
+            ", but this SPECT_recon build bundles CUDA 13.x runtime/NVRTC "
+            "(needed for RTX 50-series sm_120). Install an NVIDIA driver with "
+            "CUDA 13.x support (R580+ / CUDA 13.0+), then retry.");
+    }
+    if (info.driverVersion < info.runtimeVersion) {
+        // Soft warning path is handled by caller; keep hard fail only for
+        // major-family mismatches above.
+    }
+}
+
+/**
  * @brief 同步当前设备
  */
 inline void synchronize() {

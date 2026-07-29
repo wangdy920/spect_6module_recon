@@ -6,6 +6,9 @@
 #include "main/RunLogger.h"
 #include "main/SmoothingOps.h"
 
+#include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -136,6 +139,28 @@ void applySeparableConvRuntime(std::vector<double> &volume, int nx, int ny,
   if (!tryApplySeparableConvCUDA(volume, nx, ny, nz, kx, ky, kz, opts)) {
     throw std::runtime_error(
         "3D separable convolution requires CUDA volume helpers.");
+  }
+}
+
+void guardZeroMaxCheckpoint(const std::vector<double> &volume,
+                            const std::string &label) {
+  bool finite = true;
+  double maxValue = 0.0;
+  for (const double value : volume) {
+    if (!std::isfinite(value)) {
+      finite = false;
+      break;
+    }
+    maxValue = std::max(maxValue, value);
+  }
+  if (finite && maxValue == 0.0) {
+    const std::string message =
+        "checkpoint max==0 at " + label + "; output is all zero.";
+    logWarn(message);
+    const char *failClosed = std::getenv("SPECT_FAIL_ON_ZERO_CHECKPOINT");
+    if (failClosed && failClosed[0] == '1')
+      throw std::runtime_error(message +
+                               " Set SPECT_FAIL_ON_ZERO_CHECKPOINT=0 to continue.");
   }
 }
 

@@ -7,6 +7,7 @@
 
 #include "interfaces/ISparseOps.h"
 #include "io/CSRTypes.h"
+#include "io/CompactChunkCSR.h"
 #include "sparse/SparseOpsCPU.h"
 #include "sparse/SparseOpsRef.h"
 
@@ -195,6 +196,29 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
+bool compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+    const io::CSRQuantizedView& matrix,
+    const float* xBatch,
+    const double* fullProjection,
+    size_t fullProjectionCount,
+    const CompactDeviceRatioParams& commonRatioParams,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int batchSize,
+    CompactDeviceRatioTiming* ratioTiming = nullptr,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
+bool compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+    const io::CSRQuantizedView& matrix,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int batchSize,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int accumulatorIndex = 0,
+    int cacheSlot = 0);
 }
 #endif
 
@@ -274,6 +298,20 @@ inline bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
 }
 inline bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRView&, const CompactDeviceTransformParams&,
+    const int*, const int*, int,
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
+    return false;
+}
+inline bool compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+    const io::CSRQuantizedView&, const float*, const double*, size_t,
+    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
+    const int*, const int*, int,
+    CompactDeviceRatioTiming* = nullptr,
+    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
+    return false;
+}
+inline bool compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+    const io::CSRQuantizedView&, const CompactDeviceTransformParams&,
     const int*, const int*, int,
     CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
     return false;

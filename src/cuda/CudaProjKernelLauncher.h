@@ -69,6 +69,16 @@ void launchProjDomainConvXKernel(const float *input, float *output,
                                  int detNx, size_t frameCount,
                                  cudaStream_t stream = nullptr);
 
+void launchCompactBranchBatchForwardScaledU16(
+    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
+    const float *rowScales, const float *x, int cols, int batchSize, float *y,
+    int rows, cudaStream_t stream = nullptr);
+
+void launchCompactBranchBatchBackwardScaledU16(
+    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
+    const float *rowScales, const float *y, int rows, int batchSize, float *x,
+    int cols, cudaStream_t stream = nullptr);
+
 } // namespace spect
 
 #endif

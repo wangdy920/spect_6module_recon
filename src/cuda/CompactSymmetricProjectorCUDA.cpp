@@ -83,6 +83,15 @@ bool compactConcurrentBedsEnabled() {
          value[0] == 't' || value[0] == 'T';
 }
 
+bool compactQuantizedGpuEnabled() {
+  const char *value = std::getenv("SPECT_COMPACT_QUANTIZED_GPU");
+  if (value == nullptr || value[0] == '\0') {
+    return true;
+  }
+  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
+         value[0] == 't' || value[0] == 'T';
+}
+
 CompactDeviceRatioParams makeCompactDeviceRatioParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int symId, bool zMirror) {
@@ -253,10 +262,13 @@ void warmCompactChunkResidentDeviceCache(
         failedChunks.push_back(key);
       }
     }
-    views.push_back(chunk->view());
+    if (!chunk->isQuantized()) {
+      views.push_back(chunk->view());
+    }
     loaded.push_back(std::move(chunk));
   }
-  if (warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes)) {
+  if (!views.empty() &&
+      warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes)) {
     std::lock_guard<std::mutex> lock(warmedMutex);
     lastWarmedChunks = &chunks;
     lastWarmedCacheBudget = cacheBudget;
@@ -816,9 +828,13 @@ bool computeCompactChunkSensitivityCUDA(
     }
   }
 
+  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
+    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
+    const bool chunkIsQuantized =
+        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
       CompactDeviceBackwardTiming backwardTiming;
@@ -830,9 +846,14 @@ bool computeCompactChunkSensitivityCUDA(
         symIds[b] = branches[b].symId;
         zMirrors[b] = branches[b].zMirror ? 1 : 0;
       }
-      if (!compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-              view, commonTransform, symIds.data(), zMirrors.data(),
-              static_cast<int>(branches.size()), &backwardTiming, 0, 0)) {
+      const bool ok = chunkIsQuantized
+          ? compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+                qview, commonTransform, symIds.data(), zMirrors.data(),
+                static_cast<int>(branches.size()), &backwardTiming, 0, 0)
+          : compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+                view, commonTransform, symIds.data(), zMirrors.data(),
+                static_cast<int>(branches.size()), &backwardTiming, 0, 0);
+      if (!ok) {
         return false;
       }
       if (timing) {
@@ -841,6 +862,11 @@ bool computeCompactChunkSensitivityCUDA(
             backwardTiming.transformBackwardSeconds;
       }
       continue;
+    }
+    if (chunkIsQuantized) {
+      throw std::runtime_error(
+          "Quantized compact chunk matrices require branch-batch mode "
+          "(SPECT_COMPACT_BRANCH_BATCH=1) for the sensitivity path.");
     }
     for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
       const auto &branch = branches[branchIndex];
@@ -944,6 +970,10 @@ bool runCompactChunkMlemNumerCUDA(
   const bool useDeviceRatio = compactDeviceRatioEnabled() &&
                               fullBackground == nullptr &&
                               attFactors == nullptr;
+  const bool useBranchBatch =
+      compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
+      attFactors == nullptr && branches.size() > 1;
+  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
   std::fill(numer, numer + nvox, 0.0);
 
@@ -972,7 +1002,52 @@ bool runCompactChunkMlemNumerCUDA(
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
+    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
+    const bool chunkIsQuantized =
+        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
+    if (useBranchBatch) {
+      const float *imgRotBatch = rotatedImages.data();
+      CompactDeviceRatioTiming deviceTiming;
+      CompactDeviceBackwardTiming backwardTiming;
+      const CompactDeviceRatioParams commonRatio =
+          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
+      const CompactDeviceTransformParams commonTransform =
+          makeCompactDeviceTransformParams(meta, 0, false);
+      std::vector<int> symIds(branches.size());
+      std::vector<int> zMirrors(branches.size());
+      for (size_t b = 0; b < branches.size(); ++b) {
+        symIds[b] = branches[b].symId;
+        zMirrors[b] = branches[b].zMirror ? 1 : 0;
+      }
+      const bool ok = chunkIsQuantized
+          ? compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+                qview, imgRotBatch, fullProjection, fullProjectionCount,
+                commonRatio, commonTransform, symIds.data(), zMirrors.data(),
+                static_cast<int>(branches.size()), &deviceTiming,
+                &backwardTiming)
+          : compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+                view, imgRotBatch, fullProjection, fullProjectionCount,
+                commonRatio, commonTransform, symIds.data(), zMirrors.data(),
+                static_cast<int>(branches.size()), &deviceTiming,
+                &backwardTiming);
+      if (!ok) {
+        return false;
+      }
+      if (timing) {
+        timing->forwardSeconds += deviceTiming.forwardSeconds;
+        timing->ratioSeconds += deviceTiming.ratioSeconds;
+        timing->backwardSeconds += deviceTiming.backwardSeconds;
+        timing->transformBackwardSeconds +=
+            backwardTiming.transformBackwardSeconds;
+      }
+      return true;
+    }
+    if (chunkIsQuantized) {
+      throw std::runtime_error(
+          "Quantized compact chunk matrices require branch-batch mode "
+          "(SPECT_COMPACT_BRANCH_BATCH=1) for the single-bed numerator path.");
+    }
     for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
       const auto &branch = branches[branchIndex];
       const float *imgRot = rotatedImages.data() + branchIndex * nvox;
@@ -1288,9 +1363,13 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     }
   }
 
+  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
+    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
+    const bool chunkIsQuantized =
+        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     for (int bed = 0; bed < bedCount; ++bed) {
       const double *fullProjection = fullProjections[bed];
@@ -1313,11 +1392,18 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
           symIds[b] = branches[b].symId;
           zMirrors[b] = branches[b].zMirror ? 1 : 0;
         }
-        if (!compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-                view, imgRotBatch, fullProjection, fullProjectionCount,
-                commonRatio, commonTransform, symIds.data(), zMirrors.data(),
-                static_cast<int>(branchCount), &deviceTiming, &backwardTiming,
-                bed, bed)) {
+        const bool ok = chunkIsQuantized
+            ? compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
+                  qview, imgRotBatch, fullProjection, fullProjectionCount,
+                  commonRatio, commonTransform, symIds.data(), zMirrors.data(),
+                  static_cast<int>(branchCount), &deviceTiming, &backwardTiming,
+                  bed, bed)
+            : compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+                  view, imgRotBatch, fullProjection, fullProjectionCount,
+                  commonRatio, commonTransform, symIds.data(), zMirrors.data(),
+                  static_cast<int>(branchCount), &deviceTiming, &backwardTiming,
+                  bed, bed);
+        if (!ok) {
           return false;
         }
         if (timing) {
@@ -1328,6 +1414,11 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
               backwardTiming.transformBackwardSeconds;
         }
         continue;
+      }
+      if (chunkIsQuantized) {
+        throw std::runtime_error(
+            "Quantized compact chunk matrices require branch-batch mode "
+            "(SPECT_COMPACT_BRANCH_BATCH=1) for the multi-bed numerator path.");
       }
 
       for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
