@@ -1,7 +1,7 @@
 #pragma once
 
 #include "cuda/CudaConfig.h"
-#include "sparse/SparseOpsBackend.h"
+#include "cuda/SparseOpsBackend.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
@@ -144,7 +144,6 @@ struct HostCSRData {
 
 int getHostParallelThreads(int requestedThreads, uint64_t workItems);
 
-HostCSRData convertCSR(const CSRView &matrix);
 HostCSRData convertCSR(const io::CSRView &matrix);
 
 void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,

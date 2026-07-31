@@ -140,22 +140,9 @@ bool ArgumentParser::applyMatrixAutoDiscovery(ReconArgs& args,
                                                      std::string& error) {
     const std::filesystem::path exeDir = executableDir(argv);
 
-    if (args.loadCSRExplicit && !args.chunkCSRDirExplicit)
-        args.chunkCSRDir.clear();
-
     if (!args.chunkCSRDir.empty()) {
         args.chunkCSRDir = resolveChunkCSRDirPath(
             args.chunkCSRDir, exeDir, args.chunkCSRDirExplicit).string();
-        if (args.matrixLayout == "standard" && !args.matrixLayoutExplicit)
-            args.matrixLayout = "compact-symmetric";
-        return true;
-    }
-
-    const bool hasStandardMatrixInput =
-        !args.loadCSRPath.empty() || !args.sysIndexPath.empty() ||
-        !args.sysWeightPath.empty();
-    if (hasStandardMatrixInput ||
-        (args.matrixLayoutExplicit && args.matrixLayout == "standard")) {
         return true;
     }
 
@@ -164,8 +151,6 @@ bool ArgumentParser::applyMatrixAutoDiscovery(ReconArgs& args,
         return true;
     if (candidates.size() == 1) {
         args.chunkCSRDir = candidates.front().string();
-        if (!args.matrixLayoutExplicit)
-            args.matrixLayout = "compact-symmetric";
         return true;
     }
 
@@ -242,7 +227,6 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             switch (args.algorithm) {
                 case ReconArgs::Algorithm::MLEM:     algName = "mlem"; break;
                 case ReconArgs::Algorithm::BSREM:    algName = "bsrem"; break;
-                case ReconArgs::Algorithm::ADMM:     algName = "admm"; break;
             }
         }
         if (!algName.empty()) {
@@ -332,44 +316,10 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-dfList"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.sysIndexPath = ArgumentParser::getRequiredArg(i, argc, argv, "-indexMat");
-        return true;
-    }, {"-indexMat"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.sysWeightPath = ArgumentParser::getRequiredArg(i, argc, argv, "-weightMat");
-        return true;
-    }, {"-weightMat"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.saveCSRPath = ArgumentParser::getRequiredArg(i, argc, argv, "-saveCSR");
-        return true;
-    }, {"-saveCSR"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.loadCSRPath = ArgumentParser::getRequiredArg(i, argc, argv, "-loadCSR");
-        a.loadCSRExplicit = true;
-        return true;
-    }, {"-loadCSR"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.chunkCSRDir = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir");
         a.chunkCSRDirExplicit = true;
         return true;
     }, {"-chunkCSRDir"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.mapCSR);
-    }, {"-mapCSR"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        std::string val = toLower(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-matrixLayout"));
-        if (val == "compact" || val == "compact_symmetric")
-            val = "compact-symmetric";
-        a.matrixLayout = val;
-        a.matrixLayoutExplicit = true;
-        return true;
-    }, {"-matrixLayout"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.compactMetaPath =
-            ArgumentParser::getRequiredArg(i, argc, argv, "-compactMeta");
-        return true;
-    }, {"-compactMeta"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.compactDenomCachePath =
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactDenomCache");
@@ -458,11 +408,9 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-cudaDevice"});
 
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.numSubsets =
-            std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-subsets"));
-        return true;
-    }, {"-subsets"});
+    bindHandlerAliases(
+        rejectCliOption("-subsets was removed; the compact-symmetric layout is always single-subset (MLEM-style full update)."),
+        {"-subsets"});
 
     auto algHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
@@ -472,8 +420,6 @@ void ArgumentParser::registerHandlers() {
             a.algorithm = ReconArgs::Algorithm::MLEM;
         } else if (val == "bsrem") {
             a.algorithm = ReconArgs::Algorithm::BSREM;
-        } else if (val == "admm") {
-            a.algorithm = ReconArgs::Algorithm::ADMM;
         } else {
             std::cerr << "Error: Unknown optimisation algorithm '" << val << "'.\n";
             return false;
@@ -482,26 +428,8 @@ void ArgumentParser::registerHandlers() {
     };
     bindHandlerAliases(algHandler, {"-opti"});
     bindHandlerAliases(
-        rejectCliOption("-alg was removed; use -opti mlem|bsrem|admm."),
+        rejectCliOption("-alg was removed; use -opti mlem|bsrem."),
         {"-alg"});
-
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.admmRho = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-admmRho"));
-        return true;
-    }, {"-admmRho"});
-
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.admmTvInner = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-admmTvInner"));
-        return true;
-    }, {"-admmTvInner"});
-
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        auto val = ArgumentParser::getRequiredArg(i, argc, argv, "-admmAdaptive");
-        a.admmAdaptive = (val == "on" || val == "true" || val == "1");
-        return true;
-    }, {"-admmAdaptive"});
 
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-bsrem"), ',');
@@ -600,10 +528,9 @@ void ArgumentParser::registerHandlers() {
     }, {"-v", "--version"});
 
     // --- Filtering & PSF ---
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parsePSFParams(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-conv"), a);
-    }, {"-conv"});
+    bindHandlerAliases(
+        rejectCliOption("-conv was removed; use image-domain -psf [fwhm_mm[,N]]."),
+        {"-conv"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         std::string value;
         if (i + 1 < argc) {
@@ -1047,8 +974,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         a.algorithm = ReconArgs::Algorithm::BSREM;
     else if (alg == "MLEM")
         a.algorithm = ReconArgs::Algorithm::MLEM;
-    else if (alg == "ADMM")
-        a.algorithm = ReconArgs::Algorithm::ADMM;
 
     std::string iters = cfg.getString("Reconstruction", "iterations");
     if (!iters.empty()) {
@@ -1058,7 +983,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         if (it.size() > 1)
             a.saveInterval = std::stoi(it[1]);
     }
-    a.numSubsets = cfg.getInt("Reconstruction", "subsets", a.numSubsets);
     a.bsrem_alpha0 =
         (float)cfg.getDouble("Reconstruction", "bsrem_alpha0", a.bsrem_alpha0);
     a.bsrem_gamma =
@@ -1104,16 +1028,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         cfg.getDouble("SystemMatrix", "prune_epsilon", a.weightPruneEps);
     a.Astream = cfg.getBool("SystemMatrix", "stream_build", a.Astream);
     a.ApruneMask = cfg.getBool("SystemMatrix", "prune_mask", a.ApruneMask);
-    a.mapCSR = cfg.getBool("SystemMatrix", "map_csr", a.mapCSR);
-    std::string layout = cfg.getString("SystemMatrix", "matrix_layout");
-    if (layout.empty())
-        layout = cfg.getString("Matrix", "layout");
-    if (!layout.empty()) {
-        layout = toLower(layout);
-        if (layout == "compact" || layout == "compact_symmetric")
-            layout = "compact-symmetric";
-        a.matrixLayout = layout;
-    }
     std::string chunkDir =
         cfg.getString("SystemMatrix", "default_chunk_csr_dir");
     if (chunkDir.empty())
@@ -1238,8 +1152,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
                 a.cropEndEnd = std::stoi(ce[1]);
             }
         }
-        a.bedOverlapInRecon = cfg.getBool("MultiBed", "overlap_in_recon",
-                                          a.bedOverlapInRecon);
         a.bedCropMethod = toLower(cfg.getString(
             "MultiBed", "crop_method", a.bedCropMethod));
         a.bedSeamPostprocess = cfg.getBool(
@@ -1313,8 +1225,6 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
             a.algorithm = ReconArgs::Algorithm::MLEM;
         else if (algLower == "bsrem")
             a.algorithm = ReconArgs::Algorithm::BSREM;
-        else if (algLower == "admm")
-            a.algorithm = ReconArgs::Algorithm::ADMM;
     }
     std::string iters = cfg.getString("Algorithm", "iterations");
     if (!iters.empty()) {
@@ -1324,8 +1234,6 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         if (it.size() > 1)
             a.saveInterval = std::stoi(it[1]);
     }
-    if (cfg.hasKey("Algorithm", "subsets"))
-        a.numSubsets = cfg.getInt("Algorithm", "subsets", a.numSubsets);
 
     // [Regularization] section
     std::string regT = cfg.getString("Regularization", "type");
@@ -1390,13 +1298,6 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         a.bsremSoftMaskLambdaOut = cfg.getDouble("BSREM", "soft_mask_lambda", a.bsremSoftMaskLambdaOut);
     }
 
-    // [ADMM] section
-    if (cfg.hasSection("ADMM")) {
-        a.admmRho = cfg.getDouble("ADMM", "rho", a.admmRho);
-        a.admmTvInner = cfg.getInt("ADMM", "tv_inner", a.admmTvInner);
-        a.admmAdaptive = cfg.getBool("ADMM", "adaptive", a.admmAdaptive);
-    }
-
     return true;
 }
 
@@ -1411,9 +1312,8 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
     bool isPathArg =
         (argName == "-df" || argName == "-i" || argName == "-input" ||
          argName == "-dfList" || argName == "-bProjList" ||
-         argName == "-indexMat" || argName == "-weightMat" ||
-         argName == "-fout" || argName == "-loadCSR" ||
-         argName == "-chunkCSRDir" || argName == "-saveCSR" ||
+         argName == "-fout" ||
+         argName == "-chunkCSRDir" ||
          argName == "-attMap" || argName == "-regCT" || argName == "-bProj" ||
          argName == "-detZRowWeightsFile" || argName == "-normFactorFile" ||
          argName == "-badDetectorFile" ||
@@ -1473,19 +1373,6 @@ bool ArgumentParser::parseIterations(const std::string& value, ReconArgs& args) 
     if (iterations.size() > 1)
         args.saveInterval = std::stoi(iterations[1]);
     return true;
-}
-
-bool ArgumentParser::parsePSFParams(const std::string& value, ReconArgs& args) {
-    if (value.find("::psf") != std::string::npos) {
-        args.usePSF = true;
-        auto psfParams = value.substr(0, value.find("::psf"));
-        auto params = split(psfParams, ',');
-        if (params.size() >= 2)
-            args.psf.fwhm_mm = std::stod(params[1]) * 2.355;
-        args.psf.mode = PSFMode::Gaussian;
-        return true;
-    }
-    return false;
 }
 
 void ArgumentParser::normalizeArgs(ReconArgs& args) {
@@ -1563,20 +1450,17 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         std::cerr << "Error: [MultiBed] analysis_fov_radius_mm must be finite and >= 0.\n";
         return false;
     }
-    if (args.bedCropMethod != "direct" && args.bedCropMethod != "sigmoid") {
-        std::cerr << "Error: [MultiBed] crop_method must be direct or sigmoid.\n";
+    const bool weightedOutputStitch =
+        args.bedCropMethod == "sigmoid" ||
+        args.bedCropMethod == "center66_cosine10";
+    if (args.bedCropMethod != "direct" && !weightedOutputStitch) {
+        std::cerr << "Error: [MultiBed] crop_method must be direct, sigmoid, "
+                     "or center66_cosine10.\n";
         return false;
     }
-    if (args.bedCropMethod == "sigmoid" && args.bedOverlapInRecon) {
-        std::cerr << "Error: [MultiBed] crop_method=sigmoid requires "
-                     "overlap_in_recon=0 (global config: "
-                  << args.configPath << ").\n";
-        return false;
-    }
-    if (args.bedSeamPostprocess &&
-        (args.bedCropMethod != "sigmoid" || args.bedOverlapInRecon)) {
-        std::cerr << "Error: [MultiBed] seam_postprocess requires "
-                     "crop_method=sigmoid and overlap_in_recon=0.\n";
+    if (args.bedSeamPostprocess && !weightedOutputStitch) {
+        std::cerr << "Error: [MultiBed] seam_postprocess requires weighted "
+                     "output stitching.\n";
         return false;
     }
     if (args.bedObjectProfile != "auto" &&
@@ -1605,6 +1489,12 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
                      "epguan_close_strength, zimu_close_strength, and "
                      "mouse_seam_strength must be "
                      "finite and in [0,1].\n";
+        return false;
+    }
+    if (args.bedMouseSeamStrength > 0.0 &&
+        args.bedCropMethod != "sigmoid") {
+        std::cerr << "Error: [MultiBed] mouse_seam_strength > 0 requires "
+                     "crop_method=sigmoid.\n";
         return false;
     }
     if (!std::isfinite(args.bedDerenzoAxialStrength) ||
@@ -1639,16 +1529,11 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         std::cerr << "Error: [MultiBed] seam_half_width must be >= 0.\n";
         return false;
     }
-    if (!args.chunkCSRDir.empty() && !args.loadCSRPath.empty()) {
-        std::cerr << "Error: Use either -loadCSR or -chunkCSRDir, not both.\n";
-        return false;
-    }
     return true;
 }
 
 bool ArgumentParser::validateGeometryArgs(const ReconArgs& args) {
-    const bool compactChunkGeometry =
-        args.matrixLayout == "compact-symmetric" && !args.chunkCSRDir.empty();
+    const bool compactChunkGeometry = !args.chunkCSRDir.empty();
     if (!compactChunkGeometry &&
         (args.Nx <= 0 || args.Ny <= 0 || args.Nz <= 0)) {
         std::cerr << "Error: Invalid reconstruction dimensions (-dim).\n";
@@ -1664,10 +1549,6 @@ bool ArgumentParser::validateGeometryArgs(const ReconArgs& args) {
 bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     if (args.numIters <= 0) {
         std::cerr << "Error: Number of iterations (-it) must be positive.\n";
-        return false;
-    }
-    if (args.numSubsets <= 0) {
-        std::cerr << "Error: Number of subsets (-subsets) must be positive.\n";
         return false;
     }
     if (args.numAngles <= 0) {
@@ -1688,36 +1569,14 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: CTAC auto-mu value must be positive.\n";
         return false;
     }
-    if (!(args.matrixLayout == "standard" ||
-          args.matrixLayout == "compact-symmetric")) {
-        std::cerr << "Error: Invalid -matrixLayout (expected standard or compact-symmetric).\n";
-        return false;
-    }
-    if (!args.chunkCSRDir.empty() && args.matrixLayout != "compact-symmetric") {
-        std::cerr << "Error: -chunkCSRDir requires -matrixLayout compact-symmetric.\n";
-        return false;
-    }
-    if (!args.compactDenomCachePath.empty() &&
-        args.matrixLayout != "compact-symmetric") {
-        std::cerr << "Error: -compactDenomCache requires -matrixLayout compact-symmetric.\n";
-        return false;
-    }
-    if (args.projectionResidual &&
-        args.matrixLayout != "compact-symmetric") {
-        std::cerr << "Error: -projectionResidual currently requires "
-                     "-matrixLayout compact-symmetric.\n";
-        return false;
-    }
     if (args.detZEdgeCensor < 0) {
         std::cerr << "Error: -detZEdgeCensor must be >= 0.\n";
         return false;
     }
     if (args.detZEdgeCensor > 0) {
-        if (args.matrixLayout != "compact-symmetric" ||
-            args.chunkCSRDir.empty()) {
+        if (args.chunkCSRDir.empty()) {
             std::cerr << "Error: -detZEdgeCensor requires the compact-symmetric "
-                         "chunk layout (-matrixLayout compact-symmetric with "
-                         "-chunkCSRDir).\n";
+                         "chunk layout (-chunkCSRDir).\n";
             return false;
         }
         if (args.detNz > 0 && 2 * args.detZEdgeCensor >= args.detNz) {
@@ -1726,11 +1585,9 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         }
     }
     if (!args.detZRowWeightsFile.empty()) {
-        if (args.matrixLayout != "compact-symmetric" ||
-            args.chunkCSRDir.empty()) {
+        if (args.chunkCSRDir.empty()) {
             std::cerr << "Error: -detZRowWeightsFile requires the "
-                         "compact-symmetric chunk layout (-matrixLayout "
-                         "compact-symmetric with -chunkCSRDir).\n";
+                         "compact-symmetric chunk layout (-chunkCSRDir).\n";
             return false;
         }
         try {
@@ -1748,11 +1605,9 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
                          "mutually exclusive.\n";
             return false;
         }
-        if (args.matrixLayout != "compact-symmetric" ||
-            args.chunkCSRDir.empty()) {
+        if (args.chunkCSRDir.empty()) {
             std::cerr << "Error: -normFactorFile requires the "
-                         "compact-symmetric chunk layout (-matrixLayout "
-                         "compact-symmetric with -chunkCSRDir).\n";
+                         "compact-symmetric chunk layout (-chunkCSRDir).\n";
             return false;
         }
         if (!args.bProjPath.empty() || !args.bProjPaths.empty()) {
@@ -1781,9 +1636,7 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         try {
             const auto badDetectors =
                 spect::io::loadBadDetectorList(args.badDetectorFile);
-            if (!badDetectors.empty() &&
-                (args.matrixLayout != "compact-symmetric" ||
-                 args.chunkCSRDir.empty())) {
+            if (!badDetectors.empty() && args.chunkCSRDir.empty()) {
                 std::cerr << "Error: a non-empty -badDetectorFile requires "
                              "the canonical compact-symmetric chunk layout "
                              "with identity projections.\n";
@@ -1794,16 +1647,16 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
             return false;
         }
     }
-    if (args.matrixLayout == "compact-symmetric") {
-        if (args.loadCSRPath.empty() && args.chunkCSRDir.empty()) {
-            std::cerr << "Error: compact-symmetric layout requires -loadCSR, -chunkCSRDir, [SystemMatrix] default_chunk_csr_dir, or exactly one exe-local matrix directory.\n";
-            return false;
-        }
+    if (args.chunkCSRDir.empty()) {
+        std::cerr << "Error: -chunkCSRDir is required (or set [SystemMatrix] default_chunk_csr_dir, or provide exactly one exe-local matrix directory).\n";
+        return false;
+    }
+    {
         const bool compactAlgorithmOk =
             args.algorithm == ReconArgs::Algorithm::MLEM ||
             args.algorithm == ReconArgs::Algorithm::BSREM;
-        if (!compactAlgorithmOk || args.numSubsets != 1) {
-            std::cerr << "Error: compact-symmetric layout supports only -opti mlem|bsrem -subsets 1.\n";
+        if (!compactAlgorithmOk) {
+            std::cerr << "Error: compact-symmetric layout supports only -opti mlem|bsrem.\n";
             return false;
         }
         if ((args.doCTAC || !args.attMapPath.empty()) &&
@@ -1817,11 +1670,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         if (compactHasReg &&
             args.algorithm != ReconArgs::Algorithm::BSREM) {
             std::cerr << "Error: compact-symmetric regularization requires -opti bsrem with TV or RDP.\n";
-            return false;
-        }
-        if (args.psfProj || args.psf.mode == PSFMode::ProjDomain ||
-            args.psf.mode == PSFMode::PostSmooth) {
-            std::cerr << "Error: compact-symmetric Phase 1 supports only image-domain -psfMode Operator or None.\n";
             return false;
         }
     }
@@ -1865,10 +1713,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         return false;
     }
 
-    if (args.psfProj && !args.usePSF) {
-        std::cerr << "Error: -psfProj requires -psf.\n";
-        return false;
-    }
     if (args.usePSF && args.psf.fwhm_mm <= 0.0) {
         std::cerr << "Error: PSF FWHM (-psf) must be positive.\n";
         return false;
@@ -1956,8 +1800,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
 
     std::cout << "[Algorithm]\n";
     std::cout << "name       = " << a.getAlgorithmName() << "\n";
-    std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n";
-    std::cout << "subsets    = " << a.numSubsets << "\n\n";
+    std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n\n";
 
     std::cout << "[Regularization]\n";
     std::cout << "type  = " << regTypeToString(a.reg.type) << "\n";
@@ -1985,13 +1828,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         std::cout << "soft_mask_band    = " << a.bsremSoftMaskBandVox << "\n";
         std::cout << "soft_mask_lambda  = " << a.bsremSoftMaskLambdaOut << "\n\n";
     }
-    if (a.algorithm == ReconArgs::Algorithm::ADMM) {
-        std::cout << "[ADMM]\n";
-        std::cout << "rho      = " << a.admmRho << "\n";
-        std::cout << "tv_inner = " << a.admmTvInner << "\n";
-        std::cout << "adaptive = " << (a.admmAdaptive ? "true" : "false") << "\n\n";
-    }
-
     std::cout << "[Filtering]\n";
     std::cout << "butterworth_cutoff  = " << a.butterCutoff << "\n";
     std::cout << "butterworth_order   = " << a.butterOrder << "\n";
@@ -1999,9 +1835,9 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "gaussian_kernel     = " << a.smoothKernel << "\n\n";
 
     std::cout << "[PSF]\n";
-    const char* psfModes[] = {"None","Operator","PostSmooth","ProjDomain","Gaussian","File"};
+    const char* psfModes[] = {"None","Operator"};
     int psfIdx = static_cast<int>(a.psf.mode);
-    std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 5 ? psfModes[psfIdx] : "Unknown") << "\n";
+    std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 1 ? psfModes[psfIdx] : "Unknown") << "\n";
     std::cout << "fwhm = " << a.psf.fwhm_mm << "\n";
     std::cout << "z_blur = " << (a.psf.z_blur ? "true" : "false") << "\n";
     std::cout << "min_sigmas = " << a.psf.min_sigmas << "\n\n";
@@ -2020,8 +1856,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "butter = cufft\n\n";
 
     std::cout << "[Matrix]\n";
-    std::cout << "layout       = " << a.matrixLayout << "\n";
-    std::cout << "compact_meta = " << (a.compactMetaPath.empty() ? "(default)" : a.compactMetaPath) << "\n";
     std::cout << "compact_denom_cache = " << (a.compactDenomCachePath.empty() ? "(none)" : a.compactDenomCachePath) << "\n";
     std::cout << "chunk_csr_dir = " << (a.chunkCSRDir.empty() ? "(none)" : a.chunkCSRDir) << "\n\n";
 
@@ -2037,10 +1871,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         }
     }
     std::cout << "\n";
-    std::cout << "overlap_in_recon = " << (a.bedOverlapInRecon ? 1 : 0)
-              << "  # 0=output stitching only\n";
     std::cout << "crop_method = " << a.bedCropMethod
-              << "  # direct|sigmoid; sigmoid uses normalized k=12 weights\n";
+              << "  # center66_cosine10 (default)|sigmoid|direct; center crop uses step56/cosine10\n";
     std::cout << "seam_postprocess = " << (a.bedSeamPostprocess ? 1 : 0)
               << "  # request; active only for multi-bed output overlap stitch\n";
     std::cout << "detz_edge_censor = " << a.detZEdgeCensor
@@ -2106,10 +1938,7 @@ void ArgumentParser::printUsage() {
 
     std::cout << "=== Quick Start ===\n";
     std::cout << "  SPECT-recon -df proj.bin -o recon_output   # uses single exe-local bin/matrix/* if present\n";
-    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb\n";
-    std::cout << "  SPECT-recon -df proj.bin -loadCSR matrix.csrb -detN 40,40\n";
-    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -opti bsrem\n";
-    std::cout << "  SPECT-recon -df proj.mat -loadCSR matrix.csrb -opti admm -it 100\n\n";
+    std::cout << "  SPECT-recon -df proj.bin -chunkCSRDir matrix/default_psc\n\n";
 
     std::cout << "  Windows paths: use quotes or forward slashes\n";
     std::cout << "    -df \"D:\\path\\file.mat\"  or  -df D:/path/file.bin\n\n";
@@ -2118,17 +1947,10 @@ void ArgumentParser::printUsage() {
     std::cout << "  -df, -i <path>          Projection MAT or BIN file\n";
     std::cout << "  -dfList <p1,p2,...>      Multi-bed projection MAT/BIN list, sorted by BedN when present (max "
               << spect::core::kMaxBeds << " beds)\n";
-    std::cout << "  -loadCSR <path>          Pre-computed CSR binary\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb\n";
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
-    std::cout << "  -matrixLayout <layout>   standard | compact-symmetric\n";
-    std::cout << "  -compactMeta <path>      metadata.bin for compact-symmetric layout\n";
-    std::cout << "                           Legacy: -loadCSR + -compactMeta single-file CSRB (260525, 76B metadata) remains supported; prefer -chunkCSRDir for 260601 production.\n";
     std::cout << "  -compactDenomCache <mhd> Reuse/save compact global denominator cache; use separate files for PSF/no-PSF/FWHM/bed variants\n";
     std::cout << "  -ctacFactorCacheDir <dir> Directory for cached CTAC attenuation factor tables (default: recon_out/ctac_factor_cache)\n";
-    std::cout << "  -saveCSR <path>          Save CSR binary after build\n";
-    std::cout << "  -indexMat <file>         System matrix voxel index file\n";
-    std::cout << "  -weightMat <file>        System matrix weight file\n";
     std::cout << "  -attMap <path>           Attenuation map (mu, mm^-1) for attenuation correction / Chang's AC\n";
     std::cout << "  -bProj <path>            Background/scatter projection MAT/BIN\n";
     std::cout << "  -bProjList <list>        Multi-bed background MAT/BIN list, sorted by BedN when present\n";
@@ -2137,11 +1959,10 @@ void ArgumentParser::printUsage() {
     std::cout << "  -n <name>                Output filename base\n\n";
 
     std::cout << "=== Algorithm ===\n";
-    std::cout << "  -opti <name>             MLEM | BSREM | ADMM\n";
+    std::cout << "  -opti <name>             MLEM | BSREM\n";
     std::cout << "                           Auto-loads config/algo_<name>.conf\n";
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
-    std::cout << "  -subsets <N>             Subsets (1=ML-EM, >1=OS-EM)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";
@@ -2157,11 +1978,6 @@ void ArgumentParser::printUsage() {
     std::cout << "  -bsremSoftBand <vox>     Transition width (default 2)\n";
     std::cout << "  -bsremSoftLambda <v>     Outside penalty boost (default 100)\n\n";
 
-    std::cout << "=== Algorithm: ADMM ===\n";
-    std::cout << "  -admmRho <value>         Penalty parameter rho (default 1.0)\n";
-    std::cout << "  -admmTvInner <n>         Chambolle-Pock inner iterations (default 20)\n";
-    std::cout << "  -admmAdaptive on|off     Adaptive rho (default on, Boyd 2011)\n\n";
-
     std::cout << "=== Regularization ===\n";
     std::cout << "  -reg <type[,beta,delta]> TV | RDP\n";
     std::cout << "  -regBeta <beta>          Regularization weight\n";
@@ -2173,8 +1989,7 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Filtering ===\n";
     std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2)\n";
     std::cout << "  -smooth <sigma>          Gaussian smoothing sigma (mm)\n";
-    std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n";
-    std::cout << "  -conv <params>           Legacy convolution filter\n\n";
+    std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n\n";
 
     std::cout << "=== PSF ===\n";
     std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.5,4)\n";
@@ -2192,7 +2007,7 @@ void ArgumentParser::printUsage() {
 
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
-    std::cout << "  -bedCropMethod <direct|sigmoid> Output stitching for overlap_in_recon=0\n";
+    std::cout << "  -bedCropMethod <center66_cosine10|sigmoid|direct> Output stitching method (default center66_cosine10)\n";
     std::cout << "  -bedSeamPostprocess <0|1> Request seam postprocess (default 1; only runs with multi-bed output overlap)\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
@@ -2226,7 +2041,6 @@ void ArgumentParser::printUsage() {
     std::cout << "  -Aprune <eps>             Prune system-matrix weights (default 1e-10)\n";
     std::cout << "  -Astream on|off           Stream build from disk (default off)\n";
     std::cout << "  -ApruneMask on|off        Prune columns outside mask (default on)\n";
-    std::cout << "  -mapCSR on|off            Memory-mapped CSR loading (default off)\n";
     std::cout << "  -joe <n>                  Joseph-like smoothing passes (default 0)\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
     std::cout << "  -v, --version             Print version string and exit\n";

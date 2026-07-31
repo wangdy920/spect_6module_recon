@@ -5,7 +5,7 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
-#include "sparse/SparseOpsBackend.h"
+#include "cuda/SparseOpsBackend.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -58,16 +58,6 @@ void launchCompactAttenFusedBackwardKernel(
     const uint16_t *att, const float *x, float *y, int rows,
     const cuda::CompactAttenBakeParams &params,
     cudaStream_t stream = nullptr);
-
-void launchProjDomainConvYKernel(const float *input, float *output,
-                                 const float *kernel, int radius, int detNz,
-                                 int detNx, size_t frameCount,
-                                 cudaStream_t stream = nullptr);
-
-void launchProjDomainConvXKernel(const float *input, float *output,
-                                 const float *kernel, int radius, int detNz,
-                                 int detNx, size_t frameCount,
-                                 cudaStream_t stream = nullptr);
 
 void launchCompactBranchBatchForwardScaledU16(
     const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,

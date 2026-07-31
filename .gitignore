@@ -1,6 +1,10 @@
 # ========= IDE / Editor =========
 .vs/
 .vscode/
+.cursor/
+
+# ========= Scratch =========
+tmp/
 
 # ========= Python =========
 __pycache__/

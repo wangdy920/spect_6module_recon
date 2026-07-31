@@ -9,6 +9,11 @@
 namespace spect {
 namespace main {
 
+inline constexpr int kCenter66CropLayers = 66;
+inline constexpr int kCenter66BedStepLayers = 56;
+inline constexpr int kCenter66OverlapLayers =
+    kCenter66CropLayers - kCenter66BedStepLayers;
+
 struct CropSettings {
   int start = 0;
   int end = 0;
@@ -25,11 +30,10 @@ struct OutputGeometry {
 
 struct OutputTransform {
   bool flipZPerBed = false;
-  bool jointVirtualZFlip = false;
   bool flipZWholeOutput = false;
   bool flipXWholeOutput = false;
-  bool bedOverlapInRecon = true;
   bool sigmoidBlendOutput = false;
+  bool center66CosineOutput = false;
   bool objectAwareSeamPostprocess = false;
   std::string objectProfile = "auto";
   bool derenzoAxialPostprocess = false;

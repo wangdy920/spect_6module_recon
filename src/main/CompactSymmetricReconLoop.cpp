@@ -246,14 +246,6 @@ std::string psfModeKey(filters::PSFMode mode) {
     return "None";
   case filters::PSFMode::Operator:
     return "Operator";
-  case filters::PSFMode::PostSmooth:
-    return "PostSmooth";
-  case filters::PSFMode::ProjDomain:
-    return "ProjDomain";
-  case filters::PSFMode::Gaussian:
-    return "Gaussian";
-  case filters::PSFMode::File:
-    return "File";
   }
   return "Unknown";
 }
@@ -380,9 +372,8 @@ std::string buildCompactDenomCacheManifest(
   std::ostringstream oss;
   oss << std::setprecision(17);
   oss << "cache_schema=compact_global_denom_v1\n";
-  oss << "matrix_layout=" << args.matrixLayout << '\n';
-  oss << "matrix_source_kind="
-      << (compactChunkLayout ? "chunkCSRDir" : "loadCSR") << '\n';
+  oss << "matrix_layout=compact-symmetric\n";
+  oss << "matrix_source_kind=chunkCSRDir\n";
   appendFileIdentity(oss, "compact_meta", compactMetaPath);
   oss << "compact_mode="
       << spect::io::compactSymmetryModeName(compactMeta.mode) << '\n';
@@ -411,8 +402,6 @@ std::string buildCompactDenomCacheManifest(
       oss << prefix << "_nnz=" << chunk.nnz << '\n';
       oss << prefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
     }
-  } else {
-    appendFileIdentity(oss, "load_csr", args.loadCSRPath);
   }
   oss << "global_dims=" << geometry.nx << ',' << geometry.ny << ','
       << geometry.nz << '\n';
@@ -478,7 +467,7 @@ std::string buildCompactDenomCacheManifest(
   }
   oss << "bed_count=" << bedZStarts.size() << '\n';
   appendVectorLine(oss, "bed_z_starts", bedZStarts);
-  oss << "bed_overlap_in_recon=" << (args.bedOverlapInRecon ? 1 : 0) << '\n';
+  oss << "bed_overlap_in_recon=0\n";
   appendVectorLine(oss, "output_bed_overlaps", args.outputBedOverlaps);
   if (args.zBedFlip && !args.projPaths.empty() && bedZStarts.size() > 1) {
     oss << "joint_virtual_z_flip=1\n";
@@ -497,10 +486,7 @@ std::string buildCompactDenomCacheManifest(
   oss << "psf_min_sigmas=" << args.psf.min_sigmas << '\n';
   if (args.psf.mode == spect::filters::PSFMode::Operator &&
       bedZStarts.size() > 1) {
-    oss << "psf_multibed_scope="
-        << (args.bedOverlapInRecon ? "global_volume"
-                                   : "per_bed_output_hardcut")
-        << '\n';
+    oss << "psf_multibed_scope=per_bed_output_hardcut\n";
   }
   if (psfKernels != nullptr) {
     appendVectorLine(oss, "psf_kernel_x", psfKernels->kx);
@@ -628,7 +614,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
   const size_t baseNvox = ctx.baseNvox;
   const size_t globalNvox = ctx.globalNvox;
   const std::vector<int> &bedZStarts = *ctx.bedZStarts;
-  const bool jointVirtualZFlip =
+  const bool bedVirtualZFlip =
       args.zBedFlip && !args.projPaths.empty() && bedCount > 1;
   spect::io::CSRView compactMatrix{};
   if (!compactChunkLayout) {
@@ -672,8 +658,6 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
-        const bool compactMultiBedGlobalPsf =
-            compactPsfActive && bedCount > 1 && args.bedOverlapInRecon;
         spect::cuda::CompactSymmetricStageTiming compactCudaTiming;
         MemoryUsageSnapshot compactPeakMemory;
         auto observeCompactMemory = [&]() {
@@ -889,39 +873,23 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             for (int bed = 0; bed < bedCount; ++bed) {
               computeLocalSensitivity(
                   compactAttFactorPtrs[static_cast<size_t>(bed)]);
-              if (!compactMultiBedGlobalPsf) {
-                apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
-                                   psfPtr, opts.threads);
-              }
+              apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
+                                 psfPtr, opts.threads);
               spect::app::accumulateBedVolumeToGlobal(
                   denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
               observeCompactMemory();
-            }
-            if (compactMultiBedGlobalPsf) {
-              apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts,
-                                 psfPtr, opts.threads);
             }
           } else {
             computeLocalSensitivity(nullptr);
-            if (!compactMultiBedGlobalPsf) {
-              apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
-                                 psfPtr, opts.threads);
-            }
+            apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
+                               psfPtr, opts.threads);
             for (int bed = 0; bed < bedCount; ++bed) {
               spect::app::accumulateBedVolumeToGlobal(
                   denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
               observeCompactMemory();
             }
-            if (compactMultiBedGlobalPsf) {
-              apply_psf_backward(denom, args.Nx, args.Ny, args.Nz, opts,
-                                 psfPtr, opts.threads);
-            }
-          }
-          if (compactMultiBedGlobalPsf) {
-            logDebug(formatStatsEntry("compact_denom_post_psf_global",
-                                     computeVectorStats(denom)));
           }
 
           if (args.josephPasses > 0) {
@@ -982,19 +950,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           logInfo("[ITER] " + std::to_string(it) + "/" +
                   std::to_string(args.numIters) + " compact");
           std::vector<double> numer(globalNvox, 0.0);
-          std::vector<double> globalPsfImage;
           const std::vector<double> *bedImageSource = &image;
-          if (compactMultiBedGlobalPsf) {
-            logDebug(formatStatsEntry(
-                "compact_global_image.it" + std::to_string(it),
-                computeVectorStats(image)));
-            apply_psf_forward(image, globalPsfImage, args.Nx, args.Ny, args.Nz,
-                              opts, psfPtr, opts.threads);
-            logDebug(formatStatsEntry(
-                "compact_global_psf_forward.it" + std::to_string(it),
-                computeVectorStats(globalPsfImage)));
-            bedImageSource = &globalPsfImage;
-          }
 
           if (compactChunkLayout) {
             std::vector<std::vector<double>> localImages(
@@ -1018,15 +974,10 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               localImages[static_cast<size_t>(bed)] =
                   spect::app::extractBedVolumeFromGlobal(
                       *bedImageSource, baseNx, baseNy, baseNz, zStart,
-                      jointVirtualZFlip);
+                      bedVirtualZFlip);
               imagePtrs[static_cast<size_t>(bed)] =
                   localImages[static_cast<size_t>(bed)].data();
-              if (compactMultiBedGlobalPsf) {
-                logDebug(formatStatsEntry(
-                    "compact_local_psf_forward.it" + std::to_string(it) +
-                        ".bed" + std::to_string(bed),
-                    computeVectorStats(localImages[static_cast<size_t>(bed)])));
-              } else if (compactPsfActive) {
+              if (compactPsfActive) {
                 logDebug(formatStatsEntry(
                     "compact_local_image.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
@@ -1082,33 +1033,17 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localNumer)));
               }
-              if (compactMultiBedGlobalPsf) {
-                spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
-                    jointVirtualZFlip);
-              } else {
-                apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
-                                   psfPtr, opts.threads);
-                if (compactPsfActive) {
-                  logDebug(formatStatsEntry(
-                      "compact_local_numer_post_psf.it" + std::to_string(it) +
-                          ".bed" + std::to_string(bed),
-                      computeVectorStats(localNumer)));
-                }
-                spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
-                    jointVirtualZFlip);
+              apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
+                                 psfPtr, opts.threads);
+              if (compactPsfActive) {
+                logDebug(formatStatsEntry(
+                    "compact_local_numer_post_psf.it" + std::to_string(it) +
+                        ".bed" + std::to_string(bed),
+                    computeVectorStats(localNumer)));
               }
-            }
-            if (compactMultiBedGlobalPsf) {
-              logDebug(formatStatsEntry(
-                  "compact_numer_pre_psf_global.it" + std::to_string(it),
-                  computeVectorStats(numer)));
-              apply_psf_backward(numer, args.Nx, args.Ny, args.Nz, opts, psfPtr,
-                                 opts.threads);
-              logDebug(formatStatsEntry(
-                  "compact_numer_post_psf_global.it" + std::to_string(it),
-                  computeVectorStats(numer)));
+              spect::app::accumulateBedVolumeToGlobal(
+                  numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                  bedVirtualZFlip);
             }
           } else {
             for (int bed = 0; bed < bedCount; ++bed) {
@@ -1116,15 +1051,10 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
               std::vector<double> localImage =
                   spect::app::extractBedVolumeFromGlobal(
                       *bedImageSource, baseNx, baseNy, baseNz, zStart,
-                      jointVirtualZFlip);
+                      bedVirtualZFlip);
               std::vector<double> localUsed;
               const double *localImageForProjection = localImage.data();
-              if (compactMultiBedGlobalPsf) {
-                logDebug(formatStatsEntry(
-                    "compact_local_psf_forward.it" + std::to_string(it) +
-                        ".bed" + std::to_string(bed),
-                    computeVectorStats(localImage)));
-              } else if (compactPsfActive) {
+              if (compactPsfActive) {
                 logDebug(formatStatsEntry(
                     "compact_local_image.it" + std::to_string(it) + ".bed" +
                         std::to_string(bed),
@@ -1166,33 +1096,17 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localNumer)));
               }
-              if (compactMultiBedGlobalPsf) {
-                spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
-                    jointVirtualZFlip);
-              } else {
-                apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
-                                   psfPtr, opts.threads);
-                if (compactPsfActive) {
-                  logDebug(formatStatsEntry(
-                      "compact_local_numer_post_psf.it" + std::to_string(it) +
-                          ".bed" + std::to_string(bed),
-                      computeVectorStats(localNumer)));
-                }
-                spect::app::accumulateBedVolumeToGlobal(
-                    numer, localNumer, baseNx, baseNy, baseNz, zStart,
-                    jointVirtualZFlip);
+              apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
+                                 psfPtr, opts.threads);
+              if (compactPsfActive) {
+                logDebug(formatStatsEntry(
+                    "compact_local_numer_post_psf.it" + std::to_string(it) +
+                        ".bed" + std::to_string(bed),
+                    computeVectorStats(localNumer)));
               }
-            }
-            if (compactMultiBedGlobalPsf) {
-              logDebug(formatStatsEntry(
-                  "compact_numer_pre_psf_global.it" + std::to_string(it),
-                  computeVectorStats(numer)));
-              apply_psf_backward(numer, args.Nx, args.Ny, args.Nz, opts, psfPtr,
-                                 opts.threads);
-              logDebug(formatStatsEntry(
-                  "compact_numer_post_psf_global.it" + std::to_string(it),
-                  computeVectorStats(numer)));
+              spect::app::accumulateBedVolumeToGlobal(
+                  numer, localNumer, baseNx, baseNy, baseNz, zStart,
+                  bedVirtualZFlip);
             }
           }
           const VectorStats numerStats = computeVectorStats(numer);
@@ -1351,13 +1265,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                  "bias,poisson_deviance_per_bin,pearson_rms\n";
           residualOut << std::setprecision(12);
 
-          std::vector<double> diagnosticGlobalPsfImage;
           const std::vector<double> *diagnosticBedSource = &image;
-          if (compactMultiBedGlobalPsf) {
-            apply_psf_forward(image, diagnosticGlobalPsfImage, args.Nx,
-                              args.Ny, args.Nz, opts, psfPtr, opts.threads);
-            diagnosticBedSource = &diagnosticGlobalPsfImage;
-          }
 
           const size_t fullRows =
               static_cast<size_t>(compactMeta.fullRows());
@@ -1365,10 +1273,10 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             std::vector<double> localImage =
                 spect::app::extractBedVolumeFromGlobal(
                     *diagnosticBedSource, baseNx, baseNy, baseNz,
-                    bedZStarts[static_cast<size_t>(bed)], jointVirtualZFlip);
+                    bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
             std::vector<double> localUsed;
             const double *localImageForProjection = localImage.data();
-            if (!compactMultiBedGlobalPsf && compactPsfActive) {
+            if (compactPsfActive) {
               apply_psf_forward(localImage, localUsed, baseNx, baseNy, baseNz,
                                 opts, psfPtr, opts.threads);
               localImageForProjection = localUsed.data();

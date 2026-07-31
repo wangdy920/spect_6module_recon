@@ -94,32 +94,6 @@ int getHostParallelThreads(int requestedThreads, uint64_t workItems) {
 #endif
 }
 
-HostCSRData convertCSR(const CSRView &matrix) {
-  if (!matrix.isValid()) {
-    throw std::runtime_error("Invalid CSRView passed to CUDA sparse backend.");
-  }
-
-  HostCSRData host;
-  host.rows = matrix.rows;
-  host.cols = matrix.cols;
-  host.nnz = matrix.nnz;
-  host.rowPtr.resize(static_cast<size_t>(matrix.rows) + 1);
-  for (int64_t row = 0; row <= matrix.rows; ++row) {
-    const int64_t offset = matrix.row_ptr[row];
-    if (offset > static_cast<int64_t>(std::numeric_limits<int32_t>::max())) {
-      throw std::runtime_error(
-          "CUDA sparse backend only supports row offsets representable as int32.");
-    }
-    host.rowPtr[static_cast<size_t>(row)] = static_cast<int32_t>(offset);
-  }
-  host.colIdx.assign(matrix.col_idx, matrix.col_idx + matrix.nnz);
-  host.values.resize(static_cast<size_t>(matrix.nnz));
-  for (size_t i = 0; i < static_cast<size_t>(matrix.nnz); ++i) {
-    host.values[i] = static_cast<float>(matrix.values[i]);
-  }
-  return host;
-}
-
 HostCSRData convertCSR(const io::CSRView &matrix) {
   if (!matrix.valid()) {
     throw std::runtime_error("Invalid io::CSRView passed to CUDA sparse backend.");

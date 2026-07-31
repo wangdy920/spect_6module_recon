@@ -2,7 +2,7 @@
 #pragma once
 
 #include "filters/PSFConfig.h"
-#include "io/CSRBuilder.h"
+#include "io/CSRTypes.h"
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -17,13 +17,12 @@ using filters::PSFConf;
 using filters::PSFKernels;
 using filters::PSFMode;
 
-// Import CSR type from io namespace (CSRView omitted to avoid conflict with core::CSRView)
+// Import CSR type from io namespace
 using io::CSR;
 
 /// Reconstruction options and parameters
 struct ReconOpts {
   int threads = 16;
-  int n_subsets = 1; // 1 => MLEM, >1 => OSEM
   bool nonneg = true;
   const std::vector<uint8_t>* mask = nullptr;
   const std::vector<double>* w_img = nullptr;
@@ -75,23 +74,9 @@ inline bool should_use_threadlocal_accum(size_t nvox, int threads) {
   return nvox <= (kMaxElems / t);
 }
 
-/// Create simple subset partitioning for OSEM
-inline std::vector<std::vector<int>> make_simple_subsets(int M, int n_subsets) {
-  if (M <= 0)
-    return {};
-  if (n_subsets <= 0)
-    throw std::invalid_argument("n_subsets must be positive");
-  std::vector<std::vector<int>> subsets(n_subsets);
-  for (int i = 0; i < M; ++i)
-    subsets[i % n_subsets].push_back(i);
-  return subsets;
-}
-
 /// Check if PSF blurring is needed
 inline bool needs_psf_blur(const ReconOpts& opts, const PSFKernels* psfKernels) {
-  // Match original_source_backup/MLEMReconstructor.h semantics:
-  // - Operator: apply space-invariant PSF during forward/back projection
-  // - PostSmooth: do NOT blur during projection; only smooth after iterations
+  // Operator: apply space-invariant PSF during forward/back projection
   if (opts.psf.mode == PSFMode::Operator)
     return (psfKernels != nullptr);
   return false;

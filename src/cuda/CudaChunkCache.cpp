@@ -244,17 +244,6 @@ uint64_t selectPreparedChunkHostCacheBudgetBytes(
   return selectPreparedChunkHostCacheBudgetBytes(activePreparedCaches);
 }
 
-MatrixCacheKey makeCacheKey(const CSRView &matrix) {
-  MatrixCacheKey key;
-  key.rowPtr = matrix.row_ptr;
-  key.colIdx = matrix.col_idx;
-  key.values = matrix.values;
-  key.rows = matrix.rows;
-  key.cols = matrix.cols;
-  key.nnz = matrix.nnz;
-  return key;
-}
-
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix) {
   MatrixCacheKey key;
   key.rowPtr = matrix.row_ptr;

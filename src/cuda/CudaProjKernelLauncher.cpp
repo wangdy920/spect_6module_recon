@@ -29,8 +29,6 @@ struct ProjDomainKernelCache {
   CUfunction compactBakeAttenFunction = nullptr;
   CUfunction compactAttenForwardFunction = nullptr;
   CUfunction compactAttenBackwardFunction = nullptr;
-  CUfunction convYFunction = nullptr;
-  CUfunction convXFunction = nullptr;
   CUfunction compactBranchBatchForwardScaledU16Function = nullptr;
   CUfunction compactBranchBatchBackwardScaledU16Function = nullptr;
   int device = -1;
@@ -68,8 +66,6 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactBakeAttenFunction != nullptr &&
       g_projDomainKernelCache.compactAttenForwardFunction != nullptr &&
       g_projDomainKernelCache.compactAttenBackwardFunction != nullptr &&
-      g_projDomainKernelCache.convYFunction != nullptr &&
-      g_projDomainKernelCache.convXFunction != nullptr &&
       g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function !=
           nullptr &&
       g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function !=
@@ -105,8 +101,6 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactBakeAttenFunction = nullptr;
     g_projDomainKernelCache.compactAttenForwardFunction = nullptr;
     g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
-    g_projDomainKernelCache.convYFunction = nullptr;
-    g_projDomainKernelCache.convXFunction = nullptr;
     g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function = nullptr;
     g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function = nullptr;
   }
@@ -137,12 +131,6 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactAttenBackwardFunction,
       g_projDomainKernelCache.module, "compact_atten_fused_spmvt"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_projDomainKernelCache.convYFunction, g_projDomainKernelCache.module,
-      "conv2d_y_mirror_frames"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_projDomainKernelCache.convXFunction, g_projDomainKernelCache.module,
-      "conv2d_x_mirror_frames"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function,
       g_projDomainKernelCache.module,
@@ -463,60 +451,6 @@ void launchCompactAttenFusedBackwardKernel(
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactAttenBackwardFunction, gridSize, 1, 1,
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
-}
-
-void launchProjDomainConvYKernel(const float *input, float *output,
-                                 const float *kernel, int radius, int detNz,
-                                 int detNx, size_t frameCount,
-                                 cudaStream_t stream) {
-  ensureProjDomainKernelsLoaded();
-  const size_t total = frameCount * static_cast<size_t>(detNz) *
-                       static_cast<size_t>(detNx);
-  if (total == 0) {
-    return;
-  }
-  CUdeviceptr inputPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(input));
-  CUdeviceptr outputPtr = reinterpret_cast<CUdeviceptr>(output);
-  CUdeviceptr kernelPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(kernel));
-  unsigned long long frames = static_cast<unsigned long long>(frameCount);
-  void *args[] = {&inputPtr, &outputPtr, &kernelPtr, &radius, &detNz, &detNx,
-                  &frames};
-    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
-  const unsigned int gridSize =
-      static_cast<unsigned int>((total + blockSize - 1) / blockSize);
-  SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.convYFunction,
-                                   gridSize, 1, 1, blockSize, 1, 1, 0,
-                                   reinterpret_cast<CUstream>(stream),
-                                   args, nullptr));
-}
-
-void launchProjDomainConvXKernel(const float *input, float *output,
-                                 const float *kernel, int radius, int detNz,
-                                 int detNx, size_t frameCount,
-                                 cudaStream_t stream) {
-  ensureProjDomainKernelsLoaded();
-  const size_t total = frameCount * static_cast<size_t>(detNz) *
-                       static_cast<size_t>(detNx);
-  if (total == 0) {
-    return;
-  }
-  CUdeviceptr inputPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(input));
-  CUdeviceptr outputPtr = reinterpret_cast<CUdeviceptr>(output);
-  CUdeviceptr kernelPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(kernel));
-  unsigned long long frames = static_cast<unsigned long long>(frameCount);
-  void *args[] = {&inputPtr, &outputPtr, &kernelPtr, &radius, &detNz, &detNx,
-                  &frames};
-    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
-  const unsigned int gridSize =
-      static_cast<unsigned int>((total + blockSize - 1) / blockSize);
-  SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.convXFunction,
-                                   gridSize, 1, 1, blockSize, 1, 1, 0,
-                                   reinterpret_cast<CUstream>(stream),
-                                   args, nullptr));
 }
 
 void launchCompactBranchBatchForwardScaledU16(

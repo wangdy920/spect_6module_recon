@@ -13,19 +13,6 @@
 #include "cuda/CudaLaunchConfig.h"
 #include "io/CompactChunkCSR.h"
 
-bool isContiguousAscending(const std::vector<int> &rows) {
-  if (rows.empty()) {
-    return true;
-  }
-  const int firstRow = rows.front();
-  for (size_t index = 0; index < rows.size(); ++index) {
-    if (rows[index] != firstRow + static_cast<int>(index)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 constexpr int kCompactDeviceBackwardMaxAccumulators =
   cuda::kCompactDeviceBackwardMaxAccumulators;
 
@@ -1438,110 +1425,6 @@ public:
     downloadDouble(dOutput_, y, static_cast<size_t>(outputSize));
   }
 
-  void runProjDomainChunkedStreaming(
-      const io::CSRView &matrix, const std::vector<std::vector<int>> &chunkRows,
-      const std::vector<double> &projections,
-      const filters::PSFKernels &psfKernels, size_t frameSize, int detNz,
-      int detNx, const double *image, int threads, double *numer) {
-    ensureCudaRuntimeAvailable();
-    if (image == nullptr || numer == nullptr) {
-      throw std::runtime_error(
-          "Proj-domain CUDA chunked streaming requires valid input and output buffers.");
-    }
-    if (frameSize == 0) {
-      throw std::runtime_error(
-          "Proj-domain CUDA chunked streaming requires a non-zero detector frame size.");
-    }
-    if (projections.size() < static_cast<size_t>(matrix.rows)) {
-      throw std::runtime_error(
-          "Proj-domain CUDA chunked streaming received an undersized projection vector.");
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    uploadDouble(dInput_, image, static_cast<size_t>(matrix.cols));
-    dAccumOutput_.allocate(static_cast<size_t>(matrix.cols));
-    if (matrix.cols > 0) {
-      CUDA_CHECK(cudaMemset(dAccumOutput_.get(), 0,
-                            static_cast<size_t>(matrix.cols) *
-                                sizeof(float)));
-    }
-
-    constexpr float eps = 1e-12f;
-    std::vector<double> localYhat;
-    std::vector<double> localRatio;
-    bool canUseDeviceChunkOps = true;
-    try {
-      ensureProjDomainKernelWeightsUploaded(psfKernels);
-      uploadDouble(dProjectionInput_, projections.data(), projections.size());
-    } catch (...) {
-      canUseDeviceChunkOps = false;
-    }
-
-    for (const auto &rows : chunkRows) {
-      if (rows.empty()) {
-        continue;
-      }
-      if (!isContiguousAscending(rows)) {
-        throw std::runtime_error(
-            "Proj-domain CUDA chunked streaming expects contiguous ascending chunk rows.");
-      }
-
-      const CachedMatrix &cached =
-          ensureStreamingSubsetUploaded(matrix, rows, threads);
-      const size_t chunkSize = static_cast<size_t>(cached.rows);
-      if (chunkSize % frameSize != 0) {
-        throw std::runtime_error(
-            "Proj-domain CUDA chunked streaming requires detector-frame-aligned chunks.");
-      }
-
-      dOutput_.allocate(chunkSize);
-      CuSparseVecGuard vecXForward;
-      CuSparseVecGuard vecYForward;
-      vecXForward.create(cached.cols, dInput_.get());
-      vecYForward.create(cached.rows, dOutput_.get());
-      executeSpMVLocked(cached, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                        vecXForward.get(), vecYForward.get(), 0.0f);
-
-      if (canUseDeviceChunkOps) {
-        try {
-          applyProjDomainChunkOpsOnDevice(
-              static_cast<size_t>(rows.front()), chunkSize, frameSize, detNz,
-              detNx, psfKernels, eps);
-        } catch (...) {
-          canUseDeviceChunkOps = false;
-        }
-      }
-
-      if (!canUseDeviceChunkOps) {
-        localYhat.resize(chunkSize);
-        downloadDouble(dOutput_, localYhat.data(), chunkSize);
-
-        localRatio.resize(chunkSize);
-        for (size_t index = 0; index < chunkSize; ++index) {
-          if (rows[index] < 0) {
-            throw std::runtime_error(
-                "Proj-domain CUDA chunked streaming received a negative row index.");
-          }
-          const size_t globalRow = static_cast<size_t>(rows[index]);
-          localRatio[index] =
-              projections[globalRow] / std::max(localYhat[index], static_cast<double>(eps));
-        }
-        applyProjDomainChunkPSF(localRatio, frameSize, detNz, detNx,
-                                psfKernels, threads);
-        uploadDouble(dChunkInput_, localRatio.data(), chunkSize);
-      }
-
-      CuSparseVecGuard vecXTranspose;
-      CuSparseVecGuard vecYTranspose;
-      vecXTranspose.create(cached.rows, dChunkInput_.get());
-      vecYTranspose.create(cached.cols, dAccumOutput_.get());
-      executeSpMVLocked(cached, CUSPARSE_OPERATION_TRANSPOSE,
-                        vecXTranspose.get(), vecYTranspose.get(), 1.0f);
-    }
-
-    downloadDouble(dAccumOutput_, numer, static_cast<size_t>(matrix.cols));
-  }
-
 private:
   static bool cudaSyncLegacyEnabled() {
     static const bool enabled = []() {
@@ -1739,99 +1622,6 @@ private:
       initialized = false;
     }
   };
-
-  void ensureProjDomainKernelWeightsUploaded(
-      const filters::PSFKernels &psfKernels) {
-    if (projKernelXHost_.size() != psfKernels.kx.size() ||
-        !std::equal(projKernelXHost_.begin(), projKernelXHost_.end(),
-                    psfKernels.kx.begin(),
-                    [](float a, double b) { return a == static_cast<float>(b); })) {
-      projKernelXHost_.resize(psfKernels.kx.size());
-      for (size_t i = 0; i < psfKernels.kx.size(); ++i)
-        projKernelXHost_[i] = static_cast<float>(psfKernels.kx[i]);
-      dProjKernelX_.copyFromHost(projKernelXHost_.data(), projKernelXHost_.size());
-    }
-    if (projKernelYHost_.size() != psfKernels.ky.size() ||
-        !std::equal(projKernelYHost_.begin(), projKernelYHost_.end(),
-                    psfKernels.ky.begin(),
-                    [](float a, double b) { return a == static_cast<float>(b); })) {
-      projKernelYHost_.resize(psfKernels.ky.size());
-      for (size_t i = 0; i < psfKernels.ky.size(); ++i)
-        projKernelYHost_[i] = static_cast<float>(psfKernels.ky[i]);
-      dProjKernelY_.copyFromHost(projKernelYHost_.data(), projKernelYHost_.size());
-    }
-  }
-
-  void applyProjDomainChunkOpsOnDevice(size_t projectionOffset, size_t chunkSize,
-                                       size_t frameSize, int detNz, int detNx,
-                                       const filters::PSFKernels &psfKernels,
-                                       float eps) {
-    if (chunkSize == 0) {
-      return;
-    }
-    if (frameSize == 0 || chunkSize % frameSize != 0) {
-      throw std::runtime_error(
-          "Proj-domain CUDA device helper requires frame-aligned chunks.");
-    }
-
-    const size_t frameCount = chunkSize / frameSize;
-    dChunkInput_.allocate(chunkSize);
-    launchProjDomainRatioKernel(dOutput_.get(), dProjectionInput_.get(),
-                                projectionOffset, dChunkInput_.get(),
-                                chunkSize, eps);
-
-    float *current = dChunkInput_.get();
-    if (!projKernelYHost_.empty() && projKernelYHost_.size() > 1) {
-      dProjChunkScratch_.allocate(chunkSize);
-      launchProjDomainConvYKernel(
-          current, dProjChunkScratch_.get(), dProjKernelY_.get(),
-          static_cast<int>(projKernelYHost_.size() / 2), detNz, detNx,
-          frameCount);
-      current = dProjChunkScratch_.get();
-    }
-
-    if (!projKernelXHost_.empty() && projKernelXHost_.size() > 1) {
-      dProjChunkScratch_.allocate(chunkSize);
-      float *target =
-          (current == dChunkInput_.get()) ? dProjChunkScratch_.get()
-                                          : dChunkInput_.get();
-      launchProjDomainConvXKernel(
-          current, target, dProjKernelX_.get(),
-          static_cast<int>(projKernelXHost_.size() / 2), detNz, detNx,
-          frameCount);
-      current = target;
-    }
-
-    if (current != dChunkInput_.get()) {
-      CUDA_CHECK(cudaMemcpy(dChunkInput_.get(), current,
-                            chunkSize * sizeof(float),
-                            cudaMemcpyDeviceToDevice));
-    }
-  }
-
-  static void applyProjDomainChunkPSF(std::vector<double> &ratioChunk,
-                                      size_t frameSize, int detNz, int detNx,
-                                      const filters::PSFKernels &psfKernels,
-                                      int threads) {
-    if (ratioChunk.empty()) {
-      return;
-    }
-
-    const ptrdiff_t frameCount =
-        static_cast<ptrdiff_t>(ratioChunk.size() / frameSize);
-#pragma omp parallel num_threads(threads) if(threads > 1 && frameCount > 1)
-    {
-      std::vector<double> frame(frameSize, 0.0);
-#pragma omp for schedule(static)
-      for (ptrdiff_t frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
-        const size_t offset = static_cast<size_t>(frameIndex) * frameSize;
-        std::copy_n(ratioChunk.data() + offset, frameSize, frame.data());
-        filters::conv2d_separable_inplace(frame, detNz, detNx, psfKernels.ky,
-                                          psfKernels.kx, 1);
-        std::copy_n(frame.data(), frameSize, ratioChunk.data() + offset);
-      }
-    }
-  }
 
   static size_t spmvBufferIndex(cusparseOperation_t operation) {
     return operation == CUSPARSE_OPERATION_TRANSPOSE ? 1u : 0u;
@@ -2207,22 +1997,6 @@ private:
     subsetCacheKeys_[slot] = key;
     subsetCacheValid_[slot] = true;
     return subsetCache_[slot];
-  }
-
-  const CachedMatrix &ensureStreamingSubsetUploaded(
-      const io::CSRView &matrix, const std::vector<int> &subset_rows,
-      int threads) {
-    const SubsetCacheKey key = makeSubsetCacheKey(matrix, subset_rows);
-    if (streamingSubsetValid_ && streamingSubsetKey_ == key &&
-        streamingSubsetCache_.matA.get() != nullptr) {
-      return streamingSubsetCache_;
-    }
-
-    buildSubsetCSR(matrix, subset_rows, threads, subsetHostScratch_);
-    uploadHostCSR(subsetHostScratch_, key.matrix, &streamingSubsetCache_);
-    streamingSubsetKey_ = key;
-    streamingSubsetValid_ = true;
-    return streamingSubsetCache_;
   }
 
   const CachedMatrix &ensureStreamingRangeUploaded(const io::CSRView &matrix,
@@ -3434,9 +3208,6 @@ private:
   std::array<SubsetCacheKey, 4> subsetCacheKeys_{};
   std::array<bool, 4> subsetCacheValid_{};
   size_t nextSubsetCacheSlot_ = 0;
-  CachedMatrix streamingSubsetCache_;
-  SubsetCacheKey streamingSubsetKey_{};
-  bool streamingSubsetValid_ = false;
   CachedMatrix streamingRangeCache_;
   RangeCacheKey streamingRangeKey_{};
   bool streamingRangeValid_ = false;
@@ -3467,9 +3238,6 @@ private:
   DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
   PinnedHostArray<float> pinnedOutputStage_;
-  DeviceArray<float> dProjChunkScratch_;
-  DeviceArray<float> dProjKernelX_;
-  DeviceArray<float> dProjKernelY_;
   DeviceArray<float> dAccumOutput_;
   DeviceArray<float> dFullOutput_;
   // Branch-batch compact-symmetric buffers (cols x batchSize / rows x batchSize).
@@ -3489,8 +3257,6 @@ private:
   std::array<DeviceBuffer, spect::core::kMaxBeds> dBedBuffer_;
   std::array<DeviceArray<double>, kCompactDeviceBackwardMaxAccumulators>
       dCompactBackwardAccum_;
-  std::vector<float> projKernelXHost_;
-  std::vector<float> projKernelYHost_;
   std::vector<float> hostFloatScratch_;
   std::array<const double *, spect::core::kMaxBeds> compactProjectionHostKey_{};
   std::array<size_t, spect::core::kMaxBeds> compactProjectionCount_{};

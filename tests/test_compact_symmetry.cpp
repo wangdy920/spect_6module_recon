@@ -24,76 +24,6 @@ namespace spect {
 namespace io {
 namespace test {
 
-TEST(IOTest, CompactSymmetryMetadataReadsLegacyLayout) {
-    const auto dir = std::filesystem::temp_directory_path() / "spect_compact_meta_tests";
-    std::filesystem::create_directories(dir);
-    const auto path = dir / "metadata.bin";
-
-    {
-        std::ofstream out(path, std::ios::binary);
-        ASSERT_TRUE(out);
-        const int32_t ints[] = {
-            6, 4, 10, 3, 2, 1, 2, 16, 2, 2, 1
-        };
-        out.write(reinterpret_cast<const char*>(ints), sizeof(ints));
-        const float voxel = 0.3f;
-        out.write(reinterpret_cast<const char*>(&voxel), sizeof(voxel));
-        const int32_t detNxDup = 2;
-        const int32_t detNz = 2;
-        out.write(reinterpret_cast<const char*>(&detNxDup), sizeof(detNxDup));
-        out.write(reinterpret_cast<const char*>(&detNz), sizeof(detNz));
-        const float pixel = 1.0f;
-        const float detectorY = 0.0f;
-        const float thickness = 1.0f;
-        out.write(reinterpret_cast<const char*>(&pixel), sizeof(pixel));
-        out.write(reinterpret_cast<const char*>(&detectorY), sizeof(detectorY));
-        out.write(reinterpret_cast<const char*>(&thickness), sizeof(thickness));
-        const int32_t use90 = 0;
-        const int32_t useZ = 1;
-        out.write(reinterpret_cast<const char*>(&use90), sizeof(use90));
-        out.write(reinterpret_cast<const char*>(&useZ), sizeof(useZ));
-    }
-
-    const auto meta = spect::io::loadCompactSymmetryMetadata(path.string());
-    EXPECT_EQ(meta.mode, spect::io::CompactSymmetryMode::Sym45Z);
-    EXPECT_EQ(meta.compactRows(), 6);
-    EXPECT_EQ(meta.fullRows(), 64);
-    EXPECT_EQ(meta.xySymmetryCount(), 8);
-    EXPECT_EQ(meta.zBranchCount(), 2);
-
-    spect::io::CSRView view{};
-    uint32_t rowPtr[] = {0, 0, 0, 0, 0, 0, 0};
-    float dummyVal[] = {1.0f};
-    uint32_t dummyCol[] = {0};
-    view.rows = 6;
-    view.cols = 4;
-    view.row_ptr = rowPtr;
-    view.col_idx = dummyCol;
-    view.val = dummyVal;
-    view.nnz = 0;
-    EXPECT_NO_THROW(spect::io::validateCompactSymmetricInputs(
-        meta, view, 64, 2, 2, 16, 2, 2, 1));
-
-    bool valid = false;
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 0, 0, valid), 0);
-    EXPECT_TRUE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 0, valid), 0);
-    EXPECT_FALSE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 1, 1, valid), 3);
-    EXPECT_TRUE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 1, valid), 2);
-    EXPECT_TRUE(valid);
-
-    uint64_t fullIndex = 0;
-    EXPECT_TRUE(spect::io::fullProjectionIndexFromCompactRow(
-        meta, 0, 0, false, fullIndex));
-    EXPECT_EQ(fullIndex, 0u);
-    EXPECT_TRUE(spect::io::fullProjectionIndexFromCompactRow(
-        meta, 0, 0, true, fullIndex));
-    EXPECT_EQ(fullIndex, 2u);
-
-    std::filesystem::remove(path);
-}
 TEST(IOTest, CompactSymmetryMapsSixModuleFullProjectionRowsOnce) {
     spect::io::CompactSymmetryMetadata meta;
     meta.totalRows = 52992;
@@ -202,7 +132,7 @@ TEST(IOTest, CompactSymmetryMetadataRejectsTruncatedExtendedHeader) {
     const auto path = dir / "metadata_truncated.bin";
 
     {
-        std::vector<char> bytes(spect::io::kCompactMetadataLegacyBytes + 4, 0);
+        std::vector<char> bytes(spect::io::kCompactMetadataExtendedV1Bytes - 8, 0);
         std::ofstream out(path, std::ios::binary);
         ASSERT_TRUE(out);
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));

@@ -289,54 +289,6 @@ void conv3d_separable_adjoint_inplace(
   f.swap(tmp);
 }
 
-void conv2d_separable_inplace(std::vector<double> &img, int rows, int cols,
-                              const std::vector<double> &ky,
-                              const std::vector<double> &kx, int threads) {
-  if (rows <= 0 || cols <= 0)
-    return;
-
-  const size_t total = static_cast<size_t>(rows) * static_cast<size_t>(cols);
-  thread_local std::vector<double> tmp;
-  tmp.resize(total);
-  auto idx2 = [cols](int r, int c) {
-    return static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c);
-  };
-
-  const int ry = static_cast<int>(ky.size()) / 2;
-#pragma omp parallel for schedule(static) num_threads(threads)
-  for (int c = 0; c < cols; ++c) {
-    for (int r = 0; r < rows; ++r) {
-      double sum = 0.0;
-      for (int t = -ry; t <= ry; ++t) {
-        int rr = r + t;
-        if (rr < 0)
-          rr = -rr;
-        else if (rr >= rows)
-          rr = rows - 1 - (rr - (rows - 1));
-        sum += ky[static_cast<size_t>(t + ry)] * img[idx2(rr, c)];
-      }
-      tmp[idx2(r, c)] = sum;
-    }
-  }
-
-  const int rx = static_cast<int>(kx.size()) / 2;
-#pragma omp parallel for schedule(static) num_threads(threads)
-  for (int r = 0; r < rows; ++r) {
-    for (int c = 0; c < cols; ++c) {
-      double sum = 0.0;
-      for (int t = -rx; t <= rx; ++t) {
-        int cc = c + t;
-        if (cc < 0)
-          cc = -cc;
-        else if (cc >= cols)
-          cc = cols - 1 - (cc - (cols - 1));
-        sum += kx[static_cast<size_t>(t + rx)] * tmp[idx2(r, cc)];
-      }
-      img[idx2(r, c)] = sum;
-    }
-  }
-}
-
 PSFKernels make_psf_kernels(const PSFConf &psf) {
   PSFKernels kernels;
   const double fwhm_x = (psf.fwhm_x > 0.0) ? psf.fwhm_x : psf.fwhm_mm;

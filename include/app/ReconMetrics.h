@@ -1,7 +1,6 @@
 #pragma once
 
 #include "app/ProjectionOps.h"
-#include "filters/Convolution.h"
 
 #include <algorithm>
 #include <cmath>
@@ -100,29 +99,6 @@ inline std::vector<double> computeExpectedProjectionRuntime(
     }
 
     const char* resolvedTag = "runtime";
-    if (opts.psf.mode == PSFMode::ProjDomain) {
-        resolvedTag = "runtime-projdomain";
-        const size_t frameSize = static_cast<size_t>(opts.det_nz) * static_cast<size_t>(opts.det_nx);
-        const bool geometryValid = psfKernels != nullptr && opts.det_nz > 0 && opts.det_nx > 0 &&
-                                   opts.num_angles > 0 && frameSize > 0 &&
-                                   frameSize * static_cast<size_t>(opts.num_angles) ==
-                                       static_cast<size_t>(baseRows);
-        if (geometryValid) {
-            for (int bed = 0; bed < bedCount; ++bed) {
-                const size_t bedOffset = static_cast<size_t>(bed) * static_cast<size_t>(baseRows);
-                for (int angle = 0; angle < opts.num_angles; ++angle) {
-                    const size_t frameOffset = bedOffset + static_cast<size_t>(angle) * frameSize;
-                    std::vector<double> frame(predicted.begin() + frameOffset,
-                                              predicted.begin() + frameOffset + frameSize);
-                    filters::conv2d_separable_inplace(frame, opts.det_nz, opts.det_nx,
-                                                      psfKernels->ky, psfKernels->kx, threads);
-                    std::copy(frame.begin(), frame.end(), predicted.begin() + frameOffset);
-                }
-            }
-        } else {
-            resolvedTag = "approx-bare";
-        }
-    }
 
 #pragma omp parallel for schedule(static) num_threads(threads)
     for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(predicted.size()); ++i) {

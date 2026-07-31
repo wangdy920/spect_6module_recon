@@ -89,7 +89,7 @@ private:
     /**
      * @brief Apply algorithm-specific config file values to ReconArgs.
      * Only affects algorithm-related sections ([Algorithm], [Regularization],
-     * [BSREM], [ADMM], [BackendHint]). Does NOT override geometry/IO/detector.
+     * [BSREM], [BackendHint]). Does NOT override geometry/IO/detector.
      */
     static bool applyAlgoConf(ReconArgs& args, const std::string& path);
 
@@ -112,11 +112,6 @@ private:
      * @brief Parse iteration specification (iter[:saveInterval]).
      */
     static bool parseIterations(const std::string& value, ReconArgs& args);
-
-    /**
-     * @brief Parse PSF parameters from legacy format.
-     */
-    static bool parsePSFParams(const std::string& value, ReconArgs& args);
 
     /**
      * @brief Parse output path into directory and filename.

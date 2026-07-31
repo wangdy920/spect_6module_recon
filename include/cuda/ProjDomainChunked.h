@@ -2,7 +2,6 @@
 
 #include "cuda/CudaLaunchConfig.h"
 
-#include "filters/PSFConfig.h"
 #include "io/CSRTypes.h"
 
 #include <cstddef>
@@ -57,33 +56,6 @@ struct CudaChunkStageTimingSnapshot {
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
-bool runProjDomainChunkedStreamingCUDA(
-    const io::CSRView &matrix, const std::vector<std::vector<int>> &chunkRows,
-    const std::vector<double> &projections,
-    const filters::PSFKernels &psfKernels, size_t frameSize, int detNz,
-    int detNx, const double *image, int threads, double *numer);
-
-bool runFullSubsetBsremCUDA(const io::CSRView &matrix,
-                            const std::vector<double> &projections,
-                            const double *image, int bedCount,
-                            const std::vector<long long> *bedOffsets,
-                            const std::vector<std::vector<uint16_t>> *bedAttenFactors,
-                            int numAngles,
-                            int threads, double *numer);
-
-bool runFullSubsetEmNumerCUDA(const io::CSRView &matrix,
-                              const std::vector<double> &projections,
-                              const double *image, int bedCount,
-                              const std::vector<long long> *bedOffsets,
-                              const std::vector<std::vector<uint16_t>> *bedAttenFactors,
-                              int numAngles,
-                              int threads, double *numer);
-
-bool warmupFullSubsetChunkCacheCUDA(
-    const io::CSRView &matrix, int bedCount,
-    const std::vector<std::vector<uint16_t>> *bedAttenFactors, int numAngles,
-    int threads);
-
 void resetCudaChunkStageTimingCUDA();
 CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA();
 void setCudaChunkNnzBudgetOverrideForTestingCUDA(uint64_t nnzBudget);
@@ -99,39 +71,6 @@ uint64_t getProjDomainChunkNnzBudgetCUDA();
 uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA();
 
 #else
-
-inline bool runProjDomainChunkedStreamingCUDA(
-    const io::CSRView &, const std::vector<std::vector<int>> &,
-    const std::vector<double> &, const filters::PSFKernels &, size_t, int, int,
-    const double *, int, double *) {
-  return false;
-}
-
-inline bool runFullSubsetBsremCUDA(const io::CSRView &,
-                                   const std::vector<double> &,
-                                   const double *, int,
-                                   const std::vector<long long> *,
-                                   const std::vector<std::vector<uint16_t>> *,
-                                   int, int,
-                                   double *) {
-  return false;
-}
-
-inline bool runFullSubsetEmNumerCUDA(const io::CSRView &,
-                                     const std::vector<double> &,
-                                     const double *, int,
-                                     const std::vector<long long> *,
-                                     const std::vector<std::vector<uint16_t>> *,
-                                     int, int,
-                                     double *) {
-  return false;
-}
-
-inline bool warmupFullSubsetChunkCacheCUDA(
-    const io::CSRView &, int, const std::vector<std::vector<uint16_t>> *, int,
-    int) {
-  return false;
-}
 
 inline void resetCudaChunkStageTimingCUDA() {}
 inline CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {

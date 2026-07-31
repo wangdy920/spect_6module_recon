@@ -28,7 +28,7 @@ target_compile_features(spect_interfaces INTERFACE cxx_std_17)
 # 当前为INTERFACE库，后续添加.cpp文件时改为STATIC
 add_library(spect_core INTERFACE)
 target_link_libraries(spect_core INTERFACE spect_interfaces)
-# spect_core将来包含: CSRMap.cpp, CSRBinary.cpp, SparseOpsRef.cpp等
+# spect_core将来包含: 核心类型编译单元等
 
 # ----------------------------------
 # spect_algo: 算法库 (MLEM/OSEM/正则化器等)
@@ -51,11 +51,11 @@ add_library(spect::algo ALIAS spect_algo)
 message(STATUS "SPECT modular libraries: spect_interfaces, spect_core, spect_algo")
 
 # ----------------------------------
-# spect_sparse: 稀疏矩阵运算库 (SparseOpsRef, SparseOpsCPU等)
+# spect_sparse: 稀疏矩阵运算库 (SparseOpsDefaults等)
 # 【T3.1】统一SpMV实现
 # ----------------------------------
 add_library(spect_sparse STATIC
-  src/sparse/SparseOpsDefaults.cpp
+  src/cuda/SparseOpsDefaults.cpp
 )
 target_include_directories(spect_sparse PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -173,7 +173,6 @@ add_library(spect::cli ALIAS spect_cli)
 add_library(spect_io STATIC
   src/io/ProjectionLoader.cpp
   src/io/MatFileReader.cpp
-  src/io/CSRBuilder.cpp
   src/io/MHDWriter.cpp
   src/io/CompactSymmetryMetadata.cpp
   src/io/CompactChunkCSR.cpp
@@ -194,9 +193,7 @@ add_library(spect::io ALIAS spect_io)
 # ----------------------------------
 add_library(spect_app STATIC
   src/app/ProjectionOps.cpp
-  src/app/OSEMReconstructor.cpp
   src/app/BsremUpdate.cpp
-  src/app/BSREMReconstructor.cpp
 )
 target_include_directories(spect_app PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -239,7 +236,7 @@ add_executable(SPECT_recon
   src/main/RunLogging.cpp
   src/main/RunLogger.cpp
   src/main/SmoothingOps.cpp
-  src/main/StandardReconLoop.cpp
+  src/main/SeamPostprocess.cpp
   src/main/VolumeOutput.cpp
   src/main/main.cpp
 )
@@ -279,25 +276,26 @@ add_custom_command(TARGET SPECT_recon POST_BUILD
           "${CMAKE_SOURCE_DIR}/config/spect_config.ini"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/spect_config.ini"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/config/bad_dector"
+          "$<TARGET_FILE_DIR:SPECT_recon>/config/bad_dector"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/config/algo_mlem.conf"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_mlem.conf"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${CMAKE_SOURCE_DIR}/config/algo_bsrem.conf"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_bsrem.conf"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/config/algo_admm.conf"
-          "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_admm.conf"
   COMMENT "Copying runtime config files beside SPECT_recon.exe")
 
-add_executable(spect_convert_6module_sysmat_to_csrb
-  tools/convert_6module_sysmat_to_csrb.cpp
-)
-target_include_directories(spect_convert_6module_sysmat_to_csrb PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+# Bundle CUDA 12.8+/13.x redistributables so RTX 30/40/50 field machines get
+# matching runtime libraries; NVRTC JITs compute_86 / compute_89 / compute_120.
+if((SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS) OR SPECT_ENABLE_BUTTERWORTH_CUFFT)
+  include(${CMAKE_SOURCE_DIR}/cmake/CudaRedist.cmake)
+  spect_bundle_cuda_runtime_for_target(SPECT_recon)
+endif()
 
 add_executable(spect_seam_postprocess
   tools/seam_postprocess.cpp
+  src/main/SeamPostprocess.cpp
   src/main/VolumeOutput.cpp
   src/main/RunLogger.cpp
 )
@@ -308,7 +306,18 @@ target_link_libraries(spect_seam_postprocess PRIVATE spect_io)
 set_target_properties(spect_seam_postprocess PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
-set_target_properties(spect_convert_6module_sysmat_to_csrb PROPERTIES
+
+add_executable(spect_forward_project
+  tools/forward_project_multibed.cpp
+)
+target_include_directories(spect_forward_project PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(spect_forward_project PRIVATE spect_io spect_app)
+if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
+  target_link_libraries(spect_forward_project PRIVATE spect_sparse_cuda)
+endif()
+set_target_properties(spect_forward_project PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 

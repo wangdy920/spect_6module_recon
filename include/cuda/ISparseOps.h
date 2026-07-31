@@ -2,7 +2,7 @@
  * @file ISparseOps.h
  * @brief 稀疏矩阵运算统一接口
  * 
- * 此接口统一CPU/CUDA后端的SpMV实现，算法层只调用接口。
+ * 此接口统一CUDA后端的SpMV实现，算法层只调用接口。
  * 
  * 设计约束:
  * - 虚调用粒度必须是"整次SpMV"，严禁元素级虚调用
@@ -12,7 +12,6 @@
 #pragma once
 
 #include "../core/AttenuationConstants.h"
-#include "../core/CSRView.h"
 #include "../core/Types.h"
 #include "../io/CSRTypes.h"
 #include "detail/SparseOpsDefaultsDecl.h"
@@ -34,8 +33,7 @@ struct SparseSubsetContext {
 /**
  * @brief 稀疏矩阵运算接口
  * 
- * 提供SpMV及相关稀疏运算的统一入口。
- * CPU和CUDA后端分别实现此接口。
+ * 提供SpMV及相关稀疏运算的统一入口（io::CSRView，CSRB v1 float 布局）。
  */
 class ISparseOps {
 public:
@@ -47,78 +45,7 @@ public:
     virtual BackendType backend() const = 0;
     
     /**
-     * @brief 稀疏矩阵-向量乘法 (y = A * x)
-     * 
-     * @param A CSR格式的稀疏矩阵视图
-     * @param x 输入向量 (长度 = A.cols)
-     * @param y 输出向量 (长度 = A.rows)
-     * @param threads 线程数 (仅CPU后端使用)
-     */
-    virtual void spmv(const CSRView& A, 
-                      const double* x, 
-                      double* y, 
-                      int threads = 1) const = 0;
-    
-    /**
-     * @brief 稀疏矩阵转置-向量乘法 (y = A^T * x)
-     * 
-     * @param A CSR格式的稀疏矩阵视图
-     * @param x 输入向量 (长度 = A.rows)
-     * @param y 输出向量 (长度 = A.cols)，调用前应初始化为0
-     * @param threads 线程数 (仅CPU后端使用)
-     * 
-     * @note 默认实现使用scatter模式，可能有性能问题。
-     *       建议使用显式转置矩阵的spmv()替代。
-     */
-    virtual void spmvT(const CSRView& A, 
-                       const double* x, 
-                       double* y, 
-                       int threads = 1) const = 0;
-    
-    /**
-     * @brief 计算归一化向量 (A^T * 1)
-     * 
-     * 即每列的和，用于MLEM/OSEM的敏感度计算。
-     * 
-     * @param A CSR格式的稀疏矩阵视图
-     * @param norm 输出归一化向量 (长度 = A.cols)
-     * @param threads 线程数
-     */
-    virtual void computeNormAT(const CSRView& A, 
-                               double* norm, 
-                               int threads = 1) const = 0;
-    
-    /**
-     * @brief 带缩放的SpMV (y = alpha * A * x + beta * y)
-     * 
-     * 可选实现，默认调用spmv后手动缩放。
-     */
-    virtual void spmvScaled(const CSRView& A, 
-                            const double* x, 
-                            double* y, 
-                            double alpha, 
-                            double beta,
-                            int threads = 1) const {
-        // 默认实现
-        if (beta == 0.0) {
-            spmv(A, x, y, threads);
-            if (alpha != 1.0) {
-                for (int64_t i = 0; i < A.rows; ++i) {
-                    y[i] *= alpha;
-                }
-            }
-        } else {
-            // 需要临时缓冲区：先计算 tmp = A*x，再做 y = alpha*tmp + beta*y
-            std::vector<double> tmp(static_cast<size_t>(A.rows), 0.0);
-            spmv(A, x, tmp.data(), threads);
-            for (int64_t i = 0; i < A.rows; ++i) {
-                y[i] = alpha * tmp[static_cast<size_t>(i)] + beta * y[i];
-            }
-        }
-    }
-
-    /**
-     * @brief 稀疏矩阵-向量乘法 (io::CSRView, float values)
+     * @brief 稀疏矩阵-向量乘法 (io::CSRView, y = A * x)
      *
      * 默认提供标量实现，后端可覆盖以获得更高性能。
      */
@@ -138,7 +65,7 @@ public:
     }
 
     /**
-     * @brief 稀疏矩阵转置-向量乘法 (io::CSRView)
+     * @brief 稀疏矩阵转置-向量乘法 (io::CSRView, y = A^T * x)
      */
     virtual void spmvT(const io::CSRView& A,
                        const double* x,
@@ -155,7 +82,7 @@ public:
     }
 
     /**
-     * @brief 计算归一化向量 (io::CSRView)
+     * @brief 计算归一化向量 (io::CSRView, A^T * 1)
      */
     virtual void computeNormAT(const io::CSRView& A,
                                double* norm,
@@ -171,7 +98,7 @@ public:
     }
 
     /**
-     * @brief 带缩放的SpMV (io::CSRView)
+     * @brief 带缩放的SpMV (io::CSRView, y = alpha * A * x + beta * y)
      */
     virtual void spmvScaled(const io::CSRView& A,
                             const double* x,
@@ -202,15 +129,6 @@ public:
      * @param ctx 多床位/CTAC上下文
      * @param y 输出向量（长度 = subset_rows.size()）
      */
-    virtual void spmvSubset(const CSRView& A,
-                            const double* x,
-                            const std::vector<int>& subset_rows,
-                            const SparseSubsetContext& ctx,
-                            double* y,
-                            int threads = 1) const {
-        sparse_detail::spmvSubsetImpl(A, x, subset_rows, ctx, y, threads);
-    }
-
     virtual void spmvSubset(const io::CSRView& A,
                             const double* x,
                             const std::vector<int>& subset_rows,
@@ -226,15 +144,6 @@ public:
      * @param x 输入向量（长度 = subset_rows.size()）
      * @param y 输出向量（长度 = 全局体素数，调用前应初始化为0）
      */
-    virtual void spmvTSubset(const CSRView& A,
-                             const double* x,
-                             const std::vector<int>& subset_rows,
-                             const SparseSubsetContext& ctx,
-                             double* y,
-                             int threads = 1) const {
-        sparse_detail::spmvTSubsetImpl(A, x, subset_rows, ctx, y, threads);
-    }
-
     virtual void spmvTSubset(const io::CSRView& A,
                              const double* x,
                              const std::vector<int>& subset_rows,
@@ -247,14 +156,6 @@ public:
     /**
      * @brief CTAC 加权的归一化向量: norm = A^T * att
      */
-    virtual void computeNormAT_Atten(const CSRView& A,
-                                     const std::vector<uint16_t>& atten,
-                                     int numAngles,
-                                     double* norm,
-                                     int threads = 1) const {
-        sparse_detail::computeNormAT_AttenImpl(A, atten, numAngles, norm, threads);
-    }
-
     virtual void computeNormAT_Atten(const io::CSRView& A,
                                      const std::vector<uint16_t>& atten,
                                      int numAngles,
@@ -266,16 +167,6 @@ public:
     /**
      * @brief 子集敏感度: S_sub = A(subset)^T * 1
      */
-    virtual void computeSubsetSensitivity(const CSRView& A,
-                                          const std::vector<int>& subset_rows,
-                                          int N,
-                                          const SparseSubsetContext& ctx,
-                                          double* sensitivity,
-                                          int threads = 1) const {
-        sparse_detail::computeSubsetSensitivityImpl(
-            A, subset_rows, N, ctx, sensitivity, threads);
-    }
-
     virtual void computeSubsetSensitivity(const io::CSRView& A,
                                           const std::vector<int>& subset_rows,
                                           int N,

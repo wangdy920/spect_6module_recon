@@ -14,7 +14,6 @@
 #include <string>
 #include <vector>
 
-#include "core/CSRHeader.h"
 #include "io/CSRTypes.h"
 #include "io/ProjectionLoader.h"
 #include "io/MatFileReader.h"

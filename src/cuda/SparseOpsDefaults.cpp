@@ -1,4 +1,4 @@
-#include "interfaces/ISparseOps.h"
+#include "cuda/ISparseOps.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -653,47 +653,24 @@ void computeSubsetSensitivityImpl(const MatrixType& A,
     }
 }
 
-template void spmvSubsetImpl<CSRView>(const CSRView&,
-                                      const double*,
-                                      const std::vector<int>&,
-                                      const SparseSubsetContext&,
-                                      double*,
-                                      int);
 template void spmvSubsetImpl<io::CSRView>(const io::CSRView&,
                                           const double*,
                                           const std::vector<int>&,
                                           const SparseSubsetContext&,
                                           double*,
                                           int);
-template void spmvTSubsetImpl<CSRView>(const CSRView&,
-                                       const double*,
-                                       const std::vector<int>&,
-                                       const SparseSubsetContext&,
-                                       double*,
-                                       int);
 template void spmvTSubsetImpl<io::CSRView>(const io::CSRView&,
                                            const double*,
                                            const std::vector<int>&,
                                            const SparseSubsetContext&,
                                            double*,
                                            int);
-template void computeNormAT_AttenImpl<CSRView>(const CSRView&,
-                                               const std::vector<uint16_t>&,
-                                               int,
-                                               double*,
-                                               int);
 template void computeNormAT_AttenImpl<io::CSRView>(
     const io::CSRView&,
     const std::vector<uint16_t>&,
     int,
     double*,
     int);
-template void computeSubsetSensitivityImpl<CSRView>(const CSRView&,
-                                                    const std::vector<int>&,
-                                                    int,
-                                                    const SparseSubsetContext&,
-                                                    double*,
-                                                    int);
 template void computeSubsetSensitivityImpl<io::CSRView>(
     const io::CSRView&,
     const std::vector<int>&,

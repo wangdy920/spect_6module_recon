@@ -5,11 +5,9 @@
 
 #pragma once
 
-#include "interfaces/ISparseOps.h"
+#include "cuda/ISparseOps.h"
 #include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
-#include "sparse/SparseOpsCPU.h"
-#include "sparse/SparseOpsRef.h"
 
 #include <cstddef>
 #include <cstdint>

@@ -33,11 +33,6 @@ std::string projectionSource(const ReconArgs &args) {
 std::string matrixSource(const ReconArgs &args) {
   if (!args.chunkCSRDir.empty())
     return "chunkCSRDir=" + args.chunkCSRDir;
-  if (!args.loadCSRPath.empty())
-    return "loadCSR=" + args.loadCSRPath;
-  if (!args.sysIndexPath.empty() || !args.sysWeightPath.empty())
-    return "mat-index=" + args.sysIndexPath + "; mat-weight=" +
-           args.sysWeightPath;
   return "<auto/config>";
 }
 
@@ -47,14 +42,6 @@ std::string psfModeName(spect::filters::PSFMode mode) {
     return "off";
   case spect::filters::PSFMode::Operator:
     return "operator";
-  case spect::filters::PSFMode::PostSmooth:
-    return "post-smooth";
-  case spect::filters::PSFMode::ProjDomain:
-    return "projection-domain";
-  case spect::filters::PSFMode::Gaussian:
-    return "gaussian";
-  case spect::filters::PSFMode::File:
-    return "file";
   }
   return "unknown";
 }
@@ -88,7 +75,7 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
       << ", name=" << (args.outputName.empty() ? "recon" : args.outputName)
       << "\n"
       << "  recon: opti=" << args.getAlgorithmName()
-      << ", iters=" << args.numIters << ", subsets=" << args.numSubsets
+      << ", iters=" << args.numIters
       << ", image=" << args.Nx << "x" << args.Ny << "x" << args.Nz
       << ", voxel_mm=" << args.Vx << "," << args.Vy << "," << args.Vz
       << "\n"
@@ -123,7 +110,6 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
   logDebug("Voxel: " + std::to_string(args.Vx) + "," +
            std::to_string(args.Vy) + "," + std::to_string(args.Vz) + " mm");
   logDebug("Angles: " + std::to_string(args.numAngles) +
-           ", subsets: " + std::to_string(args.numSubsets) +
            ", iterations: " + std::to_string(args.numIters));
   logDebug("Threads: " + std::to_string(args.numThreads) +
            ", sparse backend: cuda");

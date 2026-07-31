@@ -1,4 +1,4 @@
-#include "sparse/SparseOpsBackend.h"
+#include "cuda/SparseOpsBackend.h"
 #include "core/AttenuationConstants.h"
 #include "cuda/CudaDriverHelpers.h"
 #include "cuda/ProjDomainChunked.h"
@@ -9,7 +9,6 @@
 #include "CudaCsrBuilder.h"
 #include "CudaProjKernelLauncher.h"
 #include "cuda/CudaConfig.h"
-#include "filters/Convolution.h"
 
 #if CUDA_ENABLED
 
@@ -141,26 +140,6 @@ bool isFullMultiBedSubset(const std::vector<int> &subset_rows,
 class SparseOpsCUDAImpl final : public ISparseOps {
 public:
   BackendType backend() const override { return BackendType::CUDA; }
-
-  void spmv(const CSRView &matrix, const double *x, double *y,
-            int threads) const override {
-    (void)threads;
-    cudaState().executeSpMV(matrix, x, y, CUSPARSE_OPERATION_NON_TRANSPOSE);
-  }
-
-  void spmvT(const CSRView &matrix, const double *x, double *y,
-             int threads) const override {
-    (void)threads;
-    cudaState().executeSpMV(matrix, x, y, CUSPARSE_OPERATION_TRANSPOSE);
-  }
-
-  void computeNormAT(const CSRView &matrix, double *norm,
-                     int threads) const override {
-    (void)threads;
-    std::vector<double> ones(static_cast<size_t>(matrix.rows), 1.0);
-    std::fill(norm, norm + static_cast<size_t>(matrix.cols), 0.0);
-    spmvT(matrix, ones.data(), norm, threads);
-  }
 
   void spmv(const io::CSRView &matrix, const double *x, double *y,
             int threads = 1) const override {
@@ -444,64 +423,6 @@ int resolveCudaHostChunkBuildThreadsForTestingCUDA(int requestedThreads,
 uint64_t resolveCudaPreparedChunkHostCacheBudgetForTestingCUDA(
     size_t activePreparedCaches) {
   return selectPreparedChunkHostCacheBudgetBytes(activePreparedCaches);
-}
-
-bool runProjDomainChunkedStreamingCUDA(
-    const io::CSRView &matrix, const std::vector<std::vector<int>> &chunkRows,
-    const std::vector<double> &projections,
-    const filters::PSFKernels &psfKernels, size_t frameSize, int detNz,
-    int detNx, const double *image, int threads, double *numer) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().runProjDomainChunkedStreaming(
-      matrix, chunkRows, projections, psfKernels, frameSize, detNz, detNx,
-      image, threads, numer);
-  return true;
-}
-
-bool runFullSubsetBsremCUDA(const io::CSRView &matrix,
-                            const std::vector<double> &projections,
-                            const double *image, int bedCount,
-                            const std::vector<long long> *bedOffsets,
-                            const std::vector<std::vector<uint16_t>> *bedAttenFactors,
-                            int numAngles,
-                            int threads, double *numer) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().runFullSubsetEmNumer(matrix, projections, image, bedCount,
-                                   bedOffsets, bedAttenFactors, numAngles,
-                                   threads, numer);
-  return true;
-}
-
-bool runFullSubsetEmNumerCUDA(const io::CSRView &matrix,
-                              const std::vector<double> &projections,
-                              const double *image, int bedCount,
-                              const std::vector<long long> *bedOffsets,
-                              const std::vector<std::vector<uint16_t>> *bedAttenFactors,
-                              int numAngles,
-                              int threads, double *numer) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().runFullSubsetEmNumer(matrix, projections, image, bedCount,
-                                   bedOffsets, bedAttenFactors, numAngles,
-                                   threads, numer);
-  return true;
-}
-
-bool warmupFullSubsetChunkCacheCUDA(
-    const io::CSRView &matrix, int bedCount,
-    const std::vector<std::vector<uint16_t>> *bedAttenFactors, int numAngles,
-    int threads) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  return cudaState().warmupFullSubsetChunkCache(matrix, bedCount,
-                                                bedAttenFactors, numAngles,
-                                                threads);
 }
 
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &matrices,
@@ -813,24 +734,6 @@ namespace {
 class SparseOpsCUDAUnavailable final : public ISparseOps {
 public:
   BackendType backend() const override { return BackendType::CUDA; }
-
-  void spmv(const CSRView &, const double *, double *, int) const override {
-    throw std::runtime_error(
-        "CUDA sparse backend was enabled for selection, but this build does not "
-        "contain SPECT_HAS_CUDA support.");
-  }
-
-  void spmvT(const CSRView &, const double *, double *, int) const override {
-    throw std::runtime_error(
-        "CUDA sparse backend was enabled for selection, but this build does not "
-        "contain SPECT_HAS_CUDA support.");
-  }
-
-  void computeNormAT(const CSRView &, double *, int) const override {
-    throw std::runtime_error(
-        "CUDA sparse backend was enabled for selection, but this build does not "
-        "contain SPECT_HAS_CUDA support.");
-  }
 };
 
 } // namespace
@@ -847,35 +750,6 @@ uint64_t getProjDomainChunkNnzBudgetCUDA() {
 }
 
 uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() { return 0; }
-
-bool runProjDomainChunkedStreamingCUDA(
-    const io::CSRView &, const std::vector<std::vector<int>> &,
-    const std::vector<double> &, const filters::PSFKernels &, size_t, int, int,
-    const double *, int, double *) {
-  return false;
-}
-
-bool runFullSubsetBsremCUDA(const io::CSRView &, const std::vector<double> &,
-                            const double *, int,
-                            const std::vector<long long> *,
-                            const std::vector<std::vector<uint16_t>> *, int,
-                            int, double *) {
-  return false;
-}
-
-bool runFullSubsetEmNumerCUDA(const io::CSRView &,
-                              const std::vector<double> &, const double *, int,
-                              const std::vector<long long> *,
-                              const std::vector<std::vector<uint16_t>> *, int,
-                              int, double *) {
-  return false;
-}
-
-bool warmupFullSubsetChunkCacheCUDA(
-    const io::CSRView &, int, const std::vector<std::vector<uint16_t>> *, int,
-    int) {
-  return false;
-}
 
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &,
                                  uint64_t) {

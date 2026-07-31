@@ -1,4 +1,5 @@
 #include "main/ReconSetup.h"
+#include "main/VolumeOutput.h"
 
 #include "core/BedPathUtils.h"
 #include "core/ReconLimits.h"
@@ -156,9 +157,7 @@ bool ensureReconDims(ReconArgs &args, std::string *warningMessage) {
   }
 
   if (changed) {
-    const bool matrixInput =
-        !args.loadCSRPath.empty() || !args.chunkCSRDir.empty() ||
-        !args.sysIndexPath.empty() || !args.sysWeightPath.empty();
+    const bool matrixInput = !args.chunkCSRDir.empty();
     if (matrixInput && !args.dimExplicit) {
       throw std::runtime_error(
           "Reconstruction dimensions are required for matrix inputs. Set -dim "
@@ -216,9 +215,19 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     );
   }
 
-  args.bedOverlaps = args.bedOverlapInRecon
-                         ? args.outputBedOverlaps
-                         : std::vector<int>(static_cast<size_t>(joints), 0);
+  if (args.bedCropMethod == "center66_cosine10") {
+    if (result.baseNz < kCenter66CropLayers)
+      throw std::runtime_error(
+          "crop_method=center66_cosine10 requires baseNz >= 66.");
+    for (int overlap : args.outputBedOverlaps) {
+      if (result.baseNz - overlap != kCenter66BedStepLayers)
+        throw std::runtime_error(
+            "crop_method=center66_cosine10 requires bed_overlap = baseNz - 56 "
+            "for every selected joint.");
+    }
+  }
+
+  args.bedOverlaps = std::vector<int>(static_cast<size_t>(joints), 0);
   result.totalOverlap = 0;
   for (int overlap : args.bedOverlaps)
     result.totalOverlap += overlap;
@@ -226,17 +235,12 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   args.Nz = result.baseNz * result.bedCount - result.totalOverlap;
   std::ostringstream summary;
   summary << "Multi-bed setup: beds=" << result.bedCount << ", baseNz=" << result.baseNz
-          << ", overlapMode="
-          << (args.bedOverlapInRecon
-                  ? "reconstruction"
-                  : "output-" + args.bedCropMethod)
+          << ", overlapMode=output-" << args.bedCropMethod
           << ", reconOverlap=" << result.totalOverlap;
-  if (!args.bedOverlapInRecon) {
-    int outputOverlap = 0;
-    for (int overlap : args.outputBedOverlaps)
-      outputOverlap += overlap;
-    summary << ", outputOverlap=" << outputOverlap;
-  }
+  int outputOverlap = 0;
+  for (int overlap : args.outputBedOverlaps)
+    outputOverlap += overlap;
+  summary << ", outputOverlap=" << outputOverlap;
   summary << ", reconNz=" << args.Nz;
   result.summary = summary.str();
   return result;

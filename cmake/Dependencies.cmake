@@ -3,20 +3,42 @@ include(GNUInstallDirs)   # 【改动】防止未定义 CMAKE_INSTALL_BINDIR
 if((SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS) OR SPECT_ENABLE_BUTTERWORTH_CUFFT)
   find_package(CUDAToolkit REQUIRED)
   message(STATUS "CUDAToolkit version: ${CUDAToolkit_VERSION}")
+  message(STATUS "SPECT CUDA architectures: ${SPECT_CUDA_ARCHITECTURES}")
+  if(CUDAToolkit_VERSION VERSION_LESS "${SPECT_CUDA_MIN_TOOLKIT_VERSION}")
+    message(FATAL_ERROR
+      "CUDA Toolkit >= ${SPECT_CUDA_MIN_TOOLKIT_VERSION} is required for "
+      "consumer RTX 50-series (sm_120 / compute_120). Found ${CUDAToolkit_VERSION}.")
+  endif()
+
+  # CUDA 13+ places redistributable DLLs under bin/x64 on Windows.
+  set(SPECT_CUDA_REDIST_DIR "")
+  if(DEFINED CUDAToolkit_BIN_DIR)
+    if(EXISTS "${CUDAToolkit_BIN_DIR}/x64")
+      set(SPECT_CUDA_REDIST_DIR "${CUDAToolkit_BIN_DIR}/x64")
+    elseif(EXISTS "${CUDAToolkit_BIN_DIR}")
+      set(SPECT_CUDA_REDIST_DIR "${CUDAToolkit_BIN_DIR}")
+    endif()
+  endif()
+  if(SPECT_CUDA_REDIST_DIR)
+    message(STATUS "CUDA redistributable dir: ${SPECT_CUDA_REDIST_DIR}")
+  else()
+    message(WARNING "CUDA redistributable directory not found; SPECT_BUNDLE_CUDA_RUNTIME may be a no-op")
+  endif()
 endif()
 
 # 条件编译定义
 if(SPECT_DETERMINISTIC)
   add_compile_definitions(SPECT_DETERMINISTIC=1)
 endif()
-if(SPECT_CSR_STRICT_VALIDATE)
-  add_compile_definitions(SPECT_CSR_STRICT_VALIDATE=1)
-endif()
 if(SPECT_ENABLE_CUDA_SPARSEOPS)
   add_compile_definitions(SPECT_ENABLE_CUDA_SPARSEOPS=1)
 endif()
 if(SPECT_ENABLE_BUTTERWORTH_CUFFT)
   add_compile_definitions(SPECT_BUTTERWORTH_HAVE_CUFFT=1)
+endif()
+if(DEFINED SPECT_CUDA_MIN_DRIVER_API_VERSION)
+  add_compile_definitions(
+    SPECT_CUDA_MIN_DRIVER_API_VERSION=${SPECT_CUDA_MIN_DRIVER_API_VERSION})
 endif()
 
 # 诊断输出

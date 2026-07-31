@@ -111,19 +111,11 @@ CompactSymmetryMode inferCompactSymmetryMode(
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   const std::size_t fileSize = metadataFileSize(path);
-  if (fileSize < kCompactMetadataLegacyBytes) {
+  if (fileSize < kCompactMetadataExtendedV1Bytes) {
     throw std::runtime_error(
         "Compact metadata file too small (" + std::to_string(fileSize) +
-        " bytes, expected at least " + std::to_string(kCompactMetadataLegacyBytes) +
+        " bytes, expected at least " + std::to_string(kCompactMetadataExtendedV1Bytes) +
         "): " + path);
-  }
-  if (fileSize > kCompactMetadataLegacyBytes &&
-      fileSize < kCompactMetadataExtendedV1Bytes) {
-    throw std::runtime_error(
-        "Compact metadata has truncated extended header (" +
-        std::to_string(fileSize) + " bytes, expected " +
-        std::to_string(kCompactMetadataLegacyBytes) + " or >= " +
-        std::to_string(kCompactMetadataExtendedV1Bytes) + "): " + path);
   }
   if (fileSize > kCompactMetadataExtendedV2Bytes) {
     throw std::runtime_error(

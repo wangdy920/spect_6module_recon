@@ -3,7 +3,7 @@
 #include "app/ReconConfig.h"
 #include "cli/ReconArgs.h"
 #include "filters/PSFConfig.h"
-#include "io/CSRBuilder.h"
+#include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "main/ReconPreparation.h"

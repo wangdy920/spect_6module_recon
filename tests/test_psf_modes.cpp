@@ -1,6 +1,6 @@
 /**
  * @file test_psf_modes.cpp
- * @brief PSF 模式行为测试（Operator / PostSmooth）
+ * @brief PSF 模式行为测试（Operator）
  */
 
 #include <gtest/gtest.h>
@@ -129,26 +129,6 @@ TEST(PSFModeTest, XyOnlyModeBuildsIdentityZKernel) {
     EXPECT_GT(kernels.kx.size(), 1u);
     EXPECT_GT(kernels.ky.size(), 1u);
     EXPECT_EQ(kernels.kz, (std::vector<double>{1.0}));
-}
-
-TEST(PSFModeTest, PostSmoothDoesNotBlurDuringProjection) {
-    const int Nx = 5, Ny = 3, Nz = 1;
-    const auto input = makePatternVolume(Nx, Ny, Nz);
-
-    ReconOpts opts;
-    opts.threads = 1;
-    opts.psf = makeBasicPSF();
-    opts.psf.mode = PSFMode::PostSmooth;
-
-    const auto kernels = make_psf_kernels(opts.psf);
-
-    std::vector<double> forward;
-    apply_psf_forward(input, forward, Nx, Ny, Nz, opts, &kernels, opts.threads);
-    EXPECT_NEAR(maxAbsDiff(input, forward), 0.0, 1e-12);
-
-    std::vector<double> backward = input;
-    apply_psf_backward(backward, Nx, Ny, Nz, opts, &kernels, opts.threads);
-    EXPECT_NEAR(maxAbsDiff(input, backward), 0.0, 1e-12);
 }
 
 TEST(PSFModeTest, GlobalVolumePsfSpansBedStartWhereLocalBedPsfMissesHalo) {

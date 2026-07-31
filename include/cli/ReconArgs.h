@@ -40,7 +40,6 @@ struct ReconArgs {
     bool badDetectorFileExplicit = false; ///< CLI path is resolved from cwd, not config dir
     int numIters = 50;            ///< Total iterations
     int saveInterval = 5;         ///< Save every N iterations
-    int numSubsets = 1;           ///< Subsets (1 = MLEM)
     int numThreads = 8;           ///< Thread count
     std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI
     bool cudaDeviceRequested = false; ///< True if CUDA device selection was requested
@@ -49,8 +48,6 @@ struct ReconArgs {
     // ========== Input/Output Paths ==========
     std::string projPath;                ///< Single-bed projection file
     std::vector<std::string> projPaths;  ///< Multi-bed projection list
-    std::string sysIndexPath;            ///< System matrix index file
-    std::string sysWeightPath;           ///< System matrix weight file
     std::string outputDir = "output";    ///< Output directory
     std::string outputName;              ///< Output filename base
 
@@ -73,7 +70,6 @@ struct ReconArgs {
     int butterOrder = 2;
     bool usePSF = false;
     PSFConf psf;                  ///< PSF configuration
-    bool psfProj = false;         ///< Per-angle 2D PSF in projection domain
     bool psfModeExplicit = false; ///< -psfMode was used explicitly
 
     // ========== Regularization ==========
@@ -110,13 +106,6 @@ struct ReconArgs {
     std::string ctacFactorCacheDir;       ///< Directory for cached CTAC attenuation factor tables
 
     // ========== CSR Cache ==========
-    std::string saveCSRPath;  ///< Save CSR to binary
-    std::string loadCSRPath;  ///< Load CSR from binary
-    bool loadCSRExplicit = false; ///< True if -loadCSR was used explicitly
-    bool mapCSR = false;      ///< Memory-map CSR
-    std::string matrixLayout = "standard"; ///< standard or compact-symmetric
-    bool matrixLayoutExplicit = false;     ///< True if -matrixLayout was used explicitly
-    std::string compactMetaPath;           ///< Optional compact metadata sidecar
     std::string compactDenomCachePath;     ///< Optional cached compact denominator MHD
     std::string chunkCSRDir;               ///< Directory with metadata.bin + chunk_*.csrb
     bool chunkCSRDirExplicit = false;      ///< True if -chunkCSRDir was used explicitly
@@ -128,13 +117,9 @@ struct ReconArgs {
     bool projectionResidual = false; ///< Write final compact projection residual CSV
 
     // ========== Optimization Algorithm ==========
-    enum class Algorithm { MLEM, BSREM, ADMM };
+    enum class Algorithm { MLEM, BSREM };
     Algorithm algorithm = Algorithm::MLEM;
 
-    // ========== ADMM Parameters ==========
-    double admmRho = 1.0;  ///< ADMM augmented Lagrangian penalty ρ
-    int admmTvInner = 20;  ///< Chambolle-Pock inner iterations for TV proximal
-    bool admmAdaptive = true; ///< Adaptive ρ adjustment (Boyd 2011 / CASToR)
     float bsrem_alpha0 = 1.0f;
     float bsrem_gamma = 0.05f;
     bool bsremUseCurvDenom = false;          ///< Enable BSREM denominator D = S + beta*Dreg
@@ -156,8 +141,7 @@ struct ReconArgs {
     int bedCount = 1;
     std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
     std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
-    bool bedOverlapInRecon = false; ///< Use bed overlap in joint reconstruction geometry
-    std::string bedCropMethod = "sigmoid"; ///< direct | sigmoid (output-only)
+    std::string bedCropMethod = "center66_cosine10"; ///< direct | sigmoid | center66_cosine10 (output-only)
     bool bedSeamPostprocess = true; ///< Request seam postprocess; active only with multi-bed output overlap stitch
     int detZEdgeCensor = 0;    ///< Censor k detZ edge rows per side in compact numerator+denominator (0 = off)
     std::string detZRowWeightsFile; ///< Detector efficiency weights applied to compact sensitivity only (empty = off)
@@ -227,7 +211,6 @@ struct ReconArgs {
         switch (algorithm) {
             case Algorithm::MLEM: return "MLEM";
             case Algorithm::BSREM: return "BSREM";
-            case Algorithm::ADMM: return "ADMM";
             default: return "Unknown";
         }
     }

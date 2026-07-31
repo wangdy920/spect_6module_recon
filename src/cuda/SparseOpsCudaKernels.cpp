@@ -592,65 +592,6 @@ extern "C" __global__ void compact_atten_fused_spmvt(
 }
 
 )CU" + R"CU(
-extern "C" __global__ void conv2d_y_mirror_frames(
-    const float *input, float *output, const float *kernel, int radius,
-    int detNz, int detNx, unsigned long long frameCount) {
-  const unsigned long long frameSize =
-      static_cast<unsigned long long>(detNz) * static_cast<unsigned long long>(detNx);
-  const unsigned long long total = frameCount * frameSize;
-  const unsigned long long index =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= total) {
-    return;
-  }
-
-  const int x = static_cast<int>(index % static_cast<unsigned long long>(detNx));
-  const int y = static_cast<int>((index / static_cast<unsigned long long>(detNx)) %
-                                 static_cast<unsigned long long>(detNz));
-  const unsigned long long frame = index / frameSize;
-  const unsigned long long base = frame * frameSize;
-
-  float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    const int yy = mirror_index(y + k, detNz);
-    sum += kernel[k + radius] *
-           input[base + static_cast<unsigned long long>(yy) *
-                            static_cast<unsigned long long>(detNx) +
-                 static_cast<unsigned long long>(x)];
-  }
-  output[index] = sum;
-}
-
-extern "C" __global__ void conv2d_x_mirror_frames(
-    const float *input, float *output, const float *kernel, int radius,
-    int detNz, int detNx, unsigned long long frameCount) {
-  const unsigned long long frameSize =
-      static_cast<unsigned long long>(detNz) * static_cast<unsigned long long>(detNx);
-  const unsigned long long total = frameCount * frameSize;
-  const unsigned long long index =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= total) {
-    return;
-  }
-
-  const int x = static_cast<int>(index % static_cast<unsigned long long>(detNx));
-  const int y = static_cast<int>((index / static_cast<unsigned long long>(detNx)) %
-                                 static_cast<unsigned long long>(detNz));
-  const unsigned long long frame = index / frameSize;
-  const unsigned long long base = frame * frameSize;
-
-  float sum = 0.0f;
-  for (int k = -radius; k <= radius; ++k) {
-    const int xx = mirror_index(x + k, detNx);
-    sum += kernel[k + radius] *
-           input[base + static_cast<unsigned long long>(y) *
-                            static_cast<unsigned long long>(detNx) +
-                 static_cast<unsigned long long>(xx)];
-  }
-  output[index] = sum;
-}
-
-)CU" + R"CU(
 // Quantized branch-batch SpMM kernels (CSR with per-row scaled uint16 values).
 // Dense matrices are column-major: X[cols x batchSize], Y[rows x batchSize].
 extern "C" __global__ void compact_branch_batch_forward_scaled_u16(

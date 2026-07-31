@@ -82,19 +82,6 @@ void conv3d_separable_adjoint_inplace(
     int threads
 );
 
-/**
- * @brief 2D 可分离卷积（原地操作）
- * 
- * 先沿 Y 方向，再沿 X 方向。
- */
-void conv2d_separable_inplace(
-    std::vector<double>& img,
-    int rows, int cols,
-    const std::vector<double>& ky,
-    const std::vector<double>& kx,
-    int threads
-);
-
 // ================= PSF 核生成 =================
 
 /// 根据 PSF 配置生成三向核

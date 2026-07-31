@@ -9,7 +9,6 @@
 namespace spect::io {
 
 // metadata.bin on-disk sizes (int32/float field layout, no magic prefix yet).
-constexpr std::size_t kCompactMetadataLegacyBytes = 76;       // 260525 and earlier
 constexpr std::size_t kCompactMetadataExtendedV1Bytes = 88;   // + use45, symCode, symmetryOrder (260601)
 constexpr std::size_t kCompactMetadataExtendedV2Bytes = 96;     // + roiRadius, roiSide
 

@@ -2,7 +2,7 @@
 
 #include "cuda/VolumeOpsCUDA.h"
 #include "filters/Convolution.h"
-#include "interfaces/ISparseOps.h"
+#include "cuda/ISparseOps.h"
 #include "main/RunLogger.h"
 #include "main/SmoothingOps.h"
 

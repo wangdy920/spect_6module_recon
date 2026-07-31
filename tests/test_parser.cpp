@@ -189,14 +189,6 @@ TEST(IOTest, ProjectionResidualDiagnosticIsExplicitlyOptIn) {
     EXPECT_TRUE(args.projectionResidual);
 }
 
-TEST(IOTest, ProjectionResidualDiagnosticRejectsStandardLayout) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon", "-df", "proj.bin", "-loadCSR", "matrix.csrb",
-        "-dim", "2,2,2", "-projectionResidual", "on"};
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-
 TEST(IOTest, ParserMissingRequiredArgReturnsExitFailure) {
     spect::cli::ArgumentParser parser;
     spect::cli::ReconArgs args;
@@ -209,55 +201,6 @@ TEST(IOTest, ParserMissingRequiredArgReturnsExitFailure) {
               spect::cli::ArgumentParser::ParseResult::ExitFailure);
 }
 
-TEST(IOTest, CompactSymmetricParserDefaultsToStandard) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", "__missing_compact_test_config__.ini",
-        "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
-        "-opti", "mlem",
-        "-subsets", "1",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    EXPECT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "standard");
-    EXPECT_TRUE(args.compactMetaPath.empty());
-}
-TEST(IOTest, StandardParserDoesNotEnableCompactFromMetaOverride) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", "__missing_compact_test_config__.ini",
-        "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
-        "-compactMeta", "custom_metadata.bin",
-        "-opti", "mlem",
-        "-subsets", "1",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    EXPECT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "standard");
-    EXPECT_EQ(args.compactMetaPath, "custom_metadata.bin");
-}
-TEST(IOTest, CompactSymmetricParserAcceptsExplicitMetaOverride) {
-    spect::cli::ReconArgs args;
-    auto argv = compactBaseArgs();
-    argv.push_back("-compactMeta");
-    argv.push_back("custom_metadata.bin");
-
-    EXPECT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "compact-symmetric");
-    EXPECT_EQ(args.compactMetaPath, "custom_metadata.bin");
-}
 TEST(IOTest, CompactSymmetricParserAcceptsDenomCachePath) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();
@@ -283,17 +226,13 @@ TEST(IOTest, CompactSymmetricParserAcceptsChunkCSRDirWithoutManualGeometry) {
         "SPECT_recon",
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
-        "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", "1"
     };
 
     EXPECT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "compact-symmetric");
     EXPECT_EQ(args.chunkCSRDir, "matrix_dir");
-    EXPECT_TRUE(args.loadCSRPath.empty());
 }
 
 TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
@@ -302,10 +241,8 @@ TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
         "SPECT_recon",
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
-        "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
         "-vox", "0.3",
@@ -321,11 +258,9 @@ TEST(IOTest, PublicSparseBackendFlagIsRejected) {
         "SPECT_recon",
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
-        "-matrixLayout", "compact-symmetric",
         "-chunkCSRDir", "matrix_dir",
         "-sparseBackend", "cpu",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
         "-vox", "0.3",
@@ -341,9 +276,8 @@ TEST(IOTest, PublicAlgFlagIsRejected) {
         "SPECT_recon",
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
+        "-chunkCSRDir", "matrix_dir",
         "-alg", "mlem",
-        "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
         "-vox", "0.3",
@@ -359,9 +293,8 @@ TEST(IOTest, OptiSelectsAlgorithm) {
         "SPECT_recon",
         "-config", "__missing_compact_test_config__.ini",
         "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
+        "-chunkCSRDir", "matrix_dir",
         "-opti", "bsrem",
-        "-subsets", "1",
         "-it", "1",
         "-dim", "108,108,80",
         "-vox", "0.3",
@@ -456,51 +389,14 @@ TEST(IOTest, CompactSymmetricParserReadsDefaultChunkCSRDirFromConfig) {
         "-config", path.string(),
         "-df", "proj.bin",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", "1"
     };
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "compact-symmetric");
     const std::filesystem::path resolved(args.chunkCSRDir);
     EXPECT_TRUE(resolved.is_absolute());
     EXPECT_EQ(resolved.filename().string(), "default_psc");
     EXPECT_EQ(resolved.parent_path().filename().string(), "matrix");
-
-    std::filesystem::remove(path);
-}
-TEST(IOTest, ExplicitLoadCSROverridesConfigDefaultChunkCSRDir) {
-    const auto dir =
-        std::filesystem::temp_directory_path() / "spect_matrix_config_tests";
-    std::filesystem::create_directories(dir);
-    const auto path = dir / "spect_config_loadcsr.ini";
-
-    {
-        std::ofstream out(path);
-        ASSERT_TRUE(out);
-        out << "[SystemMatrix]\n";
-        out << "default_chunk_csr_dir = matrix/default_psc\n";
-    }
-
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", path.string(),
-        "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
-        "-matrixLayout", "standard",
-        "-opti", "mlem",
-        "-subsets", "1",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "standard");
-    EXPECT_EQ(args.loadCSRPath, "matrix.csrb");
-    EXPECT_TRUE(args.chunkCSRDir.empty());
 
     std::filesystem::remove(path);
 }
@@ -557,32 +453,6 @@ TEST(IOTest, ExplicitPsfModeNoneOverridesPsfDefaultOperator) {
     EXPECT_TRUE(args.usePSF);
     EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::None);
 }
-TEST(IOTest, CompactSymmetricParserRejectsLoadCSRAndChunkCSRDirTogether) {
-    spect::cli::ReconArgs args;
-    auto argv = compactBaseArgs();
-    argv.push_back("-chunkCSRDir");
-    argv.push_back("matrix_dir");
-
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-TEST(IOTest, StandardParserRejectsCompactDenomCachePathWithoutCompactLayout) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", "__missing_compact_test_config__.ini",
-        "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
-        "-compactDenomCache", "cache/psc_260601_global_denom.mhd",
-        "-opti", "mlem",
-        "-subsets", "1",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
 TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
     auto expectRejected = [](std::vector<std::string> argv) {
         spect::cli::ReconArgs args;
@@ -604,14 +474,8 @@ TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
     }
     {
         auto argv = compactBaseArgs();
-        auto it = std::find(argv.begin(), argv.end(), "1");
-        ASSERT_NE(it, argv.end());
-        *it = "2";
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-ctac");
+        argv.push_back("-subsets");
+        argv.push_back("2");
         expectRejected(argv);
     }
     {
@@ -681,7 +545,6 @@ TEST(IOTest, CompactSymmetricParserAcceptsBackgroundProjection) {
 
     spect::cli::ReconArgs args;
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.matrixLayout, "compact-symmetric");
     EXPECT_EQ(args.bProjPath, "background.bin");
 }
 TEST(IOTest, ConfigParserStripsInlineComments) {
@@ -734,10 +597,8 @@ TEST(IOTest, CtacAutoMuNuclideConfigResolvesWaterMu) {
         "SPECT_recon",
         "-config", path.string(),
         "-df", "proj.bin",
-        "-loadCSR", "matrix.csrb",
-        "-matrixLayout", "standard",
+        "-chunkCSRDir", "matrix_dir",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", "1"
     };
     ASSERT_TRUE(parseReconArgsForTest(argv, args));

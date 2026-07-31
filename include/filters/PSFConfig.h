@@ -17,10 +17,6 @@ namespace filters {
 enum class PSFMode { 
     None, 
     Operator,         // PSF 作为算子在迭代中应用
-    PostSmooth,       // PSF 作为后处理平滑
-    ProjDomain,       // 投影域 PSF
-    Gaussian,         // 简单高斯 PSF
-    File              // 从文件加载 PSF
 };
 
 enum class PSFInterp { Linear, Nearest };

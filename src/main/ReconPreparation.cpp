@@ -82,7 +82,7 @@ ReconPreparedParams prepareReconPreparedParams(const ReconArgs &args,
 
 PSFPreparationResult preparePSFForRuntime(ReconOpts &opts, const ReconArgs &args,
                                           const filters::Spacing3 &spacing,
-                                          int, size_t projectionCount,
+                                          int, size_t,
                                           int) {
   PSFPreparationResult result;
   opts.psf = args.psf;
@@ -93,19 +93,6 @@ PSFPreparationResult preparePSFForRuntime(ReconOpts &opts, const ReconArgs &args
   if (!args.usePSF) {
     opts.psf.mode = filters::PSFMode::None;
     return result;
-  }
-
-  if (args.psfProj && !args.psfModeExplicit) {
-    opts.psf.mode = filters::PSFMode::ProjDomain;
-    const int detNz = std::max(1, args.detNz);
-    const int detNx = (args.detNx > 0) ? args.detNx : std::max(1, args.detectorChannels);
-    const size_t expected = static_cast<size_t>(std::max(1, args.numAngles)) *
-                            static_cast<size_t>(detNz) *
-                            static_cast<size_t>(detNx);
-    if (opts.n_subsets > 1 || projectionCount != expected) {
-      opts.psf.mode = filters::PSFMode::Operator;
-      result.logs.warningMessages.emplace_back("Projection-domain PSF is incompatible with current subset/projection layout. Falling back to operator-domain PSF.");
-    }
   }
 
   if (opts.psf.mode != filters::PSFMode::None) {

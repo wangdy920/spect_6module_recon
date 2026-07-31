@@ -11,23 +11,9 @@
 #include <stdexcept>
 
 namespace spect::main {
-namespace {
-
-std::string defaultCompactMetadataPath(const std::string &matrixPath) {
-  std::filesystem::path dir = std::filesystem::path(matrixPath).parent_path();
-  if (dir.empty())
-    dir = ".";
-  return (dir / "metadata.bin").string();
-}
-
-} // namespace
 
 std::string resolveCompactMetadataPath(const ReconArgs &args) {
-  if (!args.compactMetaPath.empty())
-    return args.compactMetaPath;
-  if (!args.chunkCSRDir.empty())
-    return (std::filesystem::path(args.chunkCSRDir) / "metadata.bin").string();
-  return defaultCompactMetadataPath(args.loadCSRPath);
+  return (std::filesystem::path(args.chunkCSRDir) / "metadata.bin").string();
 }
 
 void applyCompactMetadataGeometry(

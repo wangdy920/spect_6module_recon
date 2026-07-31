@@ -4,8 +4,8 @@
 
 #include "core/ReconLimits.h"
 #include "cuda/CudaLaunchConfig.h"
-#include "interfaces/ISparseOps.h"
-#include "sparse/SparseOpsBackend.h"
+#include "cuda/ISparseOps.h"
+#include "cuda/SparseOpsBackend.h"
 
 #include <algorithm>
 #include <chrono>

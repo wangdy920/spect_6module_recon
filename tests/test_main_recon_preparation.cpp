@@ -101,45 +101,4 @@ TEST(ReconPreparationTest, CylindricalMaskHelperReturnsNullWhenDisabled) {
   EXPECT_TRUE(mask.empty());
 }
 
-TEST(ReconPreparationTest, RuntimePSFFallsBackFromProjDomainWhenSubsetMismatch) {
-  ReconArgs args;
-  args.usePSF = true;
-  args.psfProj = true;
-  args.psfModeExplicit = false;
-  args.numAngles = 2;
-  args.detectorChannels = 3;
-
-  ReconOpts opts;
-  opts.n_subsets = 2;
-  const filters::Spacing3 spacing{1.0, 1.0, 1.0};
-
-  const auto runtime =
-      preparePSFForRuntime(opts, args, spacing, 1, /*projectionCount=*/6, 64);
-
-  EXPECT_EQ(opts.psf.mode, filters::PSFMode::Operator);
-  EXPECT_FALSE(runtime.logs.warningMessages.empty());
-}
-
-TEST(ReconPreparationTest,
-     RuntimePSFProjDomainUsesLoadedDetectorGeometryWhenCompatible) {
-  ReconArgs args;
-  args.usePSF = true;
-  args.psfProj = true;
-  args.psfModeExplicit = false;
-  args.numAngles = 2;
-  args.detectorChannels = 3;
-  args.detNz = 2;
-  args.detNx = 4;
-
-  ReconOpts opts;
-  opts.n_subsets = 1;
-  const filters::Spacing3 spacing{1.0, 1.0, 1.0};
-
-  const auto runtime =
-      preparePSFForRuntime(opts, args, spacing, 1, /*projectionCount=*/16, 64);
-
-  EXPECT_EQ(opts.psf.mode, filters::PSFMode::ProjDomain);
-  EXPECT_TRUE(runtime.logs.warningMessages.empty());
-}
-
 } // namespace spect::main::test

@@ -26,8 +26,7 @@ bool isCropSettingsValid(int nz, const CropSettings &crop) {
 namespace {
 
 bool shouldFlipZPerBed(const OutputTransform *transform) {
-  return transform && transform->flipZPerBed && !transform->jointVirtualZFlip &&
-         transform->baseNz > 0 &&
+  return transform && transform->flipZPerBed && transform->baseNz > 0 &&
          !transform->bedZStarts.empty();
 }
 
@@ -40,8 +39,8 @@ bool shouldFlipXWholeOutput(const OutputTransform *transform) {
 }
 
 bool shouldHardCutOutputOverlap(const OutputTransform *transform) {
-  return transform && !transform->bedOverlapInRecon &&
-         transform->baseNz > 0 && transform->bedZStarts.size() > 1;
+  return transform && transform->baseNz > 0 &&
+         transform->bedZStarts.size() > 1;
 }
 
 void validateBedZFlipTransform(const OutputTransform &transform, int nz) {
@@ -204,6 +203,101 @@ std::vector<double> sigmoidBlendOutputOverlap(
       out[offset + xy] /= weight;
   }
   return out;
+}
+
+double center66CosineFadeIn(int overlapIndex) {
+  constexpr double pi = 3.14159265358979323846;
+  const double phase = static_cast<double>(overlapIndex) /
+                       static_cast<double>(kCenter66OverlapLayers - 1);
+  const double sine = std::sin(0.5 * pi * phase);
+  return sine * sine;
+}
+
+void validateCenter66CosineTransform(const OutputTransform &transform, int nz) {
+  validateBedZFlipTransform(transform, nz);
+  if (transform.baseNz < kCenter66CropLayers)
+    throw std::invalid_argument(
+        "prepareOutputVolume: center66_cosine10 requires baseNz >= 66");
+  const std::vector<int> starts = outputBedStarts(transform);
+  for (size_t bed = 1; bed < starts.size(); ++bed) {
+    if (starts[bed] - starts[bed - 1] != kCenter66BedStepLayers)
+      throw std::invalid_argument(
+          "prepareOutputVolume: center66_cosine10 requires a 56-layer bed step");
+  }
+}
+
+std::vector<double> center66CosineBlendOutputOverlap(
+    const std::vector<double> &source, int nx, int ny, int nz,
+    const OutputTransform &transform) {
+  validateCenter66CosineTransform(transform, nz);
+  const std::vector<int> starts = outputBedStarts(transform);
+  const int cropStart = (transform.baseNz - kCenter66CropLayers) / 2;
+  const int outputNz = starts.back() + kCenter66CropLayers;
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
+  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
+  for (size_t bed = 0; bed < starts.size(); ++bed) {
+    for (int localZ = 0; localZ < kCenter66CropLayers; ++localZ) {
+      double weight = 1.0;
+      if (bed > 0 && localZ < kCenter66OverlapLayers)
+        weight *= center66CosineFadeIn(localZ);
+      if (bed + 1 < starts.size() &&
+          localZ >= kCenter66BedStepLayers)
+        weight *= 1.0 -
+                  center66CosineFadeIn(localZ - kCenter66BedStepLayers);
+      const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
+      const int dstZ = starts[bed] + localZ;
+      const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
+      const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
+      for (size_t xy = 0; xy < plane; ++xy)
+        out[dstOffset + xy] += weight * source[srcOffset + xy];
+      weights[static_cast<size_t>(dstZ)] += weight;
+    }
+  }
+  for (int z = 0; z < outputNz; ++z) {
+    const double weight = weights[static_cast<size_t>(z)];
+    if (weight <= 0.0)
+      continue;
+    const size_t offset = static_cast<size_t>(z) * plane;
+    for (size_t xy = 0; xy < plane; ++xy)
+      out[offset + xy] /= weight;
+  }
+  return out;
+}
+
+std::vector<uint8_t> center66BlendOutputMask(
+    const std::vector<uint8_t> &source, int nx, int ny, int nz,
+    const OutputTransform &transform) {
+  validateCenter66CosineTransform(transform, nz);
+  const std::vector<int> starts = outputBedStarts(transform);
+  const int cropStart = (transform.baseNz - kCenter66CropLayers) / 2;
+  const int outputNz = starts.back() + kCenter66CropLayers;
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  std::vector<uint8_t> out(static_cast<size_t>(outputNz) * plane, 0);
+  for (size_t bed = 0; bed < starts.size(); ++bed) {
+    for (int localZ = 0; localZ < kCenter66CropLayers; ++localZ) {
+      const size_t srcOffset = static_cast<size_t>(
+          transform.bedZStarts[bed] + cropStart + localZ) * plane;
+      const size_t dstOffset =
+          static_cast<size_t>(starts[bed] + localZ) * plane;
+      for (size_t xy = 0; xy < plane; ++xy)
+        out[dstOffset + xy] =
+            std::max(out[dstOffset + xy], source[srcOffset + xy]);
+    }
+  }
+  return out;
+}
+
+OutputTransform center66PostprocessTransform(
+    const OutputTransform &transform) {
+  OutputTransform adjusted = transform;
+  adjusted.baseNz = kCenter66CropLayers;
+  for (size_t bed = 0; bed < adjusted.bedZStarts.size(); ++bed)
+    adjusted.bedZStarts[bed] =
+        static_cast<int>(bed) * kCenter66CropLayers;
+  adjusted.outputBedOverlaps.assign(
+      adjusted.bedZStarts.size() - 1, kCenter66OverlapLayers);
+  return adjusted;
 }
 
 std::vector<uint8_t> blendOutputMask(const std::vector<uint8_t> &source,
@@ -537,6 +631,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     throw std::invalid_argument("prepareOutputVolume: source size mismatch");
   if (mask && mask->size() != expected)
     throw std::invalid_argument("prepareOutputVolume: mask size mismatch");
+  if (transform && transform->center66CosineOutput &&
+      transform->mouseSeamStrength > 0.0)
+    throw std::invalid_argument(
+        "prepareOutputVolume: mouse_seam_strength is only supported by sigmoid stitching");
 
   std::vector<double> transformedSource;
   std::vector<uint8_t> transformedMask;
@@ -558,7 +656,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     preStitchSource = *sourceForOutput;
   }
   if (shouldHardCutOutputOverlap(transform)) {
-    if (transform->sigmoidBlendOutput) {
+    if (transform->center66CosineOutput) {
+      transformedSource = center66CosineBlendOutputOverlap(
+          *sourceForOutput, nx, ny, nz, *transform);
+    } else if (transform->sigmoidBlendOutput) {
       transformedSource = sigmoidBlendOutputOverlap(
           *sourceForOutput, nx, ny, nz, *transform);
     } else {
@@ -569,11 +670,16 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     transformedNz = static_cast<int>(transformedSource.size() /
                                      (static_cast<size_t>(nx) * ny));
     if (maskForOutput) {
-      transformedMask = transform->sigmoidBlendOutput
-                            ? blendOutputMask(*maskForOutput, nx, ny, nz,
-                                              *transform)
-                            : hardCutOutputOverlap(*maskForOutput, nx, ny, nz,
-                                                   *transform);
+      if (transform->center66CosineOutput) {
+        transformedMask = center66BlendOutputMask(
+            *maskForOutput, nx, ny, nz, *transform);
+      } else if (transform->sigmoidBlendOutput) {
+        transformedMask = blendOutputMask(*maskForOutput, nx, ny, nz,
+                                          *transform);
+      } else {
+        transformedMask = hardCutOutputOverlap(*maskForOutput, nx, ny, nz,
+                                               *transform);
+      }
       maskForOutput = &transformedMask;
     }
   }
@@ -581,6 +687,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
   const std::vector<double> *analysisForPostprocess = nullptr;
   OutputTransform frozenTransform;
   const OutputTransform *postprocessTransform = transform;
+  if (transform && transform->center66CosineOutput) {
+    frozenTransform = center66PostprocessTransform(*transform);
+    postprocessTransform = &frozenTransform;
+  }
   double analysisRadiusMm = 0.0;
   if (transform && transform->objectAwareSeamPostprocess) {
     analysisRadiusMm = transform->analysisFovRadiusMm > 0.0
@@ -625,9 +735,9 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     sourceForOutput = &transformedSource;
   }
   if (transform && transform->objectAwareSeamPostprocess) {
-    if (!transform->sigmoidBlendOutput || transform->bedOverlapInRecon)
+    if (!transform->sigmoidBlendOutput && !transform->center66CosineOutput)
       throw std::invalid_argument(
-          "prepareOutputVolume: seam postprocess requires output sigmoid stitching");
+          "prepareOutputVolume: seam postprocess requires weighted output stitching");
     postprocessStitchedOutput(transformedSource, nx, ny, transformedNz,
                               *postprocessTransform, voxelSizeXmm, voxelSizeYmm,
                               analysisForPostprocess);
