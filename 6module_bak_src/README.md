@@ -1,62 +1,68 @@
-# 6module_bak_src — 系统矩阵生成与 legacy 参考
+# 6module_bak_src — 重建原型与系统矩阵生成端
 
-本目录**不参与**主线 `SPECT_recon` CMake 构建，仅供离线生成系统矩阵与历史数值对齐。
+本目录**不参与**主线 `SPECT_recon` CMake 构建，仅保存唯一的重建原型、唯一的系统矩阵生成端与投影预处理工具。
 
 ## 文件说明
 
-| 文件 | 状态 | 用途 |
+| 文件 | 定位 | 用途 |
 | --- | --- | --- |
-| `spect_sysmat_PSC_6module_24pin_YSO_v4.cu` | **推荐生成端** | 输出 `metadata.bin` + `chunk_*.csrb`（与 `-chunkCSRDir` 一致） |
-| `spect_sysmat_PSC_6module_24pin_YSO_v2.cu` | legacy | 输出 `chunk_*.bin`（row-wise），仅用于旧转换工具 |
-| `spect_recon_mlem.cu` | **deprecated / reference-only** | 独立 CUDA MLEM，只读 `.bin`；与主线逻辑已迁入 `CompactSymmetricProjectorCUDA.cpp`，保留作 legacy 数值对齐 |
+| `spect_recon_PSC_6module_24pin_YSO_bedmerge.cu` | **唯一重建原型** | 多床位单床重建与拼接参考实现（编译/用法照录文件头注释，见下） |
+| `spect_sysmat_PSC_6module_24pin_YSO_v4.cu` | **唯一系统矩阵生成端** | 输出 `metadata.bin`(88B, SYM_90Z) + `chunk_*.csrb`；后续响应变体的基线 |
 | `mat_convert_bin.m` | 工具 | MAT → 投影 BIN（函数 `mat_convert_bin(...)`；示例见 `run_mat_convert_bin_example.m`） |
+| `run_mat_convert_bin_example.m` | 示例 | `mat_convert_bin` 调用示例（含 legacy 硬编码路径，按需修改） |
 
-## Legacy MLEM 编译与 B1/B2 一致性验证
+## 重建原型：spect_recon_PSC_6module_24pin_YSO_bedmerge.cu
 
-详见 **`doc/Legacy_MLEM_B1B2_Parity_CN.md`**。
+照录文件头注释：
 
-```powershell
-nvcc -O3 -std=c++14 -arch=sm_86 6module_bak_src\spect_recon_mlem.cu `
-  -o build_legacy_6module\spect_recon_mlem_legacy.exe -lcusparse -lcufft
+```text
+SPECT 多床位单床重建与拼接程序。
 
-powershell -ExecutionPolicy Bypass -File scripts\run_6module_legacy_b1b2_parity.ps1 `
-  -SpectExe build_codex_cuda\bin\SPECT_recon.exe -Iterations 50
+流程：逐床位执行完整系统矩阵重建，按中心 mask 裁剪 x/y/z，
+在相邻床位重叠区估计标量增益，最后使用余弦平方权重平滑拼接。
+体素线性索引固定为 z*(Nx*Ny)+y*Nx+x，其中 x 为最快变化维。
+
+编译：
+nvcc -O3 -std=c++17 -arch=sm_89 \
+  recon/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu \
+  -o recon/process/spect_recon_PSC_6module_24pin_YSO_bedmerge_sm89 \
+  -lcusparse -lcufft
+
+usage:
+./spect_recon_PSC_6module_24pin_YSO_bedmerge \
+  --matrix-dir  MCmatrix_PSC_48h \
+  --proj-dir  ep_168 \
+  --out recon_ep168_mask100x100x72 \
+  --mask-size 100x100x72 \
+  --bed-step-mm 16.8 \
+  --norm-factor MCmatrix_PSC_48h/norm_factor.bin \
+  --roi-diameter-mm 32.4 \
+  --roi-height-mm 48 \
+  --iters 50 \
+  --gpus 2
+
+./spect_recon_PSC_6module_24pin_YSO_bedmerge \
+  --matrix-dir /data/SPECT/MCmatrix_PSC \
+  --proj-dir /data/SPECT/simulation_preprocess \
+  --out /data/SPECT/recon_simulation_mask \
+  --mask-size 100x100x72 \
+  --bed-step-mm 16.8 \
+  --data-mode simulation \
+  --no-detector-mask \
+  --no-norm-factor
 ```
 
-Legacy 支持 Butterworth（`--butter-cutoff` / `--butter-mode every` 对齐主线每 iter 滤波）。验证口径为 **B1/B1、B2/B2**（legacy 当场生成 reference）；B1 需另备 v2 `chunk_*.bin` 目录，见 `doc/Legacy_MLEM_B1B2_Parity_CN.md`。
+## 系统矩阵生成端：spect_sysmat_PSC_6module_24pin_YSO_v4.cu
 
-历史 50-iter 输出和 sensitivity 参考已移至 `test_data/legacy_ref/`。它们与
-`test_data/share/` 同名文件哈希不同，因此保留为 2026-05-23 legacy 对齐参考：
-注意：仓库 `.gitignore` 默认忽略 `test_data/`；后续如需新增 legacy reference 文件，需显式 `git add -f test_data/legacy_ref/<file>`。
-
-| 文件 | SHA256 |
-| --- | --- |
-| `test_data/legacy_ref/recon_iter050.hdr` | `b3a872b4971356846e6eab8af8500326b86e2074d918d8e23316a87e2dd9cec9` |
-| `test_data/legacy_ref/recon_iter050.img` | `1b3bd158d27e48e6702e00e92f5e5944ee2f61a8dbab4e3bb9de1cee404c467c` |
-| `test_data/legacy_ref/recon_iter050.raw` | `2dff471ec72b91cc0efda6eba4781cc548f2de70c8b9f146433d4177df6b0b6f` |
-| `test_data/legacy_ref/sensitivity.raw` | `376cc7eb9dc1a213e4b3f1009ef32cbe08bc90277a4427528b49e8e7789c5ae6` |
-
-## v4 编译示例（Windows）
+编译（Windows，按文件头注释口径，文件名以实际为准）：
 
 ```powershell
-nvcc -O3 -arch=sm_86 spect_sysmat_PSC_6module_24pin_YSO_v4.cu -o spect_sysmat_v4.exe
+nvcc -O3 -std=c++14 -arch=sm_86 6module_bak_src\spect_sysmat_PSC_6module_24pin_YSO_v4.cu -o spect_sysmat_v4.exe
 ```
 
-默认 `coll_modules=6`；输出目录含 `metadata.bin`（88B，SYM_90Z）与 `chunk_000.csrb` …
+默认 `coll_modules=6`；输出目录含 `metadata.bin`（88B，SYM_90Z）、`metadata.txt`（文本版，便于人工检查）与 `chunk_000.csrb` …。
 
-## 与主线关系
+## 与主线的关系
 
-- **Canonical**：v4 `.csrb` + 主线 `-chunkCSRDir`
-- **Legacy**：v2 `.bin` → `spect_convert_6module_sysmat_to_csrb`（compact 行，不展开对称）
-
-### 格式 × 读取端矩阵（§5.1，canonical 裁决）
-
-| 格式 | 产生端 | 布局 | 主线 `SPECT_recon` | 转换工具 `spect_convert_6module_sysmat_to_csrb` | 独立 `spect_recon_mlem.cu` |
-| --- | --- | --- | --- | --- | --- |
-| v4 `chunk_*.csrb` + `metadata.bin`(88B, SYM_90Z) | `spect_sysmat_*_v4.cu` | compact CSR chunk（对称压缩，90°Z） | ✅ **canonical**（`-chunkCSRDir`） | ❌ 无需 | ❌ **不支持** |
-| v2 `chunk_*.bin` + `metadata.bin`(76B) | `spect_sysmat_*_v2.cu` | row-wise 原始 chunk | ❌ 不直接读（须先转换） | ✅ 唯一消费者 → 输出 `.csrb` | ✅ 唯一直接读取端 |
-| 单文件 `matrix_6module.csrb`(260525, 45z) | 转换工具输出 | 合并 CSRB | ✅（`-loadCSR` legacy 路径） | —（自身输出） | ❌ 不支持 |
-
-**已知且接受的限制**：v4 `.csrb` 矩阵**无法直接喂给独立 `spect_recon_mlem.cu`**（后者只解析 v2 row-wise `.bin`）。独立 MLEM 已标 deprecated / reference-only，不再跟进新格式；需要 legacy 数值对齐时，用 v2 生成端重新产出 `.bin`，或直接使用 `test_data/legacy_ref/` 中的既有参考输出。
-
-详见 `doc/Format_Reader_Matrix_CN.md`（格式 × 读者能力矩阵）与 `doc/Capability_Matrix_CN.md`（能力边界）。
+- **唯一生产链路**：v4 生成端输出 `metadata.bin + chunk_*.csrb` → 主线 `SPECT_recon -chunkCSRDir <dir>` 直接读取（含 88B/96B metadata、SYM_90Z compact-symmetric 布局）。
+- 详见 `doc/Format_Reader_Matrix_CN.md`（格式说明）与 `doc/Capability_Matrix_CN.md`（能力边界）。

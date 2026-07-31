@@ -17,6 +17,7 @@ from refine_ct_spect_bone_distance import (
     fov_weight,
     inverse_points,
     overlay,
+    qa_levels,
     robust_distance,
     sample_distance,
     thin_points,
@@ -447,13 +448,12 @@ def main() -> int:
     write_center_qa(
         center_qa, fixed_points, moving_points, translation_params,
         rigid_params, center)
-    write_axial_qa(axial_qa, fixed, moving, translated, rigid,
-                   [55, 115, 175, 225])
+    levels = qa_levels(len(fixed))
+    write_axial_qa(axial_qa, fixed, moving, translated, rigid, levels)
     anchor_axial_qa = args.output_dir / "mouse_anatomical_anchor_axial_qa.png"
     write_axial_qa(
         anchor_axial_qa, fixed, moving, anchor_translated, anchor_rigid,
-        [55, 115, 175, 225],
-        ("anchor translation", "anchor small-rigid"))
+        levels, ("anchor translation", "anchor small-rigid"))
     comparison_qa = None
     if args.surface_transform:
         surface_affine = sitk.ReadTransform(str(args.surface_transform))

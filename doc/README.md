@@ -6,17 +6,18 @@
 
 | File | Purpose |
 |---|---|
-| `RELEASE_20260715_CN.md` | 当前 release 边界、默认拼接与签收 |
+| `RELEASE_20260721_CN.md` | 当前 release 边界、默认拼接与签收 |
+| `RELEASE_20260715_CN.md` | 上一版 release 边界（保留为历史；当前以 20260721 为准） |
 | `USAGE_CN.md` | 公开 CLI |
 | `CLI_CHANGES_CN.md` | 废弃/改名参数速查 |
-| `PARAMETERS_CN.template.md` | 发布包参数说明模板 |
+| `PARAMETERS_CN.template.md` | 发布包参数说明模板（由 `scripts/package_rc.ps1` 拷贝为发布包内 `PARAMETERS_CN.md`） |
 | `README_RC.template.md` | 发布包 README 模板 |
 | `Capability_Matrix_CN.md` | 能力矩阵 + 耐久决策 |
-| `Format_Reader_Matrix_CN.md` | 6module 格式 × 读者 |
-| `Legacy_MLEM_B1B2_Parity_CN.md` | B1/260601 回归；B2 reference-only |
+| `Format_Reader_Matrix_CN.md` | v4 chunk CSRB 矩阵格式说明 |
 | `CTAC_AutoMu_Validation_CN.md` | CTAC / auto-mu 调试与主 gate |
 | `Recon_Interface_Migration_Field_CN.md` | 现场 ThreeModalities 重建接口迁移 |
-| `MULTIBED_OVERLAP_RECONSTRUCTION_CN.md` | 多床位联合几何、denom/numerator、PSF、输出裁剪与接缝连续性 |
+
+> 已废弃的设计稿、PR 执行日志、旧 release 说明与 `doc/archive/` 均已删除；行为以代码与当前 release 为准。需要历史证据时查 git。
 
 ## How to decide
 

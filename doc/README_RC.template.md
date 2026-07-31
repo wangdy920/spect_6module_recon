@@ -13,7 +13,6 @@ __PACKAGE_NAME__/
       spect_config.ini
       algo_mlem.conf
       algo_bsrem.conf
-      algo_admm.conf
     matrix/
       <matrix_name>/          optional, not bundled in this package
   README.md
@@ -73,3 +72,12 @@ fixed `Bed1..Bed5` table: `b1=Bed1-Bed2`, `b2=Bed2-Bed3`, `b3=Bed3-Bed4`,
 
 Detailed Chinese parameter notes are in `PARAMETERS_CN.md`. Removed or renamed
 CLI entries are summarized in `CLI_CHANGES_CN.md`.
+
+## Mouse Default
+
+The release default keeps norm-W2 detector weights disabled. Do not pass
+`-detZRowWeightsFile` for the default Mouse reconstruction. The preliminary
+review of Mouse 2 found extra signal in the liver region and judged it likely
+to be an erroneous signal for a bone-seeking tracer; this remains a review
+note pending confirmation by an experienced reader, not a validated biological
+or algorithmic conclusion.

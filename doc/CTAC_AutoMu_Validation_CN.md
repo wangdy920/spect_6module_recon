@@ -140,7 +140,7 @@ auto-mu CTAC vs true-mu CTAC：
 日志口径：
 
 - 每次 run 默认输出 `Run configuration` 块，包含 projection、matrix、
-  output、iterations/subsets/dim/voxel、CTAC/PSF/Butterworth/reg 参数。
+  output、iterations/dim/voxel、CTAC/PSF/Butterworth/reg 参数。
 - CTAC path 明确打印：`compact CTAC: attenuation factors fused in native CUDA forward/backward/sensitivity kernels.`
 
 20 iter true-mu performance gate（复用 denom cache，`-vb 2`，GPU precheck

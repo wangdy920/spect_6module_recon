@@ -20,6 +20,13 @@ def fov_weight(shape: tuple[int, int], radius: float = 50, taper: float = 4) -> 
     return np.clip((radius + taper - r) / taper, 0, 1)
 
 
+def qa_levels(nz: int, count: int = 4) -> list[int]:
+    if nz <= 0:
+        raise ValueError("nz must be positive")
+    return np.linspace(0, nz - 1, count + 2, dtype=int)[1:-1].tolist()
+
+
+
 def transform_points(points: np.ndarray, params: np.ndarray,
                      center: np.ndarray) -> np.ndarray:
     rotation = Rotation.from_rotvec(params[:3])
@@ -164,7 +171,7 @@ def main() -> int:
     after_distance = sample_distance(
         ct_distance, transform_points(moving_points, params, center), spacing)
     qa_path = args.output_dir / "mouse_bone_registration_axial_qa.png"
-    write_slice_qa(qa_path, fixed, moving, moved_display, [55, 115, 175, 225])
+    write_slice_qa(qa_path, fixed, moving, moved_display, qa_levels(len(fixed)))
     manifest = {
         "decision": "pending_visual_gate",
         "evidence_regime": "paired_relative_no_manual_landmark_ground_truth",

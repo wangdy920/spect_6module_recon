@@ -15,7 +15,6 @@ cd D:\path\to\<package_root>
 1. `.\bin\config\spect_config.ini`
 2. `.\bin\config\algo_mlem.conf`
 3. `.\bin\config\algo_bsrem.conf`
-4. `.\bin\config\algo_admm.conf`
 
 只有在明确要覆盖发布包默认配置时才传：
 
@@ -43,7 +42,7 @@ cd D:\path\to\<package_root>
 ```
 
 说明：
-- `-opti mlem`、`-subsets 1` 可由 `bin/config/algo_mlem.conf` 提供，通常不用显式传。
+- `-opti mlem` 可由 `bin/config/algo_mlem.conf` 提供，通常不用显式传；compact 布局恒单 subset，无 `-subsets` 参数。
 - `-config` 不需要显式传。
 - 多个矩阵目录时，在 `bin/config/spect_config.ini` 设置 `default_chunk_csr_dir = matrix/<matrix_name>`，或在命令行传 `-chunkCSRDir .\bin\matrix\<matrix_name>`。
 - 投影路径仍需要按实际数据传入。
@@ -58,7 +57,7 @@ cd D:\path\to\<package_root>
   -it 50:5
 ```
 
-多床位规则：
+多床位规则（仅 stitch：各床独立重建，输出前拼接）：
 - 最多 5 个床位。
 - `-dfList` 默认按路径中的 `BedN` 排序。
 - `-bProjList` 使用同样排序规则。
@@ -70,9 +69,8 @@ cd D:\path\to\<package_root>
   - `b5` 保留占位
 - 如果实际传入 `Bed2,Bed3,Bed4`，使用 `b2,b3`。
 - 如果只传 `-bedOverlap 16`，会复制到所有固定槽位。
-- ini `overlap_in_recon=1`：`bed_overlap` 参与联合重建。
-- ini `overlap_in_recon=0`：重建使用零 overlap，写 MHD 前按 `crop_method` 选择 `direct` hard-cut 或归一化 `sigmoid(k=12)` 融合。
-- `crop_method=sigmoid`：默认方案；只融合相邻床位的内部接缝，不做 positive-only fill，也不裁剪首尾 overlap。
+- 写 MHD 前按 `crop_method` 选择默认 `center66_cosine10`、legacy `sigmoid(k=12)` 或 `direct` hard-cut 拼接。
+- `crop_method=center66_cosine10`：每床输出中心 66 层，固定步进 56 层，在相邻床共同的 10 层中做归一化 cosine 融合；要求 `bed_overlap = 单床 Nz - 56`。
 
 ## 输出方向
 
@@ -80,12 +78,13 @@ cd D:\path\to\<package_root>
 
 ```ini
 [MultiBed]
-bed_overlap = 16,16,16,0,0  # 80 层单床对应 stride=64
-overlap_in_recon = 0
-crop_method = sigmoid
+bed_overlap = 104,104,104,104,0  # 160 层单床对应固定 stride=56
+crop_method = center66_cosine10
 fov_radius_mm = 15.0
+analysis_fov_radius_mm = 15.0
+mouse_seam_strength = 0.0
 crop_end    = 0,0  # 将最终 Z 首尾指定层置零，不改变层数
-z_bed_flip  = 1  # compact joint consumes this as virtual-Z iteration mapping; non-joint applies output per-bed flip
+z_bed_flip  = 1  # 输出阶段按床 Z 翻转
 z_out_flip  = 0
 x_out_flip  = 0
 ```
@@ -97,17 +96,12 @@ x_out_flip  = 0
 -zoutflip 1
 -xoutflip 1
 -cropEnd top,end
--bedCropMethod sigmoid
+-bedCropMethod center66_cosine10
 ```
 
 处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。
 
-矩阵入口与预处理投影变体必须配对：
-
-| 矩阵入口 | `PROJECTION_VARIANT` | `z_bed_flip` / `-zbedflip` |
-|---|---|---|
-| `-chunkCSRDir`（推荐） | `identity` | 保留本包 `[MultiBed]` 默认，勿擅自改 |
-| `-loadCSR` + `-compactMeta`（单文件 legacy） | `xflip` / `flipx` | **必须为 `1`（每床翻转）** |
+矩阵入口与预处理投影变体必须配对：`-chunkCSRDir`（260601 chunk）对应 `PROJECTION_VARIANT=identity`，`z_bed_flip` 保留本包 `[MultiBed]` 默认，勿擅自改。
 
 ## 常用覆盖参数
 
@@ -115,7 +109,8 @@ x_out_flip  = 0
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。配置 `[PSF] z_blur=false` 可将 Z 核固定为 `{1}`，用于 XY-only Operator PSF 消融；默认 `true` 保持 XYZ PSF。
-- `-opti mlem|bsrem|admm`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
+- `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
+- `-opti mlem|bsrem`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
 ## 查看合并配置

@@ -110,9 +110,7 @@ foreach ($overlap in $overlapList) {
     $args = @(
         "-dfList", $dfList,
         "-chunkCSRDir", $MatrixDir,
-        "-matrixLayout", "compact-symmetric",
         "-opti", "mlem",
-        "-subsets", "1",
         "-it", ("{0}:5" -f $Iterations),
         "-th", "8",
         "-bedOverlap", $bedOverlapArg,

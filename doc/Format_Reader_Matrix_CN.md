@@ -1,25 +1,38 @@
-# 6module 格式 × 读者能力矩阵
+# 系统矩阵格式说明（v4 chunk CSRB × SPECT_recon）
 
-> Canonical 生产路径：**260601 chunk CSRB**（`-chunkCSRDir` 或 `bin/matrix` 唯一目录自动发现）。260525 单文件为 legacy（不退场，仅兼容）。
+> 唯一生产格式：**v4 compact chunk CSRB 目录**，由 `6module_bak_src/spect_sysmat_PSC_6module_24pin_YSO_v4.cu` 生成，主线 `SPECT_recon` 以 `-chunkCSRDir` 读取。其余历史格式（v2 row-wise `.bin`、260525 单文件 `.csrb`、MAT 矩阵）及对应 CLI 入口已全部退场。
 
-| 格式 / 入口 | 生成端 | 磁盘布局 | 主线读者 | Legacy MLEM (`spect_recon_mlem*.cu`) | 转换工具 | 备注 |
-|---|---|---|---|---|---|---|
-| v4 chunk CSRB 目录 | `spect_sysmat_*_v4.cu` 等 | `metadata.bin`(88B+) + `chunk_*.csrb` | ✅ `-chunkCSRDir` | ❌ | — | **Canonical**；260601 |
-| v2 row-wise chunk BIN | `spect_sysmat_*_v2.cu` | `metadata.bin` + `chunk_*.bin` | ❌ 直接读 | ✅ | ✅ `spect_convert_6module_sysmat_to_csrb` | 输出 compact 行 CSRB，不展开对称 |
-| 260525 单文件 compact CSRB | 历史 / 转换 | `matrix_6module.csrb` + 76B metadata | ✅ `-loadCSR -compactMeta` | ❌ | — | Legacy；大文件隐式 mmap |
-| standard 单文件 CSRB | 无对称压缩 | `.csrb` full rows | ✅ `-loadCSR` | ❌ | — | standard layout |
-| 投影 BIN | `mat_convert_bin.m` | header + float64[] | ✅ `-df` / `-dfList` | ✅ | — | 见 `6module_bak_src` |
+## 磁盘布局
 
-## metadata 大小
+```text
+<matrix_dir>/
+  metadata.bin        ; 88B（ExtendedV1）或 96B（ExtendedV2）
+  metadata.txt        ; 文本版，仅供人工检查
+  chunk_000.csrb      ; 按角度分块的 compact CSR（对称压缩，不展开）
+  chunk_001.csrb
+  ...
+```
 
-| 大小 | 语义 | 状态 |
+## metadata.bin
+
+| 大小 | 名称 | 语义 |
 |---|---|---|
-| 76B | 260525 legacy compact | 保留兼容 |
-| 88B | 260601 ExtendedV1 | Canonical |
-| 96B | ExtendedV2 | 按文件大小读取 |
+| 88B | ExtendedV1 | 260601 canonical：几何（dim/vox/detN/ang）+ `use45` / `symCode` / `symmetryOrder` |
+| 96B | ExtendedV2 | ExtendedV1 + `roiRadius` / `roiSide` |
+
+当前 6module 矩阵对称码为 **SYM_90Z**（90° 旋转 + Z 对称）。程序按文件实际大小解析，进入 compact 路径后用 metadata 几何覆盖 CLI/INI 的 `dim` / `vox` / `detN` / `ang`（见 `ReconDataLoader.cpp::applyCompactMetadataGeometry`）。
+
+## 读取端
+
+| 读取端 | 入口 | 说明 |
+|---|---|---|
+| `SPECT_recon` | `-chunkCSRDir <dir>`；或 `[SystemMatrix] default_chunk_csr_dir`；或 exe-local `bin/matrix/*` 唯一候选自动发现 | **唯一消费路径** |
+
+解析与校验见 `src/io/CompactChunkCSR.cpp`（chunk 校验可用 `SPECT_CHUNK_VALIDATE=off` 关闭，会打印 WARN）。
 
 ## 参考
 
-- `6module_bak_src/README.md`
-- `tests/test_convert_6module_sysmat.cpp`
-- `doc/Capability_Matrix_CN.md`
+- `6module_bak_src/README.md` — 生成端编译与产出
+- `include/io/CompactSymmetryMetadata.h` — metadata 布局常量
+- `test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md` — 260601 数据包内说明
+- `doc/Capability_Matrix_CN.md` — 能力边界
