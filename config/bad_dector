@@ -1,0 +1,6 @@
+# Preferred format: one global detector number (0..95) per line.
+# Also accepted: "link-<3|4>-FPGA-<0..5>-dector-<0..7>"
+# global = ((link==4 ? 6 : 0) + FPGA)*8 + dector
+# Example: 68 is "link-4-FPGA-2-dector-4"
+[
+]
