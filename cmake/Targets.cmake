@@ -22,40 +22,17 @@ target_include_directories(spect_interfaces INTERFACE
 target_compile_features(spect_interfaces INTERFACE cxx_std_17)
 # 接口库不得依赖任何第三方库 (matio/cufft/omp等)
 
-# ----------------------------------
-# spect_core: 核心类型库 (CSR, Types等)
-# ----------------------------------
-# 当前为INTERFACE库，后续添加.cpp文件时改为STATIC
-add_library(spect_core INTERFACE)
-target_link_libraries(spect_core INTERFACE spect_interfaces)
-# spect_core将来包含: 核心类型编译单元等
-
-# ----------------------------------
-# spect_algo: 算法库 (MLEM/OSEM/正则化器等)
-# ----------------------------------
-# 当前为INTERFACE库，后续重构时添加.cpp
-add_library(spect_algo INTERFACE)
-target_link_libraries(spect_algo INTERFACE 
-  spect_core
-  spect_filters
-  spect_regularizer
-)
-# spect_algo将来包含: MLEMReconstructor.cpp, Regularizers.cpp等
-# 约束: 只能依赖spect_core/spect_interfaces，不能依赖io/cli/app
-
 # 便捷alias (用于外部项目)
 add_library(spect::interfaces ALIAS spect_interfaces)
-add_library(spect::core ALIAS spect_core)
-add_library(spect::algo ALIAS spect_algo)
 
-message(STATUS "SPECT modular libraries: spect_interfaces, spect_core, spect_algo")
+message(STATUS "SPECT modular libraries: spect_interfaces, spect_sparse, spect_filters, spect_regularizer, spect_cli, spect_io, spect_app, spect_pipeline")
 
 # ----------------------------------
 # spect_sparse: 稀疏矩阵运算库 (SparseOpsDefaults等)
 # 【T3.1】统一SpMV实现
 # ----------------------------------
 add_library(spect_sparse STATIC
-  src/cuda/SparseOpsDefaults.cpp
+  src/sparse/SparseOpsDefaults.cpp
 )
 target_include_directories(spect_sparse PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -69,13 +46,13 @@ add_library(spect::sparse ALIAS spect_sparse)
 
 if(SPECT_BUILD_CUDA_SCAFFOLD)
   add_library(spect_sparse_cuda STATIC
-    src/cuda/SparseOpsCUDA.cpp
-    src/cuda/CudaSparseOpsFacade.cpp
-    src/cuda/CudaChunkCache.cpp
-    src/cuda/CudaCsrBuilder.cpp
-    src/cuda/CudaProjKernelLauncher.cpp
-    src/cuda/SparseOpsCudaKernels.cpp
-    src/cuda/CompactSymmetricProjectorCUDA.cpp
+    src/sparse/cuda/SparseOpsCUDA.cpp
+    src/sparse/cuda/CudaSparseOpsFacade.cpp
+    src/sparse/cuda/CudaChunkCache.cpp
+    src/sparse/cuda/CudaCsrBuilder.cpp
+    src/sparse/cuda/CudaProjKernelLauncher.cpp
+    src/sparse/cuda/SparseOpsCudaKernels.cpp
+    src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp
   )
   target_include_directories(spect_sparse_cuda PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -105,12 +82,12 @@ add_library(spect_filters STATIC
 )
 if(TARGET CUDA::cudart)
   target_sources(spect_filters PRIVATE
-    src/cuda/VolumeOpsCUDA.cpp
+    src/filters/cuda/VolumeOpsCUDA.cpp
   )
 endif()
 if(SPECT_ENABLE_BUTTERWORTH_CUFFT)
   target_sources(spect_filters PRIVATE
-    src/cuda/ButterworthCUDA.cpp
+    src/filters/cuda/ButterworthCUDA.cpp
   )
 endif()
 target_include_directories(spect_filters PUBLIC
@@ -162,7 +139,7 @@ target_include_directories(spect_cli PUBLIC
   $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(spect_cli PUBLIC spect_core)
+target_link_libraries(spect_cli PUBLIC spect_interfaces)
 # CLI依赖: Filters.h (PSFConf), Regularizers.h (RegConf)
 add_library(spect::cli ALIAS spect_cli)
 
@@ -173,6 +150,7 @@ add_library(spect::cli ALIAS spect_cli)
 add_library(spect_io STATIC
   src/io/ProjectionLoader.cpp
   src/io/MatFileReader.cpp
+  src/io/MatVarPath.cpp
   src/io/MHDWriter.cpp
   src/io/CompactSymmetryMetadata.cpp
   src/io/CompactChunkCSR.cpp
@@ -182,37 +160,72 @@ target_include_directories(spect_io PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(spect_io PUBLIC spect_core)
+target_link_libraries(spect_io PUBLIC spect_interfaces)
 # IO依赖matio
 target_link_libraries(spect_io PUBLIC ${_matio_target})
 add_library(spect::io ALIAS spect_io)
 
 # ----------------------------------
-# spect_app: 应用层 (ProjectionOps, OSEM/BSREM步骤等)
-# 【T2.3】从MLEMReconstructor.h迁移的重建算法实现
+# spect_pipeline: 重建流水线 (recon 算法层 / ctac 物理项 / postprocess / pipeline 编排)
+# SPECT_recon、spect_tests 与 tools/ 共用同一份目标文件，避免同源重复编译
 # ----------------------------------
-add_library(spect_app STATIC
-  src/app/ProjectionOps.cpp
-  src/app/BsremUpdate.cpp
+add_library(spect_pipeline STATIC
+  src/recon/BsremKappaMap.cpp
+  src/recon/BsremUpdate.cpp
+  src/recon/CompactSymmetricReconLoop.cpp
+  src/recon/ProjectionOps.cpp
+  src/recon/ReconLoopHelpers.cpp
+
+  src/ctac/AutoMuMap.cpp
+  src/ctac/CTACFactorCache.cpp
+  src/ctac/CTACOps.cpp
+
+  src/postprocess/SeamPostprocess.cpp
+  src/postprocess/SmoothingOps.cpp
+
+  src/pipeline/MainProgram.cpp
+  src/pipeline/ReconArgsPrinter.cpp
+  src/pipeline/ReconDataLoader.cpp
+  src/pipeline/ReconPreparation.cpp
+  src/pipeline/ReconSetup.cpp
+  src/pipeline/RunLogger.cpp
+  src/pipeline/RunLogging.cpp
+  src/pipeline/VolumeOutput.cpp
 )
-target_include_directories(spect_app PUBLIC
+target_include_directories(spect_pipeline PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(spect_app PUBLIC 
+target_link_libraries(spect_pipeline PUBLIC
+  spect_io
+  spect_cli
+  spect_sparse
   spect_filters
   spect_regularizer
-  spect_io
 )
+if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
+  target_link_libraries(spect_pipeline PUBLIC spect_sparse_cuda)
+endif()
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(spect_app PUBLIC OpenMP::OpenMP_CXX)
+  target_link_libraries(spect_pipeline PUBLIC OpenMP::OpenMP_CXX)
 endif()
-# MSVC AVX2 optimization for SIMD in reconstructors
 if(MSVC)
-  target_compile_options(spect_app PRIVATE $<$<CONFIG:Release>:/arch:AVX2>)
+  # 与旧 SPECT_recon 目标保持一致，否则重建热循环会失去 AVX2/fp:fast 而改变数值与性能
+  target_compile_options(spect_pipeline PRIVATE /MP /EHsc /permissive- /bigobj)
+  target_compile_options(spect_pipeline PRIVATE
+    $<$<CONFIG:Release>:/O2 /Oi /Ot /fp:fast /arch:AVX2>
+  )
+  # 这两个文件原属 spect_app，从未启用 /fp:fast；它们是锁定的物理项，
+  # 放宽浮点模型会改变生产数值，故显式钉回 /fp:precise（MSVC 取最后一个 /fp 开关）。
+  set_source_files_properties(
+    src/recon/ProjectionOps.cpp
+    src/recon/BsremUpdate.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:/fp:precise>"
+  )
 endif()
-add_library(spect::app ALIAS spect_app)
+add_library(spect::pipeline ALIAS spect_pipeline)
 
 # ----------------------------------
 # 9) 生成可执行文件
@@ -221,43 +234,16 @@ add_library(spect::app ALIAS spect_app)
 # 注意: Filters.cpp 和 Regularizers.cpp 已经编译在 spect_filters/spect_regularizer 库中
 #       不要在这里重复包含，否则会导致 ODR 违规
 add_executable(SPECT_recon
-  src/main/AutoMuMap.cpp
-  src/main/BsremKappaMap.cpp
-  src/main/CTACFactorCache.cpp
-  src/main/CTACOps.cpp
-  src/main/CompactSymmetricReconLoop.cpp
-  src/main/MainProgram.cpp
-  src/main/MatVarPath.cpp
-  src/main/ReconDataLoader.cpp
-  src/main/ReconPreparation.cpp
-  src/main/ReconArgsPrinter.cpp
-  src/main/ReconLoopHelpers.cpp
-  src/main/ReconSetup.cpp
-  src/main/RunLogging.cpp
-  src/main/RunLogger.cpp
-  src/main/SmoothingOps.cpp
-  src/main/SeamPostprocess.cpp
-  src/main/VolumeOutput.cpp
   src/main/main.cpp
 )
 
 # 链接模块库 (获取include目录)
-target_link_libraries(SPECT_recon PRIVATE 
-  spect_algo
-  spect_app
-  spect_io
-  spect_cli
-  spect_sparse
-  spect_filters
-  spect_regularizer
+target_link_libraries(SPECT_recon PRIVATE
+  spect_pipeline
 )
 target_include_directories(SPECT_recon PRIVATE
   $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
 )
-
-if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
-  target_link_libraries(SPECT_recon PRIVATE spect_sparse_cuda)
-endif()
 
 # 添加include目录
 target_include_directories(SPECT_recon PRIVATE 
@@ -295,14 +281,11 @@ endif()
 
 add_executable(spect_seam_postprocess
   tools/seam_postprocess.cpp
-  src/main/SeamPostprocess.cpp
-  src/main/VolumeOutput.cpp
-  src/main/RunLogger.cpp
 )
 target_include_directories(spect_seam_postprocess PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(spect_seam_postprocess PRIVATE spect_io)
+target_link_libraries(spect_seam_postprocess PRIVATE spect_pipeline)
 set_target_properties(spect_seam_postprocess PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
@@ -313,7 +296,7 @@ add_executable(spect_forward_project
 target_include_directories(spect_forward_project PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(spect_forward_project PRIVATE spect_io spect_app)
+target_link_libraries(spect_forward_project PRIVATE spect_pipeline)
 if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
   target_link_libraries(spect_forward_project PRIVATE spect_sparse_cuda)
 endif()

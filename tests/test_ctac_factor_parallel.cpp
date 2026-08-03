@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "main/CTACOps.h"
+#include "ctac/CTACOps.h"
 #include "cuda/CudaConfig.h"
 
 #include <cstdint>

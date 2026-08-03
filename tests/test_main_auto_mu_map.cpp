@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "core/AttenuationCoefficients.h"
-#include "main/AutoMuMap.h"
+#include "ctac/AutoMuMap.h"
 
 #include <cmath>
 #include <stdexcept>

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "main/ReconSetup.h"
+#include "pipeline/ReconSetup.h"
 
 #include <chrono>
 #include <filesystem>

@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "main/VolumeOutput.h"
-#include "main/ReconLoopHelpers.h"
+#include "pipeline/VolumeOutput.h"
+#include "recon/ReconLoopHelpers.h"
+#include "postprocess/SeamPostprocess.h"
 #include <cstdlib>
 #include <stdexcept>
 #include <string>

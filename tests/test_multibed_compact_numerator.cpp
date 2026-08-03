@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "cuda/CompactSymmetricProjector.h"
+#include "sparse/CompactSymmetricProjector.h"
 #include "cuda/CudaConfig.h"
 #include "io/CompactChunkCSR.h"
 #include "tests/common/compact_symmetry_test_helpers.h"

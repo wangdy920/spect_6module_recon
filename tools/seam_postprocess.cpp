@@ -1,7 +1,9 @@
 #include "io/MHDWriter.h"
 #include "io/VolumeLoader.h"
-#include "main/VolumeOutput.h"
+#include "postprocess/SeamPostprocess.h"
+#include "pipeline/VolumeOutput.h"
 
+#include <cstddef>
 #include <exception>
 #include <iostream>
 #include <string>

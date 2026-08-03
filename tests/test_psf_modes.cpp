@@ -9,9 +9,9 @@
 #include <numeric>
 #include <vector>
 
-#include "app/ProjectionOps.h"
-#include "app/ReconConfig.h"
-#include "app/BedOffsets.h"
+#include "recon/ProjectionOps.h"
+#include "recon/ReconConfig.h"
+#include "recon/BedOffsets.h"
 #include "filters/Convolution.h"
 
 using spect::apply_psf_backward;

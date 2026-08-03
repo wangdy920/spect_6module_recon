@@ -24,7 +24,7 @@
 #include "io/CompactSymmetryMetadata.h"
 #include "io/MHDWriter.h"
 #include "io/VolumeLoader.h"
-#include "cuda/ISparseOps.h"
+#include "sparse/ISparseOps.h"
 
 namespace spect {
 namespace test {
@@ -95,7 +95,7 @@ TEST(InterfaceTest, MockSparseOpsCompiles) {
 
 // ============ Sparse 后端可用性 ============
 
-#include "cuda/SparseOpsBackend.h"
+#include "sparse/SparseOpsBackend.h"
 
 namespace spect {
 namespace sparse {

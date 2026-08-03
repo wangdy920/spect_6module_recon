@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "main/SmoothingOps.h"
+#include "postprocess/SmoothingOps.h"
 
 #include <vector>
 

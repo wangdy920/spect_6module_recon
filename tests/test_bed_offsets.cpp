@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "app/BedOffsets.h"
+#include "recon/BedOffsets.h"
 
 namespace spect {
 namespace app {

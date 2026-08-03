@@ -13,16 +13,16 @@
 // noise-free matched-model closed loop, to separate implementation/contract
 // defects from unmodelled bed-dependent response in real data.
 
-#include "app/BedOffsets.h"
-#include "app/ProjectionOps.h"
-#include "app/ReconConfig.h"
-#include "cuda/CompactSymmetricProjector.h"
+#include "recon/BedOffsets.h"
+#include "recon/ProjectionOps.h"
+#include "recon/ReconConfig.h"
+#include "sparse/CompactSymmetricProjector.h"
 #include "filters/Convolution.h"
 #include "filters/PSFConfig.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "io/VolumeLoader.h"
-#include "cuda/SparseOpsBackend.h"
+#include "sparse/SparseOpsBackend.h"
 
 #include <cstdint>
 #include <cstring>

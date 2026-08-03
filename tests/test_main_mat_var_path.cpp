@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "main/MatVarPath.h"
+#include "io/MatVarPath.h"
 
 #include <string>
 

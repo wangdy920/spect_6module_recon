@@ -11,20 +11,6 @@ if(SPECT_BUILD_TESTS)
   
   # 测试可执行文件 - 不再依赖 original_source_backup
   add_executable(spect_tests
-    src/main/AutoMuMap.cpp
-    src/main/BsremKappaMap.cpp
-    src/main/CTACFactorCache.cpp
-    src/main/CTACOps.cpp
-    src/main/CompactSymmetricReconLoop.cpp
-    src/main/MatVarPath.cpp
-    src/main/ReconDataLoader.cpp
-    src/main/ReconLoopHelpers.cpp
-    src/main/ReconPreparation.cpp
-    src/main/ReconSetup.cpp
-    src/main/RunLogger.cpp
-    src/main/SmoothingOps.cpp
-    src/main/SeamPostprocess.cpp
-    src/main/VolumeOutput.cpp
     tests/test_main.cpp
     tests/test_placeholder.cpp
     tests/test_psf_modes.cpp
@@ -63,16 +49,13 @@ if(SPECT_BUILD_TESTS)
   )
   
   # 【T1.3】链接模块库
-  target_link_libraries(spect_tests PRIVATE spect_algo)
-  
+  target_link_libraries(spect_tests PRIVATE spect_pipeline)
+
   # 【T2.1】链接CLI模块
   target_link_libraries(spect_tests PRIVATE spect_cli)
   
   # 【T2.2】链接IO模块
   target_link_libraries(spect_tests PRIVATE spect_io)
-  
-  # 【T2.3】链接App模块
-  target_link_libraries(spect_tests PRIVATE spect_app)
   
   # 【T3.1】链接Sparse模块
   target_link_libraries(spect_tests PRIVATE spect_sparse)

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "filters/ButterworthFilter.h"
-#include "main/ReconPreparation.h"
+#include "pipeline/ReconPreparation.h"
 
 namespace spect::main::test {
 
