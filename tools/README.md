@@ -20,7 +20,7 @@
   mouse
 ```
 
-`profile` 取值：`phantom` / `zimu` / `mouse` / `derenzo` / `unknown`。`derenzo` 可跟第 4 个参数 `strength`（默认 `0.30`）。该工具复用 `src/main/SeamPostprocess.cpp` 的同一逻辑，便于在不重跑重建的情况下验证后处理参数。
+`profile` 取值：`phantom` / `zimu` / `mouse` / `derenzo` / `unknown`。`derenzo` 可跟第 4 个参数 `strength`（默认 `0.30`）。该工具链接 `spect_pipeline`，与重建主程序共用 `src/postprocess/SeamPostprocess.cpp` 的同一份目标文件，便于在不重跑重建的情况下验证后处理参数。
 
 ### 匹配模型前投影
 

@@ -378,6 +378,75 @@ TEST(VolumeOutputTest, DiffuseMouseGateDoesNotCaptureCompactPhantom) {
   EXPECT_EQ(classifyOutputObjectProfile(volume, nx, ny, nz), "phantom");
 }
 
+namespace {
+
+/// Six triangular rod clusters on one pitch, apex inward, parked in the middle
+/// of z so the volume looks like a single-bed acquisition with air at both ends.
+std::vector<double> makeRodLatticeVolume(int nx, int ny, int nz, int z0, int z1,
+                                         double innerRadius, double pitch,
+                                         int sectors) {
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> volume(static_cast<size_t>(nz) * plane, 0.0);
+  const double centerY = 0.5 * (ny - 1);
+  const double centerX = 0.5 * (nx - 1);
+  const double rowStep = pitch * std::sqrt(3.0) / 2.0;
+  constexpr double rodRadius = 2.0;
+  for (int sector = 0; sector < sectors; ++sector) {
+    const double angle = 2.0 * 3.14159265358979323846 * sector / sectors;
+    const double dirY = std::sin(angle);
+    const double dirX = std::cos(angle);
+    for (int row = 0; row < 3; ++row) {
+      for (int index = 0; index <= row; ++index) {
+        const double radius = innerRadius + row * rowStep;
+        const double across = (index - 0.5 * row) * pitch;
+        const double rodY = centerY + dirY * radius - dirX * across;
+        const double rodX = centerX + dirX * radius + dirY * across;
+        for (int y = 0; y < ny; ++y) {
+          for (int x = 0; x < nx; ++x) {
+            if (std::hypot(y - rodY, x - rodX) > rodRadius)
+              continue;
+            for (int z = z0; z < z1; ++z)
+              volume[static_cast<size_t>(z) * plane +
+                     static_cast<size_t>(y) * nx + x] = 1.0;
+          }
+        }
+      }
+    }
+  }
+  return volume;
+}
+
+} // namespace
+
+TEST(VolumeOutputTest, ClassifiesSingleBedRodLatticeAsDerenzo) {
+  const int nx = 61;
+  const int ny = 61;
+  const int nz = 30;
+  const auto volume = makeRodLatticeVolume(nx, ny, nz, 10, 20, 10.0, 6.0, 6);
+
+  EXPECT_EQ(classifyOutputObjectProfile(volume, nx, ny, nz, 0.5, 0.5),
+            "derenzo");
+}
+
+TEST(VolumeOutputTest, RodLatticeGateRejectsSingleUnsectoredCluster) {
+  const int nx = 61;
+  const int ny = 61;
+  const int nz = 30;
+  const auto volume = makeRodLatticeVolume(nx, ny, nz, 10, 20, 2.0, 6.0, 6);
+
+  EXPECT_NE(classifyOutputObjectProfile(volume, nx, ny, nz, 0.5, 0.5),
+            "derenzo");
+}
+
+TEST(VolumeOutputTest, RodLatticeGateNeedsVoxelSizes) {
+  const int nx = 61;
+  const int ny = 61;
+  const int nz = 30;
+  const auto volume = makeRodLatticeVolume(nx, ny, nz, 10, 20, 10.0, 6.0, 6);
+
+  EXPECT_NE(classifyOutputObjectProfile(volume, nx, ny, nz), "derenzo");
+}
+
 TEST(VolumeOutputTest, PhantomContourInterpolationKeepsTwoComponentsSeparate) {
   const int nx = 9;
   const int ny = 5;
@@ -975,6 +1044,7 @@ TEST(VolumeOutputTest, DerenzoFillImprovesInternalGapWithoutExtendingRods) {
   addRod(32, 31, 9, 35, 22);
 
   OutputTransform transform;
+  transform.objectProfile = "derenzo";
   transform.derenzoAxialPostprocess = true;
   transform.derenzoAxialStrength = 0.5;
   const auto output = prepareOutputVolume(

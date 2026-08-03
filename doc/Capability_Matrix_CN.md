@@ -1,6 +1,6 @@
 # SPECT-recon Capability Matrix
 
-> 对齐日期：2026-07-31（收敛重构后）。以 `src/cli/ArgumentParser.cpp`、`src/main/MainProgram.cpp`、compact CUDA 路径为唯一事实来源。
+> 对齐日期：2026-07-31（收敛重构后）。以 `src/cli/ArgumentParser.cpp`、`src/pipeline/MainProgram.cpp`、compact CUDA 路径为唯一事实来源。
 
 ## 证据入口
 
@@ -8,8 +8,8 @@
 |---|---|
 | CLI 校验 | `src/cli/ArgumentParser.cpp`（`registerHandlers` / `validateArgs`） |
 | compact 几何 | `src/io/CompactSymmetryMetadata.cpp`、`ReconDataLoader.cpp::applyCompactMetadataGeometry` |
-| 主流程 | `src/main/MainProgram.cpp` |
-| compact CUDA | `src/cuda/CompactSymmetricProjectorCUDA.cpp` |
+| 主流程 | `src/pipeline/MainProgram.cpp` |
+| compact CUDA | `src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp` |
 | 回归 | `tests/`、`recon_out/convergence_baseline_20260731/`（冻结金标准） |
 
 ## 耐久决策

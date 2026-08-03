@@ -38,6 +38,10 @@ struct OutputTransform {
   std::string objectProfile = "auto";
   bool derenzoAxialPostprocess = false;
   double derenzoAxialStrength = 0.30;
+  bool derenzoAdhesionPostprocess = false;
+  double derenzoAdhesionInner = 0.02;
+  double derenzoAdhesionOuter = 0.10;
+  double derenzoCoreDamp = 0.55;
   double phantomCloseStrength = 1.0;
   double epguanCloseStrength = 1.0;
   bool epguanWallMaxPreserve = false;

@@ -778,6 +778,27 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-derenzoAxialStrength"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(
+            i, argc, argv, a.bedDerenzoAdhesion);
+    }, {"-derenzoAdhesion"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedDerenzoAdhesionInner = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv,
+                                           "-derenzoAdhesionInner"));
+        return true;
+    }, {"-derenzoAdhesionInner"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedDerenzoAdhesionOuter = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv,
+                                           "-derenzoAdhesionOuter"));
+        return true;
+    }, {"-derenzoAdhesionOuter"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bedDerenzoCoreDamp = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-derenzoCoreDamp"));
+        return true;
+    }, {"-derenzoCoreDamp"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-cropEnd"), ',');
         if (parts.size() == 1) {
@@ -1169,6 +1190,14 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         a.bedDerenzoAxialStrength = cfg.getDouble(
             "MultiBed", "derenzo_axial_strength",
             a.bedDerenzoAxialStrength);
+        a.bedDerenzoAdhesion = cfg.getBool(
+            "MultiBed", "derenzo_adhesion", a.bedDerenzoAdhesion);
+        a.bedDerenzoAdhesionInner = cfg.getDouble(
+            "MultiBed", "derenzo_adhesion_inner", a.bedDerenzoAdhesionInner);
+        a.bedDerenzoAdhesionOuter = cfg.getDouble(
+            "MultiBed", "derenzo_adhesion_outer", a.bedDerenzoAdhesionOuter);
+        a.bedDerenzoCoreDamp = cfg.getDouble(
+            "MultiBed", "derenzo_core_damp", a.bedDerenzoCoreDamp);
         a.bedPhantomCloseStrength = cfg.getDouble(
             "MultiBed", "phantom_close_strength", a.bedPhantomCloseStrength);
         a.bedEpguanCloseStrength = cfg.getDouble(
@@ -1502,6 +1531,21 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         args.bedDerenzoAxialStrength > 1.0) {
         std::cerr << "Error: [MultiBed] derenzo_axial_strength must be "
                      "finite and in [0,1].\n";
+        return false;
+    }
+    const auto inUnitRange = [](double value) {
+        return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+    };
+    if (!inUnitRange(args.bedDerenzoAdhesionInner) ||
+        !inUnitRange(args.bedDerenzoAdhesionOuter) ||
+        args.bedDerenzoAdhesionInner > args.bedDerenzoAdhesionOuter) {
+        std::cerr << "Error: [MultiBed] derenzo_adhesion_inner/_outer must be "
+                     "finite, in [0,1] and inner <= outer.\n";
+        return false;
+    }
+    if (!inUnitRange(args.bedDerenzoCoreDamp)) {
+        std::cerr << "Error: [MultiBed] derenzo_core_damp must be finite and "
+                     "in [0,1].\n";
         return false;
     }
     if (!std::isfinite(args.bedEpguanSeamEdgeStrength) ||
@@ -1887,10 +1931,18 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
               << "  # auto|mouse|phantom|epguan|zimu|derenzo\n";
     std::cout << "derenzo_postprocess = "
               << (a.bedDerenzoPostprocess ? 1 : 0)
-              << "  # explicit derenzo profile only\n";
+              << "  # runs when the profile is derenzo (explicit or auto)\n";
     std::cout << "derenzo_axial_strength = "
               << a.bedDerenzoAxialStrength
               << "  # positive-only per-rod fill [0,1]\n";
+    std::cout << "derenzo_adhesion = " << (a.bedDerenzoAdhesion ? 1 : 0)
+              << "  # in-plane rod adhesion fill + core damping\n";
+    std::cout << "derenzo_adhesion_inner = " << a.bedDerenzoAdhesionInner
+              << "  # adhesion fraction at the inner sectors [0,1]\n";
+    std::cout << "derenzo_adhesion_outer = " << a.bedDerenzoAdhesionOuter
+              << "  # adhesion fraction at the rim sectors [0,1]\n";
+    std::cout << "derenzo_core_damp = " << a.bedDerenzoCoreDamp
+              << "  # rod-core high-frequency damping [0,1]\n";
     std::cout << "phantom_close_strength = " << a.bedPhantomCloseStrength
               << "  # contour interpolation blend [0,1]\n";
     std::cout << "epguan_close_strength = " << a.bedEpguanCloseStrength
@@ -2013,8 +2065,12 @@ void ArgumentParser::printUsage() {
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
     std::cout << "  -normFactorFile <f>       Full projection correction factors c; applies reciprocal 1/c to sensitivity\n";
     std::cout << "  -bedObjectProfile <auto|mouse|phantom|epguan|zimu|derenzo> Override automatic object profile\n";
-    std::cout << "  -derenzoPostprocess <0|1> Enable explicit Derenzo axial continuity processing\n";
+    std::cout << "  -derenzoPostprocess <0|1> Enable Derenzo axial continuity processing (auto-detected profile)\n";
     std::cout << "  -derenzoAxialStrength <s> Positive-only per-rod fill strength [0,1]\n";
+    std::cout << "  -derenzoAdhesion <0|1>    Enable Derenzo in-plane adhesion fill and rod-core damping\n";
+    std::cout << "  -derenzoAdhesionInner <s> Adhesion fraction at the inner sectors [0,1]\n";
+    std::cout << "  -derenzoAdhesionOuter <s> Adhesion fraction at the rim sectors [0,1]\n";
+    std::cout << "  -derenzoCoreDamp <s>      Rod-core high-frequency damping [0,1]\n";
     std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";

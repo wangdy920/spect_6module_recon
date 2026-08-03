@@ -7,12 +7,32 @@
 #include <exception>
 #include <iostream>
 #include <string>
+#include <vector>
+
+namespace {
+
+std::vector<double> parseTriplet(const std::string &text) {
+  std::vector<double> values;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t comma = text.find(',', start);
+    const std::size_t stop = comma == std::string::npos ? text.size() : comma;
+    values.push_back(std::stod(text.substr(start, stop - start)));
+    if (comma == std::string::npos)
+      break;
+    start = stop + 1;
+  }
+  return values;
+}
+
+} // namespace
 
 int main(int argc, char **argv) {
   if (argc < 4 || argc > 5) {
     std::cerr << "Usage: spect_seam_postprocess <input.mhd> "
-                 "<output-stem> <phantom|zimu|mouse|derenzo|unknown> "
-                 "[derenzo-strength]\n";
+                 "<output-stem> "
+                 "<phantom|zimu|mouse|derenzo|adhesion|classify|unknown> "
+                 "[derenzo-strength | inner,outer,damp]\n";
     return 1;
   }
   try {
@@ -20,6 +40,31 @@ int main(int argc, char **argv) {
     auto volume = spect::io::loadVolume(argv[1], nx, ny, nz);
     const auto info = spect::io::parseMHD(argv[1]);
     const std::string profile = argv[3];
+    if (profile == "classify") {
+      std::cout << spect::main::classifyOutputObjectProfile(volume, nx, ny, nz,
+                                                            info.dx, info.dy)
+                << '\n';
+      return 0;
+    }
+    if (profile == "adhesion") {
+      double inner = 0.02;
+      double outer = 0.10;
+      double damp = 0.55;
+      if (argc == 5) {
+        const auto values = parseTriplet(argv[4]);
+        if (values.size() != 3)
+          throw std::invalid_argument(
+              "adhesion mode expects inner,outer,damp");
+        inner = values[0];
+        outer = values[1];
+        damp = values[2];
+      }
+      spect::main::postprocessDerenzoAdhesion(volume, nx, ny, nz, info.dx,
+                                              info.dy, inner, outer, damp);
+      spect::io::writeMHD(argv[2], volume, nx, ny, nz, info.dx, info.dy,
+                          info.dz, true);
+      return 0;
+    }
     if (profile == "derenzo") {
       const double strength = argc == 5 ? std::stod(argv[4]) : 0.30;
       spect::main::postprocessDerenzoOutput(

@@ -149,6 +149,10 @@ struct ReconArgs {
     std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | epguan | zimu | derenzo
     bool bedDerenzoPostprocess = true; ///< Enable explicit Derenzo axial continuity processing
     double bedDerenzoAxialStrength = 0.30; ///< Positive-only high-confidence rod fill, [0,1]
+    bool bedDerenzoAdhesion = false; ///< Enable Derenzo in-plane adhesion fill + rod-core damping
+    double bedDerenzoAdhesionInner = 0.02; ///< Adhesion fraction at the inner sectors, [0,1]
+    double bedDerenzoAdhesionOuter = 0.10; ///< Adhesion fraction at the rim sectors, [0,1]
+    double bedDerenzoCoreDamp = 0.55; ///< High-frequency damping inside the rod cores, [0,1]
     double bedPhantomCloseStrength = 1.0; ///< Phantom contour-interpolation blend, [0,1]
     double bedEpguanCloseStrength = 1.0; ///< EP tube contour-interpolation blend, [0,1]
     bool bedEpguanWallMaxPreserve = false; ///< Keep brighter original EP wall at seams

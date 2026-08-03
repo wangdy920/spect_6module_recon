@@ -18,6 +18,8 @@ namespace main {
 
 namespace {
 
+constexpr double kPi = 3.14159265358979323846;
+
 std::vector<int> seamOutputBedStarts(const OutputTransform &transform) {
   const size_t beds = transform.bedZStarts.size();
   if (transform.outputBedOverlaps.size() + 1 != beds)
@@ -99,8 +101,29 @@ struct ObjectClassification {
   double mainFraction = 0.0;
 };
 
+/// What a Derenzo phantom is, geometrically: rods on one pitch inside a sector,
+/// sectors that are triangles, and the sectors spread evenly around a common
+/// centre. All of it is transaxial, so it says nothing about bed count.
+struct DerenzoLatticeGeometry {
+  bool isDerenzo = false;
+  int rodCount = 0;
+  int sectorCount = 0;
+  double pitchCv = 0.0;
+  double radiusCv = 0.0;
+  double angleRmsDeg = 0.0;
+  double triangleFraction = 0.0;
+  const char *reason = "not_evaluated";
+};
+
+DerenzoLatticeGeometry analyzeDerenzoLattice(const std::vector<double> &volume,
+                                             int nx, int ny, int nz,
+                                             double voxelSizeXmm,
+                                             double voxelSizeYmm);
+
 ObjectClassification classifyOutputObject(const std::vector<double> &volume,
-                                           int nx, int ny, int nz) {
+                                           int nx, int ny, int nz,
+                                           double voxelSizeXmm = 0.0,
+                                           double voxelSizeYmm = 0.0) {
   ObjectClassification result;
   std::vector<double> positive;
   positive.reserve(volume.size() / 8);
@@ -115,21 +138,26 @@ ObjectClassification classifyOutputObject(const std::vector<double> &volume,
   const double highThreshold = 0.50 * p995;
   const size_t plane = static_cast<size_t>(nx) * ny;
   std::vector<double> componentCounts;
+  std::vector<size_t> sliceMaskCounts;
   componentCounts.reserve(static_cast<size_t>(nz));
+  sliceMaskCounts.reserve(static_cast<size_t>(nz));
   size_t maskCount = 0;
   size_t highCount = 0;
   for (int z = 0; z < nz; ++z) {
     std::vector<uint8_t> mask(plane, 0);
     const size_t offset = static_cast<size_t>(z) * plane;
+    size_t sliceCount = 0;
     for (size_t xy = 0; xy < plane; ++xy) {
       const double value = volume[offset + xy];
       if (value >= threshold) {
         mask[xy] = 1;
+        ++sliceCount;
         ++maskCount;
         if (value >= highThreshold)
           ++highCount;
       }
     }
+    sliceMaskCounts.push_back(sliceCount);
     componentCounts.push_back(
         static_cast<double>(componentSizes2D(mask, ny, nx).size()));
   }
@@ -150,8 +178,24 @@ ObjectClassification classifyOutputObject(const std::vector<double> &volume,
   result.highFraction = maskCount > 0
                             ? static_cast<double>(highCount) / maskCount
                             : 0.0;
-  result.p90Components = percentile(componentCounts, 90.0);
-  result.medianComponents = percentile(componentCounts, 50.0);
+  // Per-slice statistics describe the object, so they are taken over its axial
+  // support only. A single-bed acquisition parks the phantom in the middle of
+  // the FOV, and counting the air slices drags the median to zero; a fused
+  // multi-bed volume fills every slice, so nothing changes there.
+  const size_t largestSlice =
+      sliceMaskCounts.empty()
+          ? 0
+          : *std::max_element(sliceMaskCounts.begin(), sliceMaskCounts.end());
+  std::vector<double> supportCounts;
+  supportCounts.reserve(componentCounts.size());
+  for (size_t z = 0; z < componentCounts.size(); ++z) {
+    if (sliceMaskCounts[z] * 10 >= largestSlice)
+      supportCounts.push_back(componentCounts[z]);
+  }
+  if (supportCounts.empty())
+    supportCounts = componentCounts;
+  result.p90Components = percentile(supportCounts, 90.0);
+  result.medianComponents = percentile(supportCounts, 50.0);
   if (!coronalSizes.empty()) {
     const double total = std::accumulate(coronalSizes.begin(),
                                          coronalSizes.end(), 0.0);
@@ -165,6 +209,37 @@ ObjectClassification classifyOutputObject(const std::vector<double> &volume,
   // coronal support (EPguan), so dominant-component phantoms are accepted
   // even when raw projection_components is inflated. Unknown remains a
   // no-op; explicit object_profile is the safety valve.
+  // Derenzo is decided on rod geometry, not on these counts. All they do is
+  // skip the (much more expensive) lattice analysis for volumes that plainly
+  // have no rod field to find: a Derenzo always breaks into many blobs in the
+  // slices it occupies. Stability of that count is deliberately not required,
+  // because inter-rod adhesion legitimately merges rods in part of the volume.
+  const bool rodLatticeCandidate = voxelSizeXmm > 0.0 && voxelSizeYmm > 0.0 &&
+                                   result.p90Components >= 8.0;
+  DerenzoLatticeGeometry lattice;
+  if (rodLatticeCandidate)
+    lattice = analyzeDerenzoLattice(volume, nx, ny, nz, voxelSizeXmm,
+                                    voxelSizeYmm);
+  else
+    lattice.reason = voxelSizeXmm > 0.0 && voxelSizeYmm > 0.0
+                         ? "prefilter_rejected"
+                         : "no_voxel_sizes";
+  std::ostringstream latticeLog;
+  latticeLog << "Derenzo lattice probe: match=" << (lattice.isDerenzo ? 1 : 0)
+             << ", reason=" << lattice.reason
+             << ", p90_components=" << result.p90Components
+             << ", median_components=" << result.medianComponents
+             << ", rods=" << lattice.rodCount
+             << ", sectors=" << lattice.sectorCount
+             << ", pitch_cv=" << lattice.pitchCv
+             << ", radius_cv=" << lattice.radiusCv
+             << ", angle_rms_deg=" << lattice.angleRmsDeg
+             << ", triangle_fraction=" << lattice.triangleFraction;
+  logInfo(latticeLog.str());
+  if (lattice.isDerenzo) {
+    result.profile = "derenzo";
+    return result;
+  }
   const bool dominantCompact =
       result.highFraction >= 0.20 && result.mainFraction >= 0.95 &&
       result.medianComponents <= 2.0 && result.p90Components <= 5.0 &&
@@ -544,6 +619,375 @@ std::vector<double> gaussianSmooth1D(const std::vector<double> &input,
   return output;
 }
 
+double smoothStep(double t) {
+  const double clamped = std::clamp(t, 0.0, 1.0);
+  return clamped * clamped * (3.0 - 2.0 * clamped);
+}
+
+struct DerenzoRods {
+  std::vector<SeamComponent> rods;
+  std::vector<double> response; ///< smoothed in-plane high-pass, rod weighting
+  bool valid = false;
+  const char *skipReason = "";
+};
+
+DerenzoRods detectDerenzoRods(const std::vector<double> &volume, int nx, int ny,
+                              int nz, double voxelSizeXmm,
+                              double voxelSizeYmm) {
+  DerenzoRods result;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> positive;
+  positive.reserve(volume.size() / 8);
+  for (double value : volume) {
+    if (value > 0.0)
+      positive.push_back(value);
+  }
+  if (positive.empty()) {
+    result.skipReason = "no_positive_signal";
+    return result;
+  }
+  const double clipValue = percentile(positive, 99.5);
+  // Axial support only: a single-bed volume parks the phantom mid-FOV, and the
+  // air slices would otherwise push the column percentile down to zero.
+  std::vector<double> sliceSums(static_cast<size_t>(nz), 0.0);
+  for (int z = 0; z < nz; ++z) {
+    const size_t offset = static_cast<size_t>(z) * plane;
+    double sum = 0.0;
+    for (size_t xy = 0; xy < plane; ++xy)
+      sum += std::max(0.0, volume[offset + xy]);
+    sliceSums[static_cast<size_t>(z)] = sum;
+  }
+  const double largestSlice =
+      *std::max_element(sliceSums.begin(), sliceSums.end());
+  std::vector<int> supportZ;
+  supportZ.reserve(static_cast<size_t>(nz));
+  for (int z = 0; z < nz; ++z) {
+    if (sliceSums[static_cast<size_t>(z)] * 10.0 >= largestSlice)
+      supportZ.push_back(z);
+  }
+  if (supportZ.empty()) {
+    result.skipReason = "no_axial_support";
+    return result;
+  }
+  std::vector<double> projection(plane, 0.0);
+  std::vector<double> column(supportZ.size());
+  for (size_t xy = 0; xy < plane; ++xy) {
+    for (size_t i = 0; i < supportZ.size(); ++i)
+      column[i] = std::min(
+          volume[static_cast<size_t>(supportZ[i]) * plane + xy], clipValue);
+    projection[xy] = percentile(column, 80.0);
+  }
+  const auto lowpass = gaussianBlur2D(projection, ny, nx, 2.0 / voxelSizeYmm,
+                                      2.0 / voxelSizeXmm);
+  std::vector<double> highpass(plane, 0.0);
+  for (size_t xy = 0; xy < plane; ++xy)
+    highpass[xy] = std::max(0.0, projection[xy] - lowpass[xy]);
+  result.response = gaussianBlur2D(highpass, ny, nx, 0.25 / voxelSizeYmm,
+                                   0.25 / voxelSizeXmm);
+  std::vector<double> highpassPositive;
+  highpassPositive.reserve(plane / 4);
+  for (double value : result.response) {
+    if (value > 0.0)
+      highpassPositive.push_back(value);
+  }
+  if (highpassPositive.empty()) {
+    result.skipReason = "no_highpass_signal";
+    return result;
+  }
+  constexpr double rodThresholdFraction = 0.40;
+  result.rods = seamComponents(
+      result.response, ny, nx,
+      rodThresholdFraction * percentile(highpassPositive, 99.0), 4);
+  result.valid = true;
+  return result;
+}
+
+// Single-linkage on the rod graph: an edge exists only when the rods are no
+// further apart than their own nearest-neighbour spacing scaled by pairScale.
+// A Derenzo sector has a constant pitch, and the gap between sectors is always
+// wider, so the connected components are the sectors without needing to know
+// the lattice.
+std::vector<int> clusterRodSectors(const std::vector<SeamComponent> &rods,
+                                   double pairScale) {
+  const int count = static_cast<int>(rods.size());
+  std::vector<int> parent(static_cast<size_t>(count));
+  std::iota(parent.begin(), parent.end(), 0);
+  const auto root = [&parent](int node) {
+    while (parent[static_cast<size_t>(node)] != node) {
+      parent[static_cast<size_t>(node)] =
+          parent[static_cast<size_t>(parent[static_cast<size_t>(node)])];
+      node = parent[static_cast<size_t>(node)];
+    }
+    return node;
+  };
+  const auto distance = [&rods](int a, int b) {
+    return std::hypot(rods[static_cast<size_t>(a)].centerY -
+                          rods[static_cast<size_t>(b)].centerY,
+                      rods[static_cast<size_t>(a)].centerX -
+                          rods[static_cast<size_t>(b)].centerX);
+  };
+  std::vector<double> nearest(static_cast<size_t>(count),
+                              std::numeric_limits<double>::infinity());
+  for (int i = 0; i < count; ++i) {
+    for (int j = 0; j < count; ++j) {
+      if (i != j)
+        nearest[static_cast<size_t>(i)] =
+            std::min(nearest[static_cast<size_t>(i)], distance(i, j));
+    }
+  }
+  for (int i = 0; i < count; ++i) {
+    for (int j = i + 1; j < count; ++j) {
+      const double limit =
+          pairScale * std::min(nearest[static_cast<size_t>(i)],
+                               nearest[static_cast<size_t>(j)]);
+      if (distance(i, j) > limit)
+        continue;
+      const int rootI = root(i);
+      const int rootJ = root(j);
+      if (rootI != rootJ)
+        parent[static_cast<size_t>(rootJ)] = rootI;
+    }
+  }
+  std::vector<int> labels(static_cast<size_t>(count), -1);
+  int next = 0;
+  for (int i = 0; i < count; ++i) {
+    const int rootI = root(i);
+    if (labels[static_cast<size_t>(rootI)] < 0)
+      labels[static_cast<size_t>(rootI)] = next++;
+    labels[static_cast<size_t>(i)] = labels[static_cast<size_t>(rootI)];
+  }
+  return labels;
+}
+
+using PlanePoint = std::pair<double, double>;
+
+std::vector<PlanePoint> convexHull(std::vector<PlanePoint> points) {
+  std::sort(points.begin(), points.end());
+  points.erase(std::unique(points.begin(), points.end()), points.end());
+  if (points.size() < 3)
+    return points;
+  const auto cross = [](const PlanePoint &o, const PlanePoint &a,
+                        const PlanePoint &b) {
+    return (a.first - o.first) * (b.second - o.second) -
+           (a.second - o.second) * (b.first - o.first);
+  };
+  std::vector<PlanePoint> hull(2 * points.size());
+  size_t k = 0;
+  for (const PlanePoint &point : points) {
+    while (k >= 2 && cross(hull[k - 2], hull[k - 1], point) <= 0.0)
+      --k;
+    hull[k++] = point;
+  }
+  const size_t lower = k + 1;
+  for (size_t i = points.size() - 1; i > 0; --i) {
+    const PlanePoint &point = points[i - 1];
+    while (k >= lower && cross(hull[k - 2], hull[k - 1], point) <= 0.0)
+      --k;
+    hull[k++] = point;
+  }
+  hull.resize(k - 1);
+  return hull;
+}
+
+// Rods sitting along a straight edge are hull vertices too, so only turns
+// sharper than minTurnDeg count as corners of the sector triangle.
+int hullCornerCount(const std::vector<PlanePoint> &hull, double minTurnDeg) {
+  const size_t count = hull.size();
+  if (count < 3)
+    return static_cast<int>(count);
+  const double minTurn = minTurnDeg * kPi / 180.0;
+  int corners = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const PlanePoint &previous = hull[(i + count - 1) % count];
+    const PlanePoint &current = hull[i];
+    const PlanePoint &next = hull[(i + 1) % count];
+    const double inY = current.first - previous.first;
+    const double inX = current.second - previous.second;
+    const double outY = next.first - current.first;
+    const double outX = next.second - current.second;
+    const double inLength = std::hypot(inY, inX);
+    const double outLength = std::hypot(outY, outX);
+    if (inLength <= 0.0 || outLength <= 0.0)
+      continue;
+    const double turn = std::abs(std::atan2(inY * outX - inX * outY,
+                                            inY * outY + inX * outX));
+    if (turn >= minTurn)
+      ++corners;
+  }
+  return corners;
+}
+
+DerenzoLatticeGeometry analyzeDerenzoLattice(const std::vector<double> &volume,
+                                             int nx, int ny, int nz,
+                                             double voxelSizeXmm,
+                                             double voxelSizeYmm) {
+  DerenzoLatticeGeometry result;
+  const auto detected =
+      detectDerenzoRods(volume, nx, ny, nz, voxelSizeXmm, voxelSizeYmm);
+  if (!detected.valid) {
+    result.reason = detected.skipReason;
+    return result;
+  }
+  const auto &rods = detected.rods;
+  result.rodCount = static_cast<int>(rods.size());
+  constexpr int minRods = 12;
+  constexpr int minSectors = 3;
+  constexpr int maxSectors = 8;
+  constexpr int minRodsPerSector = 3;
+  if (result.rodCount < minRods) {
+    result.reason = "too_few_rods";
+    return result;
+  }
+
+  const auto labels = clusterRodSectors(rods, 1.35);
+  const int groups =
+      labels.empty() ? 0 : *std::max_element(labels.begin(), labels.end()) + 1;
+  std::vector<std::vector<PlanePoint>> sectors(static_cast<size_t>(groups));
+  for (size_t i = 0; i < rods.size(); ++i)
+    sectors[static_cast<size_t>(labels[i])].emplace_back(rods[i].centerY,
+                                                         rods[i].centerX);
+  std::vector<std::vector<PlanePoint>> kept;
+  for (auto &sector : sectors) {
+    if (static_cast<int>(sector.size()) >= minRodsPerSector)
+      kept.push_back(std::move(sector));
+  }
+  result.sectorCount = static_cast<int>(kept.size());
+  if (result.sectorCount < minSectors || result.sectorCount > maxSectors) {
+    result.reason = "sector_count_out_of_range";
+    return result;
+  }
+
+  // One pitch per sector, and triangular sectors: both are what a rod lattice
+  // has and a skeleton or a hot-spot cluster does not.
+  std::vector<double> pitchCvs;
+  std::vector<PlanePoint> centroids;
+  int triangles = 0;
+  for (const auto &sector : kept) {
+    std::vector<double> nearest;
+    nearest.reserve(sector.size());
+    for (size_t i = 0; i < sector.size(); ++i) {
+      double best = std::numeric_limits<double>::infinity();
+      for (size_t j = 0; j < sector.size(); ++j) {
+        if (i != j)
+          best = std::min(best, std::hypot(sector[i].first - sector[j].first,
+                                           sector[i].second - sector[j].second));
+      }
+      if (std::isfinite(best))
+        nearest.push_back(best);
+    }
+    if (nearest.empty()) {
+      result.reason = "degenerate_sector";
+      return result;
+    }
+    const double mean =
+        std::accumulate(nearest.begin(), nearest.end(), 0.0) / nearest.size();
+    double variance = 0.0;
+    for (double value : nearest)
+      variance += (value - mean) * (value - mean);
+    variance /= static_cast<double>(nearest.size());
+    pitchCvs.push_back(mean > 0.0 ? std::sqrt(variance) / mean : 1.0);
+    double sumY = 0.0;
+    double sumX = 0.0;
+    for (const auto &point : sector) {
+      sumY += point.first;
+      sumX += point.second;
+    }
+    centroids.emplace_back(sumY / sector.size(), sumX / sector.size());
+    if (hullCornerCount(convexHull(sector), 30.0) == 3)
+      ++triangles;
+  }
+  result.pitchCv = percentile(pitchCvs, 50.0);
+  result.triangleFraction =
+      static_cast<double>(triangles) / static_cast<double>(kept.size());
+
+  double centreY = 0.0;
+  double centreX = 0.0;
+  for (const auto &centroid : centroids) {
+    centreY += centroid.first;
+    centreX += centroid.second;
+  }
+  centreY /= static_cast<double>(centroids.size());
+  centreX /= static_cast<double>(centroids.size());
+  std::vector<double> radii;
+  std::vector<double> angles;
+  for (const auto &centroid : centroids) {
+    const double dy = centroid.first - centreY;
+    const double dx = centroid.second - centreX;
+    radii.push_back(std::hypot(dy, dx));
+    angles.push_back(std::atan2(dy, dx));
+  }
+  const double radiusMean =
+      std::accumulate(radii.begin(), radii.end(), 0.0) / radii.size();
+  double radiusVariance = 0.0;
+  for (double value : radii)
+    radiusVariance += (value - radiusMean) * (value - radiusMean);
+  radiusVariance /= static_cast<double>(radii.size());
+  result.radiusCv =
+      radiusMean > 0.0 ? std::sqrt(radiusVariance) / radiusMean : 1.0;
+
+  std::sort(angles.begin(), angles.end());
+  const double expected = 2.0 * kPi / static_cast<double>(angles.size());
+  double angleVariance = 0.0;
+  for (size_t i = 0; i < angles.size(); ++i) {
+    const double next = i + 1 < angles.size() ? angles[i + 1]
+                                              : angles[0] + 2.0 * kPi;
+    const double error = (next - angles[i]) - expected;
+    angleVariance += error * error;
+  }
+  result.angleRmsDeg = std::sqrt(angleVariance / angles.size()) * 180.0 / kPi;
+
+  if (result.pitchCv > 0.30)
+    result.reason = "pitch_not_constant";
+  else if (result.radiusCv > 0.35)
+    result.reason = "sectors_not_concentric";
+  else if (result.angleRmsDeg > 25.0)
+    result.reason = "sectors_not_evenly_spaced";
+  else if (result.triangleFraction < 0.50)
+    result.reason = "sectors_not_triangular";
+  else {
+    result.reason = "rod_lattice";
+    result.isDerenzo = true;
+  }
+  return result;
+}
+
+// Negative inside the hull, positive outside; the units are pixels.
+std::vector<double> convexHullSignedDistance(
+    const std::vector<PlanePoint> &hull, int ny, int nx) {
+  std::vector<double> field(static_cast<size_t>(ny) * nx, 0.0);
+  const size_t corners = hull.size();
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      const double py = static_cast<double>(y);
+      const double px = static_cast<double>(x);
+      double best = std::numeric_limits<double>::infinity();
+      bool inside = corners >= 3;
+      for (size_t i = 0; i < corners; ++i) {
+        const PlanePoint &a = hull[i];
+        const PlanePoint &b = hull[(i + 1) % corners];
+        const double ey = b.first - a.first;
+        const double ex = b.second - a.second;
+        const double lengthSquared = ey * ey + ex * ex;
+        const double t =
+            lengthSquared > 0.0
+                ? std::clamp(((py - a.first) * ey + (px - a.second) * ex) /
+                                 lengthSquared,
+                             0.0, 1.0)
+                : 0.0;
+        best = std::min(best, std::hypot(py - (a.first + t * ey),
+                                         px - (a.second + t * ex)));
+        if (inside &&
+            (b.first - a.first) * (px - a.second) -
+                    (b.second - a.second) * (py - a.first) <
+                0.0)
+          inside = false;
+      }
+      field[static_cast<size_t>(y) * nx + x] = inside ? -best : best;
+    }
+  }
+  return field;
+}
+
 void applyEpguanBackgroundFilter(std::vector<double> &volume,
                                  const std::vector<double> &analysisVolume,
                                  int nx, int ny, int nz, double voxelSizeXmm,
@@ -894,7 +1338,8 @@ void applyObjectAwareSeamPostprocessImpl(std::vector<double> &volume, int nx,
                                          const std::vector<double> &analysisVolume) {
   ObjectClassification classification;
   if (transform.objectProfile == "auto")
-    classification = classifyOutputObject(analysisVolume, nx, ny, nz);
+    classification = classifyOutputObject(analysisVolume, nx, ny, nz,
+                                          voxelSizeXmm, voxelSizeYmm);
   else
     classification.profile = transform.objectProfile;
   const std::string &profile = classification.profile;
@@ -975,12 +1420,15 @@ void applyObjectAwareSeamPostprocessImpl(std::vector<double> &volume, int nx,
 } // namespace
 
 std::string classifyOutputObjectProfile(const std::vector<double> &volume,
-                                        int nx, int ny, int nz) {
+                                        int nx, int ny, int nz,
+                                        double voxelSizeXmm,
+                                        double voxelSizeYmm) {
   const size_t expected = static_cast<size_t>(nx) * ny * nz;
   if (nx <= 0 || ny <= 0 || nz <= 0 || volume.size() != expected)
     throw std::invalid_argument(
         "classifyOutputObjectProfile: invalid volume dimensions");
-  return classifyOutputObject(volume, nx, ny, nz).profile;
+  return classifyOutputObject(volume, nx, ny, nz, voxelSizeXmm, voxelSizeYmm)
+      .profile;
 }
 
 void postprocessDerenzoOutput(std::vector<double> &volume, int nx, int ny,
@@ -1003,49 +1451,15 @@ void postprocessDerenzoOutput(std::vector<double> &volume, int nx, int ny,
     return;
   }
 
-  std::vector<double> positive;
-  positive.reserve(volume.size() / 8);
-  for (double value : volume) {
-    if (value > 0.0)
-      positive.push_back(value);
-  }
-  if (positive.empty()) {
-    logInfo("Derenzo axial postprocess: skipped reason=no_positive_signal");
+  const auto lattice =
+      detectDerenzoRods(volume, nx, ny, nz, voxelSizeXmm, voxelSizeYmm);
+  if (!lattice.valid) {
+    logInfo(std::string("Derenzo axial postprocess: skipped reason=") +
+            lattice.skipReason);
     return;
   }
-
-  const double clipValue = percentile(positive, 99.5);
-  std::vector<double> projection(plane, 0.0);
-  std::vector<double> column(static_cast<size_t>(nz));
-  for (size_t xy = 0; xy < plane; ++xy) {
-    for (int z = 0; z < nz; ++z)
-      column[static_cast<size_t>(z)] = std::min(
-          volume[static_cast<size_t>(z) * plane + xy], clipValue);
-    projection[xy] = percentile(column, 80.0);
-  }
-  const auto lowpass = gaussianBlur2D(
-      projection, ny, nx, 2.0 / voxelSizeYmm, 2.0 / voxelSizeXmm);
-  std::vector<double> highpass(plane, 0.0);
-  for (size_t xy = 0; xy < plane; ++xy)
-    highpass[xy] = std::max(0.0, projection[xy] - lowpass[xy]);
-  const auto highpassSmooth = gaussianBlur2D(
-      highpass, ny, nx, 0.25 / voxelSizeYmm, 0.25 / voxelSizeXmm);
-  std::vector<double> highpassPositive;
-  highpassPositive.reserve(plane / 4);
-  for (double value : highpassSmooth) {
-    if (value > 0.0)
-      highpassPositive.push_back(value);
-  }
-  if (highpassPositive.empty()) {
-    logInfo("Derenzo axial postprocess: skipped reason=no_highpass_signal");
-    return;
-  }
-
-  constexpr double rodThresholdFraction = 0.40;
-  const double highpassReference = percentile(highpassPositive, 99.0);
-  const auto rods = seamComponents(highpassSmooth, ny, nx,
-                                   rodThresholdFraction * highpassReference,
-                                   4);
+  const std::vector<double> &highpassSmooth = lattice.response;
+  const std::vector<SeamComponent> &rods = lattice.rods;
   int morphLength =
       std::max(1, static_cast<int>(std::round(1.50 / voxelSizeZmm)));
   if (morphLength % 2 == 0)
@@ -1153,6 +1567,279 @@ void postprocessDerenzoOutput(std::vector<double> &volume, int nx, int ny,
   if (processedRods > 0)
     summary << ", trusted_span_voxels=" << shortestSpan << ".."
             << longestSpan;
+  logInfo(summary.str());
+}
+
+void postprocessDerenzoAdhesion(std::vector<double> &volume, int nx, int ny,
+                                int nz, double voxelSizeXmm,
+                                double voxelSizeYmm, double adhesionInner,
+                                double adhesionOuter, double coreDamp) {
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  const size_t expected = plane * static_cast<size_t>(nz);
+  if (nx <= 0 || ny <= 0 || nz <= 0 || volume.size() != expected)
+    throw std::invalid_argument(
+        "postprocessDerenzoAdhesion: invalid volume dimensions");
+  if (voxelSizeXmm <= 0.0 || voxelSizeYmm <= 0.0)
+    throw std::invalid_argument(
+        "postprocessDerenzoAdhesion: voxel sizes must be positive");
+  const auto validStrength = [](double value) {
+    return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+  };
+  if (!validStrength(adhesionInner) || !validStrength(adhesionOuter) ||
+      !validStrength(coreDamp))
+    throw std::invalid_argument(
+        "postprocessDerenzoAdhesion: strengths must be in [0,1]");
+  if (adhesionInner > adhesionOuter)
+    throw std::invalid_argument(
+        "postprocessDerenzoAdhesion: inner fraction must not exceed outer");
+  if (adhesionOuter == 0.0 && coreDamp == 0.0) {
+    logInfo("Derenzo adhesion postprocess: skipped reason=strength_zero");
+    return;
+  }
+
+  const auto lattice =
+      detectDerenzoRods(volume, nx, ny, nz, voxelSizeXmm, voxelSizeYmm);
+  if (!lattice.valid) {
+    logInfo(std::string("Derenzo adhesion postprocess: skipped reason=") +
+            lattice.skipReason);
+    return;
+  }
+  const std::vector<SeamComponent> &rods = lattice.rods;
+  constexpr size_t minimumRods = 6;
+  if (rods.size() < minimumRods) {
+    logInfo("Derenzo adhesion postprocess: skipped reason=too_few_rods");
+    return;
+  }
+
+  // Every length below is expressed in rod radii, so the pass needs no
+  // scanner-specific tuning: the reference recipe stated its margins in PSF
+  // sigma, and for a resolvable lattice sigma is about half the rod radius.
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kSigmaPerRodRadius = 0.50;
+  constexpr double kGelRho = 3.50;          ///< adhesion blur, in sigma
+  constexpr double kHullMarginSigma = 1.20; ///< hull pad beyond the rod edge
+  constexpr double kHullFeatherSigma = 1.0;
+  constexpr double kCoreInnerRadius = 0.45; ///< full damping inside, in radii
+  constexpr double kCoreOuterRadius = 0.95; ///< no damping beyond, in radii
+  constexpr double kSectorPairScale = 1.35;
+  std::vector<double> areas;
+  areas.reserve(rods.size());
+  for (const SeamComponent &rod : rods) {
+    double pixels = 0.0;
+    for (uint8_t flag : rod.mask)
+      pixels += flag ? 1.0 : 0.0;
+    areas.push_back(pixels);
+  }
+  const double rodRadius =
+      std::sqrt(std::max(1.0, percentile(areas, 50.0)) / kPi);
+  const double sigma = kSigmaPerRodRadius * rodRadius;
+  // The volume already carries one PSF width, so only the residual blur that
+  // widens sigma to rho * sigma is applied here.
+  const double gelSigma = sigma * std::sqrt(kGelRho * kGelRho - 1.0);
+  const double sharpSigma = 0.70 * sigma;
+  const double hullPad = rodRadius + kHullMarginSigma * sigma;
+  const double hullFeather = std::max(1e-6, kHullFeatherSigma * sigma);
+
+  // Distance to the nearest rod centre drives the core gate.
+  std::vector<double> centerDistance(plane, 0.0);
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      double best = std::numeric_limits<double>::infinity();
+      for (const SeamComponent &rod : rods)
+        best = std::min(best, std::hypot(static_cast<double>(y) - rod.centerY,
+                                         static_cast<double>(x) - rod.centerX));
+      centerDistance[static_cast<size_t>(y) * nx + x] = best;
+    }
+  }
+
+  size_t dampedVoxels = 0;
+  double dampedSignal = 0.0;
+  if (coreDamp > 0.0) {
+    std::vector<double> coreGate(plane, 0.0);
+    const double span = (kCoreOuterRadius - kCoreInnerRadius) * rodRadius;
+    for (size_t xy = 0; xy < plane; ++xy)
+      coreGate[xy] =
+          1.0 - smoothStep((centerDistance[xy] - kCoreInnerRadius * rodRadius) /
+                           std::max(1e-6, span));
+    std::vector<double> slice(plane, 0.0);
+    for (int z = 0; z < nz; ++z) {
+      const size_t base = static_cast<size_t>(z) * plane;
+      std::copy(volume.begin() + static_cast<ptrdiff_t>(base),
+                volume.begin() + static_cast<ptrdiff_t>(base + plane),
+                slice.begin());
+      const auto smooth = gaussianBlur2D(slice, ny, nx, sigma, sigma);
+      for (size_t xy = 0; xy < plane; ++xy) {
+        if (coreGate[xy] <= 0.0)
+          continue;
+        const double delta = coreDamp * coreGate[xy] * (slice[xy] - smooth[xy]);
+        if (delta == 0.0)
+          continue;
+        volume[base + xy] = std::max(0.0, slice[xy] - delta);
+        ++dampedVoxels;
+        dampedSignal += std::abs(delta);
+      }
+    }
+  }
+
+  size_t sectorCount = 0;
+  size_t filledVoxels = 0;
+  double addedSignal = 0.0;
+  double maxAbs = 0.0;
+  if (adhesionOuter > 0.0) {
+    const std::vector<int> labels = clusterRodSectors(rods, kSectorPairScale);
+    const int sectors = *std::max_element(labels.begin(), labels.end()) + 1;
+    std::vector<uint8_t> support(plane, 0);
+    double centroidY = 0.0;
+    double centroidX = 0.0;
+    for (const SeamComponent &rod : rods) {
+      centroidY += rod.centerY;
+      centroidX += rod.centerX;
+      for (size_t xy = 0; xy < plane; ++xy)
+        support[xy] |= rod.mask[xy];
+    }
+    centroidY /= static_cast<double>(rods.size());
+    centroidX /= static_cast<double>(rods.size());
+    double radiusMin = std::numeric_limits<double>::infinity();
+    double radiusMax = 0.0;
+    for (const SeamComponent &rod : rods) {
+      const double radius =
+          std::hypot(rod.centerY - centroidY, rod.centerX - centroidX);
+      radiusMin = std::min(radiusMin, radius);
+      radiusMax = std::max(radiusMax, radius);
+    }
+    // Adhesion grows towards the outer sectors, matching the graded fill of
+    // the reference phantom (inner fraction at the centre, outer at the rim).
+    const double radiusSpan = std::max(1e-6, radiusMax - radiusMin);
+    std::vector<double> radialWeight(plane, adhesionOuter);
+    for (int y = 0; y < ny; ++y) {
+      for (int x = 0; x < nx; ++x) {
+        const double radius = std::hypot(static_cast<double>(y) - centroidY,
+                                         static_cast<double>(x) - centroidX);
+        const double t = std::clamp((radius - radiusMin) / radiusSpan, 0.0, 1.0);
+        radialWeight[static_cast<size_t>(y) * nx + x] =
+            adhesionInner + (adhesionOuter - adhesionInner) * 0.5 *
+                                (1.0 - std::cos(kPi * t));
+      }
+    }
+
+    struct AdhesionSector {
+      std::vector<size_t> pixels;
+      std::vector<double> gate;
+      double scale = 1.0;
+    };
+    std::vector<AdhesionSector> gated;
+    for (int sector = 0; sector < sectors; ++sector) {
+      std::vector<PlanePoint> centres;
+      for (size_t i = 0; i < rods.size(); ++i) {
+        if (labels[i] == sector)
+          centres.emplace_back(rods[i].centerY, rods[i].centerX);
+      }
+      if (centres.size() < 3)
+        continue;
+      const auto hull = convexHull(std::move(centres));
+      if (hull.size() < 3)
+        continue;
+      const auto hullDistance = convexHullSignedDistance(hull, ny, nx);
+      AdhesionSector entry;
+      entry.gate.assign(plane, 0.0);
+      for (size_t xy = 0; xy < plane; ++xy) {
+        const double gate = smoothStep((hullPad - hullDistance[xy]) /
+                                       hullFeather);
+        if (gate <= 0.0)
+          continue;
+        entry.gate[xy] = gate;
+        entry.pixels.push_back(xy);
+      }
+      if (entry.pixels.empty())
+        continue;
+      gated.push_back(std::move(entry));
+    }
+    sectorCount = gated.size();
+
+    int peakSlice = 0;
+    double peakSum = -1.0;
+    for (int z = 0; z < nz; ++z) {
+      const size_t base = static_cast<size_t>(z) * plane;
+      double sum = 0.0;
+      for (size_t xy = 0; xy < plane; ++xy) {
+        if (support[xy])
+          sum += volume[base + xy];
+      }
+      if (sum > peakSum) {
+        peakSum = sum;
+        peakSlice = z;
+      }
+    }
+
+    std::vector<double> masked(plane, 0.0);
+    const auto maskSlice = [&](int z) {
+      const size_t base = static_cast<size_t>(z) * plane;
+      for (size_t xy = 0; xy < plane; ++xy)
+        masked[xy] = support[xy] ? std::max(0.0, volume[base + xy]) : 0.0;
+    };
+    if (!gated.empty() && peakSum > 0.0) {
+      // The gel level is locked on the brightest slice: the ratio between the
+      // widened and the sharp field is a geometry constant, so one calibration
+      // keeps the fill following the axial profile instead of flattening it.
+      maskSlice(peakSlice);
+      const auto wideRef = gaussianBlur2D(masked, ny, nx, gelSigma, gelSigma);
+      const auto sharpRef =
+          gaussianBlur2D(masked, ny, nx, sharpSigma, sharpSigma);
+      for (AdhesionSector &entry : gated) {
+        std::vector<double> wideValues;
+        std::vector<double> sharpValues;
+        wideValues.reserve(entry.pixels.size());
+        sharpValues.reserve(entry.pixels.size());
+        for (size_t xy : entry.pixels) {
+          wideValues.push_back(wideRef[xy]);
+          sharpValues.push_back(sharpRef[xy]);
+        }
+        const double wideLevel = percentile(wideValues, 99.5);
+        entry.scale =
+            wideLevel > 0.0 ? percentile(sharpValues, 99.5) / wideLevel : 0.0;
+      }
+
+      std::vector<double> bridge(plane, 0.0);
+      for (int z = 0; z < nz; ++z) {
+        maskSlice(z);
+        double sliceSum = 0.0;
+        for (double value : masked)
+          sliceSum += value;
+        if (sliceSum <= 0.0)
+          continue;
+        const auto wide = gaussianBlur2D(masked, ny, nx, gelSigma, gelSigma);
+        const auto sharp =
+            gaussianBlur2D(masked, ny, nx, sharpSigma, sharpSigma);
+        std::fill(bridge.begin(), bridge.end(), 0.0);
+        for (const AdhesionSector &entry : gated) {
+          for (size_t xy : entry.pixels) {
+            const double fill = wide[xy] * entry.scale - sharp[xy];
+            if (fill > 0.0)
+              bridge[xy] += fill * entry.gate[xy];
+          }
+        }
+        const size_t base = static_cast<size_t>(z) * plane;
+        for (size_t xy = 0; xy < plane; ++xy) {
+          const double delta = radialWeight[xy] * bridge[xy];
+          if (delta <= 0.0)
+            continue;
+          volume[base + xy] += delta;
+          ++filledVoxels;
+          addedSignal += delta;
+          maxAbs = std::max(maxAbs, delta);
+        }
+      }
+    }
+  }
+
+  std::ostringstream summary;
+  summary << "Derenzo adhesion postprocess: detected_rods=" << rods.size()
+          << ", sectors=" << sectorCount
+          << ", rod_radius_voxels=" << rodRadius
+          << ", damped_voxels=" << dampedVoxels
+          << ", damped_signal=" << dampedSignal
+          << ", filled_voxels=" << filledVoxels
+          << ", added_signal=" << addedSignal << ", max_abs=" << maxAbs;
   logInfo(summary.str());
 }
 

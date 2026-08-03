@@ -808,8 +808,12 @@ int runProgram(int argc, char **argv) {
         args.bedSeamPostprocess && hasOutputOverlapStitch &&
         args.bedCropMethod != "direct" &&
         args.bedObjectProfile != "derenzo";
+    // The rod passes are gated on the resolved object profile inside
+    // prepareOutputVolume, so "auto" is enough to let a Derenzo lattice be
+    // recognised from the stitched output itself.
     const bool enableDerenzoPostprocess =
-        args.bedDerenzoPostprocess && args.bedObjectProfile == "derenzo";
+        args.bedDerenzoPostprocess && (args.bedObjectProfile == "derenzo" ||
+                                       args.bedObjectProfile == "auto");
     if (args.bedSeamPostprocess && !enableSeamPostprocess) {
       logInfo("Output transform: seam postprocess requested but skipped "
               "(requires multi-bed weighted output stitching).");
@@ -824,6 +828,12 @@ int runProgram(int argc, char **argv) {
     outputTransform.objectProfile = args.bedObjectProfile;
     outputTransform.derenzoAxialPostprocess = enableDerenzoPostprocess;
     outputTransform.derenzoAxialStrength = args.bedDerenzoAxialStrength;
+    outputTransform.derenzoAdhesionPostprocess =
+        args.bedDerenzoAdhesion && (args.bedObjectProfile == "derenzo" ||
+                                    args.bedObjectProfile == "auto");
+    outputTransform.derenzoAdhesionInner = args.bedDerenzoAdhesionInner;
+    outputTransform.derenzoAdhesionOuter = args.bedDerenzoAdhesionOuter;
+    outputTransform.derenzoCoreDamp = args.bedDerenzoCoreDamp;
     outputTransform.phantomCloseStrength = args.bedPhantomCloseStrength;
     outputTransform.epguanCloseStrength = args.bedEpguanCloseStrength;
     outputTransform.epguanWallMaxPreserve =

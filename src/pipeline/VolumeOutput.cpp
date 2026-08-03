@@ -692,6 +692,7 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     postprocessTransform = &frozenTransform;
   }
   double analysisRadiusMm = 0.0;
+  std::string resolvedProfile = transform ? transform->objectProfile : "auto";
   if (transform && transform->objectAwareSeamPostprocess) {
     analysisRadiusMm = transform->analysisFovRadiusMm > 0.0
                            ? transform->analysisFovRadiusMm
@@ -709,9 +710,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
           analysisForPostprocess ? *analysisForPostprocess : *sourceForOutput;
       frozenTransform = *transform;
       if (frozenTransform.objectProfile == "auto")
-        frozenTransform.objectProfile =
-            classifyOutputObjectProfile(analysis, nx, ny, transformedNz);
+        frozenTransform.objectProfile = classifyOutputObjectProfile(
+            analysis, nx, ny, transformedNz, voxelSizeXmm, voxelSizeYmm);
       postprocessTransform = &frozenTransform;
+      resolvedProfile = frozenTransform.objectProfile;
       if (frozenTransform.objectProfile == "mouse") {
         transformedSource = mouseConfidenceBlendOutputOverlap(
             preStitchSource, nx, ny, nz, frozenTransform, analysisRadiusMm,
@@ -726,12 +728,39 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
         voxelSizeXmm, voxelSizeYmm);
     sourceForOutput = &transformedSource;
   }
-  if (transform && transform->derenzoAxialPostprocess) {
+  // A Derenzo rod lattice is recognised from the stitched output itself, so
+  // the rod passes below still run when the caller left object_profile=auto.
+  if (transform &&
+      (transform->derenzoAxialPostprocess ||
+       transform->derenzoAdhesionPostprocess) &&
+      resolvedProfile == "auto") {
+    resolvedProfile = classifyOutputObjectProfile(
+        analysisForPostprocess ? *analysisForPostprocess : *sourceForOutput, nx,
+        ny, transformedNz, voxelSizeXmm, voxelSizeYmm);
+    if (postprocessTransform == transform) {
+      frozenTransform = *transform;
+      postprocessTransform = &frozenTransform;
+    }
+    frozenTransform.objectProfile = resolvedProfile;
+  }
+  if (transform && transform->derenzoAxialPostprocess &&
+      resolvedProfile == "derenzo") {
     if (sourceForOutput != &transformedSource)
       transformedSource = *sourceForOutput;
     postprocessDerenzoOutput(
         transformedSource, nx, ny, transformedNz, voxelSizeXmm,
         voxelSizeYmm, voxelSizeZmm, transform->derenzoAxialStrength);
+    sourceForOutput = &transformedSource;
+  }
+  if (transform && transform->derenzoAdhesionPostprocess &&
+      resolvedProfile == "derenzo") {
+    if (sourceForOutput != &transformedSource)
+      transformedSource = *sourceForOutput;
+    postprocessDerenzoAdhesion(transformedSource, nx, ny, transformedNz,
+                               voxelSizeXmm, voxelSizeYmm,
+                               transform->derenzoAdhesionInner,
+                               transform->derenzoAdhesionOuter,
+                               transform->derenzoCoreDamp);
     sourceForOutput = &transformedSource;
   }
   if (transform && transform->objectAwareSeamPostprocess) {
