@@ -58,14 +58,6 @@ struct CudaChunkStageTimingSnapshot {
 
 void resetCudaChunkStageTimingCUDA();
 CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA();
-void setCudaChunkNnzBudgetOverrideForTestingCUDA(uint64_t nnzBudget);
-void setCudaPreparedChunkHostCacheBytesOverrideForTestingCUDA(uint64_t bytes);
-void setCudaHostChunkBuildThreadsOverrideForTestingCUDA(int threads);
-void setCudaSkipBackwardTransposeForTestingCUDA(bool skip);
-int resolveCudaHostChunkBuildThreadsForTestingCUDA(int requestedThreads,
-                                                   uint64_t workItems);
-uint64_t resolveCudaPreparedChunkHostCacheBudgetForTestingCUDA(
-    size_t activePreparedCaches);
 
 uint64_t getProjDomainChunkNnzBudgetCUDA();
 uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA();
@@ -75,16 +67,6 @@ uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA();
 inline void resetCudaChunkStageTimingCUDA() {}
 inline CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
   return {};
-}
-inline void setCudaChunkNnzBudgetOverrideForTestingCUDA(uint64_t) {}
-inline void setCudaPreparedChunkHostCacheBytesOverrideForTestingCUDA(uint64_t) {}
-inline void setCudaHostChunkBuildThreadsOverrideForTestingCUDA(int) {}
-inline void setCudaSkipBackwardTransposeForTestingCUDA(bool) {}
-inline int resolveCudaHostChunkBuildThreadsForTestingCUDA(int, uint64_t) {
-  return 1;
-}
-inline uint64_t resolveCudaPreparedChunkHostCacheBudgetForTestingCUDA(size_t) {
-  return 0;
 }
 
 inline uint64_t getProjDomainChunkNnzBudgetCUDA() { return kProjDomainChunkMinNnz; }

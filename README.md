@@ -2,7 +2,7 @@
 
 High-performance 3D SPECT reconstruction pipeline with C++17 modular architecture and CUDA acceleration. The project provides:
 
-- **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, Butterworth, and Joseph-like smoothing.
+- **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, and Butterworth filtering.
 - **Compact-symmetric backend**: **default matrix 260601** — `-chunkCSRDir` loads `metadata.bin` + `chunk_*.csrb` (`test_data/6module/260601`, 88B/96B metadata, Sym90Z). This is the **only** matrix input path; single-file CSRB/MAT entries have been removed.
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, NVRTC kernels for PSF/RDP/TV gradients. Single GPU.
 - **6-module matrix generation reference**: `6module_bak_src/` holds the CUDA v4 system-matrix generator, the bedmerge reconstruction prototype, and the MAT→BIN projection tool.
@@ -43,14 +43,13 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | Option | Description |
 | --- | --- |
 | `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and `chunk_*.csrb` (**only matrix entry**). Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
-| `-Astream on|off`    | Stream build from disk (default **off**). |
+| `-Astream on|off`    | Removed; compact chunk CSRB is always streamed/mmapped per chunk. Pruning happens at matrix-generation time, so `-Aprune` / `-ApruneMask` are rejected too. |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
 | `-badDetectorFile <file>` | Skip hardware blocks in both measured projection rows and sensitivity. Entries may be preferred global numbers `0..95` or detailed `link-<3|4>-FPGA-<0..5>-dector-<0..7>` IDs; the shipped list is empty. |
 | `-detZRowWeightsFile <file>` / `-normFactorFile <file>` | Optional normalization inputs. `-detZRowWeightsFile` contains detector efficiency weights directly. `-normFactorFile` contains full projection correction factors `c` in `<uint32 angles><uint32 rays><float64 values>` BIN form; the background-free MLEM path applies reciprocal efficiency `1/c` to sensitivity. Default is empty/off. |
 | Sparse backend | Fixed to CUDA. The old `-sparseBackend` / `-spBackend` CLI switch is rejected. |
 | `-psf [fwhm_mm[,N]]` | Image-domain Operator PSF; FWHM is in mm and N truncates the Gaussian at N*sigma. |
 | `-psfMode Operator|None` | Force PSF on/off; `-psf` defaults to `Operator`. |
-| `-joe <n>` | Joseph-like (B-spline) smoothing passes on denom/image. Default 0 = disabled. |
 | `-opti mlem|bsrem` | Select optimisation algorithm (overrides config). Single-subset full update; there is no `-subsets` switch. |
 | `-bsrem <alpha0[,gamma]>` | BSREM‑II step parameters (overrides config). |
 | `-reg <type,beta,...>` | Regularisation. Public types: `None`, `TV`/`TVIsotropic`, `RDP`. For TV use `-reg TV,beta,delta`; for RDP use `-reg RDP,beta,gamma,delta`. `beta` is independent of `-bsrem` alpha/gamma. |

@@ -163,13 +163,4 @@ void guardZeroMaxCheckpoint(const std::vector<double> &volume,
   }
 }
 
-void applyJosephLike(std::vector<double> &buffer, int nx, int ny, int nz,
-                     int passes, int threads, bool clampImage) {
-  if (passes <= 0)
-    return;
-  applyJosephSmoothing(buffer, nx, ny, nz, passes, threads);
-  if (clampImage)
-    clampNonNegativeInPlace(buffer, threads);
-}
-
 } // namespace spect::main

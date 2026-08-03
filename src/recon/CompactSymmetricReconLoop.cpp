@@ -473,7 +473,9 @@ std::string buildCompactDenomCacheManifest(
     oss << "joint_virtual_z_flip=1\n";
     oss << "joint_overlap_accumulation=direct\n";
   }
-  oss << "joseph_passes=" << args.josephPasses << '\n';
+  // Retired field, kept literal so the 448 MB of existing auto_<hash>.mhd denom
+  // caches still key-match; dropping the line would silently rebuild all of them.
+  oss << "joseph_passes=0\n";
   oss << "psf_mode=" << psfModeKey(args.psf.mode) << '\n';
   oss << "psf_fwhm=" << args.psf.fwhm_x << ',' << args.psf.fwhm_y << ','
       << args.psf.fwhm_z << ',' << args.psf.fwhm_mm << '\n';
@@ -699,7 +701,7 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
                   "compact denom cache manifest mismatch for " +
                   compactDenomCachePath.string() + ": " + cacheStatus +
                   ". Use a distinct -compactDenomCache path for no-PSF, "
-                  "PSF/FWHM, Joseph, and bed-geometry variants, or delete the "
+                  "PSF/FWHM, and bed-geometry variants, or delete the "
                   "stale cache intentionally.");
             }
             logInfo("compact denom cache miss: " + cacheStatus);
@@ -892,11 +894,6 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
             }
           }
 
-          if (args.josephPasses > 0) {
-            applyJosephLike(denom, args.Nx, args.Ny, args.Nz, args.josephPasses,
-                            opts.threads, false);
-            logInfo("Denom smoothing (Joseph-like) complete.");
-          }
           if (!compactDenomCachePath.empty()) {
             try {
               saveCompactDenomCache(compactDenomCachePath, compactDenomManifest,
@@ -1201,9 +1198,6 @@ std::vector<double> runCompactSymmetricReconstructionImpl(
           compactTiming.mlemUpdateSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - updateStart)
                   .count();
-
-          applyJosephLike(image, args.Nx, args.Ny, args.Nz, args.josephPasses,
-                          opts.threads, true);
 
           if (prepared.butterConf.enabled) {
             const auto butterStart = ProfileClock::now();

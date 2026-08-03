@@ -85,9 +85,6 @@ struct ReconArgs {
     double cylCenterZ = std::numeric_limits<double>::quiet_NaN();
 
     // ========== System Matrix Options ==========
-    double weightPruneEps = 0.0;  ///< Prune threshold (0 = off)
-    bool Astream = false;         ///< Stream build from disk
-    bool ApruneMask = false;      ///< Prune columns outside mask
     bool doCTAC = false;          ///< Iterative CTAC
     std::string ctacModel = "line-integral"; ///< fixed production model
     int ctacRotSign = 1;          ///< Voxel rotation sign matching sysmat generator (+1/-1)
@@ -112,7 +109,6 @@ struct ReconArgs {
 
     // ========== Miscellaneous ==========
     std::vector<float> voxelSizeMM = {1.0f, 1.0f, 1.0f};
-    int josephPasses = 0;
     int verbosity = 1;
     bool projectionResidual = false; ///< Write final compact projection residual CSV
 
@@ -131,7 +127,6 @@ struct ReconArgs {
     double bsremKappaClipMin = 0.1;          ///< Lower clipping bound after kappa normalization
     double bsremKappaClipMax = 10.0;         ///< Upper clipping bound after kappa normalization
     bool bsremSoftMask = false;              ///< Enable soft-mask penalty boosting via kappa map
-    int bsremSoftMaskBandVox = 2;            ///< Soft-mask transition width in voxels
     double bsremSoftMaskLambdaOut = 100.0;   ///< Penalty boost outside support: 1+lambda*(1-M)^2
 
     // ========== Body Mask ==========
@@ -170,13 +165,6 @@ struct ReconArgs {
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
-
-    // ========== Symmetry expansion ==========
-    // Reverses the 4-fold XY 90-degree rotation sense in compact-symmetric
-    // (Sym90Z/Sym45Z) image-side voxel mapping. Off = use matrix's baked
-    // handedness (default). On = swap CCW<->CW branches to compensate for a
-    // generator whose voxel_rotation_sign disagrees with gantry direction.
-    bool symReverseXY = false;     ///< Reverse Sym90Z/Sym45Z XY rotation handedness
 
     // ========== Output Z-axis Cropping ==========
     // For zeroing final output edge slices after output flips (Z size unchanged)

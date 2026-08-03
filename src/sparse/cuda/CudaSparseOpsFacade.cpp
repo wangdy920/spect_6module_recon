@@ -397,34 +397,6 @@ uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() {
   return selectPreparedChunkHostCacheBudgetCapBytes();
 }
 
-void setCudaChunkNnzBudgetOverrideForTestingCUDA(uint64_t nnzBudget) {
-  g_cudaChunkNnzBudgetOverride.store(nnzBudget, std::memory_order_relaxed);
-}
-
-void setCudaPreparedChunkHostCacheBytesOverrideForTestingCUDA(uint64_t bytes) {
-  g_cudaPreparedChunkHostCacheBytesOverride.store(bytes,
-                                                  std::memory_order_relaxed);
-}
-
-void setCudaHostChunkBuildThreadsOverrideForTestingCUDA(int threads) {
-  g_cudaHostChunkBuildThreadsOverride.store(threads,
-                                            std::memory_order_relaxed);
-}
-
-void setCudaSkipBackwardTransposeForTestingCUDA(bool /*skip*/) {
-  // Code.CUDA.40: backward transpose scratch removed; this API is now a no-op.
-}
-
-int resolveCudaHostChunkBuildThreadsForTestingCUDA(int requestedThreads,
-                                                   uint64_t workItems) {
-  return getHostParallelThreads(requestedThreads, workItems);
-}
-
-uint64_t resolveCudaPreparedChunkHostCacheBudgetForTestingCUDA(
-    size_t activePreparedCaches) {
-  return selectPreparedChunkHostCacheBudgetBytes(activePreparedCaches);
-}
-
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &matrices,
                                  uint64_t reserveBytes) {
   if (!isCudaAvailable()) {
@@ -781,11 +753,6 @@ void resetCudaChunkStageTimingCUDA() {}
 CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
   return {};
 }
-
-void setCudaChunkNnzBudgetOverrideForTestingCUDA(uint64_t) {}
-void setCudaPreparedChunkHostCacheBytesOverrideForTestingCUDA(uint64_t) {}
-void setCudaHostChunkBuildThreadsOverrideForTestingCUDA(int) {}
-int resolveCudaHostChunkBuildThreadsForTestingCUDA(int, uint64_t) { return 1; }
 
 } // namespace cuda
 

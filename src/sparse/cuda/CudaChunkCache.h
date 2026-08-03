@@ -246,8 +246,6 @@ struct CudaChunkStageTimingState {
 };
 
 extern CudaChunkStageTimingState g_cudaChunkStageTiming;
-extern std::atomic<uint64_t> g_cudaChunkNnzBudgetOverride;
-extern std::atomic<uint64_t> g_cudaPreparedChunkHostCacheBytesOverride;
 
 uint64_t recommendProjDomainChunkNnzBudget(size_t freeBytes);
 uint64_t selectCudaChunkNnzBudget();

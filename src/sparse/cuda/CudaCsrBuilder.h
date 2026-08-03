@@ -16,8 +16,6 @@
 
 namespace spect {
 
-extern std::atomic<int> g_cudaHostChunkBuildThreadsOverride;
-
 inline void checkCusparse(cusparseStatus_t status, const char *expr,
                           const char *file, int line) {
   if (status != CUSPARSE_STATUS_SUCCESS) {

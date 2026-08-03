@@ -19,13 +19,4 @@ TEST(SmoothingOpsTest, ClampNonNegativeInPlaceZerosNegativeValues) {
   EXPECT_DOUBLE_EQ(values[4], 0.0);
 }
 
-TEST(SmoothingOpsTest, JosephSmoothingZeroPassLeavesBufferUnchanged) {
-  std::vector<double> buffer = {1.0, 2.0, 3.0, 4.0};
-  const std::vector<double> before = buffer;
-
-  applyJosephSmoothing(buffer, 2, 2, 1, 0, 1);
-
-  EXPECT_EQ(buffer, before);
-}
-
 } // namespace spect::main::test

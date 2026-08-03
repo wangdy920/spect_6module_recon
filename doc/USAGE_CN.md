@@ -67,7 +67,7 @@ compact chunk 矩阵默认识别优先级：
 | `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector` 空列表 |
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
 
-无 CTAC 的 `-chunkCSRDir` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点、Joseph 和 PSF 口径，不匹配时不会复用。
+无 CTAC 的 `-chunkCSRDir` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点和 PSF 口径，不匹配时不会复用。
 
 `bad_dector` 是带方括号的逐行列表，优先使用最简单的全局探测器编号 `0..95`；也兼容 `link-<3|4>-FPGA-<0..5>-dector-<0..7>` 详细格式。编号遵循采集预处理的 `spect_detector_index`：`global = ((link==4 ? 6 : 0) + FPGA)*8 + dector`。读取任一格式后都会补齐另一种标识；跨格式重复项会报错。例如：
 
@@ -120,7 +120,6 @@ compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subset
 | `-bsremKappaEps <v>` | kappa 稳定项，默认 `1e-6` |
 | `-bsremKappaClip <min,max>` | kappa 裁剪范围，默认 `0.1,10` |
 | `-bsremSoftMask [on\|off]` | soft-mask 惩罚增强 |
-| `-bsremSoftBand <vox>` | soft-mask 过渡宽度，默认 2 |
 | `-bsremSoftLambda <v>` | mask 外惩罚增强，默认 100 |
 
 ---
@@ -161,7 +160,6 @@ TV/RDP 可选使用已配准到重建网格的 CT（或 mu-map）作为边缘权
 | `-smoothKernel <n>` | Gaussian kernel half-width |
 | `-butter <cutoff[,order]>` | Butterworth 低通滤波，如 `0.35,2` |
 | `-butterOrder <n>` | 单独设置 Butterworth order |
-| `-joe <n>` | Joseph-like smoothing passes，默认 0 |
 
 Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
 
@@ -240,9 +238,6 @@ Mouse 发布默认使用 `center66_cosine10`，不附加 normalization/detZ 因�
 | `-config <path>` | 全局配置文件 |
 | `-algoConf <path>` | 算法配置文件 |
 | `-dumpConf` | 打印合并配置并退出 |
-| `-Aprune <eps>` | 系统矩阵权重剪枝阈值，默认 `1e-10` |
-| `-Astream [on\|off]` | 从磁盘流式构建系统矩阵，默认 off |
-| `-ApruneMask [on\|off]` | 剪枝 mask 外列，默认 on |
 | `-h` / `-help` / `--help` | 打印 help |
 
 ---
@@ -262,8 +257,10 @@ Mouse 发布默认使用 `center66_cosine10`，不附加 normalization/detZ 因�
 | `-psfProj` | 专用报错：公开 PSF 仅 Operator |
 | `-butterBackend` / `-bwBackend` | 专用报错：Butterworth 固定 cuFFT |
 | `-prior` / `-regPower` / `-regSigma` / `-regKernel` 等 anatomical 细调 | 专用报错：公开正则仅 TV/RDP |
+| `-joe` | 专用报错：Joseph-like 平滑退场，改用 `-psf` / `-butter` / `-smooth` |
+| `-Aprune` / `-Astream` / `-ApruneMask` | 专用报错：compact chunk CSRB 在生成阶段完成剪枝，读取恒为逐 chunk 流式/mmap |
 
-INI 死键（`[SystemMatrix] matrix_layout` / `map_csr`、`[Reconstruction] subsets`、`[MultiBed] overlap_in_recon` 及 ADMM 相关）已从 `config/spect_config.ini` 移除；未知 INI 键被静默忽略。
+INI 死键（`[SystemMatrix] matrix_layout` / `map_csr` / `prune_epsilon` / `stream_build` / `prune_mask`、`[Reconstruction] subsets` / `joseph_passes`、`[MultiBed] overlap_in_recon` 及 ADMM 相关）已从 `config/spect_config.ini` 移除；未知 INI 键被静默忽略。
 
 ---
 

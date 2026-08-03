@@ -53,8 +53,6 @@ SystemMemoryInfo querySystemMemoryInfo() { return {}; }
 } // namespace
 
 CudaChunkStageTimingState g_cudaChunkStageTiming;
-std::atomic<uint64_t> g_cudaChunkNnzBudgetOverride{0};
-std::atomic<uint64_t> g_cudaPreparedChunkHostCacheBytesOverride{0};
 
 uint64_t recommendProjDomainChunkNnzBudget(size_t freeBytes) {
   uint64_t usableBytes = static_cast<uint64_t>(freeBytes);
@@ -80,11 +78,6 @@ uint64_t recommendProjDomainChunkNnzBudget(size_t freeBytes) {
 }
 
 uint64_t selectCudaChunkNnzBudget() {
-  const uint64_t overrideBudget =
-      g_cudaChunkNnzBudgetOverride.load(std::memory_order_relaxed);
-  if (overrideBudget > 0) {
-    return overrideBudget;
-  }
   try {
     if (!cuda::isCudaAvailable()) {
       return kProjDomainChunkDefaultNnz;
@@ -222,12 +215,6 @@ uint64_t splitPreparedChunkHostCacheBudgetBytes(uint64_t totalBudgetBytes,
 
 uint64_t selectPreparedChunkHostCacheBudgetBytes(
     size_t activePreparedCaches) {
-  const uint64_t overrideBytes =
-      g_cudaPreparedChunkHostCacheBytesOverride.load(std::memory_order_relaxed);
-  if (overrideBytes > 0) {
-    return splitPreparedChunkHostCacheBudgetBytes(overrideBytes,
-                                                  activePreparedCaches);
-  }
   const uint64_t cap = selectPreparedChunkHostCacheBudgetCapBytes();
   if (cap == 0) {
     return splitPreparedChunkHostCacheBudgetBytes(
@@ -336,11 +323,6 @@ bool needsWholeMatrixChunking(const io::CSRView &matrix) {
   }
   const uint64_t nnz =
       static_cast<uint64_t>(matrix.row_ptr[static_cast<size_t>(matrix.rows)]);
-  const uint64_t overrideBudget =
-      g_cudaChunkNnzBudgetOverride.load(std::memory_order_relaxed);
-  if (overrideBudget > 0 && nnz > overrideBudget) {
-    return true;
-  }
   return nnz > static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
 }
 

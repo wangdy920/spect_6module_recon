@@ -24,8 +24,6 @@
 
 namespace spect {
 
-std::atomic<int> g_cudaHostChunkBuildThreadsOverride{0};
-
 namespace {
 
 unsigned int detectPhysicalCoreCount() {
@@ -68,11 +66,6 @@ unsigned int detectPhysicalCoreCount() {
 }
 
 int resolveHostChunkBuildThreadBudget(int requestedThreads) {
-  const int override =
-      g_cudaHostChunkBuildThreadsOverride.load(std::memory_order_relaxed);
-  if (override > 0) {
-    return std::max(1, override);
-  }
   const int safeRequested = std::max(1, requestedThreads);
   const int physicalCores =
       std::max(1, static_cast<int>(detectPhysicalCoreCount()));

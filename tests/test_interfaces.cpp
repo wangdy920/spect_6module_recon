@@ -161,8 +161,6 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_EQ(parser.getInt("Basic", "verbosity", 0), 1);
         EXPECT_EQ(parser.getInt("Detector", "channels", 0), 40);
         EXPECT_EQ(parser.getInt("Detector", "angles", 0), 360);
-        EXPECT_FALSE(parser.getBool("SystemMatrix", "stream_build", true));
-        EXPECT_TRUE(parser.getBool("SystemMatrix", "prune_mask", false));
         EXPECT_EQ(parser.getString("PSF", "mode", ""), "None");
         EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.5);
         EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "min_sigmas", 0.0), 4.0);

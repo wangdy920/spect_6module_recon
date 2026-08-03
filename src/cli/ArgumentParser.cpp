@@ -478,11 +478,11 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremSoftMask);
     }, {"-bsremSoftMask"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bsremSoftMaskBandVox = std::stoi(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftBand"));
-        return true;
-    }, {"-bsremSoftBand"});
+    bindHandlerAliases(
+        rejectCliOption("-bsremSoftBand was removed; the soft-mask transition band was never implemented "
+                        "(the mask is applied as a hard binary boost). Use -bsremSoftLambda to set the "
+                        "outside-mask weight."),
+        {"-bsremSoftBand"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremSoftMaskLambdaOut = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftLambda"));
@@ -897,22 +897,18 @@ void ArgumentParser::registerHandlers() {
     }, {"-bProjList"});
 
     // --- Performance & Misc ---
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.weightPruneEps =
-            std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-Aprune"));
-        return true;
-    }, {"-Aprune"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.Astream);
-    }, {"-Astream"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.ApruneMask);
-    }, {"-ApruneMask"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.josephPasses =
-            std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-joe"));
-        return true;
-    }, {"-joe"});
+    bindHandlerAliases(
+        rejectCliOption("-Aprune was removed; the compact chunk CSRB matrix is pruned at generation time."),
+        {"-Aprune"});
+    bindHandlerAliases(
+        rejectCliOption("-Astream was removed; compact chunk CSRB is always streamed/mmapped per chunk."),
+        {"-Astream"});
+    bindHandlerAliases(
+        rejectCliOption("-ApruneMask was removed; the compact chunk CSRB matrix is pruned at generation time."),
+        {"-ApruneMask"});
+    bindHandlerAliases(
+        rejectCliOption("-joe was removed; the Joseph-like smoothing pass is retired. Use -psf / -butter / -smooth instead."),
+        {"-joe"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)argc;
         (void)argv;
@@ -1023,11 +1019,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         "Reconstruction", "bsrem_kappa_clip_max", a.bsremKappaClipMax);
     a.bsremSoftMask =
         cfg.getBool("Reconstruction", "bsrem_soft_mask", a.bsremSoftMask);
-    a.bsremSoftMaskBandVox = cfg.getInt(
-        "Reconstruction", "bsrem_soft_mask_band_vox", a.bsremSoftMaskBandVox);
     a.bsremSoftMaskLambdaOut = cfg.getDouble(
         "Reconstruction", "bsrem_soft_mask_lambda_out", a.bsremSoftMaskLambdaOut);
-    a.josephPasses = cfg.getInt("Reconstruction", "joseph_passes", a.josephPasses);
     a.bProjPath = cfg.getString("Reconstruction", "b_proj", a.bProjPath);
 
     if (cfg.hasKey("CTAC", "auto_mu_nuclide"))
@@ -1045,10 +1038,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     a.outputName = cfg.getString("InputOutput", "output_name", a.outputName);
 
     // System Matrix
-    a.weightPruneEps =
-        cfg.getDouble("SystemMatrix", "prune_epsilon", a.weightPruneEps);
-    a.Astream = cfg.getBool("SystemMatrix", "stream_build", a.Astream);
-    a.ApruneMask = cfg.getBool("SystemMatrix", "prune_mask", a.ApruneMask);
     std::string chunkDir =
         cfg.getString("SystemMatrix", "default_chunk_csr_dir");
     if (chunkDir.empty())
@@ -1323,7 +1312,6 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
             }
         }
         a.bsremSoftMask = cfg.getBool("BSREM", "soft_mask", a.bsremSoftMask);
-        a.bsremSoftMaskBandVox = cfg.getInt("BSREM", "soft_mask_band", a.bsremSoftMaskBandVox);
         a.bsremSoftMaskLambdaOut = cfg.getDouble("BSREM", "soft_mask_lambda", a.bsremSoftMaskLambdaOut);
     }
 
@@ -1734,10 +1722,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: BSREM kappa clip range is invalid.\n";
         return false;
     }
-    if (args.bsremSoftMask && args.bsremSoftMaskBandVox < 1) {
-        std::cerr << "Error: BSREM soft-mask band must be >= 1 voxel.\n";
-        return false;
-    }
     if (args.bsremSoftMask && args.bsremSoftMaskLambdaOut < 0.0) {
         std::cerr << "Error: BSREM soft-mask lambda must be >= 0.\n";
         return false;
@@ -1869,7 +1853,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         std::cout << "kappa_eps         = " << a.bsremKappaEps << "\n";
         std::cout << "kappa_clip        = " << a.bsremKappaClipMin << "," << a.bsremKappaClipMax << "\n";
         std::cout << "soft_mask         = " << (a.bsremSoftMask ? "true" : "false") << "\n";
-        std::cout << "soft_mask_band    = " << a.bsremSoftMaskBandVox << "\n";
         std::cout << "soft_mask_lambda  = " << a.bsremSoftMaskLambdaOut << "\n\n";
     }
     std::cout << "[Filtering]\n";
@@ -2027,7 +2010,6 @@ void ArgumentParser::printUsage() {
     std::cout << "  -bsremKappaEps <v>       Kappa epsilon (default 1e-6)\n";
     std::cout << "  -bsremKappaClip <min,max>  Kappa clip range (default 0.1,10)\n";
     std::cout << "  -bsremSoftMask on|off    Soft-mask penalty boosting\n";
-    std::cout << "  -bsremSoftBand <vox>     Transition width (default 2)\n";
     std::cout << "  -bsremSoftLambda <v>     Outside penalty boost (default 100)\n\n";
 
     std::cout << "=== Regularization ===\n";
@@ -2094,10 +2076,6 @@ void ArgumentParser::printUsage() {
     std::cout << "  -config <path>            Global config (default search: exe/config, exe, cwd/config, cwd)\n";
     std::cout << "  -dumpConf                 Print merged config and exit\n";
     std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
-    std::cout << "  -Aprune <eps>             Prune system-matrix weights (default 1e-10)\n";
-    std::cout << "  -Astream on|off           Stream build from disk (default off)\n";
-    std::cout << "  -ApruneMask on|off        Prune columns outside mask (default on)\n";
-    std::cout << "  -joe <n>                  Joseph-like smoothing passes (default 0)\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
     std::cout << "  -v, --version             Print version string and exit\n";
     std::cout << "  -th <N>                   Thread count\n";

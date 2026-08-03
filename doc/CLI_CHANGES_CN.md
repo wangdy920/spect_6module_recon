@@ -23,14 +23,20 @@
 | `-prior ...` / anatomical prior 参数 | 专用报错；公开正则只保留 TV/RDP |
 | `-reg NLM|Tikhonov|LogCosh|MRP|Bowsher|PLS...` | `-reg TV,...` 或 `-reg RDP,...` |
 | `-regPower` / `-regSigma` / `-regKernel` 等 | 专用报错；细调入口随非公开正则一并退场 |
+| `-joe <n>` | 专用报错；Joseph-like 平滑退场，改用 `-psf` / `-butter` / `-smooth` |
+| `-Aprune <eps>` / `-Astream` / `-ApruneMask` | 专用报错；compact chunk CSRB 在生成阶段完成剪枝，读取恒为逐 chunk 流式/mmap |
+| `-bsremSoftBand <vox>` | 专用报错；soft-mask 过渡带从未实现（mask 为硬二值加权），外权重用 `-bsremSoftLambda` |
 
 ## INI 死键
 
 以下键已从 `config/spect_config.ini` 移除（未知 INI 键被静默忽略）：
 
 - `[SystemMatrix] matrix_layout`、`map_csr`（布局/读取方式固定）
+- `[SystemMatrix] prune_epsilon`、`stream_build`、`prune_mask`（剪枝在矩阵生成阶段完成）
 - `[Reconstruction] subsets`（恒单 subset）
 - `[MultiBed] overlap_in_recon`（joint 联合重建退场，仅 stitch）
+- `[Reconstruction] joseph_passes`（Joseph-like 平滑退场）
+- `[Reconstruction] bsrem_soft_mask_band_vox`、`algo_bsrem.conf` 的 `[BSREM] soft_mask_band`（过渡带从未实现）
 - ADMM 相关键（算法退场）
 - `algo_*.conf` 中 `[Algorithm] subsets`
 
@@ -44,12 +50,6 @@
 | `[MultiBed] seam_postprocess` | 请求接缝后处理（默认 1）；仅在多床 weighted 输出 overlap 生效时运行 |
 
 各床按零 overlap 独立重建，融合只发生在输出保存前。中心方案要求每个实际接缝满足 `bed_overlap = 单床 Nz - 56`。
-
-## 仍可用但不推荐
-
-| 参数 | 当前建议 |
-| --- | --- |
-| `-joe <n>` | 默认 `0`；除非复现实验，不建议启用 |
 
 ## 推荐最小命令
 
