@@ -83,6 +83,14 @@ bool refreshCompactProjectionCUDA(const double *projection, size_t count,
   return true;
 }
 
+bool refreshCompactBranchBatchInputCUDA(const float *input, size_t count) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().refreshCompactBranchBatchInput(input, count);
+  return true;
+}
+
 bool spmvFloatCUDA(const io::CSRView &matrix, const float *x, float *y) {
   if (!isCudaAvailable()) {
     return false;
@@ -229,22 +237,21 @@ bool compactDeviceRatioSpmvTFloatCUDA(
   return true;
 }
 
-bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const float *xBatch,
-    const double *fullProjection, size_t fullProjectionCount,
+bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix, const double *const *fullProjections,
+    size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonRatioParams,
     const cuda::CompactDeviceTransformParams &commonTransformParams,
-    const int *symIds, const int *zMirrors, int batchSize,
+    const int *symIds, const int *zMirrors, int branchCount, int bedCount,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
-    int cacheSlot) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming) {
   if (!isCudaAvailable()) {
     return false;
   }
-  cudaState().executeCompactBranchBatchDeviceRatioSpmvTAccumulateFloat(
-      matrix, xBatch, fullProjection, fullProjectionCount, commonRatioParams,
-      commonTransformParams, symIds, zMirrors, batchSize, ratioTiming,
-      backwardTiming, accumulatorIndex, cacheSlot);
+  cudaState().executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
+      matrix, fullProjections, fullProjectionCount, commonRatioParams,
+      commonTransformParams, symIds, zMirrors, branchCount, bedCount,
+      ratioTiming, backwardTiming);
   return true;
 }
 
@@ -362,6 +369,10 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &,
 }
 
 bool refreshCompactProjectionCUDA(const double *, size_t, int) {
+  return false;
+}
+
+bool refreshCompactBranchBatchInputCUDA(const float *, size_t) {
   return false;
 }
 

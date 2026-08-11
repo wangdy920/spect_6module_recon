@@ -2,7 +2,7 @@
 
 **执行区间：** 2026-08-10 至 2026-08-11
 
-**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。
+**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。性能优化后，单床 50 次中位数低于 2 分钟，四床中位数为 3.16 分钟并作为当前硬件边界保留。
 **数值权威：** `6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu` 中的 `sieve + CASToR + FWHM 1.3 mm + 3σ` 路线。
 
 ## 1. 执行结论与判定合同
@@ -117,7 +117,7 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 | CH mouse | `[1, 0.98772624, 1.05752771, 1.06324157, 1.83994881]` |
 | Mouse | `[1, 0.93013597, 0.99892396, 1.06802328, 1.44608513]` |
 
-### 4.3 正式运行耗时
+### 4.3 优化前正式运行耗时
 
 | 数据集 | 耗时（秒） | 退出码 |
 |---|---:|---:|
@@ -127,7 +127,7 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 | CH mouse | 805.77 | 0 |
 | Mouse | 741.88 | 0 |
 
-耗时仅记录本机本轮运行，不作为性能采纳结论。四/五床的同几何分母缓存被复用，但每组投影、50 次 numerator/update 和最终输出均独立执行。
+这些是优化前的单次历史记录，只用于量级背景，不作为后续性能采纳统计量。四/五床的同几何分母缓存被复用，但每组投影、50 次 numerator/update 和最终输出均独立执行。
 
 ### 4.4 输出级 Smooth / Butterworth 与非负钳制门
 
@@ -143,13 +143,41 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 
 端到端 smoke 使用正式 Derenzo 投影、已认证 denominator cache、`sieve + CASToR 1.3 mm/3σ` 和一次 MLEM。进程退出码为 0；`recon_it1`、`recon_it1_smooth`、`recon_it1_butter` 均为 `100×100×72`、有限且负体素数为 0，manifest 记录独立派生、生产钳制及六文件清单。该 smoke 只验证真实保存入口，不替代上面的五组同输入数值门，也没有重跑五组 50 次 MLEM。
 
+### 4.5 50 次迭代性能收敛
+
+性能签收按共享设备口径执行：同一冻结 EP 四床输入、同一 SHA-256 矩阵副本、同一 denominator cache，基线与候选按 `A1,B1,B2,A2,A3,B3` 交错运行，各取三次中位数。边界快照中可见其他任务造成的 GPU utilization 为 0%–13%，因此不采用单次最佳值。基线是干净提交 `17bd22c` 且设置 `SPECT_COMPACT_BRANCH_BATCH=0`；候选使用默认合批路径，无性能环境变量覆盖。
+
+| EP 四床短 A/B | 三次耗时（秒） | 中位数（秒） | 相对基线中位数 |
+|---|---|---:|---:|
+| 逐分支基线 | 80.0837、52.4101、52.0406 | 52.4101 | — |
+| branch/bed 合批 | 58.0584、35.9559、35.9731 | **35.9731** | **-31.36%** |
+
+配对 A/B 的主输出最大 relL2 为 `9.7147e-8`，Smooth 最大为 `1.0541e-7`，Butterworth 最大为 `1.3564e-7`；均低于主输出 `1e-5` 和冻结派生体 `2e-7` 门，且全部有限、非负。用户将旧 `1e-7` 性能分支门放宽为 `1e-5` 后，本候选仍多两个数量级余量。
+
+最终 50 次运行使用默认配置、NVMe 上的冻结矩阵副本和命中 denominator cache，各重复三次并取中位数：
+
+| 数据集 | 床数 | 三次耗时（秒） | 中位数（秒） | 120 秒目标 | 与优化前单次记录的背景差值 |
+|---|---:|---|---:|---|---:|
+| Derenzo | 1 | 99.9661、104.5868、110.4908 | **104.5868** | 三次均通过 | -82.42% |
+| EPguan | 4 | 189.6690、191.7576、188.8894 | **189.6690** | 未通过 | -72.78% |
+
+优化后 Derenzo 主输出相对优化前正式体 relL2 为 `2.1353e-7`；EPguan 为 `6.8556e-7`，都低于 `1e-5`。三次重复间，Derenzo 主/Smooth/Butterworth 最大 relL2 分别为 `5.5703e-8`、`5.2646e-8`、`9.9992e-8`；EPguan 分别为 `1.1770e-7`、`1.2516e-7`、`1.5246e-7`，派生体仍通过 `2e-7` 门。
+
+采纳项只有五个共享数据流变化：保留两个 resident CSR chunk 并为临时 CUDA 工作预留 6 GiB；branch/bed 合并为一次 SpMM；每轮 numerator 只上传一次旋转批输入；跨 chunk 复用大块 CUDA CSR allocation；host chunk cache 默认 25 GiB。拒绝并删除的实验包括全量/分段 `cudaHostRegister`、mmap+28 GiB、并行床、SpMM alg2/alg3、256 MiB staging 和三 resident chunk streaming；它们分别触发显存风险、不支持或持续吞吐下降，没有保留第二生产实现。
+
+在 RTX 4070 Ti SUPER 16 GB、64 GB 主存上，对 EP 三次迭代按 250 ms 采样 121 次：包含其他任务的总显存峰值为 15,519 MiB，最少剩余 543 MiB，运行完成。由此签收的低时延部署是 64 GB 主存 + SSD/NVMe 矩阵；32 GB 主存可降低 host cache 运行，但本轮不承诺相同吞吐。四床 2 分钟目标没有达到，当前证据支持的边界是约 3.16 分钟，而不是继续用高显存风险换取未证实的增益。
+
+### 4.6 日志位置回归
+
+最终源码一迭代真实 smoke 的 `recon_20260811_122044_116.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_source_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
+
 ## 5. 决策、限制与停止条件
 
 ### 5.1 采纳与拒绝
 
-最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。输出端恢复一个最小保存数据流：未滤波主输出加两个独立派生副本；同时修复 CUDA Butterworth 尺寸切换缓存。CLI 不新增输出滤波参数，物理单位与钳制策略只由 `[Filtering]` 明确配置。
+最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。输出端恢复一个最小保存数据流：未滤波主输出加两个独立派生副本；同时修复 CUDA Butterworth 尺寸切换缓存。性能端只在同一 compact CUDA 数据流内采用 resident cache、branch/bed SpMM 合批、单次批输入上传和 allocation 复用；`SPECT_COMPACT_BRANCH_BATCH=0` 保留可调用的正确性/性能基线。CLI 不新增输出滤波或性能参数，物理单位与钳制策略只由 `[Filtering]` 明确配置。
 
-以下候选明确拒绝且实现已回退：CASToR 低前向中性比、0.01 MLEM 更新下限、直接 `A^T w` 加权灵敏度。原因不是“代码复杂”，而是它们在冻结门下没有减少目标误差；保留它们只会制造第二数值路线。
+数值候选 CASToR 低前向中性比、0.01 MLEM 更新下限、直接 `A^T w` 加权灵敏度，以及上述无持续增益的性能候选均明确拒绝并从生产源码移除。保留它们只会制造第二数值路线或不可签收的显存风险。
 
 ### 5.2 已知限制
 
@@ -157,10 +185,12 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 - 五组 50 次正式重建先于输出派生恢复；本轮没有重复执行约一小时的五组迭代，而是用冻结的同输入五组体积验证滤波算子，并用一次真实重建验证保存/manifest 接口。
 - 原型是用户指定的实现基线，不是独立临床/物理真值。本轮未做新核素、新矩阵、新采集、DICOM 临床阅片或跨 GPU 架构的外推验证。
 - Derenzo 通过但不像另外四组那样接近机器精度；若未来收紧 relL2 门，必须重新冻结合同后再定位，不能回写当前阈值。
+- 50 次 2 分钟门只在本机单床三次重复中通过；四床 EP 的中位数是 189.67 秒。没有把单床结果外推为所有床数均通过。
+- 共享 GPU 的峰值采样只剩 543 MiB，总显存余量偏紧；resident cache warmup 后若其他任务继续显著增长，仍可能触发 OOM。本轮未把这种外部并发变化隐藏为程序保证。
 
 ### 5.3 停止条件
 
-在当前五数据集与现有阈值下，继续引入数值候选不会减少尚未通过的合同项——因为合同项已全部通过。因此本优化线停止在当前单一生产实现。只有出现新的冻结输入、收紧的数值/对象门、不同矩阵或可复现的新失败时，才重新开启受控实验。
+在当前五数据集与现有阈值下，数值合同项已全部通过。性能线在两个 resident chunk + branch/bed batch 停止：单床已达到目标，已试的额外并行、pinning、mmap、staging 和算法选择均无持续增益或越过显存边界。只有出现可复现的四床瓶颈定位、新硬件/矩阵、收紧的门或新的安全优化假设时，才重新开启受控实验。
 
 ## 6. 复现与验证清单
 
@@ -191,6 +221,20 @@ $env:SPECT_FILTER_PARITY_REFERENCE_ROOT = (Resolve-Path recon_out\canonical_stit
 build\Release\bin\Release\spect_tests.exe `
   --gtest_filter=OutputFilterParityTest.FrozenFiveDatasetsWhenRequested
 
+# 性能 A/B：按 A1,B1,B2,A2,A3,B3 交错；每组取 elapsed_seconds 中位数。
+$env:SPECT_COMPACT_BRANCH_BATCH = '0'
+recon_out\perf_120s_20260811\run_variant.ps1 `
+  -Label median_epguan3_baseline_A1 -Dataset epguan -Iterations 3 `
+  -MatrixDir D:\Projects\SPECT-recon\tmp\matrix_perf_nvme_20260811 `
+  -DenomCache D:\Projects\SPECT-recon\recon_out\perf_120s_20260811\nvme_denom\epguan.mhd `
+  -Executable D:\Projects\SPECT-recon\tmp\baseline_17bd22c\staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Verbosity 0
+Remove-Item Env:\SPECT_COMPACT_BRANCH_BATCH
+recon_out\perf_120s_20260811\run_variant.ps1 `
+  -Label median_epguan3_candidate_B1 -Dataset epguan -Iterations 3 `
+  -MatrixDir D:\Projects\SPECT-recon\tmp\matrix_perf_nvme_20260811 `
+  -DenomCache D:\Projects\SPECT-recon\recon_out\perf_120s_20260811\nvme_denom\epguan.mhd `
+  -Executable D:\Projects\SPECT-recon\staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Verbosity 0
+
 python recon_out\canonical_stitch_20260807\certify_outputs.py `
   --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
 ```
@@ -212,7 +256,11 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 | 真实保存入口 | 一迭代 Derenzo 写出主/Smooth/Butterworth 六文件；全部有限非负；manifest 一致 | 通过 |
 | 直接切片视觉 QA | 共享原型窗宽、无插值、无候选缩放 | 通过 |
 | 基础重建输出证书 | 原五组 21 个正式证据文件、90,349,475 字节 SHA-256 列表 | 通过；证书不包含本轮派生 smoke |
-| 未验证范围 | 五组 50 次重新生成派生文件、新数据、新矩阵、临床正确性、跨架构性能 | 明确未验证 |
+| 性能短 A/B | 基线/候选各 3 次交错，中位数 52.4101 / 35.9731 秒；三类输出最大 relL2 1.3564e-7 | 通过，候选 -31.36% |
+| 50 次性能重复 | Derenzo 3 次中位数 104.5868 秒；EP 四床 3 次中位数 189.6690 秒 | 单床通过；四床未达 120 秒 |
+| 显存采样 | EP 3 次、250 ms×121；总峰值 15,519 MiB、最少剩余 543 MiB | 通过但余量偏紧 |
+| 日志输出目录 | 最终源码 smoke 日志在目标目录；仓库/staging 根无新增日志 | 正常路径通过；目录创建失败仍有显式 CWD fallback |
+| 未验证范围 | 其余三组在优化后二次执行 50 次、32 GB 主存同吞吐、新数据、新矩阵、临床正确性、跨架构性能 | 明确未验证 |
 
 ## References
 

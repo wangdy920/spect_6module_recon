@@ -25,5 +25,9 @@
 | S21 | `recon_out/output_filter_end_to_end_20260811/spect_tests.json` | 当前 233 项测试的机器可读结果（232 通过、1 项外部数据门按设计跳过） |
 | S22 | `recon_out/output_filter_end_to_end_20260811/filter_parity_test.json` | 冻结五数据集同输入输出滤波门 1/1 通过的机器可读结果 |
 | S23 | `staging/SPECT_recon_rc_dev/bin/` | 干净 Release `20260811+17bd22c` 的部署可执行文件、权威配置副本及 CUDA 运行库 |
+| S24 | `recon_out/perf_120s_20260811/experiment.json` | 120 秒目标、交错中位数口径、采纳/拒绝候选、数值门、显存与部署边界的性能决策记录 |
+| S25 | `recon_out/perf_120s_20260811/median_*/record.json` | EP 短 A/B 与 Derenzo/EP 50 次重复运行的完整命令、耗时及 GPU 边界快照 |
+| S26 | `recon_out/perf_120s_20260811/final_gpu_peak_epguan3/record.json` | 最终源码 EP 三次运行及 250 ms 显存采样所对应的运行记录 |
+| S27 | `recon_out/perf_120s_20260811/final_source_smoke_1it/` | 最终源码真实保存入口与日志目录回归证据 |
 
 本登记只列本次报告实际使用的本地证据；受保护原型是实现一致性基线，不被表述为独立物理真值。

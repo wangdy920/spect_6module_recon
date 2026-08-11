@@ -32,8 +32,8 @@ constexpr uint64_t kPreparedChunkHostCacheMidRamThresholdBytes = 28ull * kCudaGi
 constexpr uint64_t kPreparedChunkHostCacheEffectiveAvailableNumerator = 2ull;
 constexpr uint64_t kPreparedChunkHostCacheEffectiveAvailableDenominator = 3ull;
 
-constexpr uint64_t kCompactChunkHostCacheDefaultBytes = 24ull * kCudaGiB;
-constexpr uint64_t kCompactChunkResidentDeviceReserveBytes = 2ull * kCudaGiB;
+constexpr uint64_t kCompactChunkHostCacheDefaultBytes = 25ull * kCudaGiB;
+constexpr uint64_t kCompactChunkResidentDeviceReserveBytes = 6ull * kCudaGiB;
 constexpr uint64_t kDeviceChunkCacheReserveBytes = 2ull * 3ull * kCudaGiB;
 
 constexpr size_t kTransientRangeSlotCount = 2;

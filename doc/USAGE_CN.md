@@ -1,6 +1,6 @@
 # SPECT_recon CLI 使用说明（中文）
 
-> 更新日期：2026-07-31（收敛重构后）  
+> 更新日期：2026-08-11（原型对齐与性能收敛后）
 > 对齐来源：`src/cli/ArgumentParser.cpp` 与 `SPECT_recon.exe -help`
 
 本页记录当前可执行文件公开接受的 CLI 参数。运行时最终真相仍以当前二进制：
@@ -110,6 +110,16 @@ compact chunk 矩阵默认识别优先级：
 | `-cudaDevice <id>` | 选择 CUDA device，覆盖环境变量 `SPECT_CUDA_DEVICE` |
 
 compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subsets` 参数。稀疏投影后端固定为 CUDA；旧 `-sparseBackend` / `-spBackend` 参数会直接报错。
+
+### compact CUDA 性能环境变量
+
+| 环境变量 | 发布默认 | 说明 |
+|---|---|---|
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `25g` | 主机端矩阵块缓存；覆盖当前 26.1 GB 六块矩阵 |
+| `SPECT_COMPACT_BRANCH_BATCH` | 开启 | 把 symmetry branch 与床位合并为 cuSPARSE SpMM；设为 `0` 可调用受保护的逐分支性能基线 |
+| `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | 关闭 | 设为 `0` 才对矩阵 payload 使用 mmap；当前低时延路线不依赖 mmap |
+
+实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。32 GB 主存可降低 host cache 运行，但不承诺同等吞吐。共享 GPU 上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
 
 ### BSREM
 

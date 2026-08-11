@@ -18,8 +18,6 @@
 #include <stdexcept>
 #include <vector>
 
-#include <cuda_runtime.h>
-
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -31,18 +29,9 @@ using Clock = std::chrono::steady_clock;
 constexpr uint64_t kCompactChunkResidentReserveBytes =
     kCompactChunkResidentDeviceReserveBytes;
 
-struct CompactChunkHostRegistrationLease {
+struct CompactChunkResidentCacheLease {
   uint64_t cacheBudget = 0;
   bool residentWarmupComplete = false;
-  std::vector<void *> regions;
-
-  ~CompactChunkHostRegistrationLease() {
-    for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
-      if (cudaHostUnregister(*it) != cudaSuccess) {
-        cudaGetLastError();
-      }
-    }
-  }
 };
 
 int effectiveThreads(int threads) { return threads > 0 ? threads : 1; }
@@ -59,10 +48,10 @@ void addTiming(double &target, Clock::time_point start) {
 bool compactBranchBatchEnabled() {
   const char *value = std::getenv("SPECT_COMPACT_BRANCH_BATCH");
   if (value == nullptr || value[0] == '\0') {
-    return false;
+    return true;
   }
-  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
-         value[0] == 't' || value[0] == 'T';
+  return value[0] != '0' && value[0] != 'n' && value[0] != 'N' &&
+         value[0] != 'f' && value[0] != 'F';
 }
 
 bool compactConcurrentBedsEnabled() {
@@ -150,19 +139,16 @@ void warmCompactChunkResidentDeviceCache(
 
   static std::mutex warmupMutex;
   std::lock_guard<std::mutex> lock(warmupMutex);
-  auto lease = std::static_pointer_cast<CompactChunkHostRegistrationLease>(
+  auto lease = std::static_pointer_cast<CompactChunkResidentCacheLease>(
       chunks.acceleratorLease());
   if (lease && lease->cacheBudget == cacheBudget &&
       lease->residentWarmupComplete) {
     return;
   }
 
-  const bool registerChunks = !lease || lease->cacheBudget != cacheBudget;
-  if (registerChunks) {
-    chunks.setAcceleratorLease({});
-    lease = std::make_shared<CompactChunkHostRegistrationLease>();
-    lease->cacheBudget = cacheBudget;
-  }
+  chunks.setAcceleratorLease({});
+  lease = std::make_shared<CompactChunkResidentCacheLease>();
+  lease->cacheBudget = cacheBudget;
 
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
@@ -170,49 +156,6 @@ void warmCompactChunkResidentDeviceCache(
   views.reserve(chunks.chunks().size());
   for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
     auto chunk = chunks.loadChunk(chunkIndex);
-    if (registerChunks) {
-      std::vector<void *> registered;
-      auto tryRegister = [&registered](void *ptr, size_t bytes) {
-        if (ptr == nullptr || bytes == 0) {
-          return cudaSuccess;
-        }
-        const cudaError_t status =
-            cudaHostRegister(ptr, bytes, cudaHostRegisterPortable);
-        if (status == cudaSuccess) {
-          registered.push_back(ptr);
-        } else {
-          cudaGetLastError();
-        }
-        return status;
-      };
-
-      cudaError_t status = tryRegister(
-          const_cast<uint32_t *>(chunk->rowPtr.data()),
-          chunk->rowPtr.size() * sizeof(uint32_t));
-      if (status == cudaSuccess) {
-        status = tryRegister(const_cast<uint32_t *>(chunk->colIdxData()),
-                             chunk->colIdxCount() * sizeof(uint32_t));
-      }
-      if (status == cudaSuccess) {
-        status = tryRegister(const_cast<float *>(chunk->valuesData()),
-                             chunk->valuesCount() * sizeof(float));
-      }
-
-      if (status == cudaSuccess) {
-        lease->regions.insert(lease->regions.end(), registered.begin(),
-                              registered.end());
-      } else {
-        std::cerr << "[NOTE] cudaHostRegister failed for compact chunk "
-                  << chunk->info.path.string() << ": "
-                  << cudaGetErrorString(status)
-                  << "; continuing with pageable host memory.\n";
-        for (auto it = registered.rbegin(); it != registered.rend(); ++it) {
-          if (cudaHostUnregister(*it) != cudaSuccess) {
-            cudaGetLastError();
-          }
-        }
-      }
-    }
     views.push_back(chunk->view());
     loaded.push_back(std::move(chunk));
   }
@@ -220,9 +163,7 @@ void warmCompactChunkResidentDeviceCache(
   lease->residentWarmupComplete =
       views.empty() ||
       warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes);
-  if (registerChunks) {
-    chunks.setAcceleratorLease(lease);
-  }
+  chunks.setAcceleratorLease(lease);
 }
 
 struct CompactBranchDescriptor {
@@ -658,29 +599,35 @@ bool runCompactChunkMlemNumerCUDA(
     if (timing)
       addTiming(timing->transformForwardSeconds, stageStart);
   }
+  if (useBranchBatch &&
+      !refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
+                                          rotatedImages.size())) {
+    return false;
+  }
+  std::vector<int> branchSymIds(branches.size());
+  std::vector<int> branchZMirrors(branches.size());
+  for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+    branchSymIds[branchIndex] = branches[branchIndex].symId;
+    branchZMirrors[branchIndex] = branches[branchIndex].zMirror ? 1 : 0;
+  }
+  const double *fullProjections[] = {fullProjection};
 
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
-      const float *imgRotBatch = rotatedImages.data();
       CompactDeviceRatioTiming deviceTiming;
       CompactDeviceBackwardTiming backwardTiming;
       const CompactDeviceRatioParams commonRatio =
           makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
       const CompactDeviceTransformParams commonTransform =
           makeCompactDeviceTransformParams(meta, 0, false);
-      std::vector<int> symIds(branches.size());
-      std::vector<int> zMirrors(branches.size());
-      for (size_t b = 0; b < branches.size(); ++b) {
-        symIds[b] = branches[b].symId;
-        zMirrors[b] = branches[b].zMirror ? 1 : 0;
-      }
-      const bool ok = compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-          view, imgRotBatch, fullProjection, fullProjectionCount, commonRatio,
-          commonTransform, symIds.data(), zMirrors.data(),
-          static_cast<int>(branches.size()), &deviceTiming, &backwardTiming);
+      const bool ok = compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
+          view, fullProjections, fullProjectionCount, commonRatio,
+          commonTransform, branchSymIds.data(), branchZMirrors.data(),
+          static_cast<int>(branches.size()), 1, &deviceTiming,
+          &backwardTiming);
       if (!ok) {
         return false;
       }
@@ -996,49 +943,51 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
         addTiming(timing->transformForwardSeconds, stageStart);
     }
   }
+  if (useBranchBatch &&
+      !refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
+                                          rotatedImages.size())) {
+    return false;
+  }
+
+  std::vector<int> branchSymIds(branchCount);
+  std::vector<int> branchZMirrors(branchCount);
+  for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
+    branchSymIds[branchIndex] = branches[branchIndex].symId;
+    branchZMirrors[branchIndex] = branches[branchIndex].zMirror ? 1 : 0;
+  }
 
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
+    if (useBranchBatch && !useConcurrentBeds) {
+      CompactDeviceRatioTiming deviceTiming;
+      CompactDeviceBackwardTiming backwardTiming;
+      const CompactDeviceRatioParams commonRatio =
+          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
+      const CompactDeviceTransformParams commonTransform =
+          makeCompactDeviceTransformParams(meta, 0, false);
+      const bool ok = compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
+          view, fullProjections, fullProjectionCount, commonRatio,
+          commonTransform, branchSymIds.data(),
+          branchZMirrors.data(), static_cast<int>(branchCount), bedCount,
+          &deviceTiming, &backwardTiming);
+      if (!ok) {
+        return false;
+      }
+      if (timing) {
+        timing->forwardSeconds += deviceTiming.forwardSeconds;
+        timing->ratioSeconds += deviceTiming.ratioSeconds;
+        timing->backwardSeconds += deviceTiming.backwardSeconds;
+        timing->transformBackwardSeconds +=
+            backwardTiming.transformBackwardSeconds;
+      }
+      return true;
+    }
     for (int bed = 0; bed < bedCount; ++bed) {
       const double *fullProjection = fullProjections[bed];
       const double *fullBackground =
           fullBackgrounds == nullptr ? nullptr : fullBackgrounds[bed];
-
-      if (useBranchBatch && !useConcurrentBeds) {
-        const float *imgRotBatch =
-            rotatedImages.data() +
-            static_cast<size_t>(bed) * branchCount * nvox;
-        CompactDeviceRatioTiming deviceTiming;
-        CompactDeviceBackwardTiming backwardTiming;
-        const CompactDeviceRatioParams commonRatio =
-            makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
-        const CompactDeviceTransformParams commonTransform =
-            makeCompactDeviceTransformParams(meta, 0, false);
-        std::vector<int> symIds(branchCount);
-        std::vector<int> zMirrors(branchCount);
-        for (size_t b = 0; b < branchCount; ++b) {
-          symIds[b] = branches[b].symId;
-          zMirrors[b] = branches[b].zMirror ? 1 : 0;
-        }
-        const bool ok = compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-            view, imgRotBatch, fullProjection, fullProjectionCount, commonRatio,
-            commonTransform, symIds.data(), zMirrors.data(),
-            static_cast<int>(branchCount), &deviceTiming, &backwardTiming, bed,
-            bed);
-        if (!ok) {
-          return false;
-        }
-        if (timing) {
-          timing->forwardSeconds += deviceTiming.forwardSeconds;
-          timing->ratioSeconds += deviceTiming.ratioSeconds;
-          timing->backwardSeconds += deviceTiming.backwardSeconds;
-          timing->transformBackwardSeconds +=
-              backwardTiming.transformBackwardSeconds;
-        }
-        continue;
-      }
 
       for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
         const auto &branch = branches[branchIndex];

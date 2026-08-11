@@ -75,6 +75,7 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
 bool refreshCompactProjectionCUDA(const double* projection, size_t count,
                                   int cacheSlot = 0);
+bool refreshCompactBranchBatchInputCUDA(const float* input, size_t count);
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 /// spmv/spmvT with compact CTAC factors fused into the CUDA nnz loop.
@@ -154,23 +155,22 @@ bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
                                       float* y,
                                       CompactDeviceRatioTiming* timing = nullptr,
                                       int cacheSlot = 0);
-/// Branch-batch compact device-ratio + device-backward accumulator path.
-/// xBatch is cols x batchSize column-major (one rotated-image branch per
-/// column). symIds/zMirrors describe the branch symmetry for each column.
-bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+/// Batched compact device-ratio + device-backward accumulator path. The input
+/// refreshed by refreshCompactBranchBatchInputCUDA is ordered bed-major, with
+/// branchCount columns per bed; each bed keeps its own projection and backward
+/// accumulator.
+bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRView& matrix,
-    const float* xBatch,
-    const double* fullProjection,
+    const double* const* fullProjections,
     size_t fullProjectionCount,
     const CompactDeviceRatioParams& commonRatioParams,
     const CompactDeviceTransformParams& commonTransformParams,
     const int* symIds,
     const int* zMirrors,
-    int batchSize,
+    int branchCount,
+    int bedCount,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
+    CompactDeviceBackwardTiming* backwardTiming = nullptr);
 /// Branch-batch compact sensitivity accumulator path.  Computes A^T * 1 for all
 /// symmetry branches in one SpMM call and scatters the results into the device
 /// backward accumulator.  symIds/zMirrors describe the branch symmetry for each

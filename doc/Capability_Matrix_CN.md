@@ -25,7 +25,7 @@
 | CTAC 模型 | **`att[angle, voxel]` fused** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
 | 多床位 | 唯一 canonical stitch：`Bed1=max physical z`、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（由 `baseNz - bedOverlap` 与 16.8 mm 机械步进校验自动确定，260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。无 stitch/profile/FOV 选择器 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
-| GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；不规划多 GPU |
+| GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；branch/bed 默认合批 SpMM，保留 `SPECT_COMPACT_BRANCH_BATCH=0` 性能基线；不规划多 GPU |
 | 输出 | 保存未滤波 `<prefix>_it<N>`，以及从同一主输出独立派生的 `_smooth` / `_butter` MHD/RAW；发布默认对各副本后置非负钳制，manifest 记录参数与六文件清单；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
 
 ## 能力表
@@ -39,6 +39,7 @@
 | compact 260601 | CTAC 单床 | 是 | 圆柱 true/auto gate | fused 默认 |
 | compact 260601 | multi-bed CTAC | 是 | 数值 parity 通过 | 每床 fused factors |
 | compact 260601 | 多床 canonical stitch | 是 | **是（五组数据）** | 两组 EP、两组 mouse 与单床 Derenzo 的对象/数值/输出端点全部通过 |
+| compact 260601 | 16 GB GPU、50 次 MLEM 性能 | 是 | 单床通过；四床有界 | 三次中位数：Derenzo 104.59 s，EPguan 189.67 s；64 GB 主存 + NVMe 矩阵口径 |
 
 ## CTAC 边界（简）
 

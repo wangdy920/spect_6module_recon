@@ -939,57 +939,59 @@ public:
     }
   }
 
-  void executeCompactBranchBatchDeviceRatioSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const float *xBatch,
-      const double *fullProjection, size_t fullProjectionCount,
+  void executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
+      const io::CSRView &matrix, const double *const *fullProjections,
+      size_t fullProjectionCount,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
-      const int *symIds, const int *zMirrors, int batchSize,
+      const int *symIds, const int *zMirrors, int branchCount, int bedCount,
       cuda::CompactDeviceRatioTiming *ratioTimingOut,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
+      int accumulatorBaseIndex = 0, int cacheSlotBase = 0) {
     ensureCudaRuntimeAvailable();
-
     std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+    if (branchCount <= 0 || bedCount <= 0 || fullProjections == nullptr) {
       throw std::runtime_error(
-          "compact branch-batch cache slot out of range.");
+          "compact bed-branch batch requires positive branch/bed counts and "
+          "projections.");
     }
-    if (batchSize <= 0) {
-      throw std::runtime_error("compact branch-batch batchSize must be > 0.");
-    }
-    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device accumulator was not initialized.");
+    if (accumulatorBaseIndex < 0 || cacheSlotBase < 0 ||
+        accumulatorBaseIndex + bedCount > spect::core::kMaxBeds ||
+        cacheSlotBase + bedCount > spect::core::kMaxBeds) {
+      throw std::runtime_error("compact bed-branch batch slots out of range.");
     }
     if (commonRatioParams.symmetryMode != 45 &&
         commonRatioParams.symmetryMode != 90) {
       throw std::runtime_error(
-          "compact branch-batch helper requires symmetryMode 45 or 90.");
+          "compact bed-branch batch requires symmetryMode 45 or 90.");
     }
+
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
     const int64_t rows = cached.rows;
     const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device accumulator size does not match matrix columns.");
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t accumSlot = compactBackwardAccumulatorSlot(
+          accumulatorBaseIndex + bed);
+      if (compactBackwardAccumSize_[accumSlot] != static_cast<size_t>(cols) ||
+          dCompactBackwardAccum_[accumSlot].get() == nullptr) {
+        throw std::runtime_error(
+            "compact bed-branch accumulator does not match matrix columns.");
+      }
+      ensureCompactFullProjectionUploaded(fullProjections[bed],
+                                          fullProjectionCount,
+                                          cacheSlotBase + bed);
     }
 
-    const auto inputStart = std::chrono::steady_clock::now();
-    dBatchInput_.copyFromHost(
-        xBatch, static_cast<size_t>(cols) * static_cast<size_t>(batchSize));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      inputStart)
-            .count());
-    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(batchSize));
-    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(batchSize));
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
-                                        cacheSlot);
+    const int batchSize = branchCount * bedCount;
+    const size_t expectedInputCount =
+        static_cast<size_t>(cols) * static_cast<size_t>(batchSize);
+    if (compactBatchInputCount_ != expectedInputCount ||
+        dBatchInput_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact branch-batch input was not refreshed for this pass.");
+    }
+    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(branchCount));
+    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(branchCount));
     ensureProjDomainKernelsLoaded();
 
     dBatchOutput_.allocate(static_cast<size_t>(rows) *
@@ -1011,11 +1013,18 @@ public:
 
     TimedCudaStagePair ratioTiming;
     ratioTiming.recordStart(nullptr);
-    launchCompactRatioBatchKernel(
-        dBatchOutput_.get(), dCompactProjectionInput_[projectionSlot].get(),
-        fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
-        dBatchZMirrors_.get(), batchSize, dBatchOutput_.get(),
-        static_cast<size_t>(rows), 1e-10);
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t offset = static_cast<size_t>(bed) *
+                            static_cast<size_t>(branchCount) *
+                            static_cast<size_t>(rows);
+      launchCompactRatioBatchKernel(
+          dBatchOutput_.get() + offset,
+          dCompactProjectionInput_[static_cast<size_t>(cacheSlotBase + bed)]
+              .get(),
+          fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), branchCount, dBatchOutput_.get() + offset,
+          static_cast<size_t>(rows), 1e-10);
+    }
     ratioTiming.recordStop(nullptr);
 
     CuSparseDnMatGuard matBBackward;
@@ -1032,9 +1041,18 @@ public:
 
     TimedCudaStagePair transformTiming;
     transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddBatchKernel(
-        dFullBatchOutput_.get(), accum.get(), accumSize, batchSize,
-        commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t accumSlot = compactBackwardAccumulatorSlot(
+          accumulatorBaseIndex + bed);
+      const size_t offset = static_cast<size_t>(bed) *
+                            static_cast<size_t>(branchCount) *
+                            static_cast<size_t>(cols);
+      launchCompactTransformBackwardAddBatchKernel(
+          dFullBatchOutput_.get() + offset,
+          dCompactBackwardAccum_[accumSlot].get(),
+          compactBackwardAccumSize_[accumSlot], branchCount,
+          commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
+    }
     transformTiming.recordStop(nullptr);
 
     transformTiming.synchronizeStop();
@@ -1308,16 +1326,13 @@ private:
     mutable std::array<size_t, 2> spmmBufferSizes{};
     mutable std::array<bool, 2> spmmBufferSizeValid{};
 
-    void reset() {
+    void prepareForUpload() {
       key = MatrixCacheKey{};
       rows = 0;
       cols = 0;
       nnz = 0;
       valueType = CachedMatrixValueType::Float;
       matA.reset();
-      dRowPtr.reset();
-      dColIdx.reset();
-      dValues.reset();
       spmvBufferSizes = {};
       spmvBufferSizeValid = {};
       spmmBufferSizes = {};
@@ -1592,7 +1607,7 @@ private:
 
   void uploadIoCsrView(const io::CSRView &matrix, const MatrixCacheKey &key,
                        CachedMatrix *cache) {
-    cache->reset();
+    cache->prepareForUpload();
     cache->key = key;
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
@@ -1610,7 +1625,7 @@ private:
 
   void uploadIoCsrViewAsync(const io::CSRView &matrix, const MatrixCacheKey &key,
                             CachedMatrix *cache, cudaStream_t stream) {
-    cache->reset();
+    cache->prepareForUpload();
     cache->key = key;
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
@@ -1934,6 +1949,21 @@ private:
   }
 
 public:
+  void refreshCompactBranchBatchInput(const float *input, size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (input == nullptr || count == 0) {
+      throw std::runtime_error("compact branch-batch input is empty.");
+    }
+    const auto inputStart = std::chrono::steady_clock::now();
+    dBatchInput_.copyFromHost(input, count);
+    compactBatchInputCount_ = count;
+    noteCudaCompactInputH2D(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      inputStart)
+            .count());
+  }
+
   void refreshCompactProjection(const double *projection, size_t count,
                                 int cacheSlot) {
     ensureCudaRuntimeAvailable();
@@ -2972,6 +3002,7 @@ private:
   DeviceArray<float> dBatchOnes_;
   DeviceArray<int> dBatchSymIds_;
   DeviceArray<int> dBatchZMirrors_;
+  size_t compactBatchInputCount_ = 0;
   // Concurrent-bed compact-symmetric state: one independent CUDA stream and
   // scratch buffers per bed so that two beds can overlap on the GPU.
   std::array<CudaStreamGuard, spect::core::kMaxBeds> bedStreams_;
