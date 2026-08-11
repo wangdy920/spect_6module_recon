@@ -191,6 +191,10 @@ a { color:#315f8c; text-decoration:none; }
 <p>受保护原型源码 SHA-256 为：</p>
 <pre><code class="language-text">6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 </code></pre>
+<p>最终从干净提交 <code>17bd22c8c22192dbe4ddf3fed57456e41bb81161</code> 重编译并重置部署包。最新 Release 版本为 <code>20260811+17bd22c</code>，构建树与部署包可执行文件 SHA-256 均为：</p>
+<pre><code class="language-text">6D95C860BACACB4EBD76B44E66DF91BBD9CED7F4BA311B389CFFF1BCDD3A2C4E
+</code></pre>
+<p>权威配置为 <code>config/spect_config.ini</code>，部署副本为 <code>staging/SPECT_recon_rc_dev/bin/config/spect_config.ini</code>；两者 SHA-256 均为 <code>35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F</code>。部署 <code>-dumpConf</code> 确认 <code>smooth_apply_stage=output</code>、<code>butter_apply_stage=output</code>、Smooth <code>0.30 mm/3σ</code>、Butterworth <code>5 cpcm/order 8</code>、<code>output_nonnegative_clamp=true</code>。随后只有本报告元数据更新，不改变该 Release 包。</p>
 <h3 id="32">3.2 比较规则</h3>
 <p>原型 Analyze 输出与当前 MHD 输出按冻结方向比较：Derenzo 为 <code>rot0</code>，所有多床数据为 <code>zflip+rot0</code>。数值比较报告原始全体积 NCC、原型 1%–P99.9 支撑域 NCC，以及最小二乘尺度匹配后的 relL2。尺度匹配只用于既定数值门，不修改候选输出或 QA 图。</p>
 <p>对象门分别为：</p>
@@ -442,8 +446,13 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 <tbody>
 <tr>
 <td>Release 配置与编译</td>
-<td><code>SPECT_recon</code>、<code>spect_tests</code> 目标成功；正式 exe 哈希已冻结</td>
+<td><code>20260811+17bd22c</code>；构建/部署 exe SHA-256 同为 <code>6D95C8...A2C4E</code></td>
 <td>通过；保留 LNK4098 标记</td>
+</tr>
+<tr>
+<td>部署配置</td>
+<td>源码/部署 <code>spect_config.ini</code> SHA-256 同为 <code>35E950...FB4F</code>；部署 <code>-dumpConf</code> 逐项核对输出滤波与 clamp</td>
+<td>通过</td>
 </tr>
 <tr>
 <td>正式单元/集成测试</td>

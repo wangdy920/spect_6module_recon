@@ -65,6 +65,14 @@
 6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 ```
 
+最终从干净提交 `17bd22c8c22192dbe4ddf3fed57456e41bb81161` 重编译并重置部署包。最新 Release 版本为 `20260811+17bd22c`，构建树与部署包可执行文件 SHA-256 均为：
+
+```text
+6D95C860BACACB4EBD76B44E66DF91BBD9CED7F4BA311B389CFFF1BCDD3A2C4E
+```
+
+权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`。随后只有本报告元数据更新，不改变该 Release 包。
+
 ### 3.2 比较规则
 
 原型 Analyze 输出与当前 MHD 输出按冻结方向比较：Derenzo 为 `rot0`，所有多床数据为 `zflip+rot0`。数值比较报告原始全体积 NCC、原型 1%–P99.9 支撑域 NCC，以及最小二乘尺度匹配后的 relL2。尺度匹配只用于既定数值门，不修改候选输出或 QA 图。
@@ -193,7 +201,8 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Release 配置与编译 | `SPECT_recon`、`spect_tests` 目标成功；正式 exe 哈希已冻结 | 通过；保留 LNK4098 标记 |
+| Release 配置与编译 | `20260811+17bd22c`；构建/部署 exe SHA-256 同为 `6D95C8...A2C4E` | 通过；保留 LNK4098 标记 |
+| 部署配置 | 源码/部署 `spect_config.ini` SHA-256 同为 `35E950...FB4F`；部署 `-dumpConf` 逐项核对输出滤波与 clamp | 通过 |
 | 正式单元/集成测试 | CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过 | 通过 |
 | detector 68 精确映射 | 新回归测试检查 60×12×12、边界及旧错误区域 | 通过 |
 | 一迭代结构门 | no-PSF `7.30e-8`；sieve `8.95e-8` | 通过 |
