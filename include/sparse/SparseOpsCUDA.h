@@ -116,20 +116,6 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
-/// Same as compactDeviceRatioSpmvTAccumulateFloatCUDA but launches on a
-/// per-bed CUDA stream and skips the final synchronization, allowing the
-/// caller to overlap multiple beds. The caller must later synchronize the
-/// stream (e.g. via compactDeviceRatioSynchronizeBedCUDA).
-bool compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
-    const io::CSRView& matrix,
-    const float* x,
-    const double* fullProjection,
-    size_t fullProjectionCount,
-    const CompactDeviceRatioParams& ratioParams,
-    const CompactDeviceTransformParams& transformParams,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
-bool compactDeviceRatioSynchronizeBedCUDA(int cacheSlot);
 /// Device-ratio + device-backward accumulator path with on-the-fly CTAC
 /// attenuation. attFactors is the full-angle table (fullNumAngles * nx*ny*nz
 /// uint16) cached by host pointer per cacheSlot.

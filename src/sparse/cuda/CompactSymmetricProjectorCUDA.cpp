@@ -54,16 +54,6 @@ bool compactBranchBatchEnabled() {
          value[0] != 'f' && value[0] != 'F';
 }
 
-bool compactConcurrentBedsEnabled() {
-  const char *value = std::getenv("SPECT_COMPACT_CONCURRENT_BEDS");
-  if (value == nullptr || value[0] == '\0') {
-    return false;
-  }
-  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
-         value[0] == 't' || value[0] == 'T';
-}
-
-
 CompactDeviceRatioParams makeCompactDeviceRatioParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int symId, bool zMirror) {
@@ -899,9 +889,6 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   const bool useBranchBatch =
       compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
       !hasAtten && branchCount > 1;
-  const bool useConcurrentBeds =
-      compactConcurrentBedsEnabled() && useDeviceRatio && useDeviceBackward &&
-      !hasAtten && bedCount > 1;
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
   if (useDeviceRatio) {
     for (int bed = 0; bed < bedCount; ++bed) {
@@ -960,7 +947,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
-    if (useBranchBatch && !useConcurrentBeds) {
+    if (useBranchBatch) {
       CompactDeviceRatioTiming deviceTiming;
       CompactDeviceBackwardTiming backwardTiming;
       const CompactDeviceRatioParams commonRatio =
@@ -1015,15 +1002,6 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
                     bed)) {
               return false;
             }
-          } else if (useConcurrentBeds) {
-            // Concurrent-bed path: launch asynchronously on the bed's private
-            // CUDA stream; synchronization is deferred to the chunk boundary.
-            if (!compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
-                    view, imgRot, fullProjection, fullProjectionCount, params,
-                    transformParams, bed, bed)) {
-              return false;
-            }
-            continue;
           } else {
             if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
                     view, imgRot, fullProjection, fullProjectionCount, params,
@@ -1124,13 +1102,6 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
                              branch.zMirror, threads);
         if (timing)
           addTiming(timing->transformBackwardSeconds, stageStart);
-      }
-    }
-    if (useConcurrentBeds) {
-      for (int bed = 0; bed < bedCount; ++bed) {
-        if (!compactDeviceRatioSynchronizeBedCUDA(bed)) {
-          return false;
-        }
       }
     }
     return true;
