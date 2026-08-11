@@ -35,35 +35,6 @@ cusparseSpMVAlg_t selectedSpmvAlg(bool backward) {
   return backward ? backwardAlg : forwardAlg;
 }
 
-cusparseSpMMAlg_t parseSpmmAlgName(const char *text,
-                                   cusparseSpMMAlg_t fallback) {
-  if (text == nullptr || *text == '\0') {
-    return fallback;
-  }
-  std::string value(text);
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (value == "default") {
-    return CUSPARSE_SPMM_ALG_DEFAULT;
-  }
-  if (value == "csr_alg1" || value == "alg1") {
-    return CUSPARSE_SPMM_CSR_ALG1;
-  }
-  if (value == "csr_alg2" || value == "alg2") {
-    return CUSPARSE_SPMM_CSR_ALG2;
-  }
-  if (value == "csr_alg3" || value == "alg3") {
-    return CUSPARSE_SPMM_CSR_ALG3;
-  }
-  return fallback;
-}
-
-cusparseSpMMAlg_t selectedSpmmAlg() {
-  static const cusparseSpMMAlg_t alg = parseSpmmAlgName(
-      std::getenv("SPECT_CUDA_SPMM_ALG"), CUSPARSE_SPMM_ALG_DEFAULT);
-  return alg;
-}
-
 inline uint64_t estimatePreparedChunkHostBytes(const io::CSRView &matrix);
 
 class CudaStreamGuard {
@@ -1449,7 +1420,7 @@ private:
     const auto hostStart = std::chrono::steady_clock::now();
     const float alpha = 1.0f;
     const float beta = 0.0f;
-    const cusparseSpMMAlg_t alg = selectedSpmmAlg();
+    constexpr cusparseSpMMAlg_t alg = CUSPARSE_SPMM_ALG_DEFAULT;
     handle_.setStream(stream);
     size_t bufferSize = bufferSizeCache;
     if (!bufferSizeValid) {
