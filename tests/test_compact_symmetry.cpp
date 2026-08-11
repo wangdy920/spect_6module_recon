@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <stdexcept>
 #include <string>
@@ -203,8 +204,15 @@ TEST(IOTest, Real260601ChunkDirectoryReadsWhenPresent) {
     EXPECT_EQ(chunks.totalRows(), static_cast<uint64_t>(meta.compactRows()));
     EXPECT_EQ(chunks.cols(), meta.totalVoxels);
 
-    const auto first = chunks.loadChunk(0);
+    auto firstLoad = std::async(std::launch::async,
+                                [&chunks]() { return chunks.loadChunk(0); });
+    auto secondLoad = std::async(std::launch::async,
+                                 [&chunks]() { return chunks.loadChunk(1); });
+    const auto first = firstLoad.get();
+    const auto second = secondLoad.get();
     ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(second->info.angleOffset, 1);
     const auto view = first->view();
     EXPECT_EQ(view.rows, static_cast<int>(chunks.chunks()[0].rows));
     EXPECT_EQ(view.cols, meta.totalVoxels);

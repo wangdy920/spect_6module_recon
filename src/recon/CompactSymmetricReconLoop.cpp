@@ -5,6 +5,7 @@
 #include "recon/ProjectionOps.h"
 #include "core/Masks.h"
 #include "sparse/CompactSymmetricProjector.h"
+#include "sparse/SparseOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
 #include "io/BadDetectorMask.h"
 #include "io/MHDWriter.h"
@@ -23,6 +24,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -924,7 +926,25 @@ std::vector<double> runCompactSymmetricReconstruction(
                 ? maskPtr
                 : nullptr;
         bool compactChunkReverseOrderNext = !loadedCompactDenomCache;
+        const bool debugStats = getVerbosity() >= 2;
+        const bool residentMlemEligible =
+            !debugStats && !useBsremUpdate && !prepared.butterConf.enabled &&
+            !prepared.smoothConf.enabled;
+        if (backgroundProj.empty()) {
+          const size_t fullProjectionCount =
+              static_cast<size_t>(compactMeta.fullRows());
+          for (int bed = 0; bed < bedCount; ++bed) {
+            if (!spect::cuda::refreshCompactProjectionCUDA(
+                    projections.data() +
+                        static_cast<size_t>(bed) * fullProjectionCount,
+                    fullProjectionCount, bed)) {
+              throw std::runtime_error(
+                  "compact projection upload requires CUDA sparse backend.");
+            }
+          }
+        }
         auto lastIterationDone = ProfileClock::now();
+        bool imageResident = false;
         bool finalOutputSaved = false;
         bool finalManifestWritten = false;
         auto saveCompactOutput = [&](int iteration) {
@@ -935,6 +955,12 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
 
           const auto saveStart = ProfileClock::now();
+          if (imageResident &&
+              !spect::cuda::downloadCompactResidentImageCUDA(
+                  image.data(), image.size())) {
+            throw std::runtime_error(
+                "compact resident image download requires CUDA backend.");
+          }
           std::vector<double> sieveSaveVolume;
           const std::vector<double> *saveSource = &image;
           if (sieveSaveCopyActive) {
@@ -970,16 +996,41 @@ std::vector<double> runCompactSymmetricReconstruction(
         for (int it = 1; it <= args.numIters; ++it) {
           logInfo("[ITER] " + std::to_string(it) + "/" +
                   std::to_string(args.numIters) + " compact");
-          std::vector<double> numer(globalNvox, 0.0);
+          std::vector<double> numer;
           const std::vector<double> *bedImageSource = &image;
+
+          const bool residentBatchInput =
+              !debugStats && bedCount > 1 && backgroundProj.empty() &&
+              !compactHasAttenuation &&
+              (!compactPsfActive ||
+               opts.psf.kernel == filters::PSFKernel::Castor) &&
+              spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+                  compactMeta, bedImageSource->data(), bedImageSource->size(),
+                  args.Nz, bedZStarts.data(), bedCount, bedVirtualZFlip,
+                  compactPsfActive ? psfPtr : nullptr, !imageResident);
+          if (imageResident && !residentBatchInput) {
+            if (!spect::cuda::downloadCompactResidentImageCUDA(
+                    image.data(), image.size())) {
+              throw std::runtime_error(
+                  "compact resident fallback image download failed.");
+            }
+            imageResident = false;
+          }
+          const bool residentMlemIteration =
+              residentBatchInput && residentMlemEligible;
+          if (!residentMlemIteration)
+            numer.assign(globalNvox, 0.0);
 
             std::vector<std::vector<double>> localImages(
                 static_cast<size_t>(bedCount));
             std::vector<std::vector<double>> localUsed(
                 static_cast<size_t>(bedCount));
             std::vector<std::vector<double>> localNumers(
-                static_cast<size_t>(bedCount),
-                std::vector<double>(baseNvox, 0.0));
+                static_cast<size_t>(bedCount));
+            if (!residentMlemIteration) {
+              for (auto &localNumer : localNumers)
+                localNumer.assign(baseNvox, 0.0);
+            }
             std::vector<const double *> projectionPtrs(
                 static_cast<size_t>(bedCount), nullptr);
             std::vector<const double *> backgroundPtrs(
@@ -990,27 +1041,35 @@ std::vector<double> runCompactSymmetricReconstruction(
                                             nullptr);
 
             for (int bed = 0; bed < bedCount; ++bed) {
-              const int zStart = bedZStarts[static_cast<size_t>(bed)];
-              localImages[static_cast<size_t>(bed)] =
-                  spect::app::extractBedVolumeFromGlobal(
-                      *bedImageSource, baseNx, baseNy, baseNz, zStart,
-                      bedVirtualZFlip);
-              imagePtrs[static_cast<size_t>(bed)] =
-                  localImages[static_cast<size_t>(bed)].data();
-              if (compactPsfActive) {
-                logDebug(formatStatsEntry(
-                    "compact_local_image.it" + std::to_string(it) + ".bed" +
-                        std::to_string(bed),
-                    computeVectorStats(localImages[static_cast<size_t>(bed)])));
-                apply_psf_forward(localImages[static_cast<size_t>(bed)],
-                                  localUsed[static_cast<size_t>(bed)], baseNx,
-                                  baseNy, baseNz, opts, psfPtr, opts.threads);
-                logDebug(formatStatsEntry(
-                    "compact_psf_forward.it" + std::to_string(it) + ".bed" +
-                        std::to_string(bed),
-                    computeVectorStats(localUsed[static_cast<size_t>(bed)])));
+              if (!residentBatchInput) {
+                const int zStart = bedZStarts[static_cast<size_t>(bed)];
+                localImages[static_cast<size_t>(bed)] =
+                    spect::app::extractBedVolumeFromGlobal(
+                        *bedImageSource, baseNx, baseNy, baseNz, zStart,
+                        bedVirtualZFlip);
                 imagePtrs[static_cast<size_t>(bed)] =
-                    localUsed[static_cast<size_t>(bed)].data();
+                    localImages[static_cast<size_t>(bed)].data();
+                if (compactPsfActive) {
+                  if (debugStats) {
+                    logDebug(formatStatsEntry(
+                        "compact_local_image.it" + std::to_string(it) +
+                            ".bed" + std::to_string(bed),
+                        computeVectorStats(
+                            localImages[static_cast<size_t>(bed)])));
+                  }
+                  apply_psf_forward(localImages[static_cast<size_t>(bed)],
+                                    localUsed[static_cast<size_t>(bed)], baseNx,
+                                    baseNy, baseNz, opts, psfPtr, opts.threads);
+                  if (debugStats) {
+                    logDebug(formatStatsEntry(
+                        "compact_psf_forward.it" + std::to_string(it) +
+                            ".bed" + std::to_string(bed),
+                        computeVectorStats(
+                            localUsed[static_cast<size_t>(bed)])));
+                  }
+                  imagePtrs[static_cast<size_t>(bed)] =
+                      localUsed[static_cast<size_t>(bed)].data();
+                }
               }
 
               const size_t projectionOffset =
@@ -1022,18 +1081,24 @@ std::vector<double> runCompactSymmetricReconstruction(
                 backgroundPtrs[static_cast<size_t>(bed)] =
                     backgroundProj.data() + projectionOffset;
               }
-              numerPtrs[static_cast<size_t>(bed)] =
-                  localNumers[static_cast<size_t>(bed)].data();
+              if (!residentMlemIteration) {
+                numerPtrs[static_cast<size_t>(bed)] =
+                    localNumers[static_cast<size_t>(bed)].data();
+              }
             }
 
             const auto numerStart = ProfileClock::now();
             const bool ok = spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
                 compactChunks, compactMeta, projectionPtrs.data(),
                 backgroundProj.empty() ? nullptr : backgroundPtrs.data(),
-                imagePtrs.data(), bedCount, opts.threads, numerPtrs.data(),
+                residentBatchInput ? nullptr : imagePtrs.data(), bedCount,
+                opts.threads,
+                residentMlemIteration ? nullptr : numerPtrs.data(),
                 compactChunkReverseOrderNext, &compactCudaTiming,
                 compactAttFactorPtrs.empty() ? nullptr
-                                             : compactAttFactorPtrs.data());
+                                             : compactAttFactorPtrs.data(),
+                !backgroundProj.empty(), residentBatchInput,
+                !residentMlemIteration);
             if (!ok) {
               throw std::runtime_error(
                   "compact-symmetric numerator requires CUDA sparse backend.");
@@ -1043,11 +1108,41 @@ std::vector<double> runCompactSymmetricReconstruction(
                 std::chrono::duration<double>(ProfileClock::now() - numerStart)
                     .count();
 
+          if (residentMlemIteration) {
+            const auto updateStart = ProfileClock::now();
+            bool imageAllZero = false;
+            if (!spect::cuda::finishCompactResidentMlemIterationCUDA(
+                    compactMeta, globalNvox, args.Nz, bedZStarts.data(),
+                    bedCount, bedVirtualZFlip, denom.data(),
+                    maskPtr == nullptr ? nullptr : maskPtr->data(),
+                    compactPsfActive ? psfPtr : nullptr,
+                    compactPositiveProjectionInput, !imageResident,
+                    &imageAllZero)) {
+              throw std::runtime_error(
+                  "compact resident MLEM update requires CUDA backend.");
+            }
+            compactTiming.mlemUpdateSeconds +=
+                std::chrono::duration<double>(ProfileClock::now() - updateStart)
+                    .count();
+            imageResident = true;
+            if (imageAllZero) {
+              const std::string message =
+                  "checkpoint max==0 at compact iteration " +
+                  std::to_string(it) + "; output is all zero.";
+              logWarn(message);
+              const char *failClosed =
+                  std::getenv("SPECT_FAIL_ON_ZERO_CHECKPOINT");
+              if (failClosed && failClosed[0] == '1')
+                throw std::runtime_error(
+                    message +
+                    " Set SPECT_FAIL_ON_ZERO_CHECKPOINT=0 to continue.");
+            }
+          } else {
             for (int bed = 0; bed < bedCount; ++bed) {
               const int zStart = bedZStarts[static_cast<size_t>(bed)];
               std::vector<double> &localNumer =
                   localNumers[static_cast<size_t>(bed)];
-              if (compactPsfActive) {
+              if (compactPsfActive && debugStats) {
                 logDebug(formatStatsEntry(
                     "compact_local_numer_pre_psf.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
@@ -1055,7 +1150,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               }
               apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                  psfPtr, opts.threads);
-              if (compactPsfActive) {
+              if (compactPsfActive && debugStats) {
                 logDebug(formatStatsEntry(
                     "compact_local_numer_post_psf.it" + std::to_string(it) +
                         ".bed" + std::to_string(bed),
@@ -1179,13 +1274,24 @@ std::vector<double> runCompactSymmetricReconstruction(
             spect::core::applyMaskInplace(image, *maskPtr);
           guardZeroMaxCheckpoint(
               image, "compact iteration " + std::to_string(it));
+          imageResident = false;
+          }
           lastIterationDone = ProfileClock::now();
           observeCompactMemory();
 
           if (args.saveInterval > 0 &&
-              (it % args.saveInterval == 0 || it == args.numIters)) {
+              it % args.saveInterval == 0 && it != args.numIters) {
             saveCompactOutput(it);
           }
+        }
+
+        if (imageResident) {
+          if (!spect::cuda::downloadCompactResidentImageCUDA(
+                  image.data(), image.size())) {
+            throw std::runtime_error(
+                "compact final resident image download failed.");
+          }
+          imageResident = false;
         }
 
         if (args.projectionResidual) {
@@ -1296,6 +1402,11 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           logInfo("compact projection residual CSV: " +
                   residualPath.string());
+        }
+
+        if (!spect::cuda::releaseCompactExecutionCUDA()) {
+          throw std::runtime_error(
+              "compact final CUDA resource release requires CUDA backend.");
         }
 
         if (!finalOutputSaved) {

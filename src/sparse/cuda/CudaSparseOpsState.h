@@ -266,6 +266,14 @@ public:
 
   void *get() const { return ptr_; }
 
+  void reset() {
+    if (ptr_ != nullptr) {
+      CUDA_CHECK(cudaFree(ptr_));
+      ptr_ = nullptr;
+      size_ = 0;
+    }
+  }
+
 private:
   void *ptr_ = nullptr;
   size_t size_ = 0;
@@ -941,8 +949,19 @@ public:
       throw std::runtime_error(
           "compact branch-batch input was not refreshed for this pass.");
     }
-    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(branchCount));
-    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(branchCount));
+    const bool branchMetadataChanged =
+        batchSymIdsHost_.size() != static_cast<size_t>(branchCount) ||
+        batchZMirrorsHost_.size() != static_cast<size_t>(branchCount) ||
+        !std::equal(batchSymIdsHost_.begin(), batchSymIdsHost_.end(), symIds) ||
+        !std::equal(batchZMirrorsHost_.begin(), batchZMirrorsHost_.end(),
+                    zMirrors);
+    if (branchMetadataChanged) {
+      dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(branchCount));
+      dBatchZMirrors_.copyFromHost(zMirrors,
+                                  static_cast<size_t>(branchCount));
+      batchSymIdsHost_.assign(symIds, symIds + branchCount);
+      batchZMirrorsHost_.assign(zMirrors, zMirrors + branchCount);
+    }
     ensureProjDomainKernelsLoaded();
 
     dBatchOutput_.allocate(static_cast<size_t>(rows) *
@@ -1288,6 +1307,13 @@ private:
       spmvBufferSizeValid = {};
       spmmBufferSizes = {};
       spmmBufferSizeValid = {};
+    }
+
+    void release() {
+      prepareForUpload();
+      dRowPtr.reset();
+      dColIdx.reset();
+      dValues.reset();
     }
   };
 
@@ -1864,6 +1890,271 @@ public:
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       inputStart)
             .count());
+  }
+
+  void prepareCompactBranchBatchInputFromGlobal(
+      const double *globalImage, size_t globalImageCount, int globalNz,
+      const int *bedZStarts, int bedCount, bool flipLocalZ,
+      bool uploadGlobalImage,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      int branchCount, int zBranchCount,
+      const std::vector<double> *castorKx,
+      const std::vector<double> *castorKy,
+      const std::vector<double> *castorKz) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (globalImage == nullptr || globalImageCount == 0 || globalNz <= 0 ||
+        bedZStarts == nullptr || bedCount <= 0 ||
+        bedCount > spect::core::kMaxBeds || branchCount <= 0 ||
+        zBranchCount <= 0 || commonTransformParams.nx <= 0 ||
+        commonTransformParams.ny <= 0 || commonTransformParams.nz <= 0) {
+      throw std::runtime_error(
+          "compact resident branch-batch input parameters are invalid.");
+    }
+    const bool useCastor =
+        castorKx != nullptr || castorKy != nullptr || castorKz != nullptr;
+    if (useCastor &&
+        (castorKx == nullptr || castorKy == nullptr || castorKz == nullptr)) {
+      throw std::runtime_error(
+          "compact resident CASToR PSF requires all three kernels.");
+    }
+    const size_t plane =
+        static_cast<size_t>(commonTransformParams.nx) *
+        static_cast<size_t>(commonTransformParams.ny);
+    const size_t nvox =
+        plane * static_cast<size_t>(commonTransformParams.nz);
+    if (globalImageCount != plane * static_cast<size_t>(globalNz)) {
+      throw std::runtime_error(
+          "compact resident global image dimensions do not match.");
+    }
+    for (int bed = 0; bed < bedCount; ++bed) {
+      if (bedZStarts[bed] < 0 ||
+          bedZStarts[bed] + commonTransformParams.nz > globalNz) {
+        throw std::runtime_error(
+            "compact resident bed range exceeds the global image.");
+      }
+    }
+
+    if (uploadGlobalImage) {
+      const auto inputStart = std::chrono::steady_clock::now();
+      dCompactGlobalImage_.copyFromHost(globalImage, globalImageCount);
+      compactResidentImageCount_ = globalImageCount;
+      noteCudaCompactInputH2D(
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        inputStart)
+              .count());
+    } else if (compactResidentImageCount_ != globalImageCount ||
+               dCompactGlobalImage_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact resident image was not initialized for this iteration.");
+    }
+    dCompactBedPrimary_.allocate(nvox);
+    if (useCastor)
+      dCompactBedSecondary_.allocate(nvox);
+    const size_t batchCount = nvox * static_cast<size_t>(branchCount) *
+                              static_cast<size_t>(bedCount);
+    dBatchInput_.allocate(batchCount);
+    compactBatchInputCount_ = batchCount;
+    ensureProjDomainKernelsLoaded();
+
+    for (int bed = 0; bed < bedCount; ++bed) {
+      launchCompactGatherBedDoubleToFloatKernel(
+          dCompactGlobalImage_.get(), globalImageCount,
+          dCompactBedPrimary_.get(), commonTransformParams.nx,
+          commonTransformParams.ny, commonTransformParams.nz, globalNz,
+          bedZStarts[bed], flipLocalZ);
+      const float *bedInput = dCompactBedPrimary_.get();
+      if (useCastor) {
+        if (!cuda::enqueueCastorConv3DFloatDeviceCUDA(
+                dCompactBedPrimary_.get(), dCompactBedSecondary_.get(),
+                commonTransformParams.nx, commonTransformParams.ny,
+                commonTransformParams.nz, *castorKx, *castorKy, *castorKz)) {
+          throw std::runtime_error(
+              "compact resident CASToR PSF operation is unavailable.");
+        }
+        bedInput = dCompactBedSecondary_.get();
+      }
+      float *bedBatch =
+          dBatchInput_.get() + static_cast<size_t>(bed) *
+                                   static_cast<size_t>(branchCount) * nvox;
+      launchCompactTransformForwardBatchKernel(
+          bedInput, bedBatch, nvox, branchCount, zBranchCount,
+          commonTransformParams);
+    }
+  }
+
+  void finishCompactResidentMlemIteration(
+      size_t globalImageCount, int globalNz, const int *bedZStarts,
+      int bedCount, bool flipLocalZ,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const double *denom, const uint8_t *mask,
+      const std::vector<double> *castorKx,
+      const std::vector<double> *castorKy,
+      const std::vector<double> *castorKz,
+      bool requirePositiveNumerator, bool refreshStaticInputs,
+      bool *imageAllZero) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (globalImageCount == 0 || globalNz <= 0 || bedZStarts == nullptr ||
+        bedCount <= 0 || bedCount > spect::core::kMaxBeds || denom == nullptr ||
+        compactResidentImageCount_ != globalImageCount ||
+        dCompactGlobalImage_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact resident MLEM update parameters are invalid.");
+    }
+    const bool useCastor =
+        castorKx != nullptr || castorKy != nullptr || castorKz != nullptr;
+    if (useCastor &&
+        (castorKx == nullptr || castorKy == nullptr || castorKz == nullptr)) {
+      throw std::runtime_error(
+          "compact resident backward CASToR PSF requires all kernels.");
+    }
+    const size_t plane =
+        static_cast<size_t>(commonTransformParams.nx) *
+        static_cast<size_t>(commonTransformParams.ny);
+    const size_t nvox =
+        plane * static_cast<size_t>(commonTransformParams.nz);
+    if (globalImageCount != plane * static_cast<size_t>(globalNz)) {
+      throw std::runtime_error(
+          "compact resident MLEM global dimensions do not match.");
+    }
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t slot = compactBackwardAccumulatorSlot(bed);
+      if (compactBackwardAccumSize_[slot] != nvox ||
+          dCompactBackwardAccum_[slot].get() == nullptr ||
+          bedZStarts[bed] < 0 ||
+          bedZStarts[bed] + commonTransformParams.nz > globalNz) {
+        throw std::runtime_error(
+            "compact resident backward accumulator or bed range mismatch.");
+      }
+    }
+
+    if (refreshStaticInputs) {
+      dCompactDenom_.copyFromHost(denom, globalImageCount);
+      if (mask != nullptr)
+        dCompactMask_.copyFromHost(mask, globalImageCount);
+      compactResidentStaticCount_ = globalImageCount;
+      compactResidentHasMask_ = mask != nullptr;
+    } else if (compactResidentStaticCount_ != globalImageCount ||
+               dCompactDenom_.get() == nullptr ||
+               compactResidentHasMask_ != (mask != nullptr)) {
+      throw std::runtime_error(
+          "compact resident denominator or mask was not initialized.");
+    }
+
+    dCompactGlobalNumer_.allocate(globalImageCount);
+    CUDA_CHECK(cudaMemset(dCompactGlobalNumer_.get(), 0,
+                          globalImageCount * sizeof(double)));
+    dCompactBedPrimary_.allocate(nvox);
+    if (useCastor)
+      dCompactBedSecondary_.allocate(nvox);
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t slot = compactBackwardAccumulatorSlot(bed);
+      launchCompactConvertDoubleToFloatKernel(
+          dCompactBackwardAccum_[slot].get(), dCompactBedPrimary_.get(),
+          nvox);
+      const float *bedNumer = dCompactBedPrimary_.get();
+      if (useCastor) {
+        if (!cuda::enqueueCastorConv3DFloatDeviceCUDA(
+                dCompactBedPrimary_.get(), dCompactBedSecondary_.get(),
+                commonTransformParams.nx, commonTransformParams.ny,
+                commonTransformParams.nz, *castorKx, *castorKy, *castorKz)) {
+          throw std::runtime_error(
+              "compact resident backward CASToR PSF is unavailable.");
+        }
+        bedNumer = dCompactBedSecondary_.get();
+      }
+      launchCompactAccumulateBedFloatToGlobalDoubleKernel(
+          bedNumer, dCompactGlobalNumer_.get(), globalImageCount,
+          commonTransformParams.nx, commonTransformParams.ny,
+          commonTransformParams.nz, globalNz, bedZStarts[bed], flipLocalZ);
+    }
+
+    dCompactIterationFlags_.allocate(1);
+    CUDA_CHECK(cudaMemset(dCompactIterationFlags_.get(), 0,
+                          sizeof(uint32_t)));
+    launchCompactMlemUpdateKernel(
+        dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
+        dCompactDenom_.get(), mask == nullptr ? nullptr : dCompactMask_.get(),
+        mask != nullptr, globalImageCount, dCompactIterationFlags_.get(),
+        1e-12);
+
+    uint32_t flags = 0;
+    dCompactIterationFlags_.copyToHost(&flags, 1);
+    if ((flags & (1U | 4U)) != 0 ||
+        (requirePositiveNumerator && (flags & 2U) == 0)) {
+      throw std::runtime_error(
+          "compact resident numerator is non-finite, zero, or non-positive.");
+    }
+    if ((flags & 8U) != 0) {
+      throw std::runtime_error(
+          "compact resident MLEM update produced a non-finite image.");
+    }
+    if (imageAllZero != nullptr)
+      *imageAllZero = (flags & 16U) == 0;
+  }
+
+  void downloadCompactResidentImage(double *image, size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (image == nullptr || count == 0 || count != compactResidentImageCount_ ||
+        dCompactGlobalImage_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact resident image download parameters are invalid.");
+    }
+    dCompactGlobalImage_.copyToHost(image, count);
+  }
+
+  void releaseCompactExecution() {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    residentMatrixSetCache_.invalidate();
+    cache_.release();
+    dInput_.reset();
+    dOutput_.reset();
+    dProjectionInput_.reset();
+    dChunkInput_.reset();
+    dAccumOutput_.reset();
+    dFullOutput_.reset();
+    dBatchInput_.reset();
+    dBatchOutput_.reset();
+    dFullBatchOutput_.reset();
+    dBatchOnes_.reset();
+    dBatchSymIds_.reset();
+    dBatchZMirrors_.reset();
+    dCompactGlobalImage_.reset();
+    dCompactBedPrimary_.reset();
+    dCompactBedSecondary_.reset();
+    dCompactGlobalNumer_.reset();
+    dCompactDenom_.reset();
+    dCompactMask_.reset();
+    dCompactIterationFlags_.reset();
+    for (auto &projection : dCompactProjectionInput_)
+      projection.reset();
+    for (auto &accumulator : dCompactBackwardAccum_)
+      accumulator.reset();
+    for (size_t bed = 0; bed < dAttenTable_.size(); ++bed) {
+      bakedMat_[bed].reset();
+      dAttenTable_[bed].reset();
+      dBakedValues_[bed].reset();
+    }
+    dBuffer_.reset();
+
+    compactResidentImageCount_ = 0;
+    compactResidentStaticCount_ = 0;
+    compactResidentHasMask_ = false;
+    compactBatchInputCount_ = 0;
+    compactProjectionHostKey_ = {};
+    compactProjectionCount_ = {};
+    compactBackwardAccumSize_ = {};
+    attenTableHostPtr_ = {};
+    attenTableCount_ = {};
+    bakedValid_ = {};
+    batchSymIdsHost_.clear();
+    batchZMirrorsHost_.clear();
+    hostFloatScratch_.clear();
   }
 
   void refreshCompactProjection(const double *projection, size_t count,
@@ -2904,6 +3195,18 @@ private:
   DeviceArray<float> dBatchOnes_;
   DeviceArray<int> dBatchSymIds_;
   DeviceArray<int> dBatchZMirrors_;
+  DeviceArray<double> dCompactGlobalImage_;
+  DeviceArray<float> dCompactBedPrimary_;
+  DeviceArray<float> dCompactBedSecondary_;
+  size_t compactResidentImageCount_ = 0;
+  DeviceArray<double> dCompactGlobalNumer_;
+  DeviceArray<double> dCompactDenom_;
+  DeviceArray<uint8_t> dCompactMask_;
+  DeviceArray<uint32_t> dCompactIterationFlags_;
+  size_t compactResidentStaticCount_ = 0;
+  bool compactResidentHasMask_ = false;
+  std::vector<int> batchSymIdsHost_;
+  std::vector<int> batchZMirrorsHost_;
   size_t compactBatchInputCount_ = 0;
   std::array<DeviceArray<double>, kCompactDeviceBackwardMaxAccumulators>
       dCompactBackwardAccum_;

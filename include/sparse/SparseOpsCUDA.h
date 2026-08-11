@@ -76,6 +76,27 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
 bool refreshCompactProjectionCUDA(const double* projection, size_t count,
                                   int cacheSlot = 0);
 bool refreshCompactBranchBatchInputCUDA(const float* input, size_t count);
+bool prepareCompactBranchBatchInputFromGlobalCUDA(
+    const double *globalImage, size_t globalImageCount, int globalNz,
+    const int *bedZStarts, int bedCount, bool flipLocalZ,
+    bool uploadGlobalImage,
+    const CompactDeviceTransformParams &commonTransformParams,
+    int branchCount, int zBranchCount,
+    const std::vector<double> *castorKx = nullptr,
+    const std::vector<double> *castorKy = nullptr,
+    const std::vector<double> *castorKz = nullptr);
+bool finishCompactResidentMlemIterationCUDA(
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ,
+    const CompactDeviceTransformParams &commonTransformParams,
+    const double *denom, const uint8_t *mask,
+    const std::vector<double> *castorKx,
+    const std::vector<double> *castorKy,
+    const std::vector<double> *castorKz,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero);
+bool downloadCompactResidentImageCUDA(double *image, size_t count);
+bool releaseCompactExecutionCUDA();
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 /// spmv/spmvT with compact CTAC factors fused into the CUDA nnz loop.

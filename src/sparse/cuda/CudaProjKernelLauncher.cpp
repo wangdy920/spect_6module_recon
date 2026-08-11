@@ -24,6 +24,11 @@ struct ProjDomainKernelCache {
   CUfunction ratioFunction = nullptr;
   CUfunction compactRatioFunction = nullptr;
   CUfunction compactRatioBatchFunction = nullptr;
+  CUfunction compactGatherBedFunction = nullptr;
+  CUfunction compactConvertDoubleToFloatFunction = nullptr;
+  CUfunction compactAccumulateBedFunction = nullptr;
+  CUfunction compactMlemUpdateFunction = nullptr;
+  CUfunction compactTransformForwardBatchFunction = nullptr;
   CUfunction compactTransformBackwardFunction = nullptr;
   CUfunction compactTransformBackwardBatchFunction = nullptr;
   CUfunction compactBakeAttenFunction = nullptr;
@@ -59,6 +64,11 @@ void ensureProjDomainKernelsLoaded() {
   if (g_projDomainKernelCache.ratioFunction != nullptr &&
       g_projDomainKernelCache.compactRatioFunction != nullptr &&
       g_projDomainKernelCache.compactRatioBatchFunction != nullptr &&
+      g_projDomainKernelCache.compactGatherBedFunction != nullptr &&
+      g_projDomainKernelCache.compactConvertDoubleToFloatFunction != nullptr &&
+      g_projDomainKernelCache.compactAccumulateBedFunction != nullptr &&
+      g_projDomainKernelCache.compactMlemUpdateFunction != nullptr &&
+      g_projDomainKernelCache.compactTransformForwardBatchFunction != nullptr &&
       g_projDomainKernelCache.compactTransformBackwardFunction != nullptr &&
       g_projDomainKernelCache.compactTransformBackwardBatchFunction != nullptr &&
       g_projDomainKernelCache.compactBakeAttenFunction != nullptr &&
@@ -90,6 +100,11 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.ratioFunction = nullptr;
     g_projDomainKernelCache.compactRatioFunction = nullptr;
     g_projDomainKernelCache.compactRatioBatchFunction = nullptr;
+    g_projDomainKernelCache.compactGatherBedFunction = nullptr;
+    g_projDomainKernelCache.compactConvertDoubleToFloatFunction = nullptr;
+    g_projDomainKernelCache.compactAccumulateBedFunction = nullptr;
+    g_projDomainKernelCache.compactMlemUpdateFunction = nullptr;
+    g_projDomainKernelCache.compactTransformForwardBatchFunction = nullptr;
     g_projDomainKernelCache.compactTransformBackwardFunction = nullptr;
     g_projDomainKernelCache.compactTransformBackwardBatchFunction = nullptr;
     g_projDomainKernelCache.compactBakeAttenFunction = nullptr;
@@ -107,6 +122,22 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactRatioBatchFunction,
       g_projDomainKernelCache.module, "compute_compact_ratio_chunk_batch"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactGatherBedFunction,
+      g_projDomainKernelCache.module, "compact_gather_bed_double_to_float"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactConvertDoubleToFloatFunction,
+      g_projDomainKernelCache.module, "compact_convert_double_to_float"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactAccumulateBedFunction,
+      g_projDomainKernelCache.module,
+      "compact_accumulate_bed_float_to_global_double"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactMlemUpdateFunction,
+      g_projDomainKernelCache.module, "compact_mlem_update"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactTransformForwardBatchFunction,
+      g_projDomainKernelCache.module, "compact_transform_forward_batch"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactTransformBackwardFunction,
       g_projDomainKernelCache.module, "compact_transform_backward_add"));
@@ -191,6 +222,135 @@ void launchCompactRatioKernel(
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactRatioFunction, gridSize, 1, 1, blockSize,
       1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactGatherBedDoubleToFloatKernel(
+    const double *globalImage, size_t globalCount, float *bedImage, int nx,
+    int ny, int nz, int globalNz, int zStart, bool flipLocalZ,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  const size_t nvox = static_cast<size_t>(nx) * static_cast<size_t>(ny) *
+                      static_cast<size_t>(nz);
+  if (nvox == 0)
+    return;
+  CUdeviceptr globalPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(globalImage));
+  CUdeviceptr bedPtr = reinterpret_cast<CUdeviceptr>(bedImage);
+  unsigned long long globalSize =
+      static_cast<unsigned long long>(globalCount);
+  unsigned long long voxelCount = static_cast<unsigned long long>(nvox);
+  int flip = flipLocalZ ? 1 : 0;
+  void *args[] = {&globalPtr, &globalSize, &bedPtr, &nx, &ny, &nz,
+                  &globalNz, &zStart, &flip, &voxelCount};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((nvox + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactGatherBedFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactConvertDoubleToFloatKernel(
+    const double *input, float *output, size_t count, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (count == 0)
+    return;
+  CUdeviceptr inputPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(input));
+  CUdeviceptr outputPtr = reinterpret_cast<CUdeviceptr>(output);
+  unsigned long long total = static_cast<unsigned long long>(count);
+  void *args[] = {&inputPtr, &outputPtr, &total};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((count + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactConvertDoubleToFloatFunction, gridSize,
+      1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
+      nullptr));
+}
+
+void launchCompactAccumulateBedFloatToGlobalDoubleKernel(
+    const float *bedImage, double *globalImage, size_t globalCount, int nx,
+    int ny, int nz, int globalNz, int zStart, bool flipLocalZ,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  const size_t nvox = static_cast<size_t>(nx) * static_cast<size_t>(ny) *
+                      static_cast<size_t>(nz);
+  if (nvox == 0)
+    return;
+  CUdeviceptr bedPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(bedImage));
+  CUdeviceptr globalPtr = reinterpret_cast<CUdeviceptr>(globalImage);
+  unsigned long long globalSize =
+      static_cast<unsigned long long>(globalCount);
+  unsigned long long voxelCount = static_cast<unsigned long long>(nvox);
+  int flip = flipLocalZ ? 1 : 0;
+  void *args[] = {&bedPtr, &globalPtr, &globalSize, &nx, &ny, &nz,
+                  &globalNz, &zStart, &flip, &voxelCount};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((nvox + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactAccumulateBedFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactMlemUpdateKernel(
+    double *image, const double *numer, const double *denom,
+    const uint8_t *mask, bool hasMask, size_t count, uint32_t *flags,
+    double eps, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (count == 0)
+    return;
+  CUdeviceptr imagePtr = reinterpret_cast<CUdeviceptr>(image);
+  CUdeviceptr numerPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(numer));
+  CUdeviceptr denomPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(denom));
+  CUdeviceptr maskPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint8_t *>(mask));
+  CUdeviceptr flagsPtr = reinterpret_cast<CUdeviceptr>(flags);
+  int useMask = hasMask ? 1 : 0;
+  unsigned long long total = static_cast<unsigned long long>(count);
+  void *args[] = {&imagePtr, &numerPtr, &denomPtr, &maskPtr, &useMask,
+                  &total, &flagsPtr, &eps};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((count + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactMlemUpdateFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactTransformForwardBatchKernel(
+    const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,
+    int zBranchCount, const cuda::CompactDeviceTransformParams &commonParams,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (nvox == 0 || branchCount <= 0 || zBranchCount <= 0)
+    return;
+  CUdeviceptr bedPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(bedImage));
+  CUdeviceptr batchPtr = reinterpret_cast<CUdeviceptr>(rotatedBatch);
+  unsigned long long voxelCount = static_cast<unsigned long long>(nvox);
+  const size_t total = nvox * static_cast<size_t>(branchCount);
+  void *args[] = {
+      &bedPtr,
+      &batchPtr,
+      &voxelCount,
+      &branchCount,
+      &zBranchCount,
+      const_cast<int *>(&commonParams.symmetryMode),
+      const_cast<int *>(&commonParams.nx),
+      const_cast<int *>(&commonParams.ny),
+      const_cast<int *>(&commonParams.nz)};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((total + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactTransformForwardBatchFunction, gridSize,
+      1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
+      nullptr));
 }
 
 void launchCompactTransformBackwardAddKernel(

@@ -187,6 +187,150 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
 }
 
 )CU") + R"CU(
+extern "C" __global__ void compact_gather_bed_double_to_float(
+    const double *globalImage, unsigned long long globalCount,
+    float *bedImage, int nx, int ny, int nz, int globalNz, int zStart,
+    int flipLocalZ, unsigned long long nvox) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= nvox || nx <= 0 || ny <= 0 || nz <= 0 || globalNz <= 0) {
+    return;
+  }
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  const int localZ = static_cast<int>(index / plane);
+  const unsigned long long xy = index % plane;
+  const int globalZ =
+      zStart + (flipLocalZ != 0 ? nz - 1 - localZ : localZ);
+  const unsigned long long globalIndex =
+      static_cast<unsigned long long>(globalZ) * plane + xy;
+  bedImage[index] =
+      globalZ >= 0 && globalZ < globalNz && globalIndex < globalCount
+          ? static_cast<float>(globalImage[globalIndex])
+          : 0.0f;
+}
+
+extern "C" __global__ void compact_convert_double_to_float(
+    const double *input, float *output, unsigned long long count) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < count) {
+    output[index] = static_cast<float>(input[index]);
+  }
+}
+
+extern "C" __global__ void compact_accumulate_bed_float_to_global_double(
+    const float *bedImage, double *globalImage, unsigned long long globalCount,
+    int nx, int ny, int nz, int globalNz, int zStart, int flipLocalZ,
+    unsigned long long nvox) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= nvox || nx <= 0 || ny <= 0 || nz <= 0 || globalNz <= 0) {
+    return;
+  }
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  const int localZ = static_cast<int>(index / plane);
+  const unsigned long long xy = index % plane;
+  const int globalZ =
+      zStart + (flipLocalZ != 0 ? nz - 1 - localZ : localZ);
+  const unsigned long long globalIndex =
+      static_cast<unsigned long long>(globalZ) * plane + xy;
+  if (globalZ >= 0 && globalZ < globalNz && globalIndex < globalCount) {
+    globalImage[globalIndex] += static_cast<double>(bedImage[index]);
+  }
+}
+
+extern "C" __global__ void compact_mlem_update(
+    double *image, const double *numer, const double *denom,
+    const unsigned char *mask, int hasMask, unsigned long long count,
+    unsigned int *flags, double eps) {
+  __shared__ unsigned int blockFlags;
+  if (threadIdx.x == 0) blockFlags = 0;
+  __syncthreads();
+
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  unsigned int localFlags = 0;
+  if (index < count) {
+    const double n = numer[index];
+    if (!isfinite(n)) localFlags |= 1U;
+    else if (n > 0.0) localFlags |= 2U;
+    else if (n < 0.0) localFlags |= 4U;
+
+    double value = 0.0;
+    if ((hasMask == 0 || mask[index] != 0) && denom[index] > 0.0) {
+      const double d = denom[index] > eps ? denom[index] : eps;
+      value = image[index] * (n / d);
+      if (value < 0.0) value = 0.0;
+    }
+    image[index] = value;
+    if (!isfinite(value)) localFlags |= 8U;
+    else if (value != 0.0) localFlags |= 16U;
+  }
+  if (localFlags != 0) atomicOr(&blockFlags, localFlags);
+  __syncthreads();
+  if (threadIdx.x == 0 && blockFlags != 0) atomicOr(flags, blockFlags);
+}
+
+extern "C" __global__ void compact_transform_forward_batch(
+    const float *bedImage, float *rotatedBatch, unsigned long long nvox,
+    int branchCount, int zBranchCount, int symmetryMode,
+    int nx, int ny, int nz) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      nvox * static_cast<unsigned long long>(branchCount);
+  if (index >= total || branchCount <= 0 || zBranchCount <= 0 ||
+      nx <= 0 || ny <= 0 || nz <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / nvox);
+  const unsigned long long voxel = index % nvox;
+  const int symId = branch / zBranchCount;
+  const int zMirror = branch % zBranchCount != 0;
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  const int iz = static_cast<int>(voxel / plane);
+  const unsigned long long rem =
+      voxel - static_cast<unsigned long long>(iz) * plane;
+  const int iy = static_cast<int>(rem / static_cast<unsigned long long>(nx));
+  const int ix = static_cast<int>(
+      rem - static_cast<unsigned long long>(iy) *
+                static_cast<unsigned long long>(nx));
+  int x = ix;
+  int y = iy;
+  if (symmetryMode == 45) {
+    switch (symId) {
+    case 1: x = iy; y = ix; break;
+    case 2: x = nx - 1 - iy; y = ix; break;
+    case 3: x = nx - 1 - ix; y = iy; break;
+    case 4: x = nx - 1 - ix; y = ny - 1 - iy; break;
+    case 5: x = nx - 1 - iy; y = ny - 1 - ix; break;
+    case 6: x = iy; y = ny - 1 - ix; break;
+    case 7: x = ix; y = ny - 1 - iy; break;
+    default: break;
+    }
+  } else {
+    switch (symId) {
+    case 1: x = nx - 1 - iy; y = ix; break;
+    case 2: x = nx - 1 - ix; y = ny - 1 - iy; break;
+    case 3: x = iy; y = ny - 1 - ix; break;
+    default: break;
+    }
+  }
+  const int z = zMirror != 0 ? nz - 1 - iz : iz;
+  if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) {
+    rotatedBatch[index] = 0.0f;
+    return;
+  }
+  const unsigned long long mapped =
+      static_cast<unsigned long long>(z) * plane +
+      static_cast<unsigned long long>(y) * static_cast<unsigned long long>(nx) +
+      static_cast<unsigned long long>(x);
+  rotatedBatch[index] = bedImage[mapped];
+}
+
 extern "C" __global__ void compact_transform_backward_add(
     const float *rotated, double *accum, unsigned long long nvox,
     int symmetryMode, int nx, int ny, int nz, int symId, int zMirror) {

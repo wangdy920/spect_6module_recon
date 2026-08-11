@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "sparse/CompactSymmetricProjector.h"
+#include "sparse/SparseOpsCUDA.h"
 #include "cuda/CudaConfig.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/CompactChunkCSR.h"
 #include "sparse/ProjDomainChunked.h"
 #include "tests/common/compact_symmetry_test_helpers.h"
@@ -138,6 +140,96 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
   expectNear(localNumers[0], refNumer0, 1e-4);
   expectNear(localNumers[1], refNumer1, 1e-4);
 
+  std::vector<double> background0(fullRows, 0.25);
+  std::vector<double> background1(fullRows, 0.5);
+  const double *backgroundPtrs[bedCount] = {background0.data(),
+                                             background1.data()};
+  std::vector<std::vector<double>> backgroundNumers(
+      bedCount, std::vector<double>(nvox, 0.0));
+  double *backgroundNumerPtrs[bedCount] = {backgroundNumers[0].data(),
+                                           backgroundNumers[1].data()};
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, backgroundPtrs, imagePtrs, bedCount, 1,
+      backgroundNumerPtrs));
+  std::vector<double> backgroundRef0(nvox, 0.0);
+  std::vector<double> backgroundRef1(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projBed0.data(), background0.data(), imageBed0.data(), 1,
+      backgroundRef0.data()));
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projBed1.data(), background1.data(), imageBed1.data(), 1,
+      backgroundRef1.data()));
+  expectNear(backgroundNumers[0], backgroundRef0, 1e-4);
+  expectNear(backgroundNumers[1], backgroundRef1, 1e-4);
+
+  std::vector<double> globalImage(2 * nvox, 0.0);
+  std::copy(imageBed0.begin(), imageBed0.end(), globalImage.begin());
+  std::copy(imageBed1.begin(), imageBed1.end(),
+            globalImage.begin() + static_cast<ptrdiff_t>(nvox));
+  const int bedZStarts[bedCount] = {0, meta.Nz};
+  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+      meta, globalImage.data(), globalImage.size(), 2 * meta.Nz, bedZStarts,
+      bedCount, false));
+  std::vector<std::vector<double>> residentNumers(
+      bedCount, std::vector<double>(nvox, 0.0));
+  double *residentNumerPtrs[bedCount] = {residentNumers[0].data(),
+                                         residentNumers[1].data()};
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, nullptr, nullptr, bedCount, 1,
+      residentNumerPtrs, false, nullptr, nullptr, true, true));
+  expectNear(residentNumers[0], refNumer0, 1e-4);
+  expectNear(residentNumers[1], refNumer1, 1e-4);
+
+  spect::filters::PSFKernels castorPsf;
+  castorPsf.kx = {0.25, 0.5, 0.25};
+  castorPsf.ky = castorPsf.kx;
+  castorPsf.kz = castorPsf.kx;
+  std::vector<std::vector<double>> blurredImages = {imageBed0, imageBed1};
+  for (auto &blurred : blurredImages) {
+    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
+        blurred, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
+        castorPsf.kz));
+  }
+  const double *blurredPtrs[bedCount] = {blurredImages[0].data(),
+                                         blurredImages[1].data()};
+  std::vector<std::vector<double>> hostPsfNumers(
+      bedCount, std::vector<double>(nvox, 0.0));
+  double *hostPsfNumerPtrs[bedCount] = {hostPsfNumers[0].data(),
+                                        hostPsfNumers[1].data()};
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, nullptr, blurredPtrs, bedCount, 1,
+      hostPsfNumerPtrs));
+  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+      meta, globalImage.data(), globalImage.size(), 2 * meta.Nz, bedZStarts,
+      bedCount, false, &castorPsf));
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, nullptr, nullptr, bedCount, 1,
+      residentNumerPtrs, false, nullptr, nullptr, true, true));
+  expectNear(residentNumers[0], hostPsfNumers[0], 1e-4);
+  expectNear(residentNumers[1], hostPsfNumers[1], 1e-4);
+
+  std::vector<double> expectedUpdated = globalImage;
+  for (int bed = 0; bed < bedCount; ++bed) {
+    auto backwardPsf = hostPsfNumers[static_cast<size_t>(bed)];
+    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
+        backwardPsf, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
+        castorPsf.kz));
+    const size_t offset = static_cast<size_t>(bed) * nvox;
+    for (size_t i = 0; i < nvox; ++i)
+      expectedUpdated[offset + i] *= backwardPsf[i];
+  }
+  std::vector<double> globalDenom(globalImage.size(), 1.0);
+  bool imageAllZero = true;
+  ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
+      meta, globalImage.size(), 2 * meta.Nz, bedZStarts, bedCount, false,
+      globalDenom.data(), nullptr, &castorPsf, true, true, &imageAllZero));
+  EXPECT_FALSE(imageAllZero);
+  std::vector<double> residentUpdated(globalImage.size(), 0.0);
+  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(
+      residentUpdated.data(), residentUpdated.size()));
+  expectNear(residentUpdated, expectedUpdated, 1e-4);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+
   std::filesystem::remove_all(dir);
 }
 
@@ -164,14 +256,26 @@ TEST_F(MultiBedCompactNumeratorTest, ProjectionBufferMutationRefreshesCache) {
   std::vector<double> projection(fullRows, 5.0);
   std::vector<double> numer(nvox, 0.0);
 
+  spect::cuda::resetCudaChunkStageTimingCUDA();
+  ASSERT_TRUE(spect::cuda::refreshCompactProjectionCUDA(
+      projection.data(), projection.size()));
   ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
       chunks, meta, projection.data(), nullptr, image.data(), 1,
-      numer.data()));
+      numer.data(), false, nullptr, nullptr, false));
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projection.data(), nullptr, image.data(), 1,
+      numer.data(), false, nullptr, nullptr, false));
+  EXPECT_EQ(spect::cuda::getCudaChunkStageTimingSnapshotCUDA()
+                .compactProjectionH2DCalls,
+            1u);
   for (size_t i = 0; i < fullRows; ++i)
     projection[i] = 1.0 + 0.01 * static_cast<double>(i);
   ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
       chunks, meta, projection.data(), nullptr, image.data(), 1,
       numer.data()));
+  EXPECT_EQ(spect::cuda::getCudaChunkStageTimingSnapshotCUDA()
+                .compactProjectionH2DCalls,
+            2u);
   const auto expected = denseNumerator(full, projection, image,
                                        static_cast<int>(fullRows),
                                        meta.totalVoxels);

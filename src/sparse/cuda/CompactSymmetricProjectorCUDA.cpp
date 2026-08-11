@@ -3,6 +3,7 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
 #include "core/ReconLimits.h"
+#include "cuda/CudaConfig.h"
 #include "cuda/CudaLaunchConfig.h"
 #include "sparse/SparseOpsCUDA.h"
 
@@ -12,6 +13,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -32,6 +34,7 @@ constexpr uint64_t kCompactChunkResidentReserveBytes =
 struct CompactChunkResidentCacheLease {
   uint64_t cacheBudget = 0;
   bool residentWarmupComplete = false;
+  std::future<void> hostPreload;
 };
 
 int effectiveThreads(int threads) { return threads > 0 ? threads : 1; }
@@ -140,19 +143,63 @@ void warmCompactChunkResidentDeviceCache(
   lease = std::make_shared<CompactChunkResidentCacheLease>();
   lease->cacheBudget = cacheBudget;
 
+  size_t residentPrefixCount = 1;
+  try {
+    const auto memory = cuda::getMemoryInfo();
+    const uint64_t available =
+        memory.free > kCompactChunkResidentReserveBytes
+            ? static_cast<uint64_t>(memory.free) -
+                  kCompactChunkResidentReserveBytes
+            : 0;
+    uint64_t bytes = 0;
+    residentPrefixCount = 0;
+    for (const auto &info : chunks.chunks()) {
+      if (bytes > available || info.fileSizeBytes > available - bytes)
+        break;
+      bytes += info.fileSizeBytes;
+      ++residentPrefixCount;
+    }
+    residentPrefixCount = std::max<size_t>(1, residentPrefixCount);
+  } catch (...) {
+    residentPrefixCount = 1;
+  }
+  residentPrefixCount =
+      std::min(residentPrefixCount, chunks.chunks().size());
+
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
-  loaded.reserve(chunks.chunks().size());
-  views.reserve(chunks.chunks().size());
-  for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
+  loaded.reserve(residentPrefixCount);
+  views.reserve(residentPrefixCount);
+  for (size_t chunkIndex = 0; chunkIndex < residentPrefixCount; ++chunkIndex) {
     auto chunk = chunks.loadChunk(chunkIndex);
     views.push_back(chunk->view());
     loaded.push_back(std::move(chunk));
   }
 
+  if (residentPrefixCount < chunks.chunks().size()) {
+    const auto *chunkDirectory = &chunks;
+    lease->hostPreload = std::async(
+        std::launch::async, [chunkDirectory, residentPrefixCount]() {
+          try {
+            for (size_t chunkIndex = residentPrefixCount;
+                 chunkIndex < chunkDirectory->chunks().size(); ++chunkIndex) {
+              (void)chunkDirectory->loadChunk(chunkIndex);
+            }
+          } catch (const std::exception &ex) {
+            std::cerr << "[NOTE] compact host preload stopped: " << ex.what()
+                      << "; foreground loading will retry.\n";
+          }
+        });
+  }
+
   lease->residentWarmupComplete =
       views.empty() ||
       warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes);
+  std::cerr << "[CompactChunkCUDA] Startup overlap: resident prefix "
+            << residentPrefixCount << " / " << chunks.chunks().size();
+  if (residentPrefixCount < chunks.chunks().size())
+    std::cerr << ", remaining host chunks preload in background";
+  std::cerr << '\n';
   chunks.setAcceleratorLease(lease);
 }
 
@@ -529,13 +576,49 @@ bool prepareCompactChunkExecutionCUDA(
   return true;
 }
 
+bool prepareCompactBranchBatchInputFromGlobalCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *globalImage, size_t globalImageCount, int globalNz,
+    const int *bedZStarts, int bedCount, bool flipLocalZ,
+    const spect::filters::PSFKernels *castorPsf, bool uploadGlobalImage) {
+  if (bedCount <= 1 || !compactBranchBatchEnabled())
+    return false;
+  const CompactDeviceTransformParams commonTransform =
+      makeCompactDeviceTransformParams(meta, 0, false);
+  return spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+      globalImage, globalImageCount, globalNz, bedZStarts, bedCount,
+      flipLocalZ, uploadGlobalImage, commonTransform,
+      meta.xySymmetryCount() * meta.zBranchCount(), meta.zBranchCount(),
+      castorPsf == nullptr ? nullptr : &castorPsf->kx,
+      castorPsf == nullptr ? nullptr : &castorPsf->ky,
+      castorPsf == nullptr ? nullptr : &castorPsf->kz);
+}
+
+bool finishCompactResidentMlemIterationCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
+    const spect::filters::PSFKernels *castorPsf,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero) {
+  const CompactDeviceTransformParams commonTransform =
+      makeCompactDeviceTransformParams(meta, 0, false);
+  return spect::cuda::finishCompactResidentMlemIterationCUDA(
+      globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+      commonTransform, denom, mask,
+      castorPsf == nullptr ? nullptr : &castorPsf->kx,
+      castorPsf == nullptr ? nullptr : &castorPsf->ky,
+      castorPsf == nullptr ? nullptr : &castorPsf->kz,
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+}
+
 bool runCompactChunkMlemNumerCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta,
     const double *fullProjection, const double *fullBackground,
     const double *smoothedImage, int threads, double *numer,
     bool reverseChunkOrder, CompactSymmetricStageTiming *timing,
-    const uint16_t *attFactors) {
+    const uint16_t *attFactors, bool refreshProjectionInput) {
   if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
       chunks.cols() != meta.totalVoxels) {
     throw std::runtime_error("compact chunk numerator matrix/metadata mismatch.");
@@ -559,7 +642,7 @@ bool runCompactChunkMlemNumerCUDA(
       compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
       attFactors == nullptr && branches.size() > 1;
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-  if (useDeviceRatio &&
+  if (useDeviceRatio && refreshProjectionInput &&
       !refreshCompactProjectionCUDA(fullProjection, fullProjectionCount)) {
     return false;
   }
@@ -826,30 +909,38 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     const double *const *smoothedImages, int bedCount, int threads,
     double *const *numers, bool reverseChunkOrder,
     CompactSymmetricStageTiming *timing,
-    const uint16_t *const *attFactors) {
+    const uint16_t *const *attFactors, bool refreshProjectionInputs,
+    bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
   if (bedCount < 1 || bedCount > spect::core::kMaxBeds) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper supports 1.." +
         std::to_string(spect::core::kMaxBeds) + " beds.");
   }
-  if (fullProjections == nullptr || smoothedImages == nullptr ||
-      numers == nullptr) {
+  if (fullProjections == nullptr ||
+      (smoothedImages == nullptr && !branchBatchInputPrepared) ||
+      (numers == nullptr && downloadBackwardOutputs)) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper received null bed pointer arrays.");
   }
   for (int bed = 0; bed < bedCount; ++bed) {
-    if (fullProjections[bed] == nullptr || smoothedImages[bed] == nullptr ||
-        numers[bed] == nullptr) {
+    if (fullProjections[bed] == nullptr ||
+        (!branchBatchInputPrepared && smoothedImages[bed] == nullptr) ||
+        (downloadBackwardOutputs && numers[bed] == nullptr)) {
       throw std::runtime_error(
           "compact chunk multi-bed CUDA helper received null bed data.");
     }
   }
   if (bedCount == 1) {
+    if (branchBatchInputPrepared || !downloadBackwardOutputs) {
+      throw std::runtime_error(
+          "compact resident branch-batch execution requires multiple beds.");
+    }
     return runCompactChunkMlemNumerCUDA(
         chunks, meta, fullProjections[0],
         fullBackgrounds == nullptr ? nullptr : fullBackgrounds[0],
         smoothedImages[0], threads, numers[0], reverseChunkOrder, timing,
-        attFactors == nullptr ? nullptr : attFactors[0]);
+        attFactors == nullptr ? nullptr : attFactors[0],
+        refreshProjectionInputs);
   }
 
   if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
@@ -889,8 +980,12 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   const bool useBranchBatch =
       compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
       !hasAtten && branchCount > 1;
+  if (branchBatchInputPrepared && !useBranchBatch) {
+    throw std::runtime_error(
+        "compact resident branch-batch input requires the batch CUDA path.");
+  }
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-  if (useDeviceRatio) {
+  if (useDeviceRatio && refreshProjectionInputs) {
     for (int bed = 0; bed < bedCount; ++bed) {
       if (!refreshCompactProjectionCUDA(fullProjections[bed],
                                         fullProjectionCount, bed)) {
@@ -899,9 +994,11 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     }
   }
 
-  std::vector<float> rotatedImages(static_cast<size_t>(bedCount) *
-                                       branchCount * nvox,
-                                   0.0f);
+  std::vector<float> rotatedImages;
+  if (!branchBatchInputPrepared) {
+    rotatedImages.assign(static_cast<size_t>(bedCount) * branchCount * nvox,
+                         0.0f);
+  }
   std::vector<std::vector<double>> accum;
   std::vector<float> bpRot;
   if (!useDeviceBackward) {
@@ -912,12 +1009,15 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   std::vector<float> ratio;
 
   for (int bed = 0; bed < bedCount; ++bed) {
-    std::fill(numers[bed], numers[bed] + nvox, 0.0);
+    if (downloadBackwardOutputs)
+      std::fill(numers[bed], numers[bed] + nvox, 0.0);
     if (useDeviceBackward) {
       if (!compactDeviceBackwardBeginCUDA(nvox, bed)) {
         return false;
       }
     }
+    if (branchBatchInputPrepared)
+      continue;
     for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
       const auto &branch = branches[branchIndex];
       float *imgRot = rotatedImages.data() +
@@ -930,7 +1030,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
         addTiming(timing->transformForwardSeconds, stageStart);
     }
   }
-  if (useBranchBatch &&
+  if (useBranchBatch && !branchBatchInputPrepared &&
       !refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
                                           rotatedImages.size())) {
     return false;
@@ -1121,14 +1221,16 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     }
   }
 
-  for (int bed = 0; bed < bedCount; ++bed) {
-    if (useDeviceBackward) {
-      if (!compactDeviceBackwardDownloadCUDA(numers[bed], nvox, bed)) {
-        return false;
+  if (downloadBackwardOutputs) {
+    for (int bed = 0; bed < bedCount; ++bed) {
+      if (useDeviceBackward) {
+        if (!compactDeviceBackwardDownloadCUDA(numers[bed], nvox, bed)) {
+          return false;
+        }
+      } else {
+        const std::vector<double> &bedAccum = accum[static_cast<size_t>(bed)];
+        std::copy(bedAccum.begin(), bedAccum.end(), numers[bed]);
       }
-    } else {
-      const std::vector<double> &bedAccum = accum[static_cast<size_t>(bed)];
-      std::copy(bedAccum.begin(), bedAccum.end(), numers[bed]);
     }
   }
   if (timing) {

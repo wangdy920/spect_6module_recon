@@ -1349,6 +1349,7 @@ struct VolumeOpsState {
   std::vector<float> cachedKxF;
   std::vector<float> cachedKyF;
   std::vector<float> cachedKzF;
+  std::vector<float> cachedZnormF;
 };
 
 thread_local VolumeOpsState g_volumeOpsState;
@@ -1642,6 +1643,46 @@ bool applySeparableConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
 
 namespace {
 
+void enqueueCastorConv3DFloatDeviceImpl(
+    float *primary, float *secondary, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz) {
+  if (primary == nullptr || secondary == nullptr || primary == secondary)
+    throw std::runtime_error(
+        "CUDA CASToR PSF requires distinct non-null device buffers");
+  if (Nx <= 0 || Ny <= 0 || Nz <= 0 || kx.empty() || ky.empty() || kz.empty())
+    throw std::runtime_error("CUDA CASToR PSF device input mismatch");
+
+  ensureVolumeKernelsLoaded();
+  auto &state = g_volumeOpsState;
+  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
+                       static_cast<size_t>(Nz);
+  unsigned long long totalCount = static_cast<unsigned long long>(total);
+  const int radiusX = static_cast<int>(kx.size()) / 2;
+  const int radiusY = static_cast<int>(ky.size()) / 2;
+  const int radiusZ = static_cast<int>(kz.size()) / 2;
+  uploadKernelIfNeededFloat(kx, state.cachedKxF, state.kxF);
+  uploadKernelIfNeededFloat(ky, state.cachedKyF, state.kyF);
+  uploadKernelIfNeededFloat(kz, state.cachedKzF, state.kzF);
+  const std::vector<double> znormHost = filters::makeCastorZNorm1D(kz, Nz);
+  uploadKernelIfNeededFloat(znormHost, state.cachedZnormF, state.znormF);
+
+  launchSeparableConvKernelFloat(g_volumeKernelCache.convXZeroF, primary,
+                                 secondary, Nx, Ny, Nz, state.kxF.get(),
+                                 radiusX, totalCount);
+  launchSeparableConvKernelFloat(g_volumeKernelCache.convYZeroF, secondary,
+                                 primary, Nx, Ny, Nz, state.kyF.get(),
+                                 radiusY, totalCount);
+  launchSeparableConvKernelFloat(g_volumeKernelCache.convZZeroF, primary,
+                                 secondary, Nx, Ny, Nz, state.kzF.get(),
+                                 radiusZ, totalCount);
+  CUdeviceptr dataPtr = reinterpret_cast<CUdeviceptr>(secondary);
+  CUdeviceptr normPtr =
+      reinterpret_cast<CUdeviceptr>(state.znormF.get());
+  void *args[] = {&dataPtr, &normPtr, &Nx, &Ny, &Nz, &totalCount};
+  launchVolumeKernel(g_volumeKernelCache.divZnormF, args, totalCount);
+}
+
 bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
                                       int Nz,
                                       const std::vector<double> &kx,
@@ -1674,32 +1715,8 @@ bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
     std::vector<float> ff(f.begin(), f.end());
     state.primaryF.upload(ff.data(), total);
     state.secondaryF.ensure(total);
-    uploadKernelIfNeededFloat(kx, state.cachedKxF, state.kxF);
-    uploadKernelIfNeededFloat(ky, state.cachedKyF, state.kyF);
-    uploadKernelIfNeededFloat(kz, state.cachedKzF, state.kzF);
-    std::vector<float> znormF(znormHost.begin(), znormHost.end());
-    state.znormF.upload(znormF.data(), znormF.size());
-
-    launchSeparableConvKernelFloat(g_volumeKernelCache.convXZeroF,
-                                   state.primaryF.get(),
-                                   state.secondaryF.get(), Nx, Ny, Nz,
-                                   state.kxF.get(), radiusX, totalCount);
-    launchSeparableConvKernelFloat(g_volumeKernelCache.convYZeroF,
-                                   state.secondaryF.get(),
-                                   state.primaryF.get(), Nx, Ny, Nz,
-                                   state.kyF.get(), radiusY, totalCount);
-    launchSeparableConvKernelFloat(g_volumeKernelCache.convZZeroF,
-                                   state.primaryF.get(),
-                                   state.secondaryF.get(), Nx, Ny, Nz,
-                                   state.kzF.get(), radiusZ, totalCount);
-    {
-      CUdeviceptr dataPtr =
-          reinterpret_cast<CUdeviceptr>(state.secondaryF.get());
-      CUdeviceptr normPtr =
-          reinterpret_cast<CUdeviceptr>(state.znormF.get());
-      void *args[] = {&dataPtr, &normPtr, &Nx, &Ny, &Nz, &totalCount};
-      launchVolumeKernel(g_volumeKernelCache.divZnormF, args, totalCount);
-    }
+    enqueueCastorConv3DFloatDeviceImpl(
+        state.primaryF.get(), state.secondaryF.get(), Nx, Ny, Nz, kx, ky, kz);
     SPECT_CUDRV_CHECK(cuCtxSynchronize());
     ff.resize(total);
     state.secondaryF.download(ff.data(), total);
@@ -1737,6 +1754,17 @@ bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
 }
 
 } // namespace
+
+bool enqueueCastorConv3DFloatDeviceCUDA(
+    float *primary, float *secondary, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz) {
+  if (!shouldUseCudaVolumeOps())
+    return false;
+  enqueueCastorConv3DFloatDeviceImpl(primary, secondary, Nx, Ny, Nz, kx, ky,
+                                     kz);
+  return true;
+}
 
 bool applyCastorConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
                                   int Nz, const std::vector<double> &kx,

@@ -562,6 +562,9 @@ CompactChunkCSRDirectory::CompactChunkCSRDirectory(
     int cols, uint64_t cacheBudgetBytes)
     : directory_(std::move(directory)), chunks_(std::move(chunks)), cols_(cols),
       cacheBudgetBytes_(cacheBudgetBytes), cache_(chunks_.size()) {
+  cacheMutexes_.reserve(chunks_.size());
+  for (size_t i = 0; i < chunks_.size(); ++i)
+    cacheMutexes_.push_back(std::make_shared<std::mutex>());
   for (const auto &chunk : chunks_) {
     totalRows_ += static_cast<uint64_t>(chunk.rows);
     totalNnz_ += chunk.nnz;
@@ -573,6 +576,7 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
   if (index >= chunks_.size()) {
     throw std::runtime_error("Compact chunk index out of range.");
   }
+  std::lock_guard<std::mutex> chunkLock(*cacheMutexes_[index]);
   if (index < cache_.size() && cache_[index]) {
     return cache_[index];
   }
@@ -580,11 +584,13 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
   auto loaded =
       std::make_shared<CompactChunkCSRData>(loadChunkData(chunks_[index], cols_));
   const uint64_t bytes = loaded->residentBytes();
-  if (index < cache_.size() &&
-      (cacheBudgetBytes_ == std::numeric_limits<uint64_t>::max() ||
-       cachedBytes_ + bytes <= cacheBudgetBytes_)) {
-    cache_[index] = loaded;
-    cachedBytes_ += bytes;
+  if (index < cache_.size()) {
+    std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+    if (cacheBudgetBytes_ == std::numeric_limits<uint64_t>::max() ||
+        cachedBytes_ + bytes <= cacheBudgetBytes_) {
+      cache_[index] = loaded;
+      cachedBytes_ += bytes;
+    }
   }
   return loaded;
 }

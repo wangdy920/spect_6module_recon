@@ -8,6 +8,7 @@
 #include "CudaChunkCache.h"
 #include "CudaCsrBuilder.h"
 #include "CudaProjKernelLauncher.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 #include "core/ReconLimits.h"
 #include "cuda/CudaConfig.h"
 #include "cuda/CudaLaunchConfig.h"
@@ -88,6 +89,61 @@ bool refreshCompactBranchBatchInputCUDA(const float *input, size_t count) {
     return false;
   }
   cudaState().refreshCompactBranchBatchInput(input, count);
+  return true;
+}
+
+bool prepareCompactBranchBatchInputFromGlobalCUDA(
+    const double *globalImage, size_t globalImageCount, int globalNz,
+    const int *bedZStarts, int bedCount, bool flipLocalZ,
+    bool uploadGlobalImage,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    int branchCount, int zBranchCount,
+    const std::vector<double> *castorKx,
+    const std::vector<double> *castorKy,
+    const std::vector<double> *castorKz) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().prepareCompactBranchBatchInputFromGlobal(
+      globalImage, globalImageCount, globalNz, bedZStarts, bedCount,
+      flipLocalZ, uploadGlobalImage, commonTransformParams, branchCount,
+      zBranchCount, castorKx, castorKy, castorKz);
+  return true;
+}
+
+bool finishCompactResidentMlemIterationCUDA(
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const double *denom, const uint8_t *mask,
+    const std::vector<double> *castorKx,
+    const std::vector<double> *castorKy,
+    const std::vector<double> *castorKz,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().finishCompactResidentMlemIteration(
+      globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+      commonTransformParams, denom, mask, castorKx, castorKy, castorKz,
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+  return true;
+}
+
+bool downloadCompactResidentImageCUDA(double *image, size_t count) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().downloadCompactResidentImage(image, count);
+  return true;
+}
+
+bool releaseCompactExecutionCUDA() {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().releaseCompactExecution();
   return true;
 }
 
@@ -352,6 +408,26 @@ bool refreshCompactProjectionCUDA(const double *, size_t, int) {
 bool refreshCompactBranchBatchInputCUDA(const float *, size_t) {
   return false;
 }
+
+bool prepareCompactBranchBatchInputFromGlobalCUDA(
+    const double *, size_t, int, const int *, int, bool, bool,
+    const cuda::CompactDeviceTransformParams &, int, int,
+    const std::vector<double> *, const std::vector<double> *,
+    const std::vector<double> *) {
+  return false;
+}
+
+bool finishCompactResidentMlemIterationCUDA(
+    size_t, int, const int *, int, bool,
+    const cuda::CompactDeviceTransformParams &, const double *,
+    const uint8_t *, const std::vector<double> *, const std::vector<double> *,
+    const std::vector<double> *, bool, bool, bool *) {
+  return false;
+}
+
+bool downloadCompactResidentImageCUDA(double *, size_t) { return false; }
+
+bool releaseCompactExecutionCUDA() { return false; }
 
 bool spmvFloatCUDA(const io::CSRView &, const float *, float *) {
   return false;

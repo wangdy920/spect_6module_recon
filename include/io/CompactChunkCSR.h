@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +72,9 @@ private:
   uint64_t cacheBudgetBytes_ = 0;
   mutable uint64_t cachedBytes_ = 0;
   mutable std::vector<std::shared_ptr<const CompactChunkCSRData>> cache_;
+  mutable std::vector<std::shared_ptr<std::mutex>> cacheMutexes_;
+  mutable std::shared_ptr<std::mutex> cacheBudgetMutex_ =
+      std::make_shared<std::mutex>();
   // Declared after cache_: release accelerator registrations before chunk data.
   mutable std::shared_ptr<void> acceleratorLease_;
 };

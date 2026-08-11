@@ -35,6 +35,14 @@ bool applyCastorConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
                                   const std::vector<double> &kz,
                                   bool useFloat = true);
 
+// Enqueue the same float32 CASToR convolution on already-resident device
+// buffers. primary contains the input and is used as intermediate storage;
+// secondary receives the final result. Work is ordered on the default stream.
+bool enqueueCastorConv3DFloatDeviceCUDA(
+    float *primary, float *secondary, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz);
+
 // CASToR forward convolution with an unconditional float32 staging/kernel
 // path. This entry intentionally ignores SPECT_CUDA_PSF_DOUBLE.
 bool applyCastorConv3DInplaceCUDAForcedFloat32Staging(
@@ -104,6 +112,12 @@ inline bool applyCastorConv3DInplaceCUDA(
     std::vector<double> &, int, int, int, const std::vector<double> &,
     const std::vector<double> &, const std::vector<double> &,
     bool = true) {
+  return false;
+}
+
+inline bool enqueueCastorConv3DFloatDeviceCUDA(
+    float *, float *, int, int, int, const std::vector<double> &,
+    const std::vector<double> &, const std::vector<double> &) {
   return false;
 }
 

@@ -31,6 +31,30 @@ void launchCompactRatioBatchKernel(
     const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
     double eps, cudaStream_t stream = nullptr);
 
+void launchCompactGatherBedDoubleToFloatKernel(
+    const double *globalImage, size_t globalCount, float *bedImage, int nx,
+    int ny, int nz, int globalNz, int zStart, bool flipLocalZ,
+    cudaStream_t stream = nullptr);
+
+void launchCompactConvertDoubleToFloatKernel(
+    const double *input, float *output, size_t count,
+    cudaStream_t stream = nullptr);
+
+void launchCompactAccumulateBedFloatToGlobalDoubleKernel(
+    const float *bedImage, double *globalImage, size_t globalCount, int nx,
+    int ny, int nz, int globalNz, int zStart, bool flipLocalZ,
+    cudaStream_t stream = nullptr);
+
+void launchCompactMlemUpdateKernel(
+    double *image, const double *numer, const double *denom,
+    const uint8_t *mask, bool hasMask, size_t count, uint32_t *flags,
+    double eps, cudaStream_t stream = nullptr);
+
+void launchCompactTransformForwardBatchKernel(
+    const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,
+    int zBranchCount, const cuda::CompactDeviceTransformParams &commonParams,
+    cudaStream_t stream = nullptr);
+
 void launchCompactTransformBackwardAddKernel(
     const float *rotated, double *accum, size_t nvox,
     const cuda::CompactDeviceTransformParams &params,

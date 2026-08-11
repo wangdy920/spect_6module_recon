@@ -2,6 +2,7 @@
 
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
+#include "filters/PSFConfig.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,21 @@ bool computeCompactChunkSensitivityCUDA(
 bool prepareCompactChunkExecutionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks);
 
+bool prepareCompactBranchBatchInputFromGlobalCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *globalImage, size_t globalImageCount, int globalNz,
+    const int *bedZStarts, int bedCount, bool flipLocalZ,
+    const spect::filters::PSFKernels *castorPsf = nullptr,
+    bool uploadGlobalImage = true);
+
+bool finishCompactResidentMlemIterationCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
+    const spect::filters::PSFKernels *castorPsf,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero);
+
 bool runCompactChunkMlemNumerCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta,
@@ -42,7 +58,8 @@ bool runCompactChunkMlemNumerCUDA(
     const double *smoothedImage, int threads, double *numer,
     bool reverseChunkOrder = false,
     CompactSymmetricStageTiming *timing = nullptr,
-    const uint16_t *attFactors = nullptr);
+    const uint16_t *attFactors = nullptr,
+    bool refreshProjectionInput = true);
 
 bool computeCompactChunkForwardProjectionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
@@ -60,7 +77,10 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     const double *const *smoothedImages, int bedCount, int threads,
     double *const *numers, bool reverseChunkOrder = false,
     CompactSymmetricStageTiming *timing = nullptr,
-    const uint16_t *const *attFactors = nullptr);
+    const uint16_t *const *attFactors = nullptr,
+    bool refreshProjectionInputs = true,
+    bool branchBatchInputPrepared = false,
+    bool downloadBackwardOutputs = true);
 
 #endif
 
