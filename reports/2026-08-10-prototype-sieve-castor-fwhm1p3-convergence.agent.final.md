@@ -65,10 +65,10 @@
 6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 ```
 
-最终从干净提交 `89af4cb1e31318f99fcba4692b38c93c265e668d` 重编译并重置部署包。最新 Release 版本为 `20260811+89af4cb`，构建树与部署包可执行文件 SHA-256 均为：
+最终从干净提交 `5baeecc45050a5434fd0c64d6e6cc9c59c35cf3b` 重编译并重置部署包。最新 Release 版本为 `20260811+5baeecc`，构建树与部署包可执行文件 SHA-256 均为：
 
 ```text
-4344B91A4ED9F9343690A843BC860D9AFB447E2629C4D558486F13D9A7FE3DCB
+B927BEDF9E8010ED59718EC1086C696E881DE52936DA169BEF6E4639F75524E0
 ```
 
 权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`。随后只有本报告元数据更新，不改变该 Release 包。
@@ -163,13 +163,13 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 
 优化后 Derenzo 主输出相对优化前正式体 relL2 为 `2.1353e-7`；EPguan 为 `6.8556e-7`，都低于 `1e-5`。三次重复间，Derenzo 主/Smooth/Butterworth 最大 relL2 分别为 `5.5703e-8`、`5.2646e-8`、`9.9992e-8`；EPguan 分别为 `1.1770e-7`、`1.2516e-7`、`1.5246e-7`，派生体仍通过 `2e-7` 门。
 
-采纳项只有五个共享数据流变化：保留两个 resident CSR chunk 并为临时 CUDA 工作预留 6 GiB；branch/bed 合并为一次 SpMM；每轮 numerator 只上传一次旋转批输入；跨 chunk 复用大块 CUDA CSR allocation；host chunk cache 默认 25 GiB。拒绝并删除的实验包括全量/分段 `cudaHostRegister`、mmap+28 GiB、并行床、SpMM alg2/alg3、256 MiB staging 和三 resident chunk streaming；它们分别触发显存风险、不支持或持续吞吐下降，没有保留第二生产实现。
+采纳项只有五个共享数据流变化：保留两个 resident CSR chunk 并为临时 CUDA 工作预留 6 GiB；branch/bed 合并为一次 SpMM；每轮 numerator 只上传一次旋转批输入；跨 chunk 复用大块 CUDA CSR allocation；host chunk cache 默认 25 GiB。拒绝并删除的实验包括全量/分段 `cudaHostRegister`、mmap+28 GiB、并行床、SpMM alg2/alg3、256 MiB staging 和三 resident chunk streaming；其中并行床的环境开关、异步 API、per-bed streams 与 scratch buffers 在最终审计中一并删除。它们分别触发显存风险、不支持或持续吞吐下降，没有保留第二生产实现。
 
 在 RTX 4070 Ti SUPER 16 GB、64 GB 主存上，对 EP 三次迭代按 250 ms 采样 121 次：包含其他任务的总显存峰值为 15,519 MiB，最少剩余 543 MiB，运行完成。由此签收的低时延部署是 64 GB 主存 + SSD/NVMe 矩阵；32 GB 主存可降低 host cache 运行，但本轮不承诺相同吞吐。四床 2 分钟目标没有达到，当前证据支持的边界是约 3.16 分钟，而不是继续用高显存风险换取未证实的增益。
 
 ### 4.6 日志位置回归
 
-最终 Release 一迭代真实 smoke 的 `recon_20260811_123354_701.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_release_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
+最终 Release 一迭代真实 smoke 的 `recon_20260811_124935_255.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_release_5baeecc_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
 
 ## 5. 决策、限制与停止条件
 
@@ -254,7 +254,7 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Release 配置与编译 | `20260811+89af4cb`；构建/部署 exe SHA-256 同为 `4344B9...E3DCB`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
+| Release 配置与编译 | `20260811+5baeecc`；构建/部署 exe SHA-256 同为 `B927BE...524E0`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
 | 部署配置 | 源码/部署 `spect_config.ini` SHA-256 同为 `35E950...FB4F`；部署 `-dumpConf` 逐项核对输出滤波与 clamp | 通过 |
 | 正式单元/集成测试 | CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过 | 通过 |
 | detector 68 精确映射 | 新回归测试检查 60×12×12、边界及旧错误区域 | 通过 |
@@ -266,6 +266,7 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 | 直接切片视觉 QA | 共享原型窗宽、无插值、无候选缩放 | 通过 |
 | 基础重建输出证书 | 原五组 21 个正式证据文件、90,349,475 字节 SHA-256 列表 | 通过；证书不包含本轮派生 smoke |
 | 性能短 A/B | 基线/候选各 3 次交错，中位数 52.4101 / 35.9731 秒；三类输出最大 relL2 1.3564e-7 | 通过，候选 -31.36% |
+| 受保护逐分支基线 | 删除并行床残余后以 `SPECT_COMPACT_BRANCH_BATCH=0` 执行一迭代；相对最终合批主/Smooth/Butterworth 最大 relL2 `1.3706e-7` | 通过；基线仍可调用 |
 | 50 次性能重复 | Derenzo 3 次中位数 104.5868 秒；EP 四床 3 次中位数 189.6690 秒 | 单床通过；四床未达 120 秒 |
 | 显存采样 | EP 3 次、250 ms×121；总峰值 15,519 MiB、最少剩余 543 MiB | 通过但余量偏紧 |
 | 日志输出目录 | 最终源码 smoke 日志在目标目录；仓库/staging 根无新增日志 | 正常路径通过；目录创建失败仍有显式 CWD fallback |
