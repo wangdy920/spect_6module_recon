@@ -65,10 +65,10 @@
 6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 ```
 
-最终从干净提交 `17bd22c8c22192dbe4ddf3fed57456e41bb81161` 重编译并重置部署包。最新 Release 版本为 `20260811+17bd22c`，构建树与部署包可执行文件 SHA-256 均为：
+最终从干净提交 `89af4cb1e31318f99fcba4692b38c93c265e668d` 重编译并重置部署包。最新 Release 版本为 `20260811+89af4cb`，构建树与部署包可执行文件 SHA-256 均为：
 
 ```text
-6D95C860BACACB4EBD76B44E66DF91BBD9CED7F4BA311B389CFFF1BCDD3A2C4E
+4344B91A4ED9F9343690A843BC860D9AFB447E2629C4D558486F13D9A7FE3DCB
 ```
 
 权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`。随后只有本报告元数据更新，不改变该 Release 包。
@@ -169,7 +169,7 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 
 ### 4.6 日志位置回归
 
-最终源码一迭代真实 smoke 的 `recon_20260811_122044_116.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_source_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
+最终 Release 一迭代真实 smoke 的 `recon_20260811_123354_701.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_release_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
 
 ## 5. 决策、限制与停止条件
 
@@ -221,6 +221,15 @@ $env:SPECT_FILTER_PARITY_REFERENCE_ROOT = (Resolve-Path recon_out\canonical_stit
 build\Release\bin\Release\spect_tests.exe `
   --gtest_filter=OutputFilterParityTest.FrozenFiveDatasetsWhenRequested
 
+# 清理后先重建同一 SHA-256 矩阵副本和独立基线 worktree。
+New-Item -ItemType Directory -Path tmp\matrix_perf_nvme_20260811
+Copy-Item -Path F:\matrix_PSC_PIN26x28x25_SCALE2_141keV_120x120x220\* `
+  -Destination tmp\matrix_perf_nvme_20260811
+git worktree add --detach tmp\baseline_17bd22c 17bd22c8c22192dbe4ddf3fed57456e41bb81161
+Push-Location tmp\baseline_17bd22c
+.\build_release.bat
+Pop-Location
+
 # 性能 A/B：按 A1,B1,B2,A2,A3,B3 交错；每组取 elapsed_seconds 中位数。
 $env:SPECT_COMPACT_BRANCH_BATCH = '0'
 recon_out\perf_120s_20260811\run_variant.ps1 `
@@ -239,13 +248,13 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
   --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
 ```
 
-逐数据集的完整展开命令、绝对输入路径、返回码与耗时保存在 `run_record.json`；不需要从本报告手工重构床位列表。
+逐数据集的完整展开命令、绝对输入路径、返回码与耗时保存在 `run_record.json`；不需要从本报告手工重构床位列表。收敛清理已删除 26.1 GB 临时矩阵副本和独立基线 worktree，以上前置命令可按冻结哈希重新创建；最终中位数记录和决策 JSON 保留。
 
 ### 6.2 验证状态
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Release 配置与编译 | `20260811+17bd22c`；构建/部署 exe SHA-256 同为 `6D95C8...A2C4E` | 通过；保留 LNK4098 标记 |
+| Release 配置与编译 | `20260811+89af4cb`；构建/部署 exe SHA-256 同为 `4344B9...E3DCB`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
 | 部署配置 | 源码/部署 `spect_config.ini` SHA-256 同为 `35E950...FB4F`；部署 `-dumpConf` 逐项核对输出滤波与 clamp | 通过 |
 | 正式单元/集成测试 | CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过 | 通过 |
 | detector 68 精确映射 | 新回归测试检查 60×12×12、边界及旧错误区域 | 通过 |
