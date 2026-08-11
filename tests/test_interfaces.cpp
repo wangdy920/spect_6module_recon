@@ -144,6 +144,8 @@ TEST(AppTest, ConfigParserIntegration) {
             parser.getDouble("Filtering", "output_butter_cutoff_cpcm", 0.0), 5.0);
         EXPECT_TRUE(parser.getBool(
             "Filtering", "output_nonnegative_clamp", false));
+        EXPECT_FALSE(parser.getBool(
+            "InputOutput", "output_filters_overwrite_primary", true));
 
         EXPECT_EQ(parser.getString("Regularization", "type", ""), "None");
     } else {

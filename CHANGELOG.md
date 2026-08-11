@@ -8,6 +8,9 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Added `[InputOutput] output_filters_overwrite_primary`; when enabled, the
+  unsuffixed primary volume contains the selected output-stage Smooth then
+  Butterworth chain while independent suffixed audit copies remain available.
 - Added this repository-level changelog as the single source for console and
   package release history.
 - Embedded the changelog in `SPECT_recon.exe -v`; the executable does not depend

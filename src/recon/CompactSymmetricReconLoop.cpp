@@ -685,6 +685,8 @@ std::vector<double> runCompactSymmetricReconstruction(
         outputFilters.butterCutoffCpcm = args.outputButterCutoffCpcm;
         outputFilters.butterOrder = args.outputButterOrder;
         outputFilters.nonnegativeClamp = args.outputNonnegativeClamp;
+        outputFilters.overwritePrimary =
+            args.outputFiltersOverwritePrimary;
         spect::cuda::CompactSymmetricStageTiming compactCudaTiming;
         MemoryUsageSnapshot compactPeakMemory;
         auto observeCompactMemory = [&]() {

@@ -61,8 +61,9 @@ struct OutputTransform {
 CropSettings sanitizeCropSettings(int cropStart, int cropEnd);
 bool isCropSettingsValid(int nz, const CropSettings &crop);
 
-/// Independent filters derived from the same prepared reconstruction volume.
-/// They never modify the iteration state or feed one another.
+/// Output filters never modify the iteration state. Suffixed copies remain
+/// independent; overwritePrimary optionally chains Smooth then Butterworth into
+/// the unsuffixed saved volume.
 struct OutputFilterSettings {
   bool smoothEnabled = false;
   double smoothFwhmMm = 0.30;
@@ -71,6 +72,7 @@ struct OutputFilterSettings {
   double butterCutoffCpcm = 5.0;
   int butterOrder = 8;
   bool nonnegativeClamp = true;
+  bool overwritePrimary = false;
 };
 
 std::vector<double> prepareOutputVolume(const std::vector<double> &source,

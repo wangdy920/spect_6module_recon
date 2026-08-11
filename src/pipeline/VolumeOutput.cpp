@@ -793,21 +793,23 @@ void saveVolumeOutput(const std::vector<double> &source,
   if (transform && transform->centerCropNy > 0) outNy = transform->centerCropNy;
 
   const bool clamp = outputFilters == nullptr || outputFilters->nonnegativeClamp;
+  const bool filtersActive = outputFilters != nullptr && iteration >= 0;
+  const bool overwritePrimary =
+      filtersActive && outputFilters->overwritePrimary;
   std::vector<double> primary = prepared;
-  if (clamp)
-    clampNonNegativeInPlace(primary);
-  io::saveMHDRAW(primary, outNx, outNy, outNz, geometry.vx,
-                 geometry.vy, geometry.vz, outputDir, outputPrefix, iteration,
-                 littleEndian);
-
-  if (outputFilters == nullptr || iteration < 0)
+  auto savePrimary = [&](std::vector<double> &volume) {
+    if (clamp)
+      clampNonNegativeInPlace(volume);
+    io::saveMHDRAW(volume, outNx, outNy, outNz, geometry.vx,
+                   geometry.vy, geometry.vz, outputDir, outputPrefix,
+                   iteration, littleEndian);
+  };
+  if (!overwritePrimary)
+    savePrimary(primary);
+  if (!filtersActive)
     return;
 
-  const std::filesystem::path iterStem =
-      std::filesystem::path(outputDir) /
-      (outputPrefix + "_it" + std::to_string(iteration));
-  if (outputFilters->smoothEnabled) {
-    std::vector<double> smoothed = prepared;
+  auto applySmooth = [&](std::vector<double> &volume) {
     const auto kx = filters::makeCastorErf1D(
         outputFilters->smoothFwhmMm, geometry.vx,
         outputFilters->smoothSigmas);
@@ -818,10 +820,45 @@ void saveVolumeOutput(const std::vector<double> &source,
         outputFilters->smoothFwhmMm, geometry.vz,
         outputFilters->smoothSigmas);
     if (!cuda::applyCastorConv3DInplaceCUDAForcedFloat32Staging(
-            smoothed, outNx, outNy, outNz, kx, ky, kz)) {
+            volume, outNx, outNy, outNz, kx, ky, kz)) {
       throw std::runtime_error(
           "Output Gaussian requires the CUDA CASToR convolution backend.");
     }
+  };
+  auto applyButter = [&](std::vector<double> &volume) {
+    filters::apply_butterworth_output_cufft(
+        volume, outNx, outNy, outNz,
+        filters::Spacing3{geometry.vx, geometry.vy, geometry.vz},
+        outputFilters->butterCutoffCpcm, outputFilters->butterOrder);
+  };
+
+  std::vector<double> smoothed;
+  if (filtersActive && outputFilters->smoothEnabled) {
+    smoothed = prepared;
+    applySmooth(smoothed);
+  }
+  std::vector<double> buttered;
+  if (filtersActive && outputFilters->butterEnabled) {
+    buttered = prepared;
+    applyButter(buttered);
+  }
+
+  if (overwritePrimary) {
+    if (outputFilters->smoothEnabled)
+      primary = smoothed;
+    if (outputFilters->butterEnabled) {
+      if (outputFilters->smoothEnabled)
+        applyButter(primary);
+      else
+        primary = buttered;
+    }
+    savePrimary(primary);
+  }
+
+  const std::filesystem::path iterStem =
+      std::filesystem::path(outputDir) /
+      (outputPrefix + "_it" + std::to_string(iteration));
+  if (outputFilters->smoothEnabled) {
     if (clamp)
       clampNonNegativeInPlace(smoothed);
     io::writeMHD((iterStem.string() + "_smooth"), smoothed, outNx, outNy,
@@ -830,11 +867,6 @@ void saveVolumeOutput(const std::vector<double> &source,
                  static_cast<float>(geometry.vz), littleEndian);
   }
   if (outputFilters->butterEnabled) {
-    std::vector<double> buttered = prepared;
-    filters::apply_butterworth_output_cufft(
-        buttered, outNx, outNy, outNz,
-        filters::Spacing3{geometry.vx, geometry.vy, geometry.vz},
-        outputFilters->butterCutoffCpcm, outputFilters->butterOrder);
     if (clamp)
       clampNonNegativeInPlace(buttered);
     io::writeMHD((iterStem.string() + "_butter"), buttered, outNx, outNy,

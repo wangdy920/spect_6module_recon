@@ -103,6 +103,8 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
       << ",butter:" << args.butterApplyStage
       << ", output_clamp="
       << (args.outputNonnegativeClamp ? "nonnegative" : "linear")
+      << ", primary_output="
+      << (args.outputFiltersOverwritePrimary ? "filter_chain" : "unfiltered")
       << ", reg=" << (args.useReg ? regTypeToString(args.reg.type) : "off");
   if (args.useReg) {
     oss << " regCT="

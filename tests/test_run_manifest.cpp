@@ -75,6 +75,7 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   args.outputButterCutoffCpcm = 5.0f;
   args.outputButterOrder = 8;
   args.outputNonnegativeClamp = false;
+  args.outputFiltersOverwritePrimary = true;
 
   args.outputBedOverlaps = {14};
 
@@ -205,6 +206,9 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
                       "\"-physical_z\""),
             std::string::npos);
   EXPECT_NE(text.find("\"nonnegative_clamp\": false"), std::string::npos);
+  EXPECT_NE(text.find("\"overwrite_primary\": true"), std::string::npos);
+  EXPECT_NE(text.find("\"primary_derivation\": \"smooth_then_butter\""),
+            std::string::npos);
   EXPECT_NE(text.find("\"derivation\": \"independent_from_prepared_primary\""),
             std::string::npos);
   EXPECT_NE(text.find("\"files\": [\"recon_it50.mhd\", \"recon_it50.raw\", "

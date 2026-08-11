@@ -460,6 +460,19 @@ void writeRunManifest(const RunManifestInput &input) {
   json.number("butter_cutoff_cpcm", args.outputButterCutoffCpcm);
   json.integer("butter_order", args.outputButterOrder);
   json.boolean("nonnegative_clamp", args.outputNonnegativeClamp);
+  json.boolean("overwrite_primary", args.outputFiltersOverwritePrimary);
+  std::string primaryDerivation = "prepared_primary";
+  if (args.outputFiltersOverwritePrimary) {
+    const bool smooth = args.smoothApplyStage == "output";
+    const bool butter = args.butterApplyStage == "output";
+    if (smooth && butter)
+      primaryDerivation = "smooth_then_butter";
+    else if (smooth)
+      primaryDerivation = "smooth";
+    else if (butter)
+      primaryDerivation = "butter";
+  }
+  json.string("primary_derivation", primaryDerivation);
   json.string("derivation", "independent_from_prepared_primary");
   json.endObject();
   json.stringVector("files", producedFiles);

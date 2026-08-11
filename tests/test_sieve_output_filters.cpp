@@ -188,6 +188,7 @@ TEST(SieveParserTest, SieveRejectsInReconButterViaCli) {
 
 TEST(SieveParserTest, SieveAcceptsIndependentOutputFilters) {
   const auto out = parseWithIni(
+      "[InputOutput]\noutput_filters_overwrite_primary = true\n"
       "[PSF]\nmode = sieve\n"
       "[Filtering]\nsmooth_apply_stage = output\n"
       "butter_apply_stage = output\n"
@@ -204,6 +205,7 @@ TEST(SieveParserTest, SieveAcceptsIndependentOutputFilters) {
   EXPECT_FLOAT_EQ(out.args.outputButterCutoffCpcm, 5.0f);
   EXPECT_EQ(out.args.outputButterOrder, 8);
   EXPECT_FALSE(out.args.outputNonnegativeClamp);
+  EXPECT_TRUE(out.args.outputFiltersOverwritePrimary);
 }
 
 TEST(SieveParserTest, SmoothCliImpliesInReconStage) {
@@ -557,7 +559,7 @@ TEST(OutputButterTest, RebuildsResponseAfterDimensionChange) {
 
 // ------------------------------------------- derived files via saveVolume --
 
-TEST(OutputFilterSaveTest, DerivesIndependentPrototypeFiltersAndAppliesClampLast) {
+TEST(OutputFilterSaveTest, DerivesIndependentCopiesAndOptionallyOverwritesPrimary) {
   if (!spect::cuda::isCudaAvailable())
     GTEST_SKIP() << "CUDA unavailable";
 
@@ -608,6 +610,46 @@ TEST(OutputFilterSaveTest, DerivesIndependentPrototypeFiltersAndAppliesClampLast
                        expectedButter),
             1e-12);
 
+  std::vector<double> expectedChain = expectedSmooth;
+  spect::filters::apply_butterworth_output_cufft(
+      expectedChain, n, n, n, {1.0, 1.0, 1.0}, 4.5, 8);
+  filters.overwritePrimary = true;
+  spect::main::saveVolumeOutput(
+      source, geometry, dir.string(), "overwrite", 1, nullptr,
+      spect::main::CropSettings{}, true, nullptr, &filters);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "overwrite_it1.raw",
+                                    source.size()),
+                       expectedChain),
+            1e-12);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "overwrite_it1_smooth.raw",
+                                    source.size()),
+                       expectedSmooth),
+            1e-12);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "overwrite_it1_butter.raw",
+                                    source.size()),
+                       expectedButter),
+            1e-12);
+
+  filters.butterEnabled = false;
+  spect::main::saveVolumeOutput(
+      source, geometry, dir.string(), "overwrite_smooth", 1, nullptr,
+      spect::main::CropSettings{}, true, nullptr, &filters);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "overwrite_smooth_it1.raw",
+                                    source.size()),
+                       expectedSmooth),
+            1e-12);
+  filters.smoothEnabled = false;
+  filters.butterEnabled = true;
+  spect::main::saveVolumeOutput(
+      source, geometry, dir.string(), "overwrite_butter", 1, nullptr,
+      spect::main::CropSettings{}, true, nullptr, &filters);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "overwrite_butter_it1.raw",
+                                    source.size()),
+                       expectedButter),
+            1e-12);
+
+  filters.overwritePrimary = false;
+  filters.smoothEnabled = true;
   filters.nonnegativeClamp = true;
   spect::main::saveVolumeOutput(
       source, geometry, dir.string(), "clamped", 1, nullptr,

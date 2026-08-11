@@ -58,6 +58,7 @@ compact chunk 矩阵默认识别优先级：
 |---|---|
 | `-df <path>` / `-i <path>` / `-input <path>` | 单床位投影 MAT/BIN |
 | `[InputOutput] merge_time_segments=true` | `-df` 指向一个 `案例/时间段/SPECT` 目录时，按时间顺序扫描同案例下的 `YYYYMMDD_HHMMSS/SPECT`，在内存中合并各时间段的同名 `BedN.bin`；默认关闭 |
+| `[InputOutput] output_filters_overwrite_primary=true` | 将启用的输出阶段后处理按 Smooth→Butterworth 顺序写入无后缀主输出；默认关闭 |
 | `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，最多 5 床 |
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
@@ -179,7 +180,7 @@ TV/RDP 可选使用已配准到重建网格的 CT（或 mu-map）作为边缘权
 | `-butter <cutoff[,order]>` | 迭代内 Butterworth 低通（归一化截止），如 `0.35,2`；传入即隐含 `butter_apply_stage=in_recon` |
 | `-butterOrder <n>` | 单独设置迭代内 Butterworth order |
 
-`[Filtering]` 以 `smooth_apply_stage` / `butter_apply_stage`（`none|in_recon|output`）控制施加阶段。CLI `-smooth` / `-butter` 始终选择 `in_recon`（改变迭代轨迹）；`output` 仅由 INI 显式配置，不回写迭代状态。发布默认同时保留未滤波主输出 `<fout>_it<N>.mhd/.raw`，并从同一份 canonical stitch + mask 输出独立派生 `<fout>_it<N>_smooth` 与 `<fout>_it<N>_butter`，二者不串联。
+`[Filtering]` 以 `smooth_apply_stage` / `butter_apply_stage`（`none|in_recon|output`）控制施加阶段。CLI `-smooth` / `-butter` 始终选择 `in_recon`（改变迭代轨迹）；`output` 仅由 INI 显式配置，不回写迭代状态。发布默认 `[InputOutput] output_filters_overwrite_primary=false`：保留未滤波主输出 `<fout>_it<N>.mhd/.raw`，并从同一份 canonical stitch + mask 输出独立派生 `<fout>_it<N>_smooth` 与 `<fout>_it<N>_butter`。设为 `true` 时，无后缀主输出依次应用已启用的 Smooth、Butterworth；带后缀副本仍独立派生，便于审计。
 
 输出 Smooth 固定使用 CASToR erf 核、`output_smooth_fwhm_mm=0.30`、`output_smooth_sigmas=3`；输出 Butterworth 固定使用 2 倍零填充的径向物理频率响应、`output_butter_cutoff_cpcm=5`、`output_butter_order=8`。`output_nonnegative_clamp=false` 保留原型线性负旁瓣，仅用于同输入数值验证；发布默认 `true`，在每个主/派生副本完成后分别钳为非负。stage 设为 `output` 时对应参数必须为正，否则启动失败。
 
@@ -189,7 +190,7 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 
 ### 原型/主线对比：canonical 输出阶段
 
-主线不包含对象感知 seam/profile 后处理。原型等价比较固定使用同一 Bed 顺序、`z_bed_flip=1`、robust gain-fit、center66/cosine10 拼接；主输出与两个派生输出分别对应原型 `stitched`、`stitched_smooth_fwhm0p3` 和 `stitched_butter_fc5cpcm_o8`。Smooth/Butterworth 必须从同一未滤波主输出独立计算，不允许把 Smooth 结果再送入 Butterworth。
+主线不包含对象感知 seam/profile 后处理。原型等价比较固定使用同一 Bed 顺序、`z_bed_flip=1`、robust gain-fit、center66/cosine10 拼接；在默认 `output_filters_overwrite_primary=false` 下，主输出与两个派生输出分别对应原型 `stitched`、`stitched_smooth_fwhm0p3` 和 `stitched_butter_fc5cpcm_o8`。带后缀 Smooth/Butterworth 始终从同一未滤波主输出独立计算；覆盖模式是明确的交付输出策略，不替代这项原型等价门槛。
 
 ## CTAC / 背景 / 掩码
 
@@ -246,7 +247,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件 |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
-默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`。manifest 记录滤波阶段、物理参数、钳制策略及实际六个体文件。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径；INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。
+默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际六个体文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径；INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。
 
 ---
 
