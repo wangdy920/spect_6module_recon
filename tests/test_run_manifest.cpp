@@ -62,6 +62,13 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   args.psf.kernel = filters::PSFKernel::Castor;
   args.psf.fwhm_mm = 1.3;
   args.psf.min_sigmas = 3.0;
+  args.smoothApplyStage = "output";
+  args.butterApplyStage = "output";
+  args.outputSmoothFwhmMm = 0.30f;
+  args.outputSmoothSigmas = 3.0f;
+  args.outputButterCutoffCpcm = 5.0f;
+  args.outputButterOrder = 8;
+  args.outputNonnegativeClamp = false;
 
   args.outputBedOverlaps = {14};
 
@@ -187,7 +194,12 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   EXPECT_NE(text.find("\"increasing_z_index_direction\": "
                       "\"-physical_z\""),
             std::string::npos);
-  EXPECT_NE(text.find("\"files\": [\"recon_it50.mhd\", \"recon_it50.raw\""),
+  EXPECT_NE(text.find("\"nonnegative_clamp\": false"), std::string::npos);
+  EXPECT_NE(text.find("\"derivation\": \"independent_from_prepared_primary\""),
+            std::string::npos);
+  EXPECT_NE(text.find("\"files\": [\"recon_it50.mhd\", \"recon_it50.raw\", "
+                      "\"recon_it50_smooth.mhd\", \"recon_it50_smooth.raw\", "
+                      "\"recon_it50_butter.mhd\", \"recon_it50_butter.raw\""),
             std::string::npos);
 
   in.close();

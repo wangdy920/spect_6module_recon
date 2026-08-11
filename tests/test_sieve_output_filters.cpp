@@ -20,6 +20,7 @@
 #include "filters/cuda/VolumeOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
 #include "filters/Convolution.h"
+#include "io/VolumeLoader.h"
 #include "pipeline/ReconPreparation.h"
 #include "pipeline/VolumeOutput.h"
 #include "recon/ProjectionOps.h"
@@ -47,6 +48,28 @@ double maxAbsDiff(const std::vector<double> &a, const std::vector<double> &b) {
   for (size_t i = 0; i < a.size(); ++i)
     d = std::max(d, std::abs(a[i] - b[i]));
   return d;
+}
+
+double relativeL2(const std::vector<double> &candidate,
+                  const std::vector<double> &reference) {
+  double numerator = 0.0, denominator = 0.0;
+  for (size_t i = 0; i < candidate.size(); ++i) {
+    const double delta = candidate[i] - reference[i];
+    numerator += delta * delta;
+    denominator += reference[i] * reference[i];
+  }
+  return std::sqrt(numerator / denominator);
+}
+
+std::vector<double> readRawDouble(const std::filesystem::path &path,
+                                  size_t count) {
+  std::vector<double> values(count);
+  std::ifstream in(path, std::ios::binary);
+  in.read(reinterpret_cast<char *>(values.data()),
+          static_cast<std::streamsize>(values.size() * sizeof(double)));
+  if (!in || in.peek() != std::ifstream::traits_type::eof())
+    throw std::runtime_error("failed reading expected double RAW file");
+  return values;
 }
 
 class ScopedEnvironmentOverride {
@@ -163,11 +186,24 @@ TEST(SieveParserTest, SieveRejectsInReconButterViaCli) {
   EXPECT_FALSE(out.ok);
 }
 
-TEST(SieveParserTest, RemovedOutputStageIsRejected) {
+TEST(SieveParserTest, SieveAcceptsIndependentOutputFilters) {
   const auto out = parseWithIni(
       "[PSF]\nmode = sieve\n"
-      "[Filtering]\nsmooth_apply_stage = output\nbutter_apply_stage = none\n");
-  EXPECT_FALSE(out.ok);
+      "[Filtering]\nsmooth_apply_stage = output\n"
+      "butter_apply_stage = output\n"
+      "output_smooth_fwhm_mm = 0.30\n"
+      "output_smooth_sigmas = 3\n"
+      "output_butter_cutoff_cpcm = 5\n"
+      "output_butter_order = 8\n"
+      "output_nonnegative_clamp = false\n");
+  ASSERT_TRUE(out.ok);
+  EXPECT_EQ(out.args.smoothApplyStage, "output");
+  EXPECT_EQ(out.args.butterApplyStage, "output");
+  EXPECT_FLOAT_EQ(out.args.outputSmoothFwhmMm, 0.30f);
+  EXPECT_FLOAT_EQ(out.args.outputSmoothSigmas, 3.0f);
+  EXPECT_FLOAT_EQ(out.args.outputButterCutoffCpcm, 5.0f);
+  EXPECT_EQ(out.args.outputButterOrder, 8);
+  EXPECT_FALSE(out.args.outputNonnegativeClamp);
 }
 
 TEST(SieveParserTest, SmoothCliImpliesInReconStage) {
@@ -204,6 +240,15 @@ TEST(SieveParserTest, InReconStageRequiresPositiveParams) {
 TEST(SieveParserTest, InvalidStageRejected) {
   const auto out = parseWithIni("[Filtering]\nbutter_apply_stage = midloop\n");
   EXPECT_FALSE(out.ok);
+}
+
+TEST(SieveParserTest, OutputStageRequiresPositiveParams) {
+  EXPECT_FALSE(parseWithIni(
+      "[Filtering]\nsmooth_apply_stage = output\n"
+      "output_smooth_fwhm_mm = 0\n").ok);
+  EXPECT_FALSE(parseWithIni(
+      "[Filtering]\nbutter_apply_stage = output\n"
+      "output_butter_order = 0\n").ok);
 }
 
 TEST(SieveRuntimeTest, DisabledCudaVolumeOpsFailsPreparation) {
@@ -496,7 +541,165 @@ TEST(OutputButterTest, ZeroPaddingPreventsCircularWrap) {
   EXPECT_LT(farMax, 1e-3 * v[0]);
 }
 
+TEST(OutputButterTest, RebuildsResponseAfterDimensionChange) {
+  if (!spect::cuda::isCudaAvailable())
+    GTEST_SKIP() << "CUDA unavailable";
+  const spect::filters::Spacing3 spacing{1.0, 1.0, 1.0};
+  std::vector<double> first(8 * 8 * 8, 1.0);
+  spect::filters::apply_butterworth_output_cufft(first, 8, 8, 8, spacing,
+                                                 4.5, 8);
+  std::vector<double> second(8 * 8 * 10, 1.0);
+  EXPECT_NO_THROW(spect::filters::apply_butterworth_output_cufft(
+      second, 8, 8, 10, spacing, 4.5, 8));
+  EXPECT_TRUE(std::all_of(second.begin(), second.end(),
+                          [](double value) { return std::isfinite(value); }));
+}
+
 // ------------------------------------------- derived files via saveVolume --
+
+TEST(OutputFilterSaveTest, DerivesIndependentPrototypeFiltersAndAppliesClampLast) {
+  if (!spect::cuda::isCudaAvailable())
+    GTEST_SKIP() << "CUDA unavailable";
+
+  constexpr int n = 16;
+  std::vector<double> source(static_cast<size_t>(n) * n * n, 0.0);
+  for (int z = 0; z < n; ++z)
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const double dx = x - 7.5, dy = y - 7.5, dz = z - 7.5;
+        source[static_cast<size_t>(z) * n * n + y * n + x] =
+            std::exp(-(dx * dx + dy * dy + dz * dz) / 8.0);
+      }
+
+  std::vector<double> expectedSmooth = source;
+  const auto kernel = spect::filters::makeCastorErf1D(0.6, 1.0, 3.0);
+  ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+      expectedSmooth, n, n, n, kernel, kernel, kernel));
+  std::vector<double> expectedButter = source;
+  spect::filters::apply_butterworth_output_cufft(
+      expectedButter, n, n, n, {1.0, 1.0, 1.0}, 4.5, 8);
+  ASSERT_LT(*std::min_element(expectedButter.begin(), expectedButter.end()),
+            0.0);
+
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_output_filter_save_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  spect::main::OutputFilterSettings filters;
+  filters.smoothEnabled = true;
+  filters.smoothFwhmMm = 0.6;
+  filters.smoothSigmas = 3.0;
+  filters.butterEnabled = true;
+  filters.butterCutoffCpcm = 4.5;
+  filters.butterOrder = 8;
+  filters.nonnegativeClamp = false;
+  const spect::main::OutputGeometry geometry{n, n, n, 1.0, 1.0, 1.0};
+  spect::main::saveVolumeOutput(
+      source, geometry, dir.string(), "linear", 1, nullptr,
+      spect::main::CropSettings{}, true, nullptr, &filters);
+
+  EXPECT_EQ(readRawDouble(dir / "linear_it1.raw", source.size()), source);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "linear_it1_smooth.raw",
+                                    source.size()),
+                       expectedSmooth),
+            1e-12);
+  EXPECT_LT(maxAbsDiff(readRawDouble(dir / "linear_it1_butter.raw",
+                                    source.size()),
+                       expectedButter),
+            1e-12);
+
+  filters.nonnegativeClamp = true;
+  spect::main::saveVolumeOutput(
+      source, geometry, dir.string(), "clamped", 1, nullptr,
+      spect::main::CropSettings{}, true, nullptr, &filters);
+  const auto clampedButter =
+      readRawDouble(dir / "clamped_it1_butter.raw", source.size());
+  for (size_t i = 0; i < clampedButter.size(); ++i)
+    EXPECT_DOUBLE_EQ(clampedButter[i], std::max(0.0, expectedButter[i]));
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(OutputFilterParityTest, FrozenFiveDatasetsWhenRequested) {
+  const char *baseRootValue = std::getenv("SPECT_FILTER_PARITY_BASE_ROOT");
+  const char *referenceRootValue =
+      std::getenv("SPECT_FILTER_PARITY_REFERENCE_ROOT");
+  if (!baseRootValue || !referenceRootValue)
+    GTEST_SKIP() << "set SPECT_FILTER_PARITY_BASE_ROOT and "
+                    "SPECT_FILTER_PARITY_REFERENCE_ROOT";
+  if (!spect::cuda::isCudaAvailable())
+    GTEST_SKIP() << "CUDA unavailable";
+
+  const std::filesystem::path baseRoot(baseRootValue);
+  const std::filesystem::path referenceRoot(referenceRootValue);
+  const std::vector<std::string> datasets = {
+      "derenzo_182222", "epguan", "epguan_19p2mm", "mouse",
+      "mouse_ch6o6p2"};
+  constexpr double tolerance = 2e-7;
+  for (const std::string &dataset : datasets) {
+    int nx = 0, ny = 0, nz = 0;
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    const auto base = spect::io::loadVolumeWithSpacing(
+        (baseRoot / dataset / "recon_it50.mhd").string(), nx, ny, nz, dx,
+        dy, dz);
+    int refNx = 0, refNy = 0, refNz = 0;
+    const auto prototypeInput = spect::io::loadVolume(
+        (referenceRoot / dataset / "input" / "recon50.hdr").string(), refNx,
+        refNy, refNz);
+    ASSERT_EQ(std::vector<int>({nx, ny, nz}),
+              std::vector<int>({refNx, refNy, refNz}))
+        << dataset;
+    ASSERT_EQ(base.size(), prototypeInput.size()) << dataset;
+
+    std::vector<double> smooth = base;
+    const double smoothFwhmMm = static_cast<double>(0.30f);
+    const auto kx = spect::filters::makeCastorErf1D(smoothFwhmMm, dx, 3.0);
+    const auto ky = spect::filters::makeCastorErf1D(smoothFwhmMm, dy, 3.0);
+    const auto kz = spect::filters::makeCastorErf1D(smoothFwhmMm, dz, 3.0);
+    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+        smooth, nx, ny, nz, kx, ky, kz));
+    std::vector<double> butter = base;
+    spect::filters::apply_butterworth_output_cufft(
+        butter, nx, ny, nz, {dx, dy, dz}, 5.0, 8);
+
+    const auto prototypeSmooth = spect::io::loadVolume(
+        (referenceRoot / dataset / "output" / "smooth" / "recon50.hdr")
+            .string(),
+        refNx, refNy, refNz);
+    const auto prototypeButter = spect::io::loadVolume(
+        (referenceRoot / dataset / "output" / "butter" / "recon50.hdr")
+            .string(),
+        refNx, refNy, refNz);
+    ASSERT_EQ(prototypeSmooth.size(), base.size()) << dataset;
+    ASSERT_EQ(prototypeButter.size(), base.size()) << dataset;
+    const double inputError = relativeL2(base, prototypeInput);
+    const double smoothError = relativeL2(smooth, prototypeSmooth);
+    const double butterError = relativeL2(butter, prototypeButter);
+    EXPECT_LE(inputError, tolerance) << dataset;
+    EXPECT_LE(smoothError, tolerance) << dataset;
+    EXPECT_LE(butterError, tolerance) << dataset;
+
+    for (size_t i = 0; i < base.size(); ++i) {
+      smooth[i] = std::max(0.0, smooth[i]);
+      butter[i] = std::max(0.0, butter[i]);
+    }
+    std::vector<double> clampedSmooth = prototypeSmooth;
+    std::vector<double> clampedButter = prototypeButter;
+    for (size_t i = 0; i < base.size(); ++i) {
+      clampedSmooth[i] = std::max(0.0, clampedSmooth[i]);
+      clampedButter[i] = std::max(0.0, clampedButter[i]);
+    }
+    const double clampedSmoothError = relativeL2(smooth, clampedSmooth);
+    const double clampedButterError = relativeL2(butter, clampedButter);
+    EXPECT_LE(clampedSmoothError, tolerance) << dataset;
+    EXPECT_LE(clampedButterError, tolerance) << dataset;
+    std::cout << "[FILTER_PARITY] " << dataset << " input=" << inputError
+              << " smooth=" << smoothError << " butter=" << butterError
+              << " clamped_smooth=" << clampedSmoothError
+              << " clamped_butter=" << clampedButterError
+              << '\n';
+  }
+}
 
 
 } // namespace test

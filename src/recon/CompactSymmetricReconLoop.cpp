@@ -649,6 +649,14 @@ std::vector<double> runCompactSymmetricReconstruction(
         // PSF-convolved copy of the state instead of the raw state.
         const bool sieveSaveCopyActive =
             compactPsfActive && args.psf.mode == filters::PSFMode::Sieve;
+        OutputFilterSettings outputFilters;
+        outputFilters.smoothEnabled = args.smoothApplyStage == "output";
+        outputFilters.smoothFwhmMm = args.outputSmoothFwhmMm;
+        outputFilters.smoothSigmas = args.outputSmoothSigmas;
+        outputFilters.butterEnabled = args.butterApplyStage == "output";
+        outputFilters.butterCutoffCpcm = args.outputButterCutoffCpcm;
+        outputFilters.butterOrder = args.outputButterOrder;
+        outputFilters.nonnegativeClamp = args.outputNonnegativeClamp;
         spect::cuda::CompactSymmetricStageTiming compactCudaTiming;
         MemoryUsageSnapshot compactPeakMemory;
         auto observeCompactMemory = [&]() {
@@ -936,7 +944,8 @@ std::vector<double> runCompactSymmetricReconstruction(
             saveSource = &sieveSaveVolume;
           }
           saveVolumeOutput(*saveSource, geometry, args.outputDir, outputPrefix,
-                           iteration, maskPtr, crop, true, outputTransformPtr);
+                           iteration, maskPtr, crop, true, outputTransformPtr,
+                           &outputFilters);
           compactTiming.outputWriteSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - saveStart)
                   .count();

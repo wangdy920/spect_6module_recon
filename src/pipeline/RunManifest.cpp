@@ -297,6 +297,14 @@ void writeRunManifest(const RunManifestInput &input) {
       input.outputPrefix + "_it" + std::to_string(input.savedIteration);
   producedFiles.push_back(iterStem + ".mhd");
   producedFiles.push_back(iterStem + ".raw");
+  if (args.smoothApplyStage == "output") {
+    producedFiles.push_back(iterStem + "_smooth.mhd");
+    producedFiles.push_back(iterStem + "_smooth.raw");
+  }
+  if (args.butterApplyStage == "output") {
+    producedFiles.push_back(iterStem + "_butter.mhd");
+    producedFiles.push_back(iterStem + "_butter.raw");
+  }
 
   std::vector<double> physicalZOffsetsMm(bedZStarts.size(), 0.0);
   for (size_t bed = 1; bed < bedZStarts.size(); ++bed) {
@@ -433,6 +441,16 @@ void writeRunManifest(const RunManifestInput &input) {
   json.integer("crop_end_start", args.cropEndStart);
   json.integer("crop_end_end", args.cropEndEnd);
   json.integer("saved_iteration", input.savedIteration);
+  json.beginObject("filters");
+  json.string("smooth_apply_stage", args.smoothApplyStage);
+  json.number("smooth_fwhm_mm", args.outputSmoothFwhmMm);
+  json.number("smooth_sigmas", args.outputSmoothSigmas);
+  json.string("butter_apply_stage", args.butterApplyStage);
+  json.number("butter_cutoff_cpcm", args.outputButterCutoffCpcm);
+  json.integer("butter_order", args.outputButterOrder);
+  json.boolean("nonnegative_clamp", args.outputNonnegativeClamp);
+  json.string("derivation", "independent_from_prepared_primary");
+  json.endObject();
   json.stringVector("files", producedFiles);
   json.endObject();
   json.endObject();

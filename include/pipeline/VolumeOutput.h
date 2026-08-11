@@ -61,6 +61,18 @@ struct OutputTransform {
 CropSettings sanitizeCropSettings(int cropStart, int cropEnd);
 bool isCropSettingsValid(int nz, const CropSettings &crop);
 
+/// Independent filters derived from the same prepared reconstruction volume.
+/// They never modify the iteration state or feed one another.
+struct OutputFilterSettings {
+  bool smoothEnabled = false;
+  double smoothFwhmMm = 0.30;
+  double smoothSigmas = 3.0;
+  bool butterEnabled = false;
+  double butterCutoffCpcm = 5.0;
+  int butterOrder = 8;
+  bool nonnegativeClamp = true;
+};
+
 std::vector<double> prepareOutputVolume(const std::vector<double> &source,
                                         int nx, int ny, int nz,
                                         const std::vector<uint8_t> *mask,
@@ -88,7 +100,8 @@ void saveVolumeOutput(const std::vector<double> &source,
                       const std::vector<uint8_t> *mask,
                       const CropSettings &crop,
                       bool littleEndian = true,
-                      const OutputTransform *transform = nullptr);
+                      const OutputTransform *transform = nullptr,
+                      const OutputFilterSettings *outputFilters = nullptr);
 
 } // namespace main
 } // namespace spect

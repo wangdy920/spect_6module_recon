@@ -87,6 +87,34 @@ TEST(VolumeOutputTest, SaveVolumeUsesFixedCenterCrop) {
   fs::remove_all(dir);
 }
 
+TEST(VolumeOutputTest, OutputClampCanBeDisabledForLinearParity) {
+  namespace fs = std::filesystem;
+  const fs::path dir =
+      fs::temp_directory_path() / "spect_output_clamp_policy_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const std::vector<double> source{-2.0, 3.0};
+  OutputFilterSettings filters;
+  filters.nonnegativeClamp = false;
+  saveVolumeOutput(source, OutputGeometry{2, 1, 1, 1.0, 1.0, 1.0},
+                   dir.string(), "linear", 1, nullptr, CropSettings{}, true,
+                   nullptr, &filters);
+  filters.nonnegativeClamp = true;
+  saveVolumeOutput(source, OutputGeometry{2, 1, 1, 1.0, 1.0, 1.0},
+                   dir.string(), "clamped", 1, nullptr, CropSettings{}, true,
+                   nullptr, &filters);
+
+  auto firstValue = [](const fs::path &path) {
+    std::ifstream raw(path, std::ios::binary);
+    double value = 0.0;
+    raw.read(reinterpret_cast<char *>(&value), sizeof(value));
+    return value;
+  };
+  EXPECT_DOUBLE_EQ(firstValue(dir / "linear_it1.raw"), -2.0);
+  EXPECT_DOUBLE_EQ(firstValue(dir / "clamped_it1.raw"), 0.0);
+  fs::remove_all(dir);
+}
+
 TEST(VolumeOutputTest, PrepareOutputAppliesMaskAndZeroesEndSlices) {
   const std::vector<double> source = {0, 1, 2, 3, 4, 5, 6, 7};
   const std::vector<uint8_t> mask = {1, 1, 1, 0, 0, 1, 1, 1};

@@ -90,7 +90,8 @@ inline bool needRebuildPlan(int Nx, int Ny, int Nz) {
 
 inline bool needRebuildMask(int Nx, int Ny, int Nz, Spacing3 sp,
                             const ButterworthConf &bw) {
-  return needRebuildPlan(Nx, Ny, Nz) || cache.bw.type != bw.type ||
+  return cache.deviceMask == nullptr || needRebuildPlan(Nx, Ny, Nz) ||
+         cache.bw.type != bw.type ||
          cache.bw.order != bw.order || !approxEq(cache.bw.cutoff_lo_frac, bw.cutoff_lo_frac) ||
          !approxEq(cache.bw.cutoff_hi_frac, bw.cutoff_hi_frac) ||
          !approxEq(cache.sp.dx, sp.dx) || !approxEq(cache.sp.dy, sp.dy) ||
@@ -389,7 +390,8 @@ inline bool needRebuildOutputPlan(int Nx, int Ny, int Nz) {
 
 inline bool needRebuildOutputResponse(int Nx, int Ny, int Nz, Spacing3 sp,
                                       double cutoffCpcm, int order) {
-  return needRebuildOutputPlan(Nx, Ny, Nz) ||
+  return outputCache.deviceResponse == nullptr ||
+         needRebuildOutputPlan(Nx, Ny, Nz) ||
          outputCache.order != order ||
          !approxEq(outputCache.cutoffCpcm, cutoffCpcm) ||
          !approxEq(outputCache.sp.dx, sp.dx) ||

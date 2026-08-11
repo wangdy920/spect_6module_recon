@@ -1111,6 +1111,18 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             toLower(cfg.getString("Filtering", "butter_apply_stage"));
         if (!butterStage.empty())
             a.butterApplyStage = butterStage;
+        a.outputSmoothFwhmMm = static_cast<float>(cfg.getDouble(
+            "Filtering", "output_smooth_fwhm_mm", a.outputSmoothFwhmMm));
+        a.outputSmoothSigmas = static_cast<float>(cfg.getDouble(
+            "Filtering", "output_smooth_sigmas", a.outputSmoothSigmas));
+        a.outputButterCutoffCpcm = static_cast<float>(cfg.getDouble(
+            "Filtering", "output_butter_cutoff_cpcm",
+            a.outputButterCutoffCpcm));
+        a.outputButterOrder = cfg.getInt(
+            "Filtering", "output_butter_order", a.outputButterOrder);
+        a.outputNonnegativeClamp = cfg.getBool(
+            "Filtering", "output_nonnegative_clamp",
+            a.outputNonnegativeClamp);
     }
 
     // MultiBed
@@ -1657,15 +1669,15 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     }
 
     const auto isValidApplyStage = [](const std::string& stage) {
-        return stage == "none" || stage == "in_recon";
+        return stage == "none" || stage == "in_recon" || stage == "output";
     };
     if (!isValidApplyStage(args.smoothApplyStage)) {
-        std::cerr << "Error: smooth_apply_stage must be none|in_recon; got '"
+        std::cerr << "Error: smooth_apply_stage must be none|in_recon|output; got '"
                   << args.smoothApplyStage << "'.\n";
         return false;
     }
     if (!isValidApplyStage(args.butterApplyStage)) {
-        std::cerr << "Error: butter_apply_stage must be none|in_recon; got '"
+        std::cerr << "Error: butter_apply_stage must be none|in_recon|output; got '"
                   << args.butterApplyStage << "'.\n";
         return false;
     }
@@ -1679,13 +1691,30 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
                      "butterworth_cutoff > 0 (or CLI -butter).\n";
         return false;
     }
+    if (args.smoothApplyStage == "output" &&
+        (!std::isfinite(args.outputSmoothFwhmMm) ||
+         args.outputSmoothFwhmMm <= 0.0f ||
+         !std::isfinite(args.outputSmoothSigmas) ||
+         args.outputSmoothSigmas <= 0.0f)) {
+        std::cerr << "Error: smooth_apply_stage=output requires positive finite "
+                     "output_smooth_fwhm_mm and output_smooth_sigmas.\n";
+        return false;
+    }
+    if (args.butterApplyStage == "output" &&
+        (!std::isfinite(args.outputButterCutoffCpcm) ||
+         args.outputButterCutoffCpcm <= 0.0f ||
+         args.outputButterOrder < 1)) {
+        std::cerr << "Error: butter_apply_stage=output requires positive finite "
+                     "output_butter_cutoff_cpcm and output_butter_order >= 1.\n";
+        return false;
+    }
     if (args.psf.mode == PSFMode::Sieve &&
         (args.smoothApplyStage == "in_recon" ||
          args.butterApplyStage == "in_recon")) {
         std::cerr << "Error: PSF mode sieve forbids in_recon filtering "
                      "(smooth/butter); sieves never filter the iteration "
                      "trajectory. Use smooth_apply_stage/butter_apply_stage "
-                     "none.\n";
+                     "output or none.\n";
         return false;
     }
 
@@ -1782,6 +1811,12 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "gaussian_kernel     = " << a.smoothKernel << "\n";
     std::cout << "smooth_apply_stage  = " << a.smoothApplyStage << "\n";
     std::cout << "butter_apply_stage  = " << a.butterApplyStage << "\n";
+    std::cout << "output_smooth_fwhm_mm     = " << a.outputSmoothFwhmMm << "\n";
+    std::cout << "output_smooth_sigmas      = " << a.outputSmoothSigmas << "\n";
+    std::cout << "output_butter_cutoff_cpcm = " << a.outputButterCutoffCpcm << "\n";
+    std::cout << "output_butter_order       = " << a.outputButterOrder << "\n";
+    std::cout << "output_nonnegative_clamp  = "
+              << (a.outputNonnegativeClamp ? "true" : "false") << "\n";
     std::cout << "\n";
 
     std::cout << "[PSF]\n";
@@ -1923,7 +1958,9 @@ void ArgumentParser::printUsage() {
     std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2); implies butter_apply_stage=in_recon\n";
     std::cout << "  -smooth <sigma>          Gaussian smoothing sigma (mm); implies smooth_apply_stage=in_recon\n";
     std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n";
-    std::cout << "  INI [Filtering] stages:  smooth_apply_stage / butter_apply_stage = none|in_recon (default none)\n\n";
+    std::cout << "  INI [Filtering] stages:  smooth_apply_stage / butter_apply_stage = none|in_recon|output\n";
+    std::cout << "  Output filters:          FWHM/sigmas in mm and cutoff in cycles/cm; derived independently\n";
+    std::cout << "  Output clamp:            output_nonnegative_clamp=true|false (applied after each filter)\n\n";
 
     std::cout << "=== PSF ===\n";
     std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.3,3)\n";

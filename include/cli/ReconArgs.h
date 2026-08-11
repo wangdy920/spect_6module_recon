@@ -69,10 +69,15 @@ struct ReconArgs {
     bool useButter = false;
     float butterCutoff = 0.35f;
     int butterOrder = 2;
-    // Filter apply stages: "none" | "in_recon".
+    // Filter apply stages: "none" | "in_recon" | "output".
     // CLI -smooth/-butter imply "in_recon"; INI may set the stage explicitly.
     std::string smoothApplyStage = "none"; ///< Gaussian smoothing stage
     std::string butterApplyStage = "none"; ///< Butterworth stage
+    float outputSmoothFwhmMm = 0.30f;       ///< Output Gaussian FWHM (mm)
+    float outputSmoothSigmas = 3.0f;        ///< Output kernel radius (N*sigma)
+    float outputButterCutoffCpcm = 5.0f;    ///< Output cutoff (cycles/cm)
+    int outputButterOrder = 8;              ///< Output Butterworth order
+    bool outputNonnegativeClamp = true;     ///< Clamp saved copies after filtering
     bool usePSF = false;
     PSFConf psf;                  ///< PSF configuration
     bool psfModeExplicit = false; ///< -psfMode was used explicitly

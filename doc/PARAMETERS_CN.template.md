@@ -95,6 +95,7 @@ x_out_flip  = 0
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain PSF；发布默认 `1.3,3`、模式 `sieve`、`psfKernel=castor`。`-psfKernel adjoint` 使用采样 Gaussian + 镜像边界 + 真伴随；`-psfKernel castor` 使用 erf 体素积分核 + 零边界 + Z-only 归一化，反向复用正向。
+- 发布 `[Filtering]` 默认 `smooth_apply_stage=output`、`butter_apply_stage=output`：保留未滤波主输出，并从同一主输出独立写出 `_smooth`（CASToR 0.30 mm/3σ）与 `_butter`（5 cycles/cm、order 8）。`output_nonnegative_clamp=true` 在每个副本滤波后钳为非负；设为 `false` 仅用于原型线性旁瓣对齐。
 - `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
 - `-opti mlem|bsrem`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。

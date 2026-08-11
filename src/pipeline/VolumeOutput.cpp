@@ -1,5 +1,8 @@
 #include "pipeline/VolumeOutput.h"
 
+#include "filters/ButterworthFilter.h"
+#include "filters/Convolution.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/MHDWriter.h"
 #include "pipeline/RunLogger.h"
 
@@ -7,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 
@@ -777,9 +781,10 @@ void saveVolumeOutput(const std::vector<double> &source,
                       const std::string &outputPrefix, int iteration,
                       const std::vector<uint8_t> *mask,
                       const CropSettings &crop, bool littleEndian,
-                      const OutputTransform *transform) {
+                      const OutputTransform *transform,
+                      const OutputFilterSettings *outputFilters) {
   int outNz = 0;
-  std::vector<double> prepared = prepareOutputVolume(
+  const std::vector<double> prepared = prepareOutputVolume(
       source, geometry.nx, geometry.ny, geometry.nz, mask, crop, &outNz,
       transform, geometry.vx, geometry.vy, geometry.vz);
   int outNx = geometry.nx;
@@ -787,13 +792,56 @@ void saveVolumeOutput(const std::vector<double> &source,
   if (transform && transform->centerCropNx > 0) outNx = transform->centerCropNx;
   if (transform && transform->centerCropNy > 0) outNy = transform->centerCropNy;
 
-  // Final saved images must be non-negative: MLEM keeps the trajectory
-  // non-negative, but float32 staging of sieve/derived copies can leave
-  // tiny negatives; clamp all saved copies uniformly.
-  clampNonNegativeInPlace(prepared);
-  io::saveMHDRAW(prepared, outNx, outNy, outNz, geometry.vx,
+  const bool clamp = outputFilters == nullptr || outputFilters->nonnegativeClamp;
+  std::vector<double> primary = prepared;
+  if (clamp)
+    clampNonNegativeInPlace(primary);
+  io::saveMHDRAW(primary, outNx, outNy, outNz, geometry.vx,
                  geometry.vy, geometry.vz, outputDir, outputPrefix, iteration,
                  littleEndian);
+
+  if (outputFilters == nullptr || iteration < 0)
+    return;
+
+  const std::filesystem::path iterStem =
+      std::filesystem::path(outputDir) /
+      (outputPrefix + "_it" + std::to_string(iteration));
+  if (outputFilters->smoothEnabled) {
+    std::vector<double> smoothed = prepared;
+    const auto kx = filters::makeCastorErf1D(
+        outputFilters->smoothFwhmMm, geometry.vx,
+        outputFilters->smoothSigmas);
+    const auto ky = filters::makeCastorErf1D(
+        outputFilters->smoothFwhmMm, geometry.vy,
+        outputFilters->smoothSigmas);
+    const auto kz = filters::makeCastorErf1D(
+        outputFilters->smoothFwhmMm, geometry.vz,
+        outputFilters->smoothSigmas);
+    if (!cuda::applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+            smoothed, outNx, outNy, outNz, kx, ky, kz)) {
+      throw std::runtime_error(
+          "Output Gaussian requires the CUDA CASToR convolution backend.");
+    }
+    if (clamp)
+      clampNonNegativeInPlace(smoothed);
+    io::writeMHD((iterStem.string() + "_smooth"), smoothed, outNx, outNy,
+                 outNz, static_cast<float>(geometry.vx),
+                 static_cast<float>(geometry.vy),
+                 static_cast<float>(geometry.vz), littleEndian);
+  }
+  if (outputFilters->butterEnabled) {
+    std::vector<double> buttered = prepared;
+    filters::apply_butterworth_output_cufft(
+        buttered, outNx, outNy, outNz,
+        filters::Spacing3{geometry.vx, geometry.vy, geometry.vz},
+        outputFilters->butterCutoffCpcm, outputFilters->butterOrder);
+    if (clamp)
+      clampNonNegativeInPlace(buttered);
+    io::writeMHD((iterStem.string() + "_butter"), buttered, outNx, outNy,
+                 outNz, static_cast<float>(geometry.vx),
+                 static_cast<float>(geometry.vy),
+                 static_cast<float>(geometry.vz), littleEndian);
+  }
 }
 
 } // namespace main

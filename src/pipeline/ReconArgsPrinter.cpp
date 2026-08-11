@@ -99,7 +99,10 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
            std::string(std::getenv("SPECT_CUDA_VOLUME_OPS")) == "0")
               ? "disabled"
               : "enabled")
-      << ", butter=" << (args.useButter ? "on" : "off")
+      << ", filters=smooth:" << args.smoothApplyStage
+      << ",butter:" << args.butterApplyStage
+      << ", output_clamp="
+      << (args.outputNonnegativeClamp ? "nonnegative" : "linear")
       << ", reg=" << (args.useReg ? regTypeToString(args.reg.type) : "off");
   if (args.useReg) {
     oss << " regCT="

@@ -21,12 +21,12 @@
 | 算法 | **MLEM / BSREM**；subset=1 语义（全量更新），无 `-subsets` 参数；OSEM/ADMM 退场 |
 | 公开正则 | 仅 **TV / RDP**；可选 registered CT 边权，无 CT 时 activity-only |
 | 公开 PSF | image-domain **`operator` / `sieve` / `none`**；`-psf` 为 FWHM mm；`-psfKernel adjoint|castor` 选择真伴随 Gaussian 或严格 CASToR erf/Z-norm/forward-reuse 语义；发布默认 `sieve + castor + 1.3,3` |
-| 稀疏 / 滤波 | 固定 **CUDA-first / cuFFT**；CASToR PSF 与 smooth 走 CUDA，Butterworth 固定 cuFFT；smooth/Butterworth 仅可显式作为 `in_recon` 滤波，发布默认关闭 |
+| 稀疏 / 滤波 | 固定 **CUDA-first / cuFFT**；CLI smooth/Butterworth 为显式 `in_recon`；发布默认在保存副本上独立施加 CASToR Smooth 0.30 mm/3σ 与 2× zero-pad Butterworth 5 cpcm/order 8 |
 | CTAC 模型 | **`att[angle, voxel]` fused** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
 | 多床位 | 唯一 canonical stitch：`Bed1=max physical z`、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（由 `baseNz - bedOverlap` 与 16.8 mm 机械步进校验自动确定，260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。无 stitch/profile/FOV 选择器 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
 | GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；不规划多 GPU |
-| 输出 | 每次重建仅保存一个无后缀 `<prefix>_it<N>.mhd/.raw` 最终体，另写自动日志与 `recon_manifest.json`；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
+| 输出 | 保存未滤波 `<prefix>_it<N>`，以及从同一主输出独立派生的 `_smooth` / `_butter` MHD/RAW；发布默认对各副本后置非负钳制，manifest 记录参数与六文件清单；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
 
 ## 能力表
 

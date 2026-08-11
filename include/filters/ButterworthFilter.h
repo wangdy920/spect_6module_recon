@@ -73,8 +73,8 @@ void apply_butterworth_inplace_cufft(
  *  - cutoff_cpcm 超过各轴最小 Nyquist（5 / max(spacing) cycles/cm）时直接
  *    抛出 std::runtime_error。
  *  - 每轴 2 倍零填充（2Nx,2Ny,2Nz），原图居中嵌入，cuFFT float R2C/C2R，
- *    逆变换乘以 1/N_padded，裁剪回原始尺寸。滤波保持线性（负旁瓣在
- *    保存阶段由 saveVolumeOutput 统一钳为非负）。
+ *    逆变换乘以 1/N_padded，裁剪回原始尺寸。滤波保持线性；保存阶段是否
+ *    钳制负旁瓣由 output_nonnegative_clamp 显式控制。
  *
  * 仅作用于传入的副本；不改动迭代状态。当未编入 cuFFT 实现时抛出运行时错误。
  */
