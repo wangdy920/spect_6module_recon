@@ -131,9 +131,28 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
         std::vector<char*> argv;
         for (std::string& arg : storage)
             argv.push_back(arg.data());
+        testing::internal::CaptureStdout();
         EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), versionArgs),
                   spect::cli::ArgumentParser::ParseResult::ExitSuccess);
+        const std::string output = testing::internal::GetCapturedStdout();
         EXPECT_TRUE(versionArgs.versionRequested);
+        EXPECT_NE(output.find("# SPECT_recon Changelog"), std::string::npos);
+        EXPECT_NE(output.find("## 20260811+949f766"), std::string::npos);
+    }
+
+    spect::cli::ReconArgs shortVersionArgs;
+    {
+        std::vector<std::string> storage = {"SPECT_recon", "--version"};
+        std::vector<char*> argv;
+        for (std::string& arg : storage)
+            argv.push_back(arg.data());
+        testing::internal::CaptureStdout();
+        EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), shortVersionArgs),
+                  spect::cli::ArgumentParser::ParseResult::ExitSuccess);
+        const std::string output = testing::internal::GetCapturedStdout();
+        EXPECT_TRUE(shortVersionArgs.versionRequested);
+        EXPECT_EQ(output.find("# SPECT_recon Changelog"), std::string::npos);
+        EXPECT_EQ(std::count(output.begin(), output.end(), '\n'), 1);
     }
 
     spect::cli::ReconArgs dumpArgs;

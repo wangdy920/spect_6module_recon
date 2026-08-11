@@ -19,6 +19,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - See `doc/Capability_Matrix_CN.md`.
 
 **Project Structure**
+- **Release history**: [CHANGELOG.md](CHANGELOG.md) — embedded in `SPECT_recon.exe -v` and copied to the package root; `--version` remains one-line for scripts
 - **Core Code**: [include/](include/), [src/](src/) — modular C++17 implementation
 - **Tests**: [tests/](tests/) — GoogleTest unit tests
 - **Documentation**: [doc/](doc/) — maintained usage, capability, format, and field-integration contracts
@@ -63,6 +64,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
 | `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI args override config. |
 | `-vb 0/1/2` | Verbosity (0=quiet, 1=info default, 2=debug). |
+| `-v` / `--version` | `-v` prints the exact build identity and complete embedded changelog; `--version` prints only the machine-readable build identity. |
 
 
 ## Multi-bed reconstruction
@@ -102,6 +104,7 @@ SPECT_recon_<version>/
         chunk_*.csrb
         manifest.json
   README.md
+  CHANGELOG.md
   PARAMETERS_CN.md
   RELEASE_NOTES.md
   SHA256SUMS.txt

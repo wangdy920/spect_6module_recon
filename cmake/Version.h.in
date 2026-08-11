@@ -21,9 +21,14 @@ namespace spect::cli {
 inline const char *versionString() { return SPECT_RECON_VERSION_STRING; }
 inline const char *gitHash() { return SPECT_RECON_GIT_HASH; }
 inline const char *buildDate() { return SPECT_RECON_BUILD_DATE; }
+inline const char *changelog() {
+  return R"SPECT_CHANGELOG(@SPECT_RECON_CHANGELOG@)SPECT_CHANGELOG";
+}
 
-inline void printVersion() {
+inline void printVersion(bool withChangelog = false) {
   std::cout << SPECT_RECON_VERSION_STRING << '\n';
+  if (withChangelog)
+    std::cout << '\n' << changelog();
 }
 
 } // namespace spect::cli

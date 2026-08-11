@@ -243,7 +243,8 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
 | `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
-| `-v` / `--version` | 打印版本字符串并退出（形如 `20260710+ad3c1d4`） |
+| `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件 |
+| `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
 默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`。manifest 记录滤波阶段、物理参数、钳制策略及实际六个体文件。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径；INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。
 

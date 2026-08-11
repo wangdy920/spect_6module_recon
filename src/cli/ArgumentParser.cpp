@@ -524,10 +524,8 @@ void ArgumentParser::registerHandlers() {
             i, argc, argv, a.projectionResidual);
     }, {"-projectionResidual"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        (void)i;
         (void)argc;
-        (void)argv;
-        printVersion();
+        printVersion(std::string(argv[i]) == "-v");
         a.versionRequested = true;
         return true;
     }, {"-v", "--version"});
@@ -2013,7 +2011,8 @@ void ArgumentParser::printUsage() {
     std::cout << "  -dumpConf                 Print merged config and exit\n";
     std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
-    std::cout << "  -v, --version             Print version string and exit\n";
+    std::cout << "  -v                        Print version and complete changelog, then exit\n";
+    std::cout << "  --version                 Print one-line version string and exit\n";
     std::cout << "  -th <N>                   Thread count\n";
     std::cout << "  -h, -help, --help         Show this help\n\n";
     std::cout << "  SPECT_FAIL_ON_ZERO_CHECKPOINT=1  Abort before writing an all-zero checkpoint\n";
