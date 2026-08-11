@@ -18,6 +18,7 @@ h2 { color:#294e70; font-size:16pt; margin:10mm 0 4mm; break-after:avoid; }
 h3 { color:#365f86; font-size:12.5pt; margin:7mm 0 2mm; break-after:avoid; }
 h4 { color:#435b70; font-size:10.8pt; margin:5mm 0 1.5mm; break-after:avoid; }
 p { margin:0 0 3.2mm; text-align:justify; orphans:3; widows:3; }
+p:has(code) { text-align:left; }
 strong { color:#20384e; }
 code { font-family:"Cascadia Mono","Consolas",monospace; font-size:8.8pt; background:#f3f6f8; padding:.1em .3em; border-radius:3px; overflow-wrap:anywhere; }
 pre { background:#18232d; color:#eef4f8; padding:4mm; border-radius:5px; overflow-wrap:anywhere; white-space:pre-wrap; break-inside:avoid; }
@@ -40,7 +41,7 @@ a { color:#315f8c; text-decoration:none; }
 </head>
 <body><h1 id="spect-sieve_castor_fwhm1p3">SPECT 重构与受保护原型 <code>sieve_castor_fwhm1p3</code> 收敛审查</h1>
 <p><strong>执行区间：</strong> 2026-08-10 至 2026-08-11</p>
-<p><strong>最终状态：</strong> 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。最终优化后，单床 50 次中位数为 94.998 秒，四床为 141.372 秒；前者通过 2 分钟目标，后者作为当前 16 GB/float32 CSR 路线的测量边界保留。
+<p><strong>最终状态：</strong> 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。最终优化后，单床 50 次中位数为 94.998 秒，四床为 141.372 秒；前者通过 2 分钟目标，后者作为当前 16 GB/float32 CSR 路线的测量边界保留。补充 <code>norm_factor.bin</code> 的 Derenzo 50 次 relL2 为 <code>2.9892e-7</code>；默认关闭的多时间段同床位内存合并入口亦通过 <code>2.8531e-8</code> 线性等价门。
 <strong>数值权威：</strong> <code>6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu</code> 中的 <code>sieve + CASToR + FWHM 1.3 mm + 3σ</code> 路线。</p>
 <h2 id="1">1. 执行结论与判定合同</h2>
 <p>本轮不是以旧发布二进制或“看起来相似”为裁决，而是以用户指定的受保护原型为唯一数值基线。重构后的单 GPU compact-v4 路径在修复共享根因后，完成正式 Release 重编译，并对五个冻结数据集逐一执行完整数据、50 次 MLEM。随后又恢复原型在 canonical 输出后的独立 Smooth/Butterworth 派生：五组同输入滤波门、可选钳制门和一迭代真实入口 smoke 全部通过。</p>
@@ -488,10 +489,50 @@ a { color:#315f8c; text-decoration:none; }
 <p>因此 <code>141.372 s</code> 是现有 float32 CSR + cuSPARSE + 16 GB 路线经小范围优化后的测量边界，不是抽象硬件极限。若重新开启，唯一仍有量级潜力的方向是单独立项的 packed-index 或近无损压缩矩阵格式、GPU 解压和自定义 sparse kernel；它会改变矩阵合同，必须把当前路线保留为控制组，不能作为本轮“顺手优化”。</p>
 <h3 id="47">4.7 日志位置回归</h3>
 <p>最终 Release 一迭代真实 smoke 的 <code>recon_20260811_170825_516.log</code> 位于目标目录 <code>recon_out/perf_120s_20260811/final_release_6f3e950_smoke_1it/</code>；仓库根目录及 staging 根的 <code>recon_*.log</code> 数量均为 0。该运行在 25.628 秒内写出主/Smooth/Butterworth 三体积和 manifest，相对上一 Release 的最大 relL2 为 <code>8.8886e-8</code>。正常路径下旧的本地误写问题不存在；若目标目录无法创建，logger 仍会明确提示并回退 CWD，该行为只作为可观察失败兜底。</p>
+<h3 id="48-normfactor">4.8 normfactor 原型对齐</h3>
+<p>新增验证冻结 <code>test_data/norm_factor/matrix/norm_factor.bin</code>（6,635,528 bytes，SHA-256 <code>57FDBCFA…F8F77F</code>）为 <code>360×2304</code> angle-major float64 投影修正因子 <code>c</code>，当前与原型均只把倒数效率 <code>1/c</code> 用于 sensitivity denominator。直接改变归一化权重没有修复 Derenzo 的初始 <code>3.57e-2</code> 偏差，候选已完整回退；源码追踪确认根因是原型在 PSF 前先按圆柱 ROI 裁剪 CSR 列，而当前实现此前只在 MLEM 更新后应用 ROI。</p>
+<p>当前实现把同一局部支持域应用于 sensitivity 的 PSF 前输入、forward PSF 后图像和 backward PSF 前分子，并把 denominator cache schema 升为 <code>compact_global_denom_v3_roi_pruned_psf_support</code>。该修复没有改变 full-FOV 快速路径。</p>
+<table>
+<thead>
+<tr>
+<th>normfactor 原型门</th>
+<th style="text-align: right;">relL2</th>
+<th style="text-align: right;">NCC</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>EPguan，1 次</td>
+<td style="text-align: right;"><code>2.2895e-7</code></td>
+<td style="text-align: right;">约 <code>1.0</code></td>
+<td>通过 <code>1e-5</code></td>
+</tr>
+<tr>
+<td>Derenzo，1 次</td>
+<td style="text-align: right;"><code>2.1143e-7</code></td>
+<td style="text-align: right;">约 <code>1.0</code></td>
+<td>通过 <code>1e-5</code></td>
+</tr>
+<tr>
+<td>Derenzo，50 次</td>
+<td style="text-align: right;"><code>2.9892e-7</code></td>
+<td style="text-align: right;"><code>0.9999999999999515</code></td>
+<td>通过 <code>1e-5</code></td>
+</tr>
+</tbody>
+</table>
+<p>Derenzo 50 次主体有限、负体素为 0，故生产 <code>output_nonnegative_clamp=true</code> 对该结果幂等；无需用关闭钳制换取表面一致性。原型耗时 <code>646.294 s</code>，当前首次验证耗时 <code>126.979 s</code>，但该单次 F: 结果不替代 4.5 节冻结的 64 GB + NVMe 三次中位数。</p>
+<h3 id="49">4.9 多时间段同床位合并与受扰性能复核</h3>
+<p>配置新增 <code>[InputOutput] merge_time_segments</code>，发布默认 <code>false</code>。启用时，<code>-df</code> 可指向 <code>案例/YYYYMMDD_HHMMSS/SPECT</code>；程序按时间名排序扫描同案例的直接子目录，要求每段具有完全相同的 <code>BedN.bin</code> 集合及 BIN 大小、头和几何，然后逐床在内存中做 angle-major 逐元素求和，不写中间投影。缺床、几何差异、非有限输入或求和溢出均直接失败；manifest 记录每床所有源路径。</p>
+<p>真实 Derenzo <code>Bed1.bin</code> 的两个同字节副本分别置于 <code>20260810_210556/SPECT</code> 与 <code>20260810_211500/SPECT</code>。合并输出相对“单段输出 ×2”的 relL2 为 <code>2.8531e-8</code>，NCC <code>0.9999999999999981</code>，sum ratio <code>0.9999999996763583</code>，manifest 记录 2 段/2 来源。首轮 smoke 暴露单床目录被误识别为 <code>dfList</code> 后产生 Z 翻转，修复后单床目录保持 <code>-df</code> 方向语义；该失败结果只作诊断，不进入发布。</p>
+<p>加入 normfactor 后在共享设备/F: 上重复三次 50 迭代，耗时为 <code>144.046</code>、<code>144.886</code>、<code>164.235 s</code>，中位数 <code>144.886 s</code>；三次对原型 relL2 为 <code>2.996e-7</code> 至 <code>3.001e-7</code>，重复间最大 relL2 <code>5.5585e-8</code>。该测量明确受其余任务与矩阵盘吞吐影响，不能推翻 4.5 节相同算法在 64 GB + NVMe 的冻结 Derenzo 中位数 <code>94.9981 s</code>。</p>
+<p>持久 PTX 缓存候选虽连续命中三个 NVRTC 模块，但首次迭代仍为 46–54 秒：26.1 GB CSR 预载与运行时编译重叠，墙钟没有可签收下降。候选代码完整回退。现有 float32 CSR + cuSPARSE + 16 GB 路线的量级瓶颈仍是矩阵 I/O/PCIe 流送；不重新开启 4.6 节已拒绝的 mmap、三 resident、FP16 或行片双缓冲路线。</p>
 <h2 id="5">5. 决策、限制与停止条件</h2>
 <h3 id="51">5.1 最终采纳</h3>
 <p>生产路线固定为单 GPU compact-v4、MLEM/BSREM、<code>sieve + CASToR + FWHM 1.3 mm + 3σ</code>，输出保存一个未滤波主体与两个从同一 prepared volume 独立派生的 Smooth/Butterworth 副本。生产 <code>output_nonnegative_clamp=true</code>；线性原型门用 <code>false</code>，通过后恢复生产值。</p>
 <p>性能端只采纳经中位数证明的共享改动：无效统计门控、冻结投影/元数据最小上传、两块矩阵驻留、主 MLEM 图像/累加器/更新全程 GPU 驻留、启动预载重叠和最终资源提前释放。所有失败候选的结论保留在 <code>recon_out/perf_120s_20260811/experiment.json</code>，代码均已回退。</p>
+<p>normfactor 路线采纳原型等价的 ROI 裁列/PSF 支持域语义；多时间段路线只增加一个默认关闭的配置键并复用同一投影加载和重建实现。时间段合并只改变进入重建前的投影值，不派生第二条算法管线。</p>
 <h3 id="52">5.2 已知限制</h3>
 <ul>
 <li>MSVC 链接仍报告既有 <code>LNK4098</code>；Release、233 项 CTest、显式五数据集滤波门和真实运行均成功，未把警告误报为已修复。</li>
@@ -500,6 +541,8 @@ a { color:#315f8c; text-decoration:none; }
 <li>16 GB EP 峰值只余 729 MiB；其他任务在 resident warmup 后继续显著增长仍可能触发 OOM。</li>
 <li>单床 50 次通过 2 分钟不外推到多床；四床 EP 的三轮中位数为 141.372 秒。</li>
 <li>32 GB 主存不是同吞吐认证配置；正式低时延证据来自 64 GB + NVMe。</li>
+<li>用户给出的 <code>D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT</code> 在本机不存在；时间段功能使用真实冻结 Derenzo 投影的两时间段副本完成入口验证，尚未在该设备端案例目录复测。</li>
+<li>当前 F: + 共享设备的 normfactor 三次中位数为 144.886 秒；它是受扰部署观测，不与 64 GB + NVMe 的 94.9981 秒混合成同一基线。</li>
 </ul>
 <h3 id="53">5.3 停止条件</h3>
 <p>本轮在两侧触发边界后停止：无损行片传输重叠使 20 次运行退化 84.2%，而能显著降低矩阵显存的 FP16 表示在矩阵值层已达 <code>3.68e-4</code>。在不更改矩阵格式与 sparse kernel 的条件下，没有新的数据支持继续叠加开关或并行。只有单独冻结新的压缩矩阵合同、控制基线、显存门和五数据集数值门后，才重新开启该架构级路线。</p>
@@ -523,6 +566,15 @@ recon_out\perf_120s_20260811\run_variant.ps1 `
 
 python scripts\compare_recon_metrics.py `
   --reference &lt;previous.mhd&gt; --candidate &lt;current.mhd&gt; --out-json &lt;metrics.json&gt;
+
+# normfactor 50 次：沿用上面的正式 Derenzo 参数，并增加
+# -normFactorFile test_data\norm_factor\matrix\norm_factor.bin
+# -compactDenomCache &lt;validated-v3-denom.mhd&gt; -it 50:50 -cyl 30,21.6
+
+# 多时间段入口：发布配置默认 false；验证时临时设 true
+# [InputOutput] merge_time_segments = true
+.\SPECT_recon.exe -df &quot;D:\data\predata\&lt;case&gt;\20260810_210556\SPECT&quot; `
+  -chunkCSRDir &lt;matrix&gt; -fout &lt;output&gt;\recon &lt;其余冻结重建参数&gt;
 </code></pre>
 <p>完整 A/B 顺序、50 次命令、环境、耗时、GPU 样本和输出路径保存在各 <code>record.json</code>；采纳/拒绝总表见 <code>recon_out/perf_120s_20260811/experiment.json</code>。清理后临时矩阵和独立旧 Release 副本不保留，可从冻结源与哈希重建。</p>
 <h3 id="62">6.2 验证状态</h3>
@@ -594,6 +646,26 @@ python scripts\compare_recon_metrics.py `
 <td>日志目录</td>
 <td>smoke 日志在目标目录；仓库/staging 根数量 0</td>
 <td>正常路径通过</td>
+</tr>
+<tr>
+<td>normfactor 原型门</td>
+<td>EP 1 次 <code>2.2895e-7</code>；Derenzo 1/50 次 <code>2.1143e-7</code>/<code>2.9892e-7</code></td>
+<td>通过 <code>1e-5</code></td>
+</tr>
+<tr>
+<td>时间段合并</td>
+<td>2 段同 Bed1；相对单段×2 relL2 <code>2.8531e-8</code>；manifest 2 来源</td>
+<td>通过</td>
+</tr>
+<tr>
+<td>受扰 50 次复核</td>
+<td>144.046/144.886/164.235 s，中位数 144.886 s；对原型约 <code>3.00e-7</code></td>
+<td>数值通过；当前环境未达 120 s</td>
+</tr>
+<tr>
+<td>PTX 缓存候选</td>
+<td>模块命中但首迭代仍 46–54 s</td>
+<td>无墙钟收益，拒绝并回退</td>
 </tr>
 <tr>
 <td>未验证</td>

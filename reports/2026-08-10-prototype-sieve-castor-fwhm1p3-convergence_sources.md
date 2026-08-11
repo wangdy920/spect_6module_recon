@@ -30,5 +30,9 @@
 | S26 | `recon_out/perf_120s_20260811/{stream_boundary_ep3_1,stream_floatacc_ep3_1,stream_floatacc_ep20_1}/record.json` | 非驻留 CSR 行片候选的数值通过、性能失败与回退记录 |
 | S27 | `recon_out/perf_120s_20260811/final_release_6f3e950_smoke_1it/` | 最终 Release 真实保存入口、上一 Release 数值比较与日志目录回归证据 |
 | S28 | `recon_out/perf_120s_20260811/run_variant.ps1` 与最终运行目录中的 `gpu_samples.csv` | 可复现的共享 GPU 250 ms 显存采样与逐运行记录入口 |
+| S29 | `recon_out/normfactor_time_segment_merge_20260811/experiment.json` | normfactor、ROI/PSF 支持域、时间段合并及 NVRTC 候选的统一采纳/拒绝记录 |
+| S30 | `recon_out/normfactor_prototype_parity_20260811/{derenzo_it1_roi_psf_metrics.json,derenzo_it50_roi_psf_metrics.json,epguan_it1_metrics.json}` | 加入 `norm_factor.bin` 后一/五十次与原型的主输出数值门 |
+| S31 | `recon_out/time_segment_merge_smoke_20260811/output_orientation_fix/recon_manifest.json` 与 `smoke_orientation_fix.stdout.log` | 两时间段同床位内存求和、来源清单与真实入口数值等价证据 |
+| S32 | `recon_out/perf_nvrtc_cache_20260811/` | 共享设备上三次 50 迭代中位数、重复性及 PTX 缓存未降低首迭代墙钟的拒绝证据 |
 
 本登记只列本次报告实际使用的本地证据；受保护原型是实现一致性基线，不被表述为独立物理真值。

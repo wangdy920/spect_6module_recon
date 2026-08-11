@@ -2,7 +2,7 @@
 
 **执行区间：** 2026-08-10 至 2026-08-11
 
-**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。最终优化后，单床 50 次中位数为 94.998 秒，四床为 141.372 秒；前者通过 2 分钟目标，后者作为当前 16 GB/float32 CSR 路线的测量边界保留。
+**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。最终优化后，单床 50 次中位数为 94.998 秒，四床为 141.372 秒；前者通过 2 分钟目标，后者作为当前 16 GB/float32 CSR 路线的测量边界保留。补充 `norm_factor.bin` 的 Derenzo 50 次 relL2 为 `2.9892e-7`；默认关闭的多时间段同床位内存合并入口亦通过 `2.8531e-8` 线性等价门。
 **数值权威：** `6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu` 中的 `sieve + CASToR + FWHM 1.3 mm + 3σ` 路线。
 
 ## 1. 执行结论与判定合同
@@ -185,6 +185,30 @@ Derenzo 相对上一 Release 的三输出最大 relL2 为 `9.8653e-8`；EPguan �
 
 最终 Release 一迭代真实 smoke 的 `recon_20260811_170825_516.log` 位于目标目录 `recon_out/perf_120s_20260811/final_release_6f3e950_smoke_1it/`；仓库根目录及 staging 根的 `recon_*.log` 数量均为 0。该运行在 25.628 秒内写出主/Smooth/Butterworth 三体积和 manifest，相对上一 Release 的最大 relL2 为 `8.8886e-8`。正常路径下旧的本地误写问题不存在；若目标目录无法创建，logger 仍会明确提示并回退 CWD，该行为只作为可观察失败兜底。
 
+### 4.8 normfactor 原型对齐
+
+新增验证冻结 `test_data/norm_factor/matrix/norm_factor.bin`（6,635,528 bytes，SHA-256 `57FDBCFA…F8F77F`）为 `360×2304` angle-major float64 投影修正因子 `c`，当前与原型均只把倒数效率 `1/c` 用于 sensitivity denominator。直接改变归一化权重没有修复 Derenzo 的初始 `3.57e-2` 偏差，候选已完整回退；源码追踪确认根因是原型在 PSF 前先按圆柱 ROI 裁剪 CSR 列，而当前实现此前只在 MLEM 更新后应用 ROI。
+
+当前实现把同一局部支持域应用于 sensitivity 的 PSF 前输入、forward PSF 后图像和 backward PSF 前分子，并把 denominator cache schema 升为 `compact_global_denom_v3_roi_pruned_psf_support`。该修复没有改变 full-FOV 快速路径。
+
+| normfactor 原型门 | relL2 | NCC | 判定 |
+|---|---:|---:|---|
+| EPguan，1 次 | `2.2895e-7` | 约 `1.0` | 通过 `1e-5` |
+| Derenzo，1 次 | `2.1143e-7` | 约 `1.0` | 通过 `1e-5` |
+| Derenzo，50 次 | `2.9892e-7` | `0.9999999999999515` | 通过 `1e-5` |
+
+Derenzo 50 次主体有限、负体素为 0，故生产 `output_nonnegative_clamp=true` 对该结果幂等；无需用关闭钳制换取表面一致性。原型耗时 `646.294 s`，当前首次验证耗时 `126.979 s`，但该单次 F: 结果不替代 4.5 节冻结的 64 GB + NVMe 三次中位数。
+
+### 4.9 多时间段同床位合并与受扰性能复核
+
+配置新增 `[InputOutput] merge_time_segments`，发布默认 `false`。启用时，`-df` 可指向 `案例/YYYYMMDD_HHMMSS/SPECT`；程序按时间名排序扫描同案例的直接子目录，要求每段具有完全相同的 `BedN.bin` 集合及 BIN 大小、头和几何，然后逐床在内存中做 angle-major 逐元素求和，不写中间投影。缺床、几何差异、非有限输入或求和溢出均直接失败；manifest 记录每床所有源路径。
+
+真实 Derenzo `Bed1.bin` 的两个同字节副本分别置于 `20260810_210556/SPECT` 与 `20260810_211500/SPECT`。合并输出相对“单段输出 ×2”的 relL2 为 `2.8531e-8`，NCC `0.9999999999999981`，sum ratio `0.9999999996763583`，manifest 记录 2 段/2 来源。首轮 smoke 暴露单床目录被误识别为 `dfList` 后产生 Z 翻转，修复后单床目录保持 `-df` 方向语义；该失败结果只作诊断，不进入发布。
+
+加入 normfactor 后在共享设备/F: 上重复三次 50 迭代，耗时为 `144.046`、`144.886`、`164.235 s`，中位数 `144.886 s`；三次对原型 relL2 为 `2.996e-7` 至 `3.001e-7`，重复间最大 relL2 `5.5585e-8`。该测量明确受其余任务与矩阵盘吞吐影响，不能推翻 4.5 节相同算法在 64 GB + NVMe 的冻结 Derenzo 中位数 `94.9981 s`。
+
+持久 PTX 缓存候选虽连续命中三个 NVRTC 模块，但首次迭代仍为 46–54 秒：26.1 GB CSR 预载与运行时编译重叠，墙钟没有可签收下降。候选代码完整回退。现有 float32 CSR + cuSPARSE + 16 GB 路线的量级瓶颈仍是矩阵 I/O/PCIe 流送；不重新开启 4.6 节已拒绝的 mmap、三 resident、FP16 或行片双缓冲路线。
+
 
 ## 5. 决策、限制与停止条件
 
@@ -194,6 +218,8 @@ Derenzo 相对上一 Release 的三输出最大 relL2 为 `9.8653e-8`；EPguan �
 
 性能端只采纳经中位数证明的共享改动：无效统计门控、冻结投影/元数据最小上传、两块矩阵驻留、主 MLEM 图像/累加器/更新全程 GPU 驻留、启动预载重叠和最终资源提前释放。所有失败候选的结论保留在 `recon_out/perf_120s_20260811/experiment.json`，代码均已回退。
 
+normfactor 路线采纳原型等价的 ROI 裁列/PSF 支持域语义；多时间段路线只增加一个默认关闭的配置键并复用同一投影加载和重建实现。时间段合并只改变进入重建前的投影值，不派生第二条算法管线。
+
 ### 5.2 已知限制
 
 - MSVC 链接仍报告既有 `LNK4098`；Release、233 项 CTest、显式五数据集滤波门和真实运行均成功，未把警告误报为已修复。
@@ -202,6 +228,8 @@ Derenzo 相对上一 Release 的三输出最大 relL2 为 `9.8653e-8`；EPguan �
 - 16 GB EP 峰值只余 729 MiB；其他任务在 resident warmup 后继续显著增长仍可能触发 OOM。
 - 单床 50 次通过 2 分钟不外推到多床；四床 EP 的三轮中位数为 141.372 秒。
 - 32 GB 主存不是同吞吐认证配置；正式低时延证据来自 64 GB + NVMe。
+- 用户给出的 `D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT` 在本机不存在；时间段功能使用真实冻结 Derenzo 投影的两时间段副本完成入口验证，尚未在该设备端案例目录复测。
+- 当前 F: + 共享设备的 normfactor 三次中位数为 144.886 秒；它是受扰部署观测，不与 64 GB + NVMe 的 94.9981 秒混合成同一基线。
 
 ### 5.3 停止条件
 
@@ -231,6 +259,15 @@ recon_out\perf_120s_20260811\run_variant.ps1 `
 
 python scripts\compare_recon_metrics.py `
   --reference <previous.mhd> --candidate <current.mhd> --out-json <metrics.json>
+
+# normfactor 50 次：沿用上面的正式 Derenzo 参数，并增加
+# -normFactorFile test_data\norm_factor\matrix\norm_factor.bin
+# -compactDenomCache <validated-v3-denom.mhd> -it 50:50 -cyl 30,21.6
+
+# 多时间段入口：发布配置默认 false；验证时临时设 true
+# [InputOutput] merge_time_segments = true
+.\SPECT_recon.exe -df "D:\data\predata\<case>\20260810_210556\SPECT" `
+  -chunkCSRDir <matrix> -fout <output>\recon <其余冻结重建参数>
 ```
 
 完整 A/B 顺序、50 次命令、环境、耗时、GPU 样本和输出路径保存在各 `record.json`；采纳/拒绝总表见 `recon_out/perf_120s_20260811/experiment.json`。清理后临时矩阵和独立旧 Release 副本不保留，可从冻结源与哈希重建。
@@ -251,6 +288,10 @@ python scripts\compare_recon_metrics.py `
 | 边界实验 | 行片双缓冲 20 次 127.0378 s；FP16 value relL2 `3.677e-4` | 均拒绝并回退 |
 | 最终真实 smoke | 25.628 s，主/Smooth/Butterworth/manifest；对旧版最大 `8.8886e-8` | 通过 |
 | 日志目录 | smoke 日志在目标目录；仓库/staging 根数量 0 | 正常路径通过 |
+| normfactor 原型门 | EP 1 次 `2.2895e-7`；Derenzo 1/50 次 `2.1143e-7`/`2.9892e-7` | 通过 `1e-5` |
+| 时间段合并 | 2 段同 Bed1；相对单段×2 relL2 `2.8531e-8`；manifest 2 来源 | 通过 |
+| 受扰 50 次复核 | 144.046/144.886/164.235 s，中位数 144.886 s；对原型约 `3.00e-7` | 数值通过；当前环境未达 120 s |
+| PTX 缓存候选 | 模块命中但首迭代仍 46–54 s | 无墙钟收益，拒绝并回退 |
 | 未验证 | 其余三集在驻留实现下二次 50 次、32 GB 同吞吐、新格式/新矩阵、临床正确性、跨架构性能 | 明确未验证 |
 
 
