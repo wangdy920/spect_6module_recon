@@ -16,6 +16,7 @@ struct LoadedProjectionSet {
   int detNx = 0;
   int numAngles = 0;
   bool detectorShapeKnown = true;
+  std::vector<std::vector<std::string>> sourceGroups;
 };
 
 std::string resolveCompactMetadataPath(const ReconArgs &args);
@@ -23,10 +24,13 @@ std::string resolveCompactMetadataPath(const ReconArgs &args);
 void applyCompactMetadataGeometry(
     ReconArgs &args, const spect::io::CompactSymmetryMetadata &meta);
 
+void prepareTimeSegmentProjectionInputs(ReconArgs &args);
+
 LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
                                       int requestedAngles,
                                       const std::string &label,
-                                      const std::string &defaultVar);
+                                      const std::string &defaultVar,
+                                      bool mergeTimeSegments = false);
 
 std::vector<double> loadVolumeChecked(const std::string &path,
                                       const std::string &label,

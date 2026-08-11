@@ -57,6 +57,7 @@ compact chunk 矩阵默认识别优先级：
 | 参数 | 说明 |
 |---|---|
 | `-df <path>` / `-i <path>` / `-input <path>` | 单床位投影 MAT/BIN |
+| `[InputOutput] merge_time_segments=true` | `-df` 指向一个 `案例/时间段/SPECT` 目录时，按时间顺序扫描同案例下的 `YYYYMMDD_HHMMSS/SPECT`，在内存中合并各时间段的同名 `BedN.bin`；默认关闭 |
 | `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，最多 5 床 |
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
@@ -68,6 +69,8 @@ compact chunk 矩阵默认识别优先级：
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
 
 `-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。需要验证床位坐标约定时必须冻结文件映射和 `-zbedflip/-zoutflip`，不能依赖列表书写顺序。
+
+多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
 无 CTAC 的 `-chunkCSRDir` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点和 PSF 口径，不匹配时不会复用。
 

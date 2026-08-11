@@ -49,6 +49,8 @@ struct ReconArgs {
     // ========== Input/Output Paths ==========
     std::string projPath;                ///< Single-bed projection file
     std::vector<std::string> projPaths;  ///< Multi-bed projection list
+    bool mergeTimeSegments = false;      ///< Sum matching BedN data across sibling timestamp/SPECT directories
+    std::vector<std::vector<std::string>> projectionSourceGroups; ///< Actual per-bed sources recorded in the manifest
     std::string outputDir = "output";    ///< Output directory
     std::string outputName;              ///< Output filename base
 

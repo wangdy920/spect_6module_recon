@@ -349,6 +349,17 @@ void writeRunManifest(const RunManifestInput &input) {
   } else {
     json.string("1", args.projPath);
   }
+  json.boolean("merge_time_segments", args.mergeTimeSegments);
+  if (args.mergeTimeSegments && !args.projectionSourceGroups.empty()) {
+    json.integer("time_segment_count",
+                 static_cast<long long>(
+                     args.projectionSourceGroups.front().size()));
+    json.string("time_segment_merge_operation",
+                "elementwise_sum_angle_major_in_memory");
+    for (size_t bed = 0; bed < args.projectionSourceGroups.size(); ++bed)
+      json.stringVector("bed" + std::to_string(bed + 1) + "_sources",
+                        args.projectionSourceGroups[bed]);
+  }
   json.string("physical_z_convention", "Bed1=max_physical_z");
   json.string("bed_number_direction", "increasing_bed_number=-Z");
   json.boolean("z_bed_flip", args.zBedFlip);

@@ -1093,6 +1093,9 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         }
     }
 
+    a.mergeTimeSegments = cfg.getBool(
+        "InputOutput", "merge_time_segments", a.mergeTimeSegments);
+
     // Filtering
     if (cfg.hasSection("Filtering")) {
         const double bwCut = cfg.getDouble("Filtering", "butterworth_cutoff", 0.0);
@@ -1893,6 +1896,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n\n";
 
     std::cout << "[InputOutput]\n";
+    std::cout << "merge_time_segments = "
+              << (a.mergeTimeSegments ? "true" : "false") << "\n";
     std::cout << "output_dir  = " << a.outputDir << "\n";
     std::cout << "output_name = " << a.outputName << "\n\n";
 
@@ -1916,6 +1921,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -df, -i <path>          Projection MAT or BIN file\n";
     std::cout << "  -dfList <p1,p2,...>      Multi-bed projection MAT/BIN list, sorted by BedN when present (max "
               << spect::core::kMaxBeds << " beds)\n";
+    std::cout << "  merge_time_segments      [InputOutput] true + -df <timestamp/SPECT>: sum matching sibling BedN.bin inputs\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb\n";
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
     std::cout << "  -compactDenomCache <mhd> Reuse/save compact global denominator cache; use separate files for PSF/no-PSF/FWHM/bed variants\n";

@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -17,6 +18,7 @@
 #include "io/CSRTypes.h"
 #include "io/ProjectionLoader.h"
 #include "io/MatFileReader.h"
+#include "pipeline/ReconDataLoader.h"
 
 
 namespace spect {
@@ -110,6 +112,62 @@ TEST(IOTest, LoadProjectionBinAutoDetects) {
     EXPECT_EQ(stats.recordCount, 8u);
 
     std::filesystem::remove(path);
+}
+TEST(IOTest, TimeSegmentMergeSumsMatchingBedsAndRejectsMissingBed) {
+    const auto unique = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("spect_time_segment_merge_" + unique);
+    const auto first = root / "case" / "20260810_210556" / "SPECT";
+    const auto second = root / "case" / "20260810_211500" / "SPECT";
+    std::filesystem::create_directories(first);
+    std::filesystem::create_directories(second);
+
+    auto writeProjection = [](const std::filesystem::path &path,
+                              double base) {
+        const int32_t angles = 2;
+        const int32_t rays = 3;
+        double values[6];
+        for (int i = 0; i < 6; ++i)
+            values[i] = base + static_cast<double>(i);
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(&angles), sizeof(angles));
+        out.write(reinterpret_cast<const char*>(&rays), sizeof(rays));
+        out.write(reinterpret_cast<const char*>(values), sizeof(values));
+    };
+    writeProjection(first / "Bed1.bin", 1.0);
+    writeProjection(first / "Bed2.bin", 101.0);
+    writeProjection(second / "Bed1.bin", 10.0);
+    writeProjection(second / "Bed2.bin", 110.0);
+
+    spect::cli::ReconArgs args;
+    args.mergeTimeSegments = true;
+    args.projPath = first.string();
+    spect::main::prepareTimeSegmentProjectionInputs(args);
+    ASSERT_EQ(args.projPaths.size(), 2u);
+    const auto loaded = spect::main::loadProjectionSet(
+        args.projPaths, 2, "Projection Data", "matrix", true);
+    ASSERT_EQ(loaded.sourceGroups.size(), 2u);
+    EXPECT_EQ(loaded.sourceGroups[0].size(), 2u);
+    ASSERT_EQ(loaded.data.size(), 12u);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_DOUBLE_EQ(loaded.data[static_cast<size_t>(i)], 11.0 + 2.0 * i);
+        EXPECT_DOUBLE_EQ(loaded.data[static_cast<size_t>(i + 6)],
+                         211.0 + 2.0 * i);
+    }
+
+    std::filesystem::remove(second / "Bed2.bin");
+    EXPECT_THROW(spect::main::loadProjectionSet(
+                     args.projPaths, 2, "Projection Data", "matrix", true),
+                 std::runtime_error);
+
+    std::filesystem::remove(first / "Bed2.bin");
+    args.projPaths.clear();
+    args.projPath = first.string();
+    spect::main::prepareTimeSegmentProjectionInputs(args);
+    EXPECT_TRUE(args.projPaths.empty());
+    EXPECT_EQ(std::filesystem::path(args.projPath).filename(), "Bed1.bin");
+    std::filesystem::remove_all(root);
 }
 TEST(IOTest, IoCSRBv1HeaderIs24Bytes) {
     EXPECT_EQ(sizeof(spect::io::CSRHeader), 24u);

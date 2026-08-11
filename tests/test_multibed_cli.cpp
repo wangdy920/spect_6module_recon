@@ -53,6 +53,26 @@ TEST(IOTest, MultiBedParserSortsDfListAndBProjListByBedNumber) {
                                         "C:/bg/Bed2.bin",
                                         "C:/bg/Bed3.bin"}));
 }
+TEST(IOTest, TimeSegmentMergeReadsFromGlobalConfig) {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_time_segment_config_tests";
+    std::filesystem::create_directories(dir);
+    const auto config = dir / "spect_config.ini";
+    {
+        std::ofstream out(config);
+        ASSERT_TRUE(out);
+        out << "[InputOutput]\nmerge_time_segments = true\n";
+    }
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        "SPECT_recon", "-config", config.string(), "-df", "Bed1.bin",
+        "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
+        "-dim", "108,108,80", "-vox", "0.3", "-ang", "360"
+    };
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.mergeTimeSegments);
+    std::filesystem::remove(config);
+}
 TEST(IOTest, MultiBedParserRejectsMoreThanFiveDfListBeds) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {

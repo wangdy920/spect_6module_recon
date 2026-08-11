@@ -27,6 +27,12 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   args.outputDir = dir.string();
   args.chunkCSRDir = "F:\\matrix\\chunks";
   args.projPaths = {"F:\\data\\Bed1.bin", "F:\\data\\Bed2.bin"};
+  args.mergeTimeSegments = true;
+  args.projectionSourceGroups = {
+      {"F:/case/20260810_210556/SPECT/Bed1.bin",
+       "F:/case/20260810_211500/SPECT/Bed1.bin"},
+      {"F:/case/20260810_210556/SPECT/Bed2.bin",
+       "F:/case/20260810_211500/SPECT/Bed2.bin"}};
   args.badDetectorFile = "bad_detector.txt";
   args.zBedFlip = true;
   args.Nx = 120;
@@ -144,6 +150,10 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   // Path backslashes must be JSON-escaped.
   EXPECT_NE(text.find("F:\\\\matrix\\\\chunks"), std::string::npos);
   EXPECT_NE(text.find("Bed1=max_physical_z"), std::string::npos);
+  EXPECT_NE(text.find("\"merge_time_segments\": true"), std::string::npos);
+  EXPECT_NE(text.find("\"time_segment_count\": 2"), std::string::npos);
+  EXPECT_NE(text.find("20260810_211500/SPECT/Bed2.bin"),
+            std::string::npos);
   EXPECT_NE(text.find("\"z_bed_flip\": true"), std::string::npos);
   EXPECT_NE(text.find("\"physical_z_offsets_mm\": [0.00000000000000000, "
                       "-70.00000000000000000]"),

@@ -358,6 +358,7 @@ int runProgram(int argc, char **argv) {
     if (ensureReconDims(args, &dimsWarning) && !dimsWarning.empty())
       logWarn(dimsWarning);
 
+    prepareTimeSegmentProjectionInputs(args);
     const BedSetupResult bedSetup = prepareBedSetup(args);
     for (const std::string &warning : bedSetup.warnings)
       logWarn(warning);
@@ -372,7 +373,9 @@ int runProgram(int argc, char **argv) {
 
     auto stageStart = ProfileClock::now();
     LoadedProjectionSet projectionSet =
-        loadProjectionSet(projPaths, args.numAngles, "Projection Data", "matrix");
+        loadProjectionSet(projPaths, args.numAngles, "Projection Data", "matrix",
+                          args.mergeTimeSegments);
+    args.projectionSourceGroups = projectionSet.sourceGroups;
     compactTiming.projectionLoadSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
     if (projectionSet.data.empty())
