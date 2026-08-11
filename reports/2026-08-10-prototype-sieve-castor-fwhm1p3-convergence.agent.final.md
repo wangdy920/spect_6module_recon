@@ -65,13 +65,13 @@
 6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 ```
 
-GPU 连续驻留与资源生命周期重构位于提交 `cbd3a27bdbf8459736bd474a71316397cb5cb757`；真实矩阵并发测试期望修正后，最终从干净提交 `6f3e950` 重编译并重置部署包。最新 Release 版本为 `20260811+6f3e950`，构建树与部署包可执行文件 SHA-256 均为：
+GPU 连续驻留与资源生命周期重构位于提交 `cbd3a27bdbf8459736bd474a71316397cb5cb757`；normfactor 的原型 ROI/PSF 支持域修复与时间段合并分别收敛于 `ece3454`、`0c1a06e`。最终从包含完整验证记录的干净提交 `949f766` 重编译并重置部署包。最新 Release 版本为 `20260811+949f766`，构建树与部署包可执行文件 SHA-256 均为：
 
 ```text
-B071B72ED2A1932EC2E11E7E074662B88844CB32F1036C6A08AB46E646A9ED3E
+814E01C10894950B009B05BEC5CB136A797B099610036F3852EC28BE0C5CBF7B
 ```
 
-权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`。随后只有本报告元数据更新，不改变该 Release 包。
+权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `AC2564D005109AEA11B823A3642F2993573E068CD45C96243972CE3F6AF78806`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`，以及新入口 `merge_time_segments=false`。随后只有本报告元数据更新，不改变该 Release 包。
 
 ### 3.2 比较规则
 
@@ -183,7 +183,7 @@ Derenzo 相对上一 Release 的三输出最大 relL2 为 `9.8653e-8`；EPguan �
 
 ### 4.7 日志位置回归
 
-最终 Release 一迭代真实 smoke 的 `recon_20260811_170825_516.log` 位于目标目录 `recon_out/perf_120s_20260811/final_release_6f3e950_smoke_1it/`；仓库根目录及 staging 根的 `recon_*.log` 数量均为 0。该运行在 25.628 秒内写出主/Smooth/Butterworth 三体积和 manifest，相对上一 Release 的最大 relL2 为 `8.8886e-8`。正常路径下旧的本地误写问题不存在；若目标目录无法创建，logger 仍会明确提示并回退 CWD，该行为只作为可观察失败兜底。
+最终 Release 一迭代真实 smoke 的 `recon_20260811_200119_286.log` 位于目标目录 `recon_out/final_release_949f766_smoke/`；仓库根目录及 staging 树的 `recon_*.log` 数量均为 0。该运行使用正式 Derenzo、normfactor、命中的 v3 denominator cache 和最终部署 EXE，写出主/Smooth/Butterworth 三体积及 manifest；相对同提交已验证构建的三输出 relL2 为 `2.9054e-8`、`2.8662e-8`、`8.8310e-8`，全部有限且无负值。130.065 秒墙钟包含共享 F: 上的矩阵预载和首次 NVRTC，不纳入 50 次性能基线。正常路径下旧的本地误写问题不存在；若目标目录无法创建，logger 仍会明确提示并回退 CWD，该行为只作为可观察失败兜底。
 
 ### 4.8 normfactor 原型对齐
 
@@ -222,7 +222,7 @@ normfactor 路线采纳原型等价的 ROI 裁列/PSF 支持域语义；多时�
 
 ### 5.2 已知限制
 
-- MSVC 链接仍报告既有 `LNK4098`；Release、233 项 CTest、显式五数据集滤波门和真实运行均成功，未把警告误报为已修复。
+- MSVC 链接仍报告既有 `LNK4098`；Release、235 项测试（234 通过、1 项外部数据门按设计跳过）、随后显式通过的五数据集滤波门和真实运行均成功，未把警告误报为已修复。
 - 五组 50 次原型等价门来自冻结正式结果；本轮 GPU 驻留改动以真实 EP/Derenzo、单元/集成测试和同输入上一 Release 对比复核，没有再次耗时重跑另外三组 50 次。
 - 原型是用户指定的实现权威，不是独立临床或物理真值；未验证新矩阵、新核素、新采集、DICOM 临床阅片或跨 GPU 性能。
 - 16 GB EP 峰值只余 729 MiB；其他任务在 resident warmup 后继续显著增长仍可能触发 OOM。
@@ -276,9 +276,9 @@ python scripts\compare_recon_metrics.py `
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| 最终 Release | `20260811+6f3e950`；build/staging SHA-256 `B071B72E…A9ED3E`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
-| 部署配置 | 源码/部署 SHA-256 `35E950A8…FB4F`；output Smooth 0.30 mm/3σ、Butterworth 5 cpcm/order 8、clamp on | 通过 |
-| 正式测试 | CTest 233/233；外部五集门默认 skip；显式冻结根 1/1 | 通过 |
+| 最终 Release | `20260811+949f766`；build/staging SHA-256 `814E01C1…CBF7B`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
+| 部署配置 | 源码/部署 SHA-256 `AC2564D0…78806`；output Smooth 0.30 mm/3σ、Butterworth 5 cpcm/order 8、clamp on、时间段合并默认 off | 通过 |
+| 正式测试 | 235 项：234 通过、外部五集门默认 skip 1；显式冻结根 1/1 | 通过 |
 | 五数据集原型主门 | 五个完整 50 次正式端点、对象/方向/有限非负门 | 通过 |
 | 输出滤波门 | 五组 Smooth 最大 `1.1563e-7`；Butterworth 同输入零差；clamp-on 门 | 通过 |
 | 短 A/B | 上一 Release/驻留候选中位数 35.7105/31.1907 秒；最大三输出 relL2 `9.3060e-8` | 通过，-12.66% |
@@ -286,7 +286,7 @@ python scripts\compare_recon_metrics.py `
 | EP 四床 50 | 三轮中位数 `141.3719 s`；对旧版 -25.46%；重复最大 `1.2482e-7` | 数值/性能增益通过，120 s 未达 |
 | 显存 | EP 峰值 15,333 MiB、最低空闲 729 MiB；Derenzo峰值 14,478 MiB | 通过但接近边界 |
 | 边界实验 | 行片双缓冲 20 次 127.0378 s；FP16 value relL2 `3.677e-4` | 均拒绝并回退 |
-| 最终真实 smoke | 25.628 s，主/Smooth/Butterworth/manifest；对旧版最大 `8.8886e-8` | 通过 |
+| 最终真实 smoke | 部署 EXE + normfactor + v3 cache；三输出相对已验证构建最大 `8.8310e-8`，均有限非负 | 通过 |
 | 日志目录 | smoke 日志在目标目录；仓库/staging 根数量 0 | 正常路径通过 |
 | normfactor 原型门 | EP 1 次 `2.2895e-7`；Derenzo 1/50 次 `2.1143e-7`/`2.9892e-7` | 通过 `1e-5` |
 | 时间段合并 | 2 段同 Bed1；相对单段×2 relL2 `2.8531e-8`；manifest 2 来源 | 通过 |
