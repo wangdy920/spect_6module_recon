@@ -379,7 +379,7 @@ std::string buildCompactDenomCacheManifest(
     const spect::filters::PSFKernels *psfKernels) {
   std::ostringstream oss;
   oss << std::setprecision(17);
-  oss << "cache_schema=compact_global_denom_v2_prototype_detector68\n";
+  oss << "cache_schema=compact_global_denom_v3_roi_pruned_psf_support\n";
   oss << "matrix_layout=compact-symmetric\n";
   oss << "matrix_source_kind=chunkCSRDir\n";
   appendFileIdentity(oss, "compact_meta", compactMetaPath);
@@ -490,6 +490,13 @@ std::string buildCompactDenomCacheManifest(
   oss << "psf_z_dependent=" << (args.psf.z_dependent ? 1 : 0) << '\n';
   oss << "psf_interp=" << psfInterpKey(args.psf.interp) << '\n';
   oss << "psf_min_sigmas=" << args.psf.min_sigmas << '\n';
+  if (args.useCylindricalMask && args.psf.mode != spect::filters::PSFMode::None) {
+    oss << "psf_matrix_support_mask=cylinder\n";
+    oss << "cylinder_mm=" << args.cylinderDiameterMM << ','
+        << args.cylinderHeightMM << '\n';
+    oss << "cylinder_center=" << args.cylCenterX << ',' << args.cylCenterY
+        << ',' << args.cylCenterZ << '\n';
+  }
   if (args.psf.mode != spect::filters::PSFMode::None &&
       bedZStarts.size() > 1) {
     oss << "psf_multibed_scope=per_bed_output_hardcut\n";
@@ -647,6 +654,25 @@ std::vector<double> runCompactSymmetricReconstruction(
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
+        // The frozen prototype prunes CSR columns to the cylinder before PSF.
+        // Masking after forward and before backward PSF is equivalent here.
+        const std::vector<uint8_t> compactLocalSupportMask =
+            compactPsfActive && args.useCylindricalMask
+                ? spect::core::makeCylMask_mm(
+                      baseNx, baseNy, baseNz, spacing.dx, spacing.dy, spacing.dz,
+                      args.cylinderDiameterMM, args.cylinderHeightMM,
+                      args.cylCenterX, args.cylCenterY, args.cylCenterZ)
+                : std::vector<uint8_t>();
+        const bool compactRoiPrunesMatrix =
+            !compactLocalSupportMask.empty() &&
+            // ponytail: full-FOV cylinders rely on the matrix's cylindrical
+            // support; add a column-support bitmap if future matrices differ.
+            (args.cylinderDiameterMM + 1e-6 <
+                 std::min(baseNx * spacing.dx, baseNy * spacing.dy) ||
+             (args.cylinderHeightMM > 0.0 &&
+              args.cylinderHeightMM + 1e-6 < baseNz * spacing.dz) ||
+             !std::isnan(args.cylCenterX) || !std::isnan(args.cylCenterY) ||
+             !std::isnan(args.cylCenterZ));
         // Sieve: iteration path is identical to Operator; save points write a
         // PSF-convolved copy of the state instead of the raw state.
         const bool sieveSaveCopyActive =
@@ -813,6 +839,9 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::vector<double> detZSensFwd;
           if (useWeightedSensitivity) {
             detZSensOnes.assign(baseNvox, 1.0);
+            if (!compactLocalSupportMask.empty())
+              spect::core::applyMaskInplace(detZSensOnes,
+                                             compactLocalSupportMask);
             detZSensFwd.assign(
                 static_cast<size_t>(compactMeta.fullRows()), 0.0);
           }
@@ -859,6 +888,9 @@ std::vector<double> runCompactSymmetricReconstruction(
             for (int bed = 0; bed < bedCount; ++bed) {
               computeLocalSensitivity(
                   compactAttFactorPtrs[static_cast<size_t>(bed)]);
+              if (!compactLocalSupportMask.empty())
+                spect::core::applyMaskInplace(localDenom,
+                                               compactLocalSupportMask);
               apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
                                  psfPtr, opts.threads);
               spect::app::accumulateBedVolumeToGlobal(
@@ -868,6 +900,9 @@ std::vector<double> runCompactSymmetricReconstruction(
             }
           } else {
             computeLocalSensitivity(nullptr);
+            if (!compactLocalSupportMask.empty())
+              spect::core::applyMaskInplace(localDenom,
+                                             compactLocalSupportMask);
             apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
                                psfPtr, opts.threads);
             for (int bed = 0; bed < bedCount; ++bed) {
@@ -1001,7 +1036,7 @@ std::vector<double> runCompactSymmetricReconstruction(
 
           const bool residentBatchInput =
               !debugStats && bedCount > 1 && backgroundProj.empty() &&
-              !compactHasAttenuation &&
+              !compactHasAttenuation && !compactRoiPrunesMatrix &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
               spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
@@ -1060,6 +1095,10 @@ std::vector<double> runCompactSymmetricReconstruction(
                   apply_psf_forward(localImages[static_cast<size_t>(bed)],
                                     localUsed[static_cast<size_t>(bed)], baseNx,
                                     baseNy, baseNz, opts, psfPtr, opts.threads);
+                  if (!compactLocalSupportMask.empty())
+                    spect::core::applyMaskInplace(
+                        localUsed[static_cast<size_t>(bed)],
+                        compactLocalSupportMask);
                   if (debugStats) {
                     logDebug(formatStatsEntry(
                         "compact_psf_forward.it" + std::to_string(it) +
@@ -1148,6 +1187,9 @@ std::vector<double> runCompactSymmetricReconstruction(
                         ".bed" + std::to_string(bed),
                     computeVectorStats(localNumer)));
               }
+              if (!compactLocalSupportMask.empty())
+                spect::core::applyMaskInplace(localNumer,
+                                               compactLocalSupportMask);
               apply_psf_backward(localNumer, baseNx, baseNy, baseNz, opts,
                                  psfPtr, opts.threads);
               if (compactPsfActive && debugStats) {
