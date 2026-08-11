@@ -18,5 +18,11 @@
 | S14 | `recon_out/mouse_prototype_numeric_policy_20260810/experiment.json` | 同一数值候选在低计数 mouse 50 次终点的拒绝记录 |
 | S15 | `recon_out/mouse_gain_window_orientation_20260810/experiment.json` | 反向存储增益读窗单独修复的结果及 blend 极性后续 |
 | S16 | `reports/assets/2026-08-11-prototype-sieve-castor-fwhm1p3-direct-slices.png` | 原型选层、共享 P99.5 窗宽、无插值、无候选缩放的直接切片 QA |
+| S17 | `recon_out/canonical_stitch_20260807/prototype_filter_parity/` | 五组受保护原型同输入 Smooth 0.30 mm/3σ 与 Butterworth 5 cpcm/order 8 线性参考体 |
+| S18 | `tests/test_sieve_output_filters.cpp` | 可复现的五组同输入滤波门、独立派生/钳制顺序与 CUDA 尺寸切换回归 |
+| S19 | `recon_out/output_filter_end_to_end_20260811/experiment.json` | 输出滤波采纳合同、五组结果、缓存根因与精确复现命令 |
+| S20 | `recon_out/output_filter_end_to_end_20260811/recon_manifest.json` | 正式入口一迭代 smoke 的输出参数、生产钳制与六文件清单 |
+| S21 | `recon_out/output_filter_end_to_end_20260811/spect_tests.json` | 当前 233 项测试的机器可读结果（232 通过、1 项外部数据门按设计跳过） |
+| S22 | `recon_out/output_filter_end_to_end_20260811/filter_parity_test.json` | 冻结五数据集同输入输出滤波门 1/1 通过的机器可读结果 |
 
 本登记只列本次报告实际使用的本地证据；受保护原型是实现一致性基线，不被表述为独立物理真值。

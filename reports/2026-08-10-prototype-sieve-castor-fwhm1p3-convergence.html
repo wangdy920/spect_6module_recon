@@ -39,11 +39,11 @@ a { color:#315f8c; text-decoration:none; }
 </style>
 </head>
 <body><h1 id="spect-sieve_castor_fwhm1p3">SPECT 重构与受保护原型 <code>sieve_castor_fwhm1p3</code> 收敛审查</h1>
-<p><strong>执行区间：</strong> 2026-08-10 至 2026-08-11<br />
-<strong>最终状态：</strong> 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。<br />
+<p><strong>执行区间：</strong> 2026-08-10 至 2026-08-11</p>
+<p><strong>最终状态：</strong> 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。
 <strong>数值权威：</strong> <code>6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu</code> 中的 <code>sieve + CASToR + FWHM 1.3 mm + 3σ</code> 路线。</p>
 <h2 id="1">1. 执行结论与判定合同</h2>
-<p>本轮不是以旧发布二进制或“看起来相似”为裁决，而是以用户指定的受保护原型为唯一数值基线。重构后的单 GPU compact-v4 路径在修复四类共享根因后，完成正式 Release 重编译，并对五个冻结数据集逐一执行完整数据、50 次 MLEM。最终聚合分析的 <code>all_five_object_endpoints_passed</code>、<code>all_five_numerical_gates_passed</code>、<code>single_final_output_contract</code> 与 <code>final_endpoint_passed</code> 均为 <code>true</code>。</p>
+<p>本轮不是以旧发布二进制或“看起来相似”为裁决，而是以用户指定的受保护原型为唯一数值基线。重构后的单 GPU compact-v4 路径在修复共享根因后，完成正式 Release 重编译，并对五个冻结数据集逐一执行完整数据、50 次 MLEM。随后又恢复原型在 canonical 输出后的独立 Smooth/Butterworth 派生：五组同输入滤波门、可选钳制门和一迭代真实入口 smoke 全部通过。</p>
 <table>
 <thead>
 <tr>
@@ -85,8 +85,8 @@ a { color:#315f8c; text-decoration:none; }
 </tr>
 <tr>
 <td>输出</td>
-<td>每组只有 <code>recon_it50.mhd/.raw</code>；有限、非负、间距/方向正确</td>
-<td>五组全部通过；21 个正式证据产物已 SHA-256 认证</td>
+<td>始终保留 <code>recon_it&lt;N&gt;</code>；Smooth 0.30 mm/3σ 与 Butterworth 5 cpcm/order 8 从同一主输出独立派生</td>
+<td>五组同输入线性/钳制门通过；生产 clamp-on 一迭代入口写出六个体文件且 manifest 一致</td>
 </tr>
 </tbody>
 </table>
@@ -104,8 +104,13 @@ a { color:#315f8c; text-decoration:none; }
 <tbody>
 <tr>
 <td>构建/接口收敛</td>
-<td>重构后存在 include、命名空间和测试目标残留；输出阶段及旧后处理字段仍有失效表面</td>
-<td>恢复 <code>SPECT_recon</code>/<code>spect_tests</code> Release 构建；生产只保留 compact-v4、单一输出与 <code>none|in_recon</code> 滤波阶段</td>
+<td>重构后存在 include、命名空间和测试目标残留；输出阶段曾被误删，导致主线不再生成原型 Smooth/Butterworth 派生</td>
+<td>恢复 <code>SPECT_recon</code>/<code>spect_tests</code> Release 构建；生产只保留 compact-v4 与一个保存数据流，阶段为 <code>none|in_recon|output</code></td>
+</tr>
+<tr>
+<td>输出滤波缓存</td>
+<td>输出 Butterworth 在相同参数下切换体积尺寸时，plan 重建后 response 指针已释放但参数缓存仍命中</td>
+<td>response/mask 缓存把空 device 指针纳入重建条件；尺寸切换回归和五组连续运行通过</td>
 </tr>
 <tr>
 <td>失败纪律</td>
@@ -180,7 +185,7 @@ a { color:#315f8c; text-decoration:none; }
 <p>这条证据链否定了此前“剩余问题一定在加权灵敏度”的临时判断：直接 <code>A^T w</code> 实验没有改变失败指标；真正的两个根因分别是 detector 68 坐标合同和 PSF 前初始 ROI 状态。</p>
 <h2 id="3">3. 验证方法</h2>
 <h3 id="31">3.1 输入与可执行文件冻结</h3>
-<p><code>input_preflight.json</code> 记录 42 个输入文件，包括正式可执行文件、配置、算法配置、坏探测器列表、受保护原型源码、6 个矩阵块及 metadata、18 个床位投影、5 组原型 Analyze 输出及 sidecar。正式二进制 SHA-256 为：</p>
+<p><code>input_preflight.json</code> 记录 42 个输入文件，包括正式可执行文件、配置、算法配置、坏探测器列表、受保护原型源码、6 个矩阵块及 metadata、18 个床位投影、5 组原型 Analyze 输出及 sidecar。五组 50 次基础重建证据所用二进制 SHA-256 为：</p>
 <pre><code class="language-text">98F4771023E2C9A40C7045CE8F2EB95DDA6E7BD1617EBDDC7F899E857AE03019
 </code></pre>
 <p>受保护原型源码 SHA-256 为：</p>
@@ -193,7 +198,7 @@ a { color:#315f8c; text-decoration:none; }
 <li>Derenzo：中心保留率 ≥ 95%，rod separability 相对变化绝对值 ≤ 5%，覆盖下降不超过 2 个百分点，最长 gap 增量不超过 1 层。</li>
 <li>EP：轴向 CV 相对变化绝对值 ≤ 5%，覆盖下降不超过 2 个百分点，seam 中位变化 ≥ -0.02。</li>
 <li>Mouse：支撑区 NCC ≥ 0.99，逐切片 NCC 中位数 ≥ 0.95。</li>
-<li>所有输出：体素有限、无负值、间距误差 ≤ <code>1e-6 mm</code>，manifest 仅声明 MHD/RAW 两个最终文件。</li>
+<li>主输出：体素有限、无负值、间距误差 ≤ <code>1e-6 mm</code>。输出滤波先以 clamp-off 对齐原型线性体，再以 clamp-on 对齐 <code>max(prototype,0)</code>；manifest 必须声明主、Smooth、Butterworth 共六个体文件。</li>
 </ul>
 <h3 id="33">3.3 直接图像质量检查</h3>
 <p>下图的切片索引只由原型最大平面和确定；每一对原型/当前图使用同一原型正体素 P99.5 窗宽，不插值、不对候选重标度、不逐图归一化。该图用于发现方向、裁剪、接缝或局部结构异常，数值门仍由 JSON 证书裁决。</p>
@@ -331,14 +336,65 @@ a { color:#315f8c; text-decoration:none; }
 </tbody>
 </table>
 <p>耗时仅记录本机本轮运行，不作为性能采纳结论。四/五床的同几何分母缓存被复用，但每组投影、50 次 numerator/update 和最终输出均独立执行。</p>
+<h3 id="44-smooth-butterworth">4.4 输出级 Smooth / Butterworth 与非负钳制门</h3>
+<p>输出滤波合同固定为：主输出不滤波；Smooth 和 Butterworth 都从同一份 canonical stitch + mask 体独立派生，不能串联。线性验证关闭 <code>output_nonnegative_clamp</code>，生产验证开启并逐体比较 <code>max(prototype, 0)</code>。五组冻结同输入采用 <code>2e-7</code> relative-L2 门；主输入与 Butterworth 为数值零差异，Smooth 的最大 relL2 为 <code>1.1563017424662106e-7</code>，钳制后保持同一误差并通过门。</p>
+<table>
+<thead>
+<tr>
+<th>数据集</th>
+<th style="text-align: right;">同输入主体 relL2</th>
+<th style="text-align: right;">Smooth relL2</th>
+<th style="text-align: right;">Butterworth relL2</th>
+<th>clamp-on 对应门</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>derenzo_182222</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.1392794e-7</td>
+<td style="text-align: right;">0</td>
+<td>通过</td>
+</tr>
+<tr>
+<td><code>epguan</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.1563017e-7</td>
+<td style="text-align: right;">0</td>
+<td>通过</td>
+</tr>
+<tr>
+<td><code>epguan_19p2mm</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.0843560e-7</td>
+<td style="text-align: right;">0</td>
+<td>通过</td>
+</tr>
+<tr>
+<td><code>mouse_ch6o6p2</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.1321093e-7</td>
+<td style="text-align: right;">0</td>
+<td>通过</td>
+</tr>
+<tr>
+<td><code>mouse</code></td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1.1213429e-7</td>
+<td style="text-align: right;">0</td>
+<td>通过</td>
+</tr>
+</tbody>
+</table>
+<p>端到端 smoke 使用正式 Derenzo 投影、已认证 denominator cache、<code>sieve + CASToR 1.3 mm/3σ</code> 和一次 MLEM。进程退出码为 0；<code>recon_it1</code>、<code>recon_it1_smooth</code>、<code>recon_it1_butter</code> 均为 <code>100×100×72</code>、有限且负体素数为 0，manifest 记录独立派生、生产钳制及六文件清单。该 smoke 只验证真实保存入口，不替代上面的五组同输入数值门，也没有重跑五组 50 次 MLEM。</p>
 <h2 id="5">5. 决策、限制与停止条件</h2>
 <h3 id="51">5.1 采纳与拒绝</h3>
-<p>最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。先前已完成的构建、输出表面、manifest、fail-closed 和 CUDA 投影缓存修复一并保留。</p>
+<p>最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。输出端恢复一个最小保存数据流：未滤波主输出加两个独立派生副本；同时修复 CUDA Butterworth 尺寸切换缓存。CLI 不新增输出滤波参数，物理单位与钳制策略只由 <code>[Filtering]</code> 明确配置。</p>
 <p>以下候选明确拒绝且实现已回退：CASToR 低前向中性比、0.01 MLEM 更新下限、直接 <code>A^T w</code> 加权灵敏度。原因不是“代码复杂”，而是它们在冻结门下没有减少目标误差；保留它们只会制造第二数值路线。</p>
 <h3 id="52">5.2 已知限制</h3>
 <ul>
-<li>MSVC 链接仍给出已知 <code>LNK4098</code> 默认库冲突警告，但 Release 构建、链接、228 项测试和五次正式运行均成功；未把警告误报为已修复。</li>
-<li>当前工作树包含本轮之前已存在的大范围重构改动且尚未提交。本报告验证的是当前工作树构建出的指定 SHA-256 二进制，不代表已完成 Git 发布收口。</li>
+<li>MSVC 链接仍给出已知 <code>LNK4098</code> 默认库冲突警告，但 Release 构建、链接、CTest 233/233 和五次正式运行均成功；未把警告误报为已修复。</li>
+<li>五组 50 次正式重建先于输出派生恢复；本轮没有重复执行约一小时的五组迭代，而是用冻结的同输入五组体积验证滤波算子，并用一次真实重建验证保存/manifest 接口。</li>
 <li>原型是用户指定的实现基线，不是独立临床/物理真值。本轮未做新核素、新矩阵、新采集、DICOM 临床阅片或跨 GPU 架构的外推验证。</li>
 <li>Derenzo 通过但不像另外四组那样接近机器精度；若未来收紧 relL2 门，必须重新冻结合同后再定位，不能回写当前阈值。</li>
 </ul>
@@ -365,6 +421,11 @@ python recon_out\canonical_stitch_20260807\analyze_parity.py `
 build\Release\bin\Release\spect_tests.exe `
   --gtest_output=json:D:\Projects\SPECT-recon\recon_out\prototype_sieve_castor_fwhm1p3_final_20260811\spect_tests.json
 
+$env:SPECT_FILTER_PARITY_BASE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\runs).Path
+$env:SPECT_FILTER_PARITY_REFERENCE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\prototype_filter_parity).Path
+build\Release\bin\Release\spect_tests.exe `
+  --gtest_filter=OutputFilterParityTest.FrozenFiveDatasetsWhenRequested
+
 python recon_out\canonical_stitch_20260807\certify_outputs.py `
   --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
 </code></pre>
@@ -386,7 +447,7 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 </tr>
 <tr>
 <td>正式单元/集成测试</td>
-<td>直接测试 JSON 228/228；CTest 228/228</td>
+<td>CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过</td>
 <td>通过</td>
 </tr>
 <tr>
@@ -410,8 +471,13 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 <td>通过</td>
 </tr>
 <tr>
-<td>单一输出清单</td>
-<td>每组仅 MHD/RAW；无派生 smooth/butter 输出</td>
+<td>输出滤波同输入门</td>
+<td>五组主输入/Butterworth relL2=0；Smooth 最大 1.1563017e-7；clamp-on 对应门通过</td>
+<td>通过</td>
+</tr>
+<tr>
+<td>真实保存入口</td>
+<td>一迭代 Derenzo 写出主/Smooth/Butterworth 六文件；全部有限非负；manifest 一致</td>
 <td>通过</td>
 </tr>
 <tr>
@@ -420,13 +486,13 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 <td>通过</td>
 </tr>
 <tr>
-<td>输出证书</td>
-<td>21 个正式证据文件、90,349,475 字节 SHA-256 列表</td>
-<td>通过</td>
+<td>基础重建输出证书</td>
+<td>原五组 21 个正式证据文件、90,349,475 字节 SHA-256 列表</td>
+<td>通过；证书不包含本轮派生 smoke</td>
 </tr>
 <tr>
 <td>未验证范围</td>
-<td>新数据、新矩阵、临床正确性、发布提交/打包、跨架构性能</td>
+<td>五组 50 次重新生成派生文件、新数据、新矩阵、临床正确性、跨架构性能</td>
 <td>明确未验证</td>
 </tr>
 </tbody>

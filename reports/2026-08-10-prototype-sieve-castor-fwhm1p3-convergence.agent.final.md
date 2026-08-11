@@ -7,7 +7,7 @@
 
 ## 1. 执行结论与判定合同
 
-本轮不是以旧发布二进制或“看起来相似”为裁决，而是以用户指定的受保护原型为唯一数值基线。重构后的单 GPU compact-v4 路径在修复四类共享根因后，完成正式 Release 重编译，并对五个冻结数据集逐一执行完整数据、50 次 MLEM。最终聚合分析的 `all_five_object_endpoints_passed`、`all_five_numerical_gates_passed`、`single_final_output_contract` 与 `final_endpoint_passed` 均为 `true`。
+本轮不是以旧发布二进制或“看起来相似”为裁决，而是以用户指定的受保护原型为唯一数值基线。重构后的单 GPU compact-v4 路径在修复共享根因后，完成正式 Release 重编译，并对五个冻结数据集逐一执行完整数据、50 次 MLEM。随后又恢复原型在 canonical 输出后的独立 Smooth/Butterworth 派生：五组同输入滤波门、可选钳制门和一迭代真实入口 smoke 全部通过。
 
 | 合同项 | 冻结口径 | 本轮结果 |
 |---|---|---|
@@ -17,7 +17,7 @@
 | 多床 | `Bed1=max physical z`、`z_bed_flip=1`、center66/cosine10、原型增益链 | 四/五床增益、方向与对象门通过 |
 | 数值门 | 支撑区 NCC ≥ 0.99；缩放匹配 relL2 ≤ 0.10 | 五组全部通过；最弱项为 Derenzo 0.995661 / 0.068587 |
 | 对象门 | Derenzo、EP、mouse 各自冻结指标 | 五组全部通过 |
-| 输出 | 每组只有 `recon_it50.mhd/.raw`；有限、非负、间距/方向正确 | 五组全部通过；21 个正式证据产物已 SHA-256 认证 |
+| 输出 | 始终保留 `recon_it<N>`；Smooth 0.30 mm/3σ 与 Butterworth 5 cpcm/order 8 从同一主输出独立派生 | 五组同输入线性/钳制门通过；生产 clamp-on 一迭代入口写出六个体文件且 manifest 一致 |
 
 结论的量词仅覆盖这五个冻结输入和上述合同。它证明当前实现复现指定原型输出；不把原型提升为独立物理真值，也不外推到未验证的矩阵、采集或参数组合。
 
@@ -27,7 +27,8 @@
 
 | 审查项 | 发现 | 最终处置与证据 |
 |---|---|---|
-| 构建/接口收敛 | 重构后存在 include、命名空间和测试目标残留；输出阶段及旧后处理字段仍有失效表面 | 恢复 `SPECT_recon`/`spect_tests` Release 构建；生产只保留 compact-v4、单一输出与 `none|in_recon` 滤波阶段 |
+| 构建/接口收敛 | 重构后存在 include、命名空间和测试目标残留；输出阶段曾被误删，导致主线不再生成原型 Smooth/Butterworth 派生 | 恢复 `SPECT_recon`/`spect_tests` Release 构建；生产只保留 compact-v4 与一个保存数据流，阶段为 `none|in_recon|output` |
+| 输出滤波缓存 | 输出 Butterworth 在相同参数下切换体积尺寸时，plan 重建后 response 指针已释放但参数缓存仍命中 | response/mask 缓存把空 device 指针纳入重建条件；尺寸切换回归和五组连续运行通过 |
 | 失败纪律 | PSF CUDA 不可用时存在不可接受的降级风险；复现目录可混入旧产物 | PSF 路径改为 fail-closed；正式运行使用全新输出根并以 manifest/证书闭合 |
 | CUDA 投影缓存 | 原实现把 host 指针和数量误当成内容身份，复用/修改缓冲区时可能沿用陈旧投影 | 每个 numerator pass 对每床刷新一次，同时保持分支/块内复用；突变缓存回归测试通过 |
 | 多床反向存储 | `z_bed_flip=1` 后，增益拟合读取了错误物理重叠端，且 cosine 融合极性仍按未反向存储解释 | 交换增益读窗并反转 blend 极性；独立修复虽能救 CH mouse 但使 EP 对象门失败，组合修复后五组通过 |
@@ -52,7 +53,7 @@
 
 ### 3.1 输入与可执行文件冻结
 
-`input_preflight.json` 记录 42 个输入文件，包括正式可执行文件、配置、算法配置、坏探测器列表、受保护原型源码、6 个矩阵块及 metadata、18 个床位投影、5 组原型 Analyze 输出及 sidecar。正式二进制 SHA-256 为：
+`input_preflight.json` 记录 42 个输入文件，包括正式可执行文件、配置、算法配置、坏探测器列表、受保护原型源码、6 个矩阵块及 metadata、18 个床位投影、5 组原型 Analyze 输出及 sidecar。五组 50 次基础重建证据所用二进制 SHA-256 为：
 
 ```text
 98F4771023E2C9A40C7045CE8F2EB95DDA6E7BD1617EBDDC7F899E857AE03019
@@ -73,7 +74,7 @@
 - Derenzo：中心保留率 ≥ 95%，rod separability 相对变化绝对值 ≤ 5%，覆盖下降不超过 2 个百分点，最长 gap 增量不超过 1 层。
 - EP：轴向 CV 相对变化绝对值 ≤ 5%，覆盖下降不超过 2 个百分点，seam 中位变化 ≥ -0.02。
 - Mouse：支撑区 NCC ≥ 0.99，逐切片 NCC 中位数 ≥ 0.95。
-- 所有输出：体素有限、无负值、间距误差 ≤ `1e-6 mm`，manifest 仅声明 MHD/RAW 两个最终文件。
+- 主输出：体素有限、无负值、间距误差 ≤ `1e-6 mm`。输出滤波先以 clamp-off 对齐原型线性体，再以 clamp-on 对齐 `max(prototype,0)`；manifest 必须声明主、Smooth、Butterworth 共六个体文件。
 
 ### 3.3 直接图像质量检查
 
@@ -120,18 +121,32 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 
 耗时仅记录本机本轮运行，不作为性能采纳结论。四/五床的同几何分母缓存被复用，但每组投影、50 次 numerator/update 和最终输出均独立执行。
 
+### 4.4 输出级 Smooth / Butterworth 与非负钳制门
+
+输出滤波合同固定为：主输出不滤波；Smooth 和 Butterworth 都从同一份 canonical stitch + mask 体独立派生，不能串联。线性验证关闭 `output_nonnegative_clamp`，生产验证开启并逐体比较 `max(prototype, 0)`。五组冻结同输入采用 `2e-7` relative-L2 门；主输入与 Butterworth 为数值零差异，Smooth 的最大 relL2 为 `1.1563017424662106e-7`，钳制后保持同一误差并通过门。
+
+| 数据集 | 同输入主体 relL2 | Smooth relL2 | Butterworth relL2 | clamp-on 对应门 |
+|---|---:|---:|---:|---|
+| `derenzo_182222` | 0 | 1.1392794e-7 | 0 | 通过 |
+| `epguan` | 0 | 1.1563017e-7 | 0 | 通过 |
+| `epguan_19p2mm` | 0 | 1.0843560e-7 | 0 | 通过 |
+| `mouse_ch6o6p2` | 0 | 1.1321093e-7 | 0 | 通过 |
+| `mouse` | 0 | 1.1213429e-7 | 0 | 通过 |
+
+端到端 smoke 使用正式 Derenzo 投影、已认证 denominator cache、`sieve + CASToR 1.3 mm/3σ` 和一次 MLEM。进程退出码为 0；`recon_it1`、`recon_it1_smooth`、`recon_it1_butter` 均为 `100×100×72`、有限且负体素数为 0，manifest 记录独立派生、生产钳制及六文件清单。该 smoke 只验证真实保存入口，不替代上面的五组同输入数值门，也没有重跑五组 50 次 MLEM。
+
 ## 5. 决策、限制与停止条件
 
 ### 5.1 采纳与拒绝
 
-最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。先前已完成的构建、输出表面、manifest、fail-closed 和 CUDA 投影缓存修复一并保留。
+最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。输出端恢复一个最小保存数据流：未滤波主输出加两个独立派生副本；同时修复 CUDA Butterworth 尺寸切换缓存。CLI 不新增输出滤波参数，物理单位与钳制策略只由 `[Filtering]` 明确配置。
 
 以下候选明确拒绝且实现已回退：CASToR 低前向中性比、0.01 MLEM 更新下限、直接 `A^T w` 加权灵敏度。原因不是“代码复杂”，而是它们在冻结门下没有减少目标误差；保留它们只会制造第二数值路线。
 
 ### 5.2 已知限制
 
-- MSVC 链接仍给出已知 `LNK4098` 默认库冲突警告，但 Release 构建、链接、228 项测试和五次正式运行均成功；未把警告误报为已修复。
-- 当前工作树包含本轮之前已存在的大范围重构改动且尚未提交。本报告验证的是当前工作树构建出的指定 SHA-256 二进制，不代表已完成 Git 发布收口。
+- MSVC 链接仍给出已知 `LNK4098` 默认库冲突警告，但 Release 构建、链接、CTest 233/233 和五次正式运行均成功；未把警告误报为已修复。
+- 五组 50 次正式重建先于输出派生恢复；本轮没有重复执行约一小时的五组迭代，而是用冻结的同输入五组体积验证滤波算子，并用一次真实重建验证保存/manifest 接口。
 - 原型是用户指定的实现基线，不是独立临床/物理真值。本轮未做新核素、新矩阵、新采集、DICOM 临床阅片或跨 GPU 架构的外推验证。
 - Derenzo 通过但不像另外四组那样接近机器精度；若未来收紧 relL2 门，必须重新冻结合同后再定位，不能回写当前阈值。
 
@@ -163,6 +178,11 @@ python recon_out\canonical_stitch_20260807\analyze_parity.py `
 build\Release\bin\Release\spect_tests.exe `
   --gtest_output=json:D:\Projects\SPECT-recon\recon_out\prototype_sieve_castor_fwhm1p3_final_20260811\spect_tests.json
 
+$env:SPECT_FILTER_PARITY_BASE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\runs).Path
+$env:SPECT_FILTER_PARITY_REFERENCE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\prototype_filter_parity).Path
+build\Release\bin\Release\spect_tests.exe `
+  --gtest_filter=OutputFilterParityTest.FrozenFiveDatasetsWhenRequested
+
 python recon_out\canonical_stitch_20260807\certify_outputs.py `
   --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
 ```
@@ -174,15 +194,16 @@ python recon_out\canonical_stitch_20260807\certify_outputs.py `
 | 检查 | 证据 | 状态 |
 |---|---|---|
 | Release 配置与编译 | `SPECT_recon`、`spect_tests` 目标成功；正式 exe 哈希已冻结 | 通过；保留 LNK4098 标记 |
-| 正式单元/集成测试 | 直接测试 JSON 228/228；CTest 228/228 | 通过 |
+| 正式单元/集成测试 | CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过 | 通过 |
 | detector 68 精确映射 | 新回归测试检查 60×12×12、边界及旧错误区域 | 通过 |
 | 一迭代结构门 | no-PSF `7.30e-8`；sieve `8.95e-8` | 通过 |
 | 五数据集 50 次 MLEM | 五进程退出码 0；聚合 analyzer 全门为真 | 通过 |
 | 方向/间距/有限非负 | 每组 manifest 与指标 JSON | 通过 |
-| 单一输出清单 | 每组仅 MHD/RAW；无派生 smooth/butter 输出 | 通过 |
+| 输出滤波同输入门 | 五组主输入/Butterworth relL2=0；Smooth 最大 1.1563017e-7；clamp-on 对应门通过 | 通过 |
+| 真实保存入口 | 一迭代 Derenzo 写出主/Smooth/Butterworth 六文件；全部有限非负；manifest 一致 | 通过 |
 | 直接切片视觉 QA | 共享原型窗宽、无插值、无候选缩放 | 通过 |
-| 输出证书 | 21 个正式证据文件、90,349,475 字节 SHA-256 列表 | 通过 |
-| 未验证范围 | 新数据、新矩阵、临床正确性、发布提交/打包、跨架构性能 | 明确未验证 |
+| 基础重建输出证书 | 原五组 21 个正式证据文件、90,349,475 字节 SHA-256 列表 | 通过；证书不包含本轮派生 smoke |
+| 未验证范围 | 五组 50 次重新生成派生文件、新数据、新矩阵、临床正确性、跨架构性能 | 明确未验证 |
 
 ## References
 
