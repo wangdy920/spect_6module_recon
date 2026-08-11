@@ -25,6 +25,23 @@ bool applySeparableConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
                                      const std::vector<double> &kz,
                                      bool useFloat = true);
 
+// CASToR 前向卷积 C = D_z^-1 * K：零扩展可分离卷积（无镜像补偿），
+// 随后逐体素除以 z 边界补偿因子（norm[z] = 落入 [0,Nz) 的 kz 权重和）。
+// 反向（伴随侧）按 CASToR 源码复用同一前向调用。
+bool applyCastorConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
+                                  int Nz,
+                                  const std::vector<double> &kx,
+                                  const std::vector<double> &ky,
+                                  const std::vector<double> &kz,
+                                  bool useFloat = true);
+
+// CASToR forward convolution with an unconditional float32 staging/kernel
+// path. This entry intentionally ignores SPECT_CUDA_PSF_DOUBLE.
+bool applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+    std::vector<double> &f, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz);
+
 bool applySeparableConv3DAdjointInplaceCUDA(
     std::vector<double> &f, int Nx, int Ny, int Nz,
     const std::vector<double> &kx, const std::vector<double> &ky,
@@ -80,6 +97,19 @@ inline bool applySeparableConv3DInplaceCUDA(
     std::vector<double> &, int, int, int, const std::vector<double> &,
     const std::vector<double> &, const std::vector<double> &,
     bool = true) {
+  return false;
+}
+
+inline bool applyCastorConv3DInplaceCUDA(
+    std::vector<double> &, int, int, int, const std::vector<double> &,
+    const std::vector<double> &, const std::vector<double> &,
+    bool = true) {
+  return false;
+}
+
+inline bool applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+    std::vector<double> &, int, int, int, const std::vector<double> &,
+    const std::vector<double> &, const std::vector<double> &) {
   return false;
 }
 

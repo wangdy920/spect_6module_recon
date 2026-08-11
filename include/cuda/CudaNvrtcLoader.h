@@ -5,7 +5,7 @@
 #include <cuda.h>
 #include <nvrtc.h>
 
-#include <cstdio>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -19,15 +19,15 @@ inline std::string compileNvrtcProgramToPtx(const char *source,
   int nvrtcMinor = 0;
   SPECT_NVRTC_CHECK(nvrtcVersion(&nvrtcMajor, &nvrtcMinor));
 
-  std::fprintf(stderr, "[INFO] NVRTC compile %s (NVRTC %d.%d",
-               programName ? programName : "(unnamed)", nvrtcMajor,
-               nvrtcMinor);
+  // cerr so ConsoleTeeGuard captures NVRTC compile notes in the run log.
+  std::cerr << "[INFO] NVRTC compile "
+            << (programName ? programName : "(unnamed)") << " (NVRTC "
+            << nvrtcMajor << '.' << nvrtcMinor;
   for (int i = 0; i < optionCount; ++i) {
-    if (options && options[i]) {
-      std::fprintf(stderr, ", %s", options[i]);
-    }
+    if (options && options[i])
+      std::cerr << ", " << options[i];
   }
-  std::fprintf(stderr, ")\n");
+  std::cerr << ")\n";
 
   nvrtcProgram program = nullptr;
   SPECT_NVRTC_CHECK(

@@ -32,96 +32,15 @@ std::size_t metadataFileSize(const std::string &path) {
 
 } // namespace
 
-int CompactSymmetryMetadata::xySymmetryCount() const {
-  switch (mode) {
-  case CompactSymmetryMode::Sym45:
-  case CompactSymmetryMode::Sym45Z:
-    return 8;
-  case CompactSymmetryMode::Sym90:
-  case CompactSymmetryMode::Sym90Z:
-    return 4;
-  case CompactSymmetryMode::Sym180:
-  case CompactSymmetryMode::SymZ180:
-    return 2;
-  default:
-    return 1;
-  }
-}
-
-int CompactSymmetryMetadata::zBranchCount() const {
-  const bool zMode = mode == CompactSymmetryMode::ZOnly ||
-                     mode == CompactSymmetryMode::Sym45Z ||
-                     mode == CompactSymmetryMode::Sym90Z ||
-                     mode == CompactSymmetryMode::SymZ180;
-  return (zMode || useZSym) && compactDetZ < detNz ? 2 : 1;
-}
-
-const char *compactSymmetryModeName(CompactSymmetryMode mode) {
-  switch (mode) {
-  case CompactSymmetryMode::None:
-    return "none";
-  case CompactSymmetryMode::ZOnly:
-    return "zonly";
-  case CompactSymmetryMode::Sym45:
-    return "45";
-  case CompactSymmetryMode::Sym45Z:
-    return "45z";
-  case CompactSymmetryMode::Sym90:
-    return "90";
-  case CompactSymmetryMode::Sym90Z:
-    return "90z";
-  case CompactSymmetryMode::Sym180:
-    return "180";
-  case CompactSymmetryMode::SymZ180:
-    return "z180";
-  }
-  return "unknown";
-}
-
-CompactSymmetryMode inferCompactSymmetryMode(
-    const CompactSymmetryMetadata &meta) {
-  const bool looks45 = meta.fullNumAngles > 0 &&
-                       (meta.fullNumAngles % 8) == 0 &&
-                       meta.compactNumAngles == meta.fullNumAngles / 8 + 1;
-  const bool looks90 = meta.fullNumAngles > 0 &&
-                       (meta.fullNumAngles % 4) == 0 &&
-                       meta.compactNumAngles == meta.fullNumAngles / 4;
-  const bool looks180 = meta.fullNumAngles > 0 &&
-                        (meta.fullNumAngles % 2) == 0 &&
-                        meta.compactNumAngles == meta.fullNumAngles / 2;
-
-  if (meta.use45Sym || meta.symCode == 45 || meta.symmetryOrder == 8 ||
-      looks45) {
-    return meta.useZSym ? CompactSymmetryMode::Sym45Z
-                        : CompactSymmetryMode::Sym45;
-  }
-  if (meta.use90Sym || looks90) {
-    return meta.useZSym ? CompactSymmetryMode::Sym90Z
-                        : CompactSymmetryMode::Sym90;
-  }
-  if (looks180) {
-    return meta.useZSym ? CompactSymmetryMode::SymZ180
-                        : CompactSymmetryMode::Sym180;
-  }
-  if (meta.useZSym) {
-    return CompactSymmetryMode::ZOnly;
-  }
-  return CompactSymmetryMode::None;
-}
+const char *compactSymmetryModeName() { return "90z"; }
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   const std::size_t fileSize = metadataFileSize(path);
-  if (fileSize < kCompactMetadataExtendedV1Bytes) {
+  if (fileSize != kCompactMetadataBytes) {
     throw std::runtime_error(
-        "Compact metadata file too small (" + std::to_string(fileSize) +
-        " bytes, expected at least " + std::to_string(kCompactMetadataExtendedV1Bytes) +
-        "): " + path);
-  }
-  if (fileSize > kCompactMetadataExtendedV2Bytes) {
-    throw std::runtime_error(
-        "Compact metadata has unexpected trailing bytes (" +
-        std::to_string(fileSize) + " bytes, max supported " +
-        std::to_string(kCompactMetadataExtendedV2Bytes) + "): " + path);
+        "Compact metadata size mismatch (" + std::to_string(fileSize) +
+        " bytes, canonical v4 SYM_90Z metadata requires exactly " +
+        std::to_string(kCompactMetadataBytes) + "): " + path);
   }
 
   std::ifstream in(path, std::ios::binary);
@@ -130,10 +49,10 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   }
 
   CompactSymmetryMetadata meta;
+  int detNxDuplicate = 0;
   int use90 = 0;
   int useZ = 0;
   int use45 = 0;
-
   if (!readScalar(in, meta.totalRows) || !readScalar(in, meta.totalVoxels) ||
       !readScalar(in, meta.maxNnz) ||
       !readScalar(in, meta.compactNumAngles) ||
@@ -142,45 +61,14 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
       !readScalar(in, meta.fullNumAngles) || !readScalar(in, meta.Nx) ||
       !readScalar(in, meta.Ny) || !readScalar(in, meta.Nz) ||
       !readScalar(in, meta.voxelSize) ||
-      !readScalar(in, meta.detNxDuplicate) || !readScalar(in, meta.detNz) ||
+      !readScalar(in, detNxDuplicate) || !readScalar(in, meta.detNz) ||
       !readScalar(in, meta.pixelSize) || !readScalar(in, meta.detectorY) ||
       !readScalar(in, meta.detectorThickness) || !readScalar(in, use90) ||
-      !readScalar(in, useZ)) {
+      !readScalar(in, useZ) || !readScalar(in, use45) ||
+      !readScalar(in, meta.symCode) ||
+      !readScalar(in, meta.symmetryOrder)) {
     throw std::runtime_error("Compact metadata is truncated: " + path);
   }
-
-  meta.use90Sym = use90 != 0;
-  meta.useZSym = useZ != 0;
-
-  if (fileSize >= kCompactMetadataExtendedV1Bytes) {
-    if (!readScalar(in, use45) || !readScalar(in, meta.symCode) ||
-        !readScalar(in, meta.symmetryOrder)) {
-      throw std::runtime_error(
-          "Compact metadata extended header is truncated: " + path);
-    }
-    meta.use45Sym = use45 != 0;
-  }
-
-  if (fileSize >= kCompactMetadataExtendedV2Bytes) {
-    if (!readScalar(in, meta.roiRadius) || !readScalar(in, meta.roiSide)) {
-      throw std::runtime_error(
-          "Compact metadata ROI fields are truncated: " + path);
-    }
-  }
-
-  if (meta.detNz <= 0) {
-    meta.detNz = meta.useZSym ? 2 * meta.compactDetZ : meta.compactDetZ;
-  }
-  if (meta.compactRaysPerAngle <= 0) {
-    meta.compactRaysPerAngle = meta.detNx * meta.compactDetZ;
-  }
-  if (meta.totalVoxels <= 0) {
-    meta.totalVoxels = meta.Nx * meta.Ny * meta.Nz;
-  }
-  if (meta.symmetryOrder <= 0) {
-    meta.symmetryOrder = 1;
-  }
-  meta.mode = inferCompactSymmetryMode(meta);
 
   requirePositive(meta.totalRows, "totalRows");
   requirePositive(meta.totalVoxels, "totalVoxels");
@@ -194,46 +82,47 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   requirePositive(meta.Ny, "Ny");
   requirePositive(meta.Nz, "Nz");
 
+  auto reject = [&](const std::string &reason) {
+    throw std::runtime_error("Compact metadata is not canonical v4 SYM_90Z (" +
+                             reason + "): " + path);
+  };
+  if (use90 != 1 || useZ != 1 || use45 != 0 || meta.symCode != 90 ||
+      meta.symmetryOrder != 4) {
+    reject("requires use90=1, useZ=1, use45=0, symCode=90, symmetryOrder=4");
+  }
+  if (detNxDuplicate != meta.detNx) {
+    reject("detNx duplicate does not match detNx");
+  }
+  if (meta.Nx != meta.Ny) {
+    reject("Nx must equal Ny");
+  }
+  if (meta.fullNumAngles % 4 != 0 ||
+      meta.compactNumAngles != meta.fullNumAngles / 4) {
+    reject("compactNumAngles must equal fullNumAngles/4");
+  }
+  if (meta.detNz != 2 * meta.compactDetZ) {
+    reject("detNz must equal 2*compactDetZ");
+  }
+  if (meta.compactRaysPerAngle != meta.detNx * meta.compactDetZ) {
+    reject("compactRaysPerAngle must equal detNx*compactDetZ");
+  }
+  if (meta.totalRows != meta.compactRows()) {
+    reject("totalRows does not match compact geometry");
+  }
+  if (meta.totalVoxels != meta.voxelCount()) {
+    reject("totalVoxels does not match image geometry");
+  }
   return meta;
 }
 
 int fullAngleFromCompactAngle(const CompactSymmetryMetadata &meta,
                               int compactAngle, int symId, bool &valid) {
-  valid = true;
-  if (compactAngle < 0 || compactAngle >= meta.compactNumAngles) {
-    valid = false;
+  valid = compactAngle >= 0 && compactAngle < meta.compactNumAngles &&
+          symId >= 0 && symId < meta.xySymmetryCount();
+  if (!valid) {
     return 0;
   }
-
-  switch (meta.mode) {
-  case CompactSymmetryMode::None:
-  case CompactSymmetryMode::ZOnly:
-    return compactAngle;
-  case CompactSymmetryMode::Sym180:
-  case CompactSymmetryMode::SymZ180:
-    return compactAngle + symId * meta.compactNumAngles;
-  case CompactSymmetryMode::Sym90:
-  case CompactSymmetryMode::Sym90Z:
-    return compactAngle + symId * meta.compactNumAngles;
-  case CompactSymmetryMode::Sym45:
-  case CompactSymmetryMode::Sym45Z: {
-    const int q = meta.fullNumAngles / 8;
-    if ((symId & 1) == 0) {
-      if (compactAngle >= q) {
-        valid = false;
-        return 0;
-      }
-      return symId * q + compactAngle;
-    }
-    if (compactAngle <= 0) {
-      valid = false;
-      return 0;
-    }
-    return symId * q + (q - compactAngle);
-  }
-  }
-  valid = false;
-  return 0;
+  return compactAngle + symId * meta.compactNumAngles;
 }
 
 bool fullProjectionIndexFromCompactRow(const CompactSymmetryMetadata &meta,
@@ -283,23 +172,15 @@ void validateCompactSymmetricGeometry(const CompactSymmetryMetadata &meta,
     throw std::runtime_error("Invalid compact-symmetric inputs: " + message);
   };
 
-  if (meta.mode != CompactSymmetryMode::Sym45Z &&
-      meta.mode != CompactSymmetryMode::Sym90Z) {
-    fail(std::string("only SYM_45Z and SYM_90Z are supported, metadata mode is ") +
-         compactSymmetryModeName(meta.mode));
-  }
   if (meta.Nx != meta.Ny) {
     fail("compact XY symmetry requires Nx == Ny.");
   }
-  if (meta.mode == CompactSymmetryMode::Sym45Z &&
-      (meta.fullNumAngles % 8 != 0 ||
-       meta.compactNumAngles != meta.fullNumAngles / 8 + 1)) {
-    fail("SYM_45Z requires compactNumAngles == fullNumAngles / 8 + 1.");
-  }
-  if (meta.mode == CompactSymmetryMode::Sym90Z &&
-      (meta.fullNumAngles % 4 != 0 ||
-       meta.compactNumAngles != meta.fullNumAngles / 4)) {
+  if (meta.fullNumAngles % 4 != 0 ||
+      meta.compactNumAngles != meta.fullNumAngles / 4) {
     fail("SYM_90Z requires compactNumAngles == fullNumAngles / 4.");
+  }
+  if (meta.detNz != 2 * meta.compactDetZ) {
+    fail("SYM_90Z requires detNz == 2 * compactDetZ.");
   }
   if (meta.compactRaysPerAngle != meta.detNx * meta.compactDetZ) {
     fail("compactRaysPerAngle must equal detNx * compactDetZ.");

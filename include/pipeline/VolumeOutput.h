@@ -4,15 +4,31 @@
 #include <string>
 #include <vector>
 
-#include "postprocess/SeamPostprocess.h"
+#include "core/SixModuleGeometry.h"
 
 namespace spect {
 namespace main {
 
-inline constexpr int kCenter66CropLayers = 66;
-inline constexpr int kCenter66BedStepLayers = 56;
-inline constexpr int kCenter66OverlapLayers =
-    kCenter66CropLayers - kCenter66BedStepLayers;
+/// Canonical output geometry derived from baseNz and bedOverlap.
+/// stepLayers = baseNz - bedOverlap  (physical bed step in layers)
+/// cropLayers = stepLayers + blendMargin
+/// blendOverlap = cropLayers - stepLayers
+struct CanonicalOutputGeometry {
+  int cropLayers = 0;
+  int stepLayers = 0;
+  int blendOverlap = 0;
+};
+
+/// Compute canonical output geometry from baseNz and bedOverlap.
+/// Validates that all overlaps produce the same step, that the step
+/// matches the scanner bed step (bedStepMm, default 16.8 mm) at the
+/// configured voxel spacing within half-layer quantization, and that the
+/// physical bed step is respected within tolerance. The blend margin
+/// defaults to 10 layers; if cropLayers would exceed baseNz, it is
+/// clamped and the blend margin shrinks accordingly.
+CanonicalOutputGeometry computeCanonicalOutputGeometry(
+    int baseNz, const std::vector<int>& outputBedOverlaps,
+    double voxelSizeZmm, double bedStepMm = 0.0);
 
 struct CropSettings {
   int start = 0;
@@ -32,33 +48,14 @@ struct OutputTransform {
   bool flipZPerBed = false;
   bool flipZWholeOutput = false;
   bool flipXWholeOutput = false;
-  bool sigmoidBlendOutput = false;
-  bool center66CosineOutput = false;
-  bool objectAwareSeamPostprocess = false;
-  std::string objectProfile = "auto";
-  bool derenzoAxialPostprocess = false;
-  double derenzoAxialStrength = 0.30;
-  bool derenzoAdhesionPostprocess = false;
-  double derenzoAdhesionInner = 0.02;
-  double derenzoAdhesionOuter = 0.10;
-  double derenzoCoreDamp = 0.55;
-  double phantomCloseStrength = 1.0;
-  double epguanCloseStrength = 1.0;
-  bool epguanWallMaxPreserve = false;
-  double epguanSeamEdgeStrength = 0.60;
-  int epguanSeamFeatherSlices = 4;
-  bool epguanBackgroundFilter = true;
-  double epguanBackgroundRetain = 0.08;
-  double epguanSupportThreshold = 0.06;
-  double epguanSupportMarginMm = 1.5;
-  double zimuCloseStrength = 0.5;
-  double mouseSeamStrength = 0.0;
-  int seamHalfWidth = 8;
+  bool reverseLocalZInReconStorage = false;
+  int centerCropNx = 0;
+  int centerCropNy = 0;
+  int centerCropNz = 0;
   int baseNz = 0;
+  CanonicalOutputGeometry canonicalGeom;
   std::vector<int> bedZStarts;
   std::vector<int> outputBedOverlaps;
-  double fovRadiusMm = 0.0;
-  double analysisFovRadiusMm = 0.0;
 };
 
 CropSettings sanitizeCropSettings(int cropStart, int cropEnd);
@@ -73,6 +70,16 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source,
                                         double voxelSizeXmm = 1.0,
                                         double voxelSizeYmm = 1.0,
                                         double voxelSizeZmm = 1.0);
+
+/// Prototype robust per-bed scalar gains: positive finite log-ratio samples
+/// inside the 30 mm overlap ROI, median/MAD outlier rejection, Bed1 anchored
+/// at 1.0, with the full adjacent-bed chain always applied. Exposed so the run
+/// manifest records exactly the gains applied to the final saved volume.
+std::vector<double> fitCenter66BedGains(const std::vector<double> &source,
+                                        int nx, int ny,
+                                        const OutputTransform &transform,
+                                        int cropStart, double voxelSizeXmm,
+                                        double voxelSizeYmm);
 
 void saveVolumeOutput(const std::vector<double> &source,
                       const OutputGeometry &geometry,

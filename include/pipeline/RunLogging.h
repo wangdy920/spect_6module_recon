@@ -18,6 +18,8 @@ public:
 
   bool enabled() const;
   const std::filesystem::path &logPath() const;
+  /// Empty when enabled(); otherwise why the tee could not open.
+  const std::string &errorMessage() const;
 
 private:
   struct Impl;

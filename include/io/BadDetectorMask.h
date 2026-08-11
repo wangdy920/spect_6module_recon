@@ -171,10 +171,18 @@ inline std::vector<uint8_t> buildBadDetectorProjectionMask(
   const size_t raysPerAngle = static_cast<size_t>(detNz) * detNx;
   std::vector<uint8_t> mask(static_cast<size_t>(fullAngles) * raysPerAngle, 0);
   for (const BadDetectorId &id : detectors) {
+    // The protected 6-module prototype assigns this hardware channel to a
+    // fixed acquisition-space block that differs from the generic ENG map.
+    const bool prototypeDetector68 =
+        id.link == 4 && id.fpga == 2 && id.detector == 4;
     const int localDetector = (id.link == 4 ? 8 : 0) + id.detector;
-    const int blockX = localDetector % kDetectorBlocksPerAxis;
-    const int blockZ = localDetector / kDetectorBlocksPerAxis;
-    const int angleBegin = id.fpga * kPhysicalAnglesPerFpga;
+    const int blockX =
+        prototypeDetector68 ? 2 : localDetector % kDetectorBlocksPerAxis;
+    const int blockZ =
+        prototypeDetector68 ? 2 : localDetector / kDetectorBlocksPerAxis;
+    const int angleBegin = prototypeDetector68
+                               ? 0
+                               : id.fpga * kPhysicalAnglesPerFpga;
     const int angleEnd = angleBegin + kPhysicalAnglesPerFpga;
     for (int angle = angleBegin; angle < angleEnd; ++angle) {
       const size_t angleOffset = static_cast<size_t>(angle) * raysPerAngle;

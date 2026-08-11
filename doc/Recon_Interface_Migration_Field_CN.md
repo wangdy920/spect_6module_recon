@@ -3,7 +3,7 @@
 **目标重建：** 当前 RC（及同源 `staging/SPECT_recon_rc_dev`；**以 RC 包 `bin/config/spect_config.ini` + `-dumpConf` 为准**）  
 **目标预处理：** 6Module release `bin/preprocess/Spect_preprocess.exe` + `resources/`（**禁止**用 `eng_to_6module_projection_bin.py` 冒充现场预处理）  
 **适用范围：** 预处理配对 + 重建接口 + 多床输出交接；DICOM 标签/空间配准仍由上位机负责  
-**对齐日期：** 2026-07-31（收敛重构后：矩阵唯一入口 `-chunkCSRDir`，单文件 CSRB / MAT 矩阵 CLI 已删除）
+**对齐日期：** 2026-08-11（CASToR PSF + 固定 6module ROI/mask/床位步进）
 
 ---
 
@@ -11,13 +11,14 @@
 
 | 决策 | 口径 |
 |---|---|
-| 生产主线 | **Spect_preprocess `identity` + 矩阵 `260601` chunk（`-chunkCSRDir` / 自动发现）+ 多床 `-dfList` + `z_bed_flip=1` + PSF FWHM `1.5,4`（Operator）** |
+| 生产主线 | **Spect_preprocess `identity` + 矩阵 `260601` chunk（`-chunkCSRDir` / 自动发现）+ 多床 `-dfList` + `z_bed_flip=1` + `-psf 1.3,3 -psfMode sieve -psfKernel castor`** |
 | 投影变体选择 | **由系统矩阵驱动**：当前唯一矩阵入口为 260601 chunk → `identity`。旧 260525 单文件 CSRB + `xflip` 链路已随 `-loadCSR` 一并退场 |
 | 算法 CLI | **始终传 `-opti mlem`**（后续可改为 `-opti bsrem`）；compact 布局恒单 subset，无 `-subsets` 参数 |
 | 几何 CLI | **默认仍传** `-dim` / `-vox` / `-ang` / `-detN`；仅当确认矩阵 `metadata.bin` 含对应字段且日志可见覆盖时，才可省略（§2.3） |
 | 床位内 Z 翻转 | **保留开启：`z_bed_flip=1` / `-zbedflip 1`**（不要再写 `-zbedflip 0`“纠正”） |
 | 预处理工具 | **只用** release `Spect_preprocess.exe`；**不要**用 `eng_to_6module_projection_bin.py` 做验收/现场等价 |
-| PSF CLI | **默认显式传** `-psf 1.5,4 -psfMode Operator`（FWHM mm[,N] + mode）。旧 `-psf 0.637`（sigma）禁止再传 |
+| PSF CLI | **默认显式传** `-psf 1.3,3 -psfMode sieve -psfKernel castor`；`castor` 对齐 erf 体素积分、零边界、Z-only norm 与 forward-reuse backward。旧 `-psf 0.637`（sigma）禁止再传 |
+| 原型/主线验证 | 主线固定 canonical gain/stitch，无 seam/profile 开关；Smooth 0.30 mm 与 Butterworth 5 cpcm/8 阶须在两侧按同一阶段/参数比较 |
 
 ---
 
@@ -34,7 +35,7 @@
 <6M>/bin/preprocess/resources/       ← calibration/Tc99m + seg_result LUT
 ```
 
-原则：包内已固定且与现场协议一致的项（如 overlap、翻转默认）可不重复传；但 **算法（`-opti`）、几何四件套、PSF（`-psf`/`-psfMode`）默认仍显式传入**。
+原则：包内已固定且与现场协议一致的项（如 overlap、翻转默认）可不重复传；但 **算法（`-opti`）、几何四件套、PSF（`-psf`/`-psfMode`/`-psfKernel`）默认仍显式传入**。
 
 ---
 
@@ -77,9 +78,9 @@ CLI 显式参数  >  algo_*.conf  >  bin/config/spect_config.ini  >  硬编码�
 | 几何 | **默认传** 四件套；省略条件见 §2.3 |
 | 多床 overlap | 与 ini 相同则不传 `-bedOverlap` |
 | 方向 | **`z_bed_flip=1` 保留**；**不要**写 `-zbedflip 0` |
-| PSF | **默认传** `-psf 1.5,4 -psfMode Operator`（仅传 mode 不启用 PSF） |
-| Butterworth | 旧现场未开滤波 → 不传 `-butter` |
-| 稀疏后端 | 固定 CUDA；**禁止** `-sparseBackend` |
+| PSF | **默认传** `-psf 1.3,3 -psfMode sieve -psfKernel castor`（只传 mode/kernel 不启用 PSF） |
+| Butterworth | 发布默认关闭；`-butter` 仅用于独立的 `in_recon` 能力测试，且与 `sieve` 互斥。原型输出滤波比较须在两侧对主输出离线施加同一参数 |
+| 稀疏后端 | 固定 CUDA |
 
 自检：`.\bin\SPECT_recon.exe -dumpConf`，应看到 `global_ini` / `algo_conf` 指向 `bin\config\...` 且 `z_bed_flip=1`。
 
@@ -87,26 +88,18 @@ CLI 显式参数  >  algo_*.conf  >  bin/config/spect_config.ini  >  硬编码�
 
 ## 3. 端到端流程对照
 
-### 3.1 现场旧链（已退场）
 
-```text
-每床 SPECT_recon -df BedN.bin -loadCSR ... -alg ... -psf 0.637 ...
-  → BedN_it20/recon_it20.raw → SPECT_Stitcher → final_recon.mhd → DICOM
-```
-
-`-loadCSR` / `-compactMeta` / `-matrixLayout` / `-alg` / `-sparseBackend` / `-subsets` 均已删除（报 `Unknown argument` 或专用迁移报错，见 `CLI_CHANGES_CN.md`）。
-
-### 3.2 当前 Release 主链（最小面）
+### 3.1 当前 Release 主链（最小面）
 
 ```text
 Spect_preprocess（identity）→ BedN.bin
-一次 SPECT_recon -dfList Bed1;Bed2;... -opti mlem -dim/-vox/-ang/-detN [-it ...] -psf 1.5,4 -psfMode Operator -fout ...\final_recon
+一次 SPECT_recon -dfList Bed1;Bed2;... -opti mlem -dim/-vox/-ang/-detN [-it ...] -psf 1.3,3 -psfMode sieve -psfKernel castor -fout ...\final_recon
   → final_recon_itN.mhd/.raw → DICOM
 ```
 
 矩阵与几何、overlap、**`z_bed_flip=1`**、算法默认均来自 **包内配置 + metadata 自动发现**。
 
-### 3.3 预处理推荐调用
+### 3.2 预处理推荐调用
 
 ```bat
 REM 260601 chunk 主线固定 VARIANT=identity
@@ -152,6 +145,8 @@ python tools\run_6module_preprocess.py ^
 
 DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**文件（如 `_it20`），或复制改名为 `final_recon.mhd` 以少改上位机。`-it N:S` 时还会写出中间 `_itS/_it2S/...`，勿误用。
 
+固定输出几何：单床 `100×100×72`；多床 `100×100×(66 + (bed_count-1)×56)`，床位物理步进 `16.8 mm`。单/多床圆柱 ROI 分别为 `30×21.6 mm`、`36×66 mm`。
+
 ---
 
 ## 5. 推荐命令
@@ -169,12 +164,13 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
   -ang 360 ^
   -detN 48,48 ^
   -it 20:5 ^
-  -psf 1.5,4 ^
-  -psfMode Operator ^
+  -psf 1.3,3 ^
+  -psfMode sieve ^
+  -psfKernel castor ^
   -fout "D:\data\predata\...\SPECT\recon\final_recon"
 ```
 
-含义：`-dfList` / `-fout` 每例必变；`-opti mlem` 显式算法入口；几何四件套默认传入（§2.3）；`-it 20:5` 覆盖包内默认；`-psf 1.5,4 -psfMode Operator` 默认显式传入。
+含义：`-dfList` / `-fout` 每例必变；`-opti mlem` 显式算法入口；几何四件套默认传入（§2.3）；`-it 20:5` 覆盖包内默认；CASToR `sieve` PSF 三件套默认显式传入。
 
 ### 5.2 何时才加回显式参数
 
@@ -192,7 +188,7 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 
 1. 固定指向新 RC 的 `bin\SPECT_recon.exe`。
 2. 预处理 `projection_variant` 固定 **identity**（矩阵唯一入口为 260601 chunk）。
-3. 每例拼：`-dfList`、`-fout`、**`-opti mlem`**、**几何四件套**、**`-psf 1.5,4 -psfMode Operator`**、以及与包默认不同的覆盖（常见：`-it 20:5`）。
+3. 每例拼：`-dfList`、`-fout`、**`-opti mlem`**、**几何四件套**、**`-psf 1.3,3 -psfMode sieve -psfKernel castor`**、以及与包默认不同的覆盖（常见：`-it 20:5`）。
 4. 去掉按床循环与 `SPECT_Stitcher` 主线调用；旧 `-alg` / `-sparseBackend` / `-loadCSR` / `-subsets` **禁止再生成**（会报错）。
 5. 成功条件：存在最终迭代的 `<prefix>_itN.mhd` + `.raw`。
 6. **`z_bed_flip` 保持 1**。
@@ -207,7 +203,7 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 |---|---|
 | 预处理 variant | 必须 Spect_preprocess **identity**；用 eng_to 代替会在投影上几乎不相关（corr≈0.03，实测拒收） |
 | `-zbedflip 0` | 与 RC 默认及本迁移口径不符；**保留 1**，否则头脚方向错 |
-| PSF | 旧 `-psf 0.637` 若误当 FWHM 会偏窄；默认传 **`-psf 1.5,4 -psfMode Operator`** |
+| PSF | 旧 `-psf 0.637` 若误当 FWHM 会偏窄；默认传 **`-psf 1.3,3 -psfMode sieve -psfKernel castor`** |
 | overlap | 仅当机械步进与包内默认不符时才覆盖 |
 | `-it` | `20` vs 包默认 `30` 会改收敛与外观 |
 
@@ -217,7 +213,7 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 2. `bin\matrix\` 是否**恰好一个** 260601 目录。
 3. 预处理是否 Spect_preprocess，且 variant = **identity**。
 4. 命令是否仍残留 `-alg` / `-sparseBackend` / `-loadCSR` / `-subsets` / `-psf 0.637` / `-zbedflip 0`。
-5. 日志是否出现 compact metadata 几何与 `psf=operator fwhm_mm=1.5`。
+5. 日志是否显示 `psf=sieve`、`fwhm_mm=1.3`、`kernel=castor`、逐床 physical offset、canonical `stitch_method=center66_cosine10`，以及发布滤波阶段均为 `none`。
 6. 是否生成约定前缀的 `*_itN.mhd/.raw`。
 
 ---
@@ -227,7 +223,6 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 | 文档 | 用途 |
 |---|---|
 | 发布包 `bin/config/spect_config.ini` | **默认真相**；与 `-dumpConf` 对照 |
-| 发布包 `CLI_CHANGES_CN.md` | 废弃参数 / PSF 语义 |
 | 发布包 `PARAMETERS_CN.md` | 包说明 |
 | `doc/USAGE_CN.md` | 公开 CLI |
 | `doc/Capability_Matrix_CN.md` | 能力边界 |

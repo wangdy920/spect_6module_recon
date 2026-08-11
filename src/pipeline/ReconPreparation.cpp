@@ -3,9 +3,11 @@
 #include "core/Masks.h"
 #include "filters/ButterworthFilter.h"
 #include "filters/Convolution.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace spect::main {
 
@@ -20,9 +22,27 @@ const std::vector<uint8_t> *maybeMakeCylindricalMask(
     const std::array<double, 3> &spacing, const ReconArgs &args) {
   if (!args.useCylindricalMask)
     return nullptr;
-  mask = spect::core::makeCylMask_mm(nx, ny, nz, spacing[0], spacing[1], spacing[2],
-                                     args.cylinderDiameterMM, args.cylinderHeightMM,
-                                     args.cylCenterX, args.cylCenterY, args.cylCenterZ);
+
+  const int bedCount = std::max(1, args.bedCount);
+  if (nz % bedCount != 0)
+    throw std::runtime_error(
+        "Cylindrical ROI requires an integer local Z size per bed.");
+  const int localNz = nz / bedCount;
+  const std::vector<uint8_t> localMask = spect::core::makeCylMask_mm(
+      nx, ny, localNz, spacing[0], spacing[1], spacing[2],
+      args.cylinderDiameterMM, args.cylinderHeightMM, args.cylCenterX,
+      args.cylCenterY, args.cylCenterZ);
+  if (bedCount == 1) {
+    mask = localMask;
+    return &mask;
+  }
+
+  mask.resize(localMask.size() * static_cast<size_t>(bedCount));
+  for (int bed = 0; bed < bedCount; ++bed) {
+    std::copy(localMask.begin(), localMask.end(),
+              mask.begin() + static_cast<std::ptrdiff_t>(bed) *
+                                 static_cast<std::ptrdiff_t>(localMask.size()));
+  }
   return &mask;
 }
 
@@ -34,7 +54,8 @@ filters::PSFKernels preparePSFKernels(const filters::PSFConf &psfConf) {
 
 filters::ButterworthConf prepareButterworthConf(const ReconArgs &args) {
   filters::ButterworthConf conf;
-  if (!args.useButter)
+  // Only the in_recon stage feeds the per-iteration filter.
+  if (!args.useButter || args.butterApplyStage != "in_recon")
     return conf;
   conf.enabled = true;
   conf.type = filters::BWType::Lowpass;
@@ -48,7 +69,9 @@ filters::ButterworthConf prepareButterworthConf(const ReconArgs &args) {
 
 SmoothConf prepareSmoothingConf(const ReconArgs &args) {
   SmoothConf conf;
-  if (!args.useSmooth || args.smoothSigma <= 0.0f)
+  // Only the in_recon stage feeds the per-iteration smoother.
+  if (!args.useSmooth || args.smoothApplyStage != "in_recon" ||
+      args.smoothSigma <= 0.0f)
     return conf;
 
   int kernel = std::max(1, args.smoothKernel);
@@ -96,6 +119,10 @@ PSFPreparationResult preparePSFForRuntime(ReconOpts &opts, const ReconArgs &args
   }
 
   if (opts.psf.mode != filters::PSFMode::None) {
+    if (!cuda::isCudaVolumeOpsAvailable())
+      throw std::runtime_error(
+          "PSF-enabled reconstruction requires CUDA volume operations; "
+          "SPECT_CUDA_VOLUME_OPS=0 and CPU fallback are not supported.");
     result.psfKernels = preparePSFKernels(opts.psf);
   }
 

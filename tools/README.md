@@ -6,21 +6,10 @@
 
 | 源文件 | 可执行名 | 用途 | 构建方式 |
 |---|---|---|---|
-| `seam_postprocess.cpp` | `spect_seam_postprocess.exe` | 离线运行 `SeamPostprocess`：对已写出的 MHD 按 `phantom/zimu/mouse/derenzo/unknown` profile 做接缝后处理 | 主 CMake 构建（链接 `spect_io` + `SeamPostprocess.cpp`） |
 | `forward_project_multibed.cpp` | `spect_forward_project.exe` | 匹配模型多床位前投影：把已知连续 phantom 经同一 compact-symmetric + PSF + 虚拟 Z 翻转链前投影为 `BedN.bin`，用于无噪 matched-model 闭环验证 | 主 CMake 构建 |
 
 ## 用法示例
 
-### 接缝后处理（离线）
-
-```powershell
-.\build\bin\Release\spect_seam_postprocess.exe `
-  recon\final_recon_it50.mhd `
-  recon\final_recon_seam.mhd `
-  mouse
-```
-
-`profile` 取值：`phantom` / `zimu` / `mouse` / `derenzo` / `unknown`。`derenzo` 可跟第 4 个参数 `strength`（默认 `0.30`）。该工具链接 `spect_pipeline`，与重建主程序共用 `src/postprocess/SeamPostprocess.cpp` 的同一份目标文件，便于在不重跑重建的情况下验证后处理参数。
 
 ### 匹配模型前投影
 

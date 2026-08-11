@@ -14,6 +14,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_main.cpp
     tests/test_placeholder.cpp
     tests/test_psf_modes.cpp
+    tests/test_sieve_output_filters.cpp
     tests/test_metric_output.cpp
     tests/test_mat_reader.cpp
     tests/test_filters_golden.cpp
@@ -35,6 +36,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_main_recon_setup.cpp
     tests/test_main_smoothing_ops.cpp
     tests/test_main_volume_output.cpp
+    tests/test_run_manifest.cpp
   )
 
   target_compile_definitions(spect_tests PRIVATE SPECT_DETERMINISTIC=1)
@@ -57,8 +59,6 @@ if(SPECT_BUILD_TESTS)
   # 【T2.2】链接IO模块
   target_link_libraries(spect_tests PRIVATE spect_io)
   
-  # 【T3.1】链接Sparse模块
-  target_link_libraries(spect_tests PRIVATE spect_sparse)
   
   # 【T4.1】链接Regularizer模块
   target_link_libraries(spect_tests PRIVATE spect_regularizer)

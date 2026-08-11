@@ -8,6 +8,7 @@
 #include "cli/Version.h"
 #include "core/Masks.h"
 #include "core/ReconLimits.h"
+#include "core/SixModuleGeometry.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "cuda/CudaConfig.h"
 #include "filters/ButterworthFilter.h"
@@ -30,7 +31,7 @@
 #include "postprocess/SmoothingOps.h"
 #include "pipeline/VolumeOutput.h"
 #include "regularizer/RegularizerCompat.h"
-#include "sparse/SparseOpsBackend.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +39,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -253,21 +255,53 @@ int runProgram(int argc, char **argv) {
   setVerbosity(std::clamp(args.verbosity, 0, 2));
   args.verbosity = getVerbosity();
 
+  // Log and MHD/RAW share one resolved output directory.  Absolute `-fout`/
+  // `-o` (drive letter / UNC) stay on that absolute path; relative dirs are
+  // pinned to this process CWD via absolute() so both artifacts agree.
   std::string logDirError;
   auto logDir = resolveLogDirectory(args, logDirError);
-  ReconArgs logArgs = args;
   if (logDir.empty())
-    logDir = ".";
-  logArgs.outputDir = logDir.string();
-  ConsoleTeeGuard tee(makeDefaultLogPath(logArgs));
+    logDir = std::filesystem::absolute(".");
+  args.outputDir = logDir.string();
+  ReconArgs logArgs = args;
+  // Build the path once: the failure branch used to call makeDefaultLogPath
+  // again and print a different timestamp than the open that actually failed.
+  const std::filesystem::path logPath = makeDefaultLogPath(logArgs);
+  ConsoleTeeGuard tee(logPath);
   if (tee.enabled()) {
+    // Announce via logInfo so -vb 0 still lands in the durable file (file sink)
+    // and -vb>=1 reaches console+file through the tee.  Avoid a second raw
+    // cerr line that would duplicate the path in the log.
     logInfo("Logging console output to: " + tee.logPath().string());
+    if (getVerbosity() < 1)
+      std::cerr << "Logging console output to: " << tee.logPath().string()
+                << '\n';
     if (!logDirError.empty()) {
       logWarn("Failed to create output directory '" + args.outputDir +
               "' for logging (" + logDirError + "); using current directory.");
     }
   } else {
-    logWarn("Failed to create log file at: " + makeDefaultLogPath(logArgs).string());
+    logWarn("Failed to create log file at: " + logPath.string() +
+            (tee.errorMessage().empty() ? "" : " (" + tee.errorMessage() + ")"));
+  }
+
+  {
+    // Matrix/config resolve vs exe dir; volumes/logs resolve vs CWD. Print the
+    // absolute output directory once so a scheduler CWD cannot hide outputs.
+    std::error_code absError;
+    const auto absOut = std::filesystem::absolute(
+        args.outputDir.empty() ? std::filesystem::path("output")
+                               : std::filesystem::path(args.outputDir),
+        absError);
+    const std::string outDir =
+        absError ? (args.outputDir.empty() ? "output" : args.outputDir)
+                 : absOut.string();
+    const std::string outMsg =
+        "Output directory: " + outDir + " (name prefix: " +
+        (args.outputName.empty() ? "recon" : args.outputName) + ")";
+    logInfo(outMsg);
+    if (getVerbosity() < 1)
+      std::cerr << outMsg << '\n';
   }
 
   const std::string commandLine = makeCommandLineString(argc, argv);
@@ -291,20 +325,30 @@ int runProgram(int argc, char **argv) {
   try {
     CompactExecutionTiming compactTiming;
     const auto loadToIterationStart = ProfileClock::now();
-    const bool compactLayoutRequested = !args.chunkCSRDir.empty();
-    const bool compactChunkLayout = compactLayoutRequested;
-    spect::io::CompactSymmetryMetadata compactMeta;
-    std::string compactMetaPath;
-
-    if (compactLayoutRequested) {
-      compactMetaPath = resolveCompactMetadataPath(args);
-      compactMeta = spect::io::loadCompactSymmetryMetadata(compactMetaPath);
-      applyCompactMetadataGeometry(args, compactMeta);
-      logInfo("compact metadata geometry loaded from " + compactMetaPath +
-              " (mode=" + spect::io::compactSymmetryModeName(compactMeta.mode) +
-              ", compactRows=" + std::to_string(compactMeta.compactRows()) +
-              ", fullRows=" + std::to_string(compactMeta.fullRows()) + ")");
+    const std::string compactMetaPath = resolveCompactMetadataPath(args);
+    spect::io::CompactSymmetryMetadata compactMeta =
+        spect::io::loadCompactSymmetryMetadata(compactMetaPath);
+    // Matrix metadata is authoritative for reconstruction dims and voxel
+    // size: it always overrides -dim/-vox (the device command line may carry
+    // stale or wrong values). Warn when an explicit -dim disagrees so the
+    // mismatch is visible on site.
+    if (args.dimExplicit &&
+        (args.Nx != compactMeta.Nx || args.Ny != compactMeta.Ny ||
+         args.Nz != compactMeta.Nz)) {
+      logWarn("CLI -dim " + std::to_string(args.Nx) + "," +
+              std::to_string(args.Ny) + "," + std::to_string(args.Nz) +
+              " disagrees with matrix metadata " +
+              std::to_string(compactMeta.Nx) + "," +
+              std::to_string(compactMeta.Ny) + "," +
+              std::to_string(compactMeta.Nz) +
+              "; matrix metadata wins (reconstruction geometry follows the "
+              "system matrix).");
     }
+    applyCompactMetadataGeometry(args, compactMeta);
+    logInfo("compact metadata geometry loaded from " + compactMetaPath +
+            " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
+            ", compactRows=" + std::to_string(compactMeta.compactRows()) +
+            ", fullRows=" + std::to_string(compactMeta.fullRows()) + ")");
 
     std::string dimHintWarning;
     if (adoptReconDimsFromHint(args, &dimHintWarning) && !dimHintWarning.empty())
@@ -327,7 +371,7 @@ int runProgram(int argc, char **argv) {
       throw std::runtime_error("Projection path is required.");
 
     auto stageStart = ProfileClock::now();
-    const LoadedProjectionSet projectionSet =
+    LoadedProjectionSet projectionSet =
         loadProjectionSet(projPaths, args.numAngles, "Projection Data", "matrix");
     compactTiming.projectionLoadSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
@@ -512,54 +556,39 @@ int runProgram(int argc, char **argv) {
     compactTiming.csrMapOrLoadSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
 
-    const int matrixRows = static_cast<int>(compactChunks->totalRows());
     const int matrixCols = compactChunks->cols();
     if (matrixCols != static_cast<int>(baseNvox)) {
       throw std::runtime_error("System matrix voxel count does not match the per-bed reconstruction grid.");
     }
 
-    const bool compactLayout = compactLayoutRequested;
-    if (compactLayout) {
-      stageStart = ProfileClock::now();
-      if (compactMetaPath.empty()) {
-        compactMetaPath = resolveCompactMetadataPath(args);
-        compactMeta = spect::io::loadCompactSymmetryMetadata(compactMetaPath);
-      }
-      if (compactChunkLayout) {
-        spect::io::validateCompactChunkSymmetricInputs(
-            compactMeta, compactChunks->totalRows(), compactChunks->cols(),
-            projectionSet.raysPerBed, args.detNz, args.detNx, args.numAngles,
-            baseNx, baseNy, baseNz);
-      }
-      compactTiming.metadataLoadAndValidateSeconds =
-          std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
-      logInfo("compact-symmetric layout enabled via " + compactMetaPath +
-              " (mode=" + spect::io::compactSymmetryModeName(compactMeta.mode) +
-              ", compactRows=" + std::to_string(compactMeta.totalRows) +
-              ", fullRows=" + std::to_string(compactMeta.fullRows()) +
-              ", matrix=chunkCSRDir)");
-      if (compactChunkLayout && bedCount > spect::core::kMaxBeds) {
-        throw std::runtime_error(
-            "compact chunk multi-bed CUDA path supports at most " +
-            std::to_string(spect::core::kMaxBeds) + " beds.");
-      }
+    stageStart = ProfileClock::now();
+    spect::io::validateCompactChunkSymmetricInputs(
+        compactMeta, compactChunks->totalRows(), compactChunks->cols(),
+        projectionSet.raysPerBed, args.detNz, args.detNx, args.numAngles,
+        baseNx, baseNy, baseNz);
+    compactTiming.metadataLoadAndValidateSeconds =
+        std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
+    logInfo("compact-symmetric layout enabled via " + compactMetaPath +
+            " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
+            ", compactRows=" + std::to_string(compactMeta.totalRows) +
+            ", fullRows=" + std::to_string(compactMeta.fullRows()) +
+            ", matrix=chunkCSRDir)");
+    if (bedCount > spect::core::kMaxBeds) {
+      throw std::runtime_error(
+          "compact chunk multi-bed CUDA path supports at most " +
+          std::to_string(spect::core::kMaxBeds) + " beds.");
     }
 
-    const size_t expectedRowsPerBed =
-        compactLayout ? static_cast<size_t>(compactMeta.fullRows())
-                      : static_cast<size_t>(matrixRows);
-    const size_t expectedRays = expectedRowsPerBed * static_cast<size_t>(bedCount);
-    std::vector<double> projections = projectionSet.data;
-    if (projections.size() < expectedRays) {
-      throw std::runtime_error("Projection count is smaller than the required system-matrix rows across all beds.");
-    }
-    if (projections.size() > expectedRays) {
-      if (compactLayout) {
-        throw std::runtime_error(
-            "Compact-symmetric layout requires exact full projection length; refusing to truncate.");
-      }
-      logWarn("Projection count exceeds required rays. Truncating to match the system matrix.");
-      projections.resize(expectedRays);
+    const size_t expectedRays =
+        static_cast<size_t>(compactMeta.fullRows()) *
+        static_cast<size_t>(bedCount);
+    std::vector<double> projections = std::move(projectionSet.data);
+    if (projections.size() != expectedRays) {
+      throw std::runtime_error(
+          "Compact-symmetric layout requires exact full projection length; "
+          "expected " +
+          std::to_string(expectedRays) + ", got " +
+          std::to_string(projections.size()) + ".");
     }
     if (!backgroundProj.empty() && backgroundProj.size() != projections.size()) {
       throw std::runtime_error("Background projection size does not match projection size.");
@@ -569,11 +598,6 @@ int runProgram(int argc, char **argv) {
       const auto badDetectors =
           spect::io::loadBadDetectorList(args.badDetectorFile);
       if (!badDetectors.empty()) {
-        if (!compactChunkLayout) {
-          throw std::runtime_error(
-              "bad detector masking requires the canonical compact chunk "
-              "layout with identity projections.");
-        }
         const std::vector<uint8_t> badDetectorMask =
             spect::io::buildBadDetectorProjectionMask(
                 badDetectors, compactMeta.fullNumAngles, compactMeta.detNz,
@@ -611,12 +635,8 @@ int runProgram(int argc, char **argv) {
       // layout, so compactMeta is loaded and projections are per-bed blocks of
       // fullRows. Censored detZ edge rows are unreliable: zero the measured
       // bins so the MLEM ratio y/(Ax) contributes nothing (numerator
-      // censoring); the matching masked sensitivity is computed in
-      // CompactSymmetricReconLoop.
-      if (!compactLayout) {
-        throw std::runtime_error(
-            "-detZEdgeCensor requires the compact-symmetric chunk layout.");
-      }
+      // censoring); the matching masked sensitivity is computed by the
+      // compact reconstruction loop.
       const int censorK = args.detZEdgeCensor;
       if (2 * censorK >= compactMeta.detNz) {
         throw std::runtime_error(
@@ -656,13 +676,55 @@ int runProgram(int argc, char **argv) {
     const std::vector<int> bedZStarts =
         spect::app::computeBedZOffsets(bedCount, baseNz, args.bedOverlaps);
 
+    const bool reverseLocalZInReconStorage =
+        args.zBedFlip && !args.projPaths.empty() && bedCount > 1;
+    logInfo("Bed coordinate contract: Bed1 = max physical Z, bed index "
+            "increases toward -Z; configured z_bed_flip=" +
+            std::to_string(args.zBedFlip ? 1 : 0) +
+            ", effective multi-bed local Z flip=" +
+            std::to_string(reverseLocalZInReconStorage ? 1 : 0) + ".");
+    if (bedCount > 1) {
+      logInfo("Bed physical step policy: canonical stitch uses " +
+              std::to_string(bedSetup.canonicalGeom.stepLayers) +
+              " layers / " +
+              std::to_string(args.bedStepMm > 0.0
+                                  ? args.bedStepMm
+                                  : spect::core::sixmodule::kMultiBedStepMm) +
+              " mm (crop=" +
+              std::to_string(bedSetup.canonicalGeom.cropLayers) +
+              " layers).");
+    }
+    double physicalZOffsetMm = 0.0;
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const int start = bedZStarts[static_cast<size_t>(bed)];
+      const std::string &bedFile = projPaths[static_cast<size_t>(bed)];
+      const int localZeroStorageZ = reverseLocalZInReconStorage
+                                        ? start + baseNz - 1
+                                        : start;
+      const int localLastStorageZ = reverseLocalZInReconStorage
+                                        ? start
+                                        : start + baseNz - 1;
+      logInfo("Bed " + std::to_string(bed + 1) + " mapping: file=\"" +
+              bedFile + "\", physical_z_offset_mm=" +
+              std::to_string(physicalZOffsetMm) +
+              " (Bed1-relative), local_z_direction=" +
+              (reverseLocalZInReconStorage ? "descending_storage_z"
+                                           : "ascending_storage_z") +
+              " (local z 0->" + std::to_string(baseNz - 1) +
+              " maps storage z " + std::to_string(localZeroStorageZ) +
+              "->" + std::to_string(localLastStorageZ) +
+              "), recon_storage_z=[" + std::to_string(start) + ", " +
+              std::to_string(start + baseNz) + ").");
+      if (bed + 1 < bedCount)
+        physicalZOffsetMm -= bedSetup.canonicalGeom.stepLayers * spacing.dz;
+    }
+
     std::vector<std::vector<uint16_t>> dynamicAttenFactors;
     std::unique_ptr<CTACFactorCache> ctacFactorCache;
     if (args.doCTAC) {
       logInfo("CTAC model: angle-dependent parallel-ray line integral "
               "(rotation sign " + std::to_string(args.ctacRotSign) +
               "). Attenuation map must be mu in mm^-1.");
-      if (bedCount > 1 || compactChunkLayout) {
         logInfo("Using dynamic CTAC attenuation factors.");
         const auto attenuationStart = std::chrono::steady_clock::now();
         dynamicAttenFactors.resize(static_cast<size_t>(bedCount));
@@ -735,10 +797,8 @@ int runProgram(int argc, char **argv) {
                                           attenuationStart)
                 .count(),
             static_cast<size_t>(bedCount)));
-      }
     }
 
-    const ISparseOps &sparseOps = getSparseOpsCUDA();
     logInfo("Sparse backend: cuda");
 
     ReconOpts opts;
@@ -748,7 +808,6 @@ int runProgram(int argc, char **argv) {
     opts.w_proj = nullptr;
     opts.w_img = nullptr;
     opts.b_proj = backgroundProj.empty() ? nullptr : &backgroundProj;
-    opts.sparseOps = &sparseOps;
     opts.bedCount = bedCount;
     opts.bedOverlaps = args.bedOverlaps;
     opts.bedAttenFactors = dynamicAttenFactors;
@@ -782,13 +841,8 @@ int runProgram(int argc, char **argv) {
     const CropSettings crop = sanitizeCropSettings(args.cropEndStart, args.cropEndEnd);
     int outputNzBeforeCrop = args.Nz;
     if (bedCount > 1) {
-      if (args.bedCropMethod == "center66_cosine10") {
-        outputNzBeforeCrop = kCenter66CropLayers +
-            (bedCount - 1) * kCenter66BedStepLayers;
-      } else {
-        for (int overlap : args.outputBedOverlaps)
-          outputNzBeforeCrop -= overlap;
-      }
+      outputNzBeforeCrop = bedSetup.canonicalGeom.cropLayers +
+          (bedCount - 1) * bedSetup.canonicalGeom.stepLayers;
     }
     if ((crop.start != 0 || crop.end != 0) &&
         !isCropSettingsValid(outputNzBeforeCrop, crop))
@@ -797,67 +851,21 @@ int runProgram(int argc, char **argv) {
     const OutputTransform *outputTransformPtr = nullptr;
     const bool dfListMode = !args.projPaths.empty();
     const bool enableBedZFlip =
-        args.zBedFlip && dfListMode && (bedCount <= 1 || !compactLayout);
-    const bool hasOutputOverlapStitch =
-        bedCount > 1 &&
-        std::any_of(args.outputBedOverlaps.begin(), args.outputBedOverlaps.end(),
-                    [](int overlap) { return overlap > 0; });
-    // Seam closing only runs when multi-bed output stitching actually uses
-    // overlap. Zero-overlap joints or single-bed keep cut/sigmoid only.
-    const bool enableSeamPostprocess =
-        args.bedSeamPostprocess && hasOutputOverlapStitch &&
-        args.bedCropMethod != "direct" &&
-        args.bedObjectProfile != "derenzo";
-    // The rod passes are gated on the resolved object profile inside
-    // prepareOutputVolume, so "auto" is enough to let a Derenzo lattice be
-    // recognised from the stitched output itself.
-    const bool enableDerenzoPostprocess =
-        args.bedDerenzoPostprocess && (args.bedObjectProfile == "derenzo" ||
-                                       args.bedObjectProfile == "auto");
-    if (args.bedSeamPostprocess && !enableSeamPostprocess) {
-      logInfo("Output transform: seam postprocess requested but skipped "
-              "(requires multi-bed weighted output stitching).");
-    }
+        args.zBedFlip && dfListMode && bedCount <= 1;
     outputTransform.flipZPerBed = enableBedZFlip;
     outputTransform.flipZWholeOutput = args.zOutFlip;
     outputTransform.flipXWholeOutput = args.xOutFlip;
-    outputTransform.sigmoidBlendOutput = args.bedCropMethod == "sigmoid";
-    outputTransform.center66CosineOutput =
-        args.bedCropMethod == "center66_cosine10";
-    outputTransform.objectAwareSeamPostprocess = enableSeamPostprocess;
-    outputTransform.objectProfile = args.bedObjectProfile;
-    outputTransform.derenzoAxialPostprocess = enableDerenzoPostprocess;
-    outputTransform.derenzoAxialStrength = args.bedDerenzoAxialStrength;
-    outputTransform.derenzoAdhesionPostprocess =
-        args.bedDerenzoAdhesion && (args.bedObjectProfile == "derenzo" ||
-                                    args.bedObjectProfile == "auto");
-    outputTransform.derenzoAdhesionInner = args.bedDerenzoAdhesionInner;
-    outputTransform.derenzoAdhesionOuter = args.bedDerenzoAdhesionOuter;
-    outputTransform.derenzoCoreDamp = args.bedDerenzoCoreDamp;
-    outputTransform.phantomCloseStrength = args.bedPhantomCloseStrength;
-    outputTransform.epguanCloseStrength = args.bedEpguanCloseStrength;
-    outputTransform.epguanWallMaxPreserve =
-        args.bedEpguanWallMaxPreserve;
-    outputTransform.epguanSeamEdgeStrength =
-        args.bedEpguanSeamEdgeStrength;
-    outputTransform.epguanSeamFeatherSlices =
-        args.bedEpguanSeamFeatherSlices;
-    outputTransform.epguanBackgroundFilter =
-        args.bedEpguanBackgroundFilter;
-    outputTransform.epguanBackgroundRetain =
-        args.bedEpguanBackgroundRetain;
-    outputTransform.epguanSupportThreshold =
-        args.bedEpguanSupportThreshold;
-    outputTransform.epguanSupportMarginMm =
-        args.bedEpguanSupportMarginMm;
-    outputTransform.zimuCloseStrength = args.bedZimuCloseStrength;
-    outputTransform.mouseSeamStrength = args.bedMouseSeamStrength;
-    outputTransform.seamHalfWidth = args.bedSeamHalfWidth;
+    outputTransform.reverseLocalZInReconStorage =
+        reverseLocalZInReconStorage;
+    outputTransform.centerCropNx = spect::core::sixmodule::kOutputMaskNx;
+    outputTransform.centerCropNy = spect::core::sixmodule::kOutputMaskNy;
+    outputTransform.centerCropNz =
+        bedCount == 1 ? spect::core::sixmodule::kSingleBedMaskNz : 0;
     outputTransform.baseNz = baseNz;
     outputTransform.bedZStarts = bedZStarts;
     outputTransform.outputBedOverlaps = args.outputBedOverlaps;
-    outputTransform.fovRadiusMm = args.fovRadiusMm;
-    outputTransform.analysisFovRadiusMm = args.analysisFovRadiusMm;
+    outputTransform.canonicalGeom = bedSetup.canonicalGeom;
+
     outputTransformPtr = &outputTransform;
     if (enableBedZFlip)
       logInfo("Output transform: per-bed Z flip enabled for dfList bed segments.");
@@ -865,53 +873,8 @@ int runProgram(int argc, char **argv) {
       logInfo("Output transform: whole-output Z flip enabled.");
     if (args.xOutFlip)
       logInfo("Output transform: whole-output X flip enabled.");
-    logInfo("Output transform: reconstruction beds are non-overlapping; "
-            "crop_method=" + args.bedCropMethod);
-    if (enableSeamPostprocess)
-      logInfo("Output transform: object-aware seam postprocess enabled; "
-              "profile=" + args.bedObjectProfile +
-              ", phantom_interp_strength=" +
-              std::to_string(args.bedPhantomCloseStrength) +
-              ", epguan_interp_strength=" +
-              std::to_string(args.bedEpguanCloseStrength) +
-              ", epguan_wall_max_preserve=" +
-              std::to_string(args.bedEpguanWallMaxPreserve ? 1 : 0) +
-              ", epguan_seam_edge_strength=" +
-              std::to_string(args.bedEpguanSeamEdgeStrength) +
-              ", epguan_seam_feather_slices=" +
-              std::to_string(args.bedEpguanSeamFeatherSlices) +
-              ", epguan_background_filter=" +
-              std::to_string(args.bedEpguanBackgroundFilter ? 1 : 0) +
-              ", epguan_background_retain=" +
-              std::to_string(args.bedEpguanBackgroundRetain) +
-              ", epguan_support_threshold=" +
-              std::to_string(args.bedEpguanSupportThreshold) +
-              ", epguan_support_margin_mm=" +
-              std::to_string(args.bedEpguanSupportMarginMm) +
-              ", zimu_smooth_strength=" +
-              std::to_string(args.bedZimuCloseStrength) +
-              ", mouse_seam_strength=" +
-              std::to_string(args.bedMouseSeamStrength) +
-              ", zimu_sigma_mm=0.3" +
-              ", seam_half_width=" +
-              std::to_string(args.bedSeamHalfWidth) + ".");
-    if (enableDerenzoPostprocess)
-      logInfo("Output transform: Derenzo per-rod axial continuity enabled; "
-              "positive_only=1, axial_strength=" +
-              std::to_string(args.bedDerenzoAxialStrength) +
-              ", z_morph_mm=1.5, rod_support_margin=0.");
-    if (args.fovRadiusMm > 0.0)
-      logInfo("Output transform: circular XY FOV radius=" +
-              std::to_string(args.fovRadiusMm) + " mm (4-voxel taper).");
-    if (enableSeamPostprocess) {
-      const double analysisRadiusMm = args.analysisFovRadiusMm > 0.0
-                                          ? args.analysisFovRadiusMm
-                                          : args.fovRadiusMm;
-      logInfo("Output transform: seam analysis XY FOV radius=" +
-              std::to_string(analysisRadiusMm) +
-              " mm (0 follows output radius).");
-    }
-
+    logInfo("Output transform: canonical center66_cosine10 stitch; "
+            "reconstruction beds are non-overlapping.");
     CompactSymmetricReconLoopContext compactContext;
     compactContext.args = &args;
     compactContext.opts = &opts;
@@ -926,7 +889,6 @@ int runProgram(int argc, char **argv) {
     compactContext.outputTransform = outputTransformPtr;
     compactContext.compactMeta = &compactMeta;
     compactContext.compactMetaPath = &compactMetaPath;
-    compactContext.compactChunkLayout = compactChunkLayout;
     compactContext.compactChunks = compactChunks.get();
     compactContext.timing = &compactTiming;
     compactContext.loadToIterationStart = loadToIterationStart;
@@ -938,7 +900,7 @@ int runProgram(int argc, char **argv) {
     compactContext.baseNvox = baseNvox;
     compactContext.globalNvox = globalNvox;
     compactContext.bedZStarts = &bedZStarts;
-    (void)CompactSymmetricReconLoop(compactContext).run(spect::io::CSRView{});
+    (void)runCompactSymmetricReconstruction(compactContext);
 
     logInfo("Reconstruction finished successfully.");
     return spect::cli::kExitSuccess;

@@ -20,21 +20,19 @@ void logCudaChunkTimingSnapshot(
 std::string outputPrefixFromArgs(const ReconArgs &args);
 
 bool tryComputeRegGradientCUDA(const std::vector<double> &image,
-                               const ReconArgs &args, const ReconOpts &opts,
+                               const ReconArgs &args,
                                const std::vector<uint8_t> *maskForReg,
                                std::vector<double> &gradReg);
 
 bool tryApplySeparableConvCUDA(std::vector<double> &volume, int nx, int ny,
                                int nz, const std::vector<double> &kx,
                                const std::vector<double> &ky,
-                               const std::vector<double> &kz,
-                               const ReconOpts &opts);
+                               const std::vector<double> &kz);
 
 void applySeparableConvRuntime(std::vector<double> &volume, int nx, int ny,
                                int nz, const std::vector<double> &kx,
                                const std::vector<double> &ky,
-                               const std::vector<double> &kz,
-                               const ReconOpts &opts, int threads);
+                               const std::vector<double> &kz, int threads);
 
 /// Warn on an all-zero iteration checkpoint; optionally fail closed via
 /// SPECT_FAIL_ON_ZERO_CHECKPOINT=1 to avoid writing a zero DICOM.

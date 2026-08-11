@@ -8,7 +8,7 @@
 
 #include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
-#include "sparse/SparseOpsBackend.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #include <atomic>
 #include <cstddef>
@@ -274,7 +274,6 @@ uint64_t selectPreparedChunkHostCacheBudgetBytes(
     const io::CSRView &matrix, size_t activePreparedCaches = 1);
 
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
-MatrixCacheKey makeCacheKey(const io::CSRQuantizedView &matrix);
 SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
                                   const std::vector<int> &subset_rows);
 AttenCacheKey makeAttenCacheKey(const io::CSRView &matrix,

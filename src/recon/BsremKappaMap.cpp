@@ -12,13 +12,9 @@ std::vector<double> computeKappaMapStandard(
   if (!args.bsremUseKappaMap || globalSensitivity.empty())
     return kappa;
 
-  // Unified semantics (2026-07-04 physics ruling): voxels with sensitivity
-  // <= eps or non-finite are excluded from the normalization mean and keep
-  // kappa = 1. The removed legacy compact variant fed 1/sqrt(eps) for such
-  // voxels into the mean, letting dead voxels outside the support inflate
-  // the mean and effectively disable regularization inside the object.
-  // For sensitivity maps that are strictly positive everywhere (e.g. the
-  // 260601 6-module geometry), both variants were bit-identical.
+  // Exclude <= eps and non-finite voxels from the normalization mean. Feeding
+  // 1/sqrt(eps) for dead voxels would inflate the mean and effectively disable
+  // regularization inside the object.
   const double eps = std::max(args.bsremKappaEps, 1e-12);
   double sum = 0.0;
   size_t count = 0;

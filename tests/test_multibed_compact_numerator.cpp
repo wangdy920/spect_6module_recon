@@ -3,12 +3,13 @@
 #include "sparse/CompactSymmetricProjector.h"
 #include "cuda/CudaConfig.h"
 #include "io/CompactChunkCSR.h"
+#include "sparse/ProjDomainChunked.h"
 #include "tests/common/compact_symmetry_test_helpers.h"
 
 using spect::io::test::denseNumerator;
 using spect::io::test::expandCompactToyToFullDense;
 using spect::io::test::makeToyCompactCSR;
-using spect::io::test::makeToySym45ZMeta;
+using spect::io::test::makeToySym90ZMeta;
 
 #include <cmath>
 #include <cstdint>
@@ -57,7 +58,7 @@ protected:
 };
 
 TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
-  const auto meta = makeToySym45ZMeta();
+  const auto meta = makeToySym90ZMeta();
   const auto compact = makeToyCompactCSR();
   const auto full = expandCompactToyToFullDense(meta, compact);
 
@@ -100,11 +101,21 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
   const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
   double *numerPtrs[bedCount] = {localNumers[0].data(),
                                  localNumers[1].data()};
+  spect::cuda::resetCudaChunkStageTimingCUDA();
 
   const bool ok = spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
       chunks, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs, false,
       nullptr, nullptr);
   ASSERT_TRUE(ok);
+  const auto cudaTiming = spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
+  EXPECT_EQ(cudaTiming.compactForwardOutputD2HCalls, 0u);
+  EXPECT_EQ(cudaTiming.compactBackwardOutputD2HCalls,
+            static_cast<size_t>(bedCount));
+  EXPECT_EQ(cudaTiming.compactOutputD2HCalls,
+            static_cast<size_t>(bedCount));
+  EXPECT_EQ(cudaTiming.compactForwardOutputD2HBytes, 0u);
+  EXPECT_EQ(cudaTiming.compactBackwardOutputD2HBytes,
+            static_cast<uint64_t>(bedCount) * nvox * sizeof(double));
 
   // Compute per-bed reference numerators from the explicit full dense matrix.
   const auto refNumer0 = denseNumerator(full, projBed0, imageBed0,
@@ -130,8 +141,49 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
   std::filesystem::remove_all(dir);
 }
 
+TEST_F(MultiBedCompactNumeratorTest, ProjectionBufferMutationRefreshesCache) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto full = expandCompactToyToFullDense(meta, compact);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_low_forward_ratio_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks = spect::io::openCompactChunkCSRDirectory(
+      dir.string(), dirMeta, 1024 * 1024);
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  const std::vector<double> image = {1.0, 1.3, 1.7, 2.1,
+                                     0.8, 1.2, 1.6, 2.0};
+  std::vector<double> projection(fullRows, 5.0);
+  std::vector<double> numer(nvox, 0.0);
+
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projection.data(), nullptr, image.data(), 1,
+      numer.data()));
+  for (size_t i = 0; i < fullRows; ++i)
+    projection[i] = 1.0 + 0.01 * static_cast<double>(i);
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projection.data(), nullptr, image.data(), 1,
+      numer.data()));
+  const auto expected = denseNumerator(full, projection, image,
+                                       static_cast<int>(fullRows),
+                                       meta.totalVoxels);
+  ASSERT_EQ(numer.size(), expected.size());
+  for (size_t i = 0; i < numer.size(); ++i)
+    EXPECT_NEAR(numer[i], expected[i], 1e-4) << "mismatch at index " << i;
+
+  std::filesystem::remove_all(dir);
+}
+
 TEST_F(MultiBedCompactNumeratorTest, TwoBedsWithCtacMatchSingleBedRuns) {
-  const auto meta = makeToySym45ZMeta();
+  const auto meta = makeToySym90ZMeta();
   const auto compact = makeToyCompactCSR();
 
   const auto dir = std::filesystem::temp_directory_path() /

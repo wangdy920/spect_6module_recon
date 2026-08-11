@@ -29,8 +29,6 @@ struct ProjDomainKernelCache {
   CUfunction compactBakeAttenFunction = nullptr;
   CUfunction compactAttenForwardFunction = nullptr;
   CUfunction compactAttenBackwardFunction = nullptr;
-  CUfunction compactBranchBatchForwardScaledU16Function = nullptr;
-  CUfunction compactBranchBatchBackwardScaledU16Function = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -66,10 +64,6 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactBakeAttenFunction != nullptr &&
       g_projDomainKernelCache.compactAttenForwardFunction != nullptr &&
       g_projDomainKernelCache.compactAttenBackwardFunction != nullptr &&
-      g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function !=
-          nullptr &&
-      g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function !=
-          nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -101,8 +95,6 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactBakeAttenFunction = nullptr;
     g_projDomainKernelCache.compactAttenForwardFunction = nullptr;
     g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
-    g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function = nullptr;
-    g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function = nullptr;
   }
 
   cuda::loadNvrtcPtxModule(&g_projDomainKernelCache.module, ptx);
@@ -131,14 +123,6 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactAttenBackwardFunction,
       g_projDomainKernelCache.module, "compact_atten_fused_spmvt"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function,
-      g_projDomainKernelCache.module,
-      "compact_branch_batch_forward_scaled_u16"));
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function,
-      g_projDomainKernelCache.module,
-      "compact_branch_batch_backward_scaled_u16"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -169,16 +153,16 @@ void launchProjDomainRatioKernel(const float *yhat, const float *projections,
 }
 
 void launchCompactRatioKernel(
-    const float *yhat, const float *fullProjection, size_t fullProjectionCount,
+    const float *yhat, const double *fullProjection, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
-    float eps, cudaStream_t stream) {
+    double eps, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (count == 0) {
     return;
   }
   CUdeviceptr yhatPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(yhat));
   CUdeviceptr projectionPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(fullProjection));
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullProjection));
   CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratio);
   unsigned long long projectionCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -239,11 +223,11 @@ void launchCompactTransformBackwardAddKernel(
 }
 
 void launchCompactRatioBatchKernel(
-    const float *yhatBatch, const float *fullProjection,
+    const float *yhatBatch, const double *fullProjection,
     size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
     const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
-    float eps, cudaStream_t stream) {
+    double eps, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (rows == 0 || batchSize <= 0) {
     return;
@@ -251,7 +235,7 @@ void launchCompactRatioBatchKernel(
   CUdeviceptr yhatPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<float *>(yhatBatch));
   CUdeviceptr projectionPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(fullProjection));
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullProjection));
   CUdeviceptr symIdsPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dSymIds));
   CUdeviceptr zMirrorsPtr =
@@ -453,63 +437,6 @@ void launchCompactAttenFusedBackwardKernel(
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
-void launchCompactBranchBatchForwardScaledU16(
-    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
-    const float *rowScales, const float *x, int cols, int batchSize, float *y,
-    int rows, cudaStream_t stream) {
-  ensureProjDomainKernelsLoaded();
-  if (rows <= 0 || batchSize <= 0) {
-    return;
-  }
-  CUdeviceptr rowPtrPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(rowPtr));
-  CUdeviceptr colIdxPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(colIdx));
-  CUdeviceptr valuesPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(values));
-  CUdeviceptr rowScalesPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(rowScales));
-  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x));
-  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(y);
-  void *args[] = {&rowPtrPtr, &colIdxPtr, &valuesPtr, &rowScalesPtr, &xPtr,
-                  &cols, &batchSize, &yPtr, &rows};
-  const unsigned int blockSize =
-      static_cast<unsigned int>(std::max(32, std::min(batchSize * 4, 256)));
-  const unsigned int gridSize = static_cast<unsigned int>(rows);
-  SPECT_CUDRV_CHECK(cuLaunchKernel(
-      g_projDomainKernelCache.compactBranchBatchForwardScaledU16Function,
-      gridSize, 1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream),
-      args, nullptr));
-}
-
-void launchCompactBranchBatchBackwardScaledU16(
-    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
-    const float *rowScales, const float *y, int rows, int batchSize, float *x,
-    int cols, cudaStream_t stream) {
-  ensureProjDomainKernelsLoaded();
-  if (rows <= 0 || batchSize <= 0) {
-    return;
-  }
-  CUdeviceptr rowPtrPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(rowPtr));
-  CUdeviceptr colIdxPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint32_t *>(colIdx));
-  CUdeviceptr valuesPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<uint16_t *>(values));
-  CUdeviceptr rowScalesPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(rowScales));
-  CUdeviceptr yPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(y));
-  CUdeviceptr xPtr = reinterpret_cast<CUdeviceptr>(x);
-  void *args[] = {&rowPtrPtr, &colIdxPtr, &valuesPtr, &rowScalesPtr, &yPtr,
-                  &rows, &batchSize, &xPtr, &cols};
-  const unsigned int blockSize =
-      static_cast<unsigned int>(std::max(32, std::min(batchSize * 4, 256)));
-  const unsigned int gridSize = static_cast<unsigned int>(rows);
-  SPECT_CUDRV_CHECK(cuLaunchKernel(
-      g_projDomainKernelCache.compactBranchBatchBackwardScaledU16Function,
-      gridSize, 1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream),
-      args, nullptr));
-}
 
 } // namespace spect
 

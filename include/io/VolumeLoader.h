@@ -204,7 +204,7 @@ inline std::vector<double> loadVolume(const std::string &path, int &Nx, int &Ny,
     size_t numel = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) * static_cast<size_t>(Nz);
 
     if (numel > 1024ULL * 1024ULL * 1024ULL) {
-        std::cerr << "[WARN] Loading huge volume: " << numel << " voxels.\n";
+        std::cerr << "[NOTE] Loading huge volume: " << numel << " voxels.\n";
     }
 
     std::vector<double> out(numel);

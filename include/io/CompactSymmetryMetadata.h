@@ -8,20 +8,8 @@
 
 namespace spect::io {
 
-// metadata.bin on-disk sizes (int32/float field layout, no magic prefix yet).
-constexpr std::size_t kCompactMetadataExtendedV1Bytes = 88;   // + use45, symCode, symmetryOrder (260601)
-constexpr std::size_t kCompactMetadataExtendedV2Bytes = 96;     // + roiRadius, roiSide
-
-enum class CompactSymmetryMode {
-  None,
-  ZOnly,
-  Sym45,
-  Sym45Z,
-  Sym90,
-  Sym90Z,
-  Sym180,
-  SymZ180
-};
+// Canonical v4 metadata.bin layout: 22 int32/float fields, no magic prefix.
+constexpr std::size_t kCompactMetadataBytes = 88;
 
 struct CompactSymmetryMetadata {
   int totalRows = 0;
@@ -41,14 +29,8 @@ struct CompactSymmetryMetadata {
   float pixelSize = 0.0f;
   float detectorY = 0.0f;
   float detectorThickness = 0.0f;
-  bool use90Sym = false;
-  bool useZSym = false;
-  bool use45Sym = false;
   int symCode = 0;
-  int symmetryOrder = 1;
-  int roiRadius = 0;
-  int roiSide = 0;
-  CompactSymmetryMode mode = CompactSymmetryMode::None;
+  int symmetryOrder = 0;
 
   int fullRaysPerAngle() const { return detNx * detNz; }
   int64_t fullRows() const {
@@ -63,8 +45,8 @@ struct CompactSymmetryMetadata {
     return static_cast<int64_t>(Nx) * static_cast<int64_t>(Ny) *
            static_cast<int64_t>(Nz);
   }
-  int xySymmetryCount() const;
-  int zBranchCount() const;
+  int xySymmetryCount() const { return 4; }
+  int zBranchCount() const { return 2; }
 };
 
 struct CompactVoxelCoord {
@@ -73,80 +55,28 @@ struct CompactVoxelCoord {
   int z = 0;
 };
 
-inline CompactVoxelCoord mapSym45D4XY(int x, int y, int n, int symId) {
+inline CompactVoxelCoord mapCompactVoxelCoord(int x, int y, int z, int nx,
+                                              int nz, int symId,
+                                              bool zMirror) {
   CompactVoxelCoord out;
   switch (symId) {
   case 1:
-    out.x = y;
+    out.x = nx - 1 - y;
     out.y = x;
     break;
   case 2:
-    out.x = n - 1 - y;
-    out.y = x;
+    out.x = nx - 1 - x;
+    out.y = nx - 1 - y;
     break;
   case 3:
-    out.x = n - 1 - x;
-    out.y = y;
-    break;
-  case 4:
-    out.x = n - 1 - x;
-    out.y = n - 1 - y;
-    break;
-  case 5:
-    out.x = n - 1 - y;
-    out.y = n - 1 - x;
-    break;
-  case 6:
     out.x = y;
-    out.y = n - 1 - x;
-    break;
-  case 7:
-    out.x = x;
-    out.y = n - 1 - y;
+    out.y = nx - 1 - x;
     break;
   default:
     out.x = x;
     out.y = y;
     break;
   }
-  return out;
-}
-
-inline CompactVoxelCoord mapSym90XY(int x, int y, int n, int symId) {
-  CompactVoxelCoord out;
-  switch (symId) {
-  case 1:
-    out.x = n - 1 - y;
-    out.y = x;
-    break;
-  case 2:
-    out.x = n - 1 - x;
-    out.y = n - 1 - y;
-    break;
-  case 3:
-    out.x = y;
-    out.y = n - 1 - x;
-    break;
-  default:
-    out.x = x;
-    out.y = y;
-    break;
-  }
-  return out;
-}
-
-inline CompactVoxelCoord mapSym45ZVoxelCoord(int x, int y, int z, int nx,
-                                             int nz, int symId,
-                                             bool zMirror) {
-  CompactVoxelCoord out = mapSym45D4XY(x, y, nx, symId);
-  out.z = zMirror ? (nz - 1 - z) : z;
-  return out;
-}
-
-inline CompactVoxelCoord mapSym90ZVoxelCoord(int x, int y, int z, int nx,
-                                             int nz, int symId,
-                                             bool zMirror) {
-  CompactVoxelCoord out = mapSym90XY(x, y, nx, symId);
   out.z = zMirror ? (nz - 1 - z) : z;
   return out;
 }
@@ -159,8 +89,8 @@ inline size_t compactVoxelLinearIndex(const CompactVoxelCoord &coord,
          static_cast<size_t>(coord.x);
 }
 
-inline size_t mapSym45ZVoxelIndex(size_t linearIndex, int nx, int ny, int nz,
-                                  int symId, bool zMirror) {
+inline size_t mapCompactVoxelIndex(size_t linearIndex, int nx, int ny, int nz,
+                                   int symId, bool zMirror) {
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
   const int z = static_cast<int>(linearIndex / plane);
   const size_t rem = linearIndex - static_cast<size_t>(z) * plane;
@@ -168,11 +98,10 @@ inline size_t mapSym45ZVoxelIndex(size_t linearIndex, int nx, int ny, int nz,
   const int x = static_cast<int>(rem - static_cast<size_t>(y) *
                                            static_cast<size_t>(nx));
   return compactVoxelLinearIndex(
-      mapSym45ZVoxelCoord(x, y, z, nx, nz, symId, zMirror), nx, ny);
+      mapCompactVoxelCoord(x, y, z, nx, nz, symId, zMirror), nx, ny);
 }
 
-const char *compactSymmetryModeName(CompactSymmetryMode mode);
-CompactSymmetryMode inferCompactSymmetryMode(const CompactSymmetryMetadata &meta);
+const char *compactSymmetryModeName();
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path);
 

@@ -31,14 +31,14 @@ function Invoke-Case([string]$Name, [string[]]$Extra) {
 Invoke-Case "b1_plain"     @("-df", $ProjBin, "-opti", "mlem", "-it", "50")
 Invoke-Case "b1_butter"    @("-df", $ProjBin, "-opti", "mlem", "-it", "50", "-butter", "0.35,2")
 Invoke-Case "bsrem20"      @("-df", $ProjBin, "-opti", "bsrem", "-it", "20")
-Invoke-Case "psf_butter20" @("-df", $ProjBin, "-opti", "mlem", "-it", "20", "-psf", "-butter", "0.35,2")
+Invoke-Case "sieve_castor20" @("-df", $ProjBin, "-opti", "mlem", "-it", "20", "-psf", "1.3,3", "-psfMode", "sieve", "-psfKernel", "castor")
 
 # 两床 stitch： Bed1/Bed2 由同一投影复制（目录 beds\ 随 OutRoot 自动准备）
 $beds = Join-Path $OutRoot "beds"
 New-Item -ItemType Directory -Force -Path $beds | Out-Null
 Copy-Item $ProjBin (Join-Path $beds "Bed1.bin") -Force
 Copy-Item $ProjBin (Join-Path $beds "Bed2.bin") -Force
-Invoke-Case "stitch2bed" @("-dfList", "$beds\Bed1.bin;$beds\Bed2.bin", "-bedOverlap", "24", "-opti", "mlem", "-it", "20")
+Invoke-Case "stitch2bed" @("-dfList", "$beds\Bed1.bin;$beds\Bed2.bin", "-bedOverlap", "164", "-opti", "mlem", "-it", "20")
 
 New-Item -ItemType Directory -Force -Path (Join-Path $OutRoot "metrics") | Out-Null
 $failed = @()
@@ -51,7 +51,7 @@ if ($LASTEXITCODE -ne 0) { $failed += "b1_plain_vs_ref" }
 
 # 可选： 冻结基线逐 case 近零差对比（期望 float 噪声量级）
 if ($GoldenDir) {
-    $finals = @{ b1_plain = "recon_it50"; b1_butter = "recon_it50"; bsrem20 = "recon_it20"; psf_butter20 = "recon_it20"; stitch2bed = "recon_it20" }
+    $finals = @{ b1_plain = "recon_it50"; b1_butter = "recon_it50"; bsrem20 = "recon_it20"; sieve_castor20 = "recon_it20"; stitch2bed = "recon_it20" }
     foreach ($case in $finals.Keys) {
         $a = Join-Path $OutRoot "$case\$($finals[$case]).mhd"
         $b = Join-Path $GoldenDir "$case\$($finals[$case]).mhd"

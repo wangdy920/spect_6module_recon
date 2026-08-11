@@ -14,6 +14,7 @@
 
 // Bring types into current namespace for convenience
 using spect::filters::PSFConf;
+using spect::filters::PSFKernel;
 using spect::filters::PSFMode;
 using spect::RegConf;
 using spect::RegType;
@@ -68,6 +69,10 @@ struct ReconArgs {
     bool useButter = false;
     float butterCutoff = 0.35f;
     int butterOrder = 2;
+    // Filter apply stages: "none" | "in_recon".
+    // CLI -smooth/-butter imply "in_recon"; INI may set the stage explicitly.
+    std::string smoothApplyStage = "none"; ///< Gaussian smoothing stage
+    std::string butterApplyStage = "none"; ///< Butterworth stage
     bool usePSF = false;
     PSFConf psf;                  ///< PSF configuration
     bool psfModeExplicit = false; ///< -psfMode was used explicitly
@@ -77,9 +82,10 @@ struct ReconArgs {
     RegConf reg;  ///< Regularization configuration
 
     // ========== Cylindrical Mask ==========
-    bool useCylindricalMask = false;
+    bool useCylindricalMask = true;
     float cylinderDiameterMM = 30.0f;
-    float cylinderHeightMM = 30.0f;
+    float cylinderHeightMM = 21.6f;
+    bool cylinderDimsExplicit = false;
     double cylCenterX = std::numeric_limits<double>::quiet_NaN();
     double cylCenterY = std::numeric_limits<double>::quiet_NaN();
     double cylCenterZ = std::numeric_limits<double>::quiet_NaN();
@@ -136,33 +142,11 @@ struct ReconArgs {
     int bedCount = 1;
     std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
     std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
-    std::string bedCropMethod = "center66_cosine10"; ///< direct | sigmoid | center66_cosine10 (output-only)
-    bool bedSeamPostprocess = true; ///< Request seam postprocess; active only with multi-bed output overlap stitch
     int detZEdgeCensor = 0;    ///< Censor k detZ edge rows per side in compact numerator+denominator (0 = off)
     std::string detZRowWeightsFile; ///< Detector efficiency weights applied to compact sensitivity only (empty = off)
     std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
-    std::string bedObjectProfile = "auto"; ///< auto | mouse | phantom | epguan | zimu | derenzo
-    bool bedDerenzoPostprocess = true; ///< Enable explicit Derenzo axial continuity processing
-    double bedDerenzoAxialStrength = 0.30; ///< Positive-only high-confidence rod fill, [0,1]
-    bool bedDerenzoAdhesion = false; ///< Enable Derenzo in-plane adhesion fill + rod-core damping
-    double bedDerenzoAdhesionInner = 0.02; ///< Adhesion fraction at the inner sectors, [0,1]
-    double bedDerenzoAdhesionOuter = 0.10; ///< Adhesion fraction at the rim sectors, [0,1]
-    double bedDerenzoCoreDamp = 0.55; ///< High-frequency damping inside the rod cores, [0,1]
-    double bedPhantomCloseStrength = 1.0; ///< Phantom contour-interpolation blend, [0,1]
-    double bedEpguanCloseStrength = 1.0; ///< EP tube contour-interpolation blend, [0,1]
-    bool bedEpguanWallMaxPreserve = false; ///< Keep brighter original EP wall at seams
-    double bedEpguanSeamEdgeStrength = 0.60; ///< C4 blend at seam-window edges, [0,1]
-    int bedEpguanSeamFeatherSlices = 4; ///< Slices from edge to full C4 blend
-    bool bedEpguanBackgroundFilter = true; ///< Attenuate signal outside EP tube support
-    double bedEpguanBackgroundRetain = 0.08; ///< Far-background retained fraction, [0,1]
-    double bedEpguanSupportThreshold = 0.06; ///< Smoothed projection threshold fraction, (0,1]
-    double bedEpguanSupportMarginMm = 1.5; ///< Fully protected margin and feather width in mm
-    double bedZimuCloseStrength = 0.5; ///< Zimu topology-locked smoothing blend, [0,1]
-    double bedMouseSeamStrength = 0.0; ///< Bilateral confidence fusion blend, [0,1]
-    int bedSeamHalfWidth = 8; ///< Phantom seam half-width; zimu is capped at 4
-    double fovRadiusMm = 0.0;       ///< Final-output circular XY FOV radius; 0 disables
-    double analysisFovRadiusMm = 0.0; ///< Classifier/support FOV; 0 follows fovRadiusMm
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
+    double bedStepMm = 0.0;        ///< Scanner bed step in mm (0 = use kMultiBedStepMm default 16.8)
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
 
@@ -211,7 +195,8 @@ struct ReconArgs {
 } // namespace cli
 } // namespace spect
 
-// Backward compatibility alias for existing code
-using ReconArgs = spect::cli::ReconArgs;
+namespace spect::main {
+using ReconArgs = cli::ReconArgs;
+}
 
 

@@ -44,14 +44,6 @@ inline const char* statusToString(Status s) {
     }
 }
 
-/**
- * @brief 执行后端类型
- */
-enum class BackendType {
-    Reference,  // 标量参考实现
-    CPU,        // AVX2 + OpenMP
-    CUDA        // GPU (预留)
-};
 
 /**
  * @brief 精度类型

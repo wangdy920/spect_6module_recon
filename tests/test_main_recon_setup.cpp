@@ -129,146 +129,46 @@ TEST(ReconSetupTest, AdoptReconDimsFromRegisteredCtHintWhenNotExplicit) {
   std::filesystem::remove(path);
 }
 
-TEST(ReconSetupTest, PrepareBedSetupCanReserveOverlapForOutputOnly) {
+
+
+TEST(ReconSetupTest, PrepareBedSetupUsesFixedSingleBedRoi) {
   ReconArgs args;
   args.Nx = 108;
   args.Ny = 108;
   args.Nz = 80;
-  args.projPaths = {"Bed1.bin", "Bed2.bin", "Bed3.bin", "Bed4.bin"};
-  args.bedOverlaps = {8, 8, 8, 0, 0};
-  args.bedCropMethod = "sigmoid";
+  args.projPath = "Bed1.bin";
 
   const BedSetupResult result = prepareBedSetup(args);
 
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{8, 8, 8}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0, 0}));
-  EXPECT_EQ(result.totalOverlap, 0);
-  EXPECT_EQ(args.Nz, 320);
-  EXPECT_NE(result.summary.find("overlapMode=output-sigmoid"),
-            std::string::npos);
+  EXPECT_EQ(result.bedCount, 1);
+  EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 30.0f);
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 21.6f);
 }
 
-TEST(ReconSetupTest, PrepareBedSetupReplicatesSingleOverlap) {
+TEST(ReconSetupTest, PrepareBedSetupPreservesExplicitCylinderRoi) {
   ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
-  args.bedOverlaps = {16};
-  args.bedCropMethod = "sigmoid";
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.dz = 0.3;
+  args.projPaths = {"Bed1.bin", "Bed2.bin"};
+  args.bedOverlaps = {164, 164, 164, 164, 0};
+  args.cylinderDiameterMM = 28.0f;
+  args.cylinderHeightMM = 24.0f;
+  args.cylinderDimsExplicit = true;
 
-  const BedSetupResult result = prepareBedSetup(args);
+  (void)prepareBedSetup(args);
 
-  EXPECT_EQ(result.baseNz, 100);
-  EXPECT_EQ(result.bedCount, 4);
-  EXPECT_EQ(args.bedCount, 4);
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{16, 16, 16}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0, 0}));
-  EXPECT_EQ(result.totalOverlap, 0);
-  EXPECT_EQ(args.Nz, 400);
-  EXPECT_TRUE(result.warnings.empty());
+  EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 28.0f);
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 24.0f);
 }
-
-TEST(ReconSetupTest, PrepareBedSetupPadsMismatchedOverlapList) {
-  ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
-  args.bedOverlaps = {16, 16};
-  args.bedCropMethod = "sigmoid";
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{16, 16, 0}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0, 0}));
-  ASSERT_EQ(result.warnings.size(), 1u);
-  EXPECT_NE(result.warnings[0].find("Missing fixed slots use zero"),
-            std::string::npos);
-  EXPECT_EQ(args.Nz, 400);
-}
-
-TEST(ReconSetupTest, PrepareBedSetupClampsInvalidOverlapValues) {
-  ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"bed1.mat", "bed2.mat", "bed3.mat", "bed4.mat"};
-  args.bedOverlaps = {-4, 120, 16, 0, 0};
-  args.bedCropMethod = "sigmoid";
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{0, 99, 16}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0, 0}));
-  EXPECT_EQ(result.totalOverlap, 0);
-  EXPECT_EQ(args.Nz, 400);
-  ASSERT_GE(result.warnings.size(), 1u);
-  bool sawClamped = false;
-  for (const std::string &warning : result.warnings) {
-    sawClamped = sawClamped || warning.find("clamped") != std::string::npos;
-  }
-  EXPECT_TRUE(sawClamped);
-}
-
-TEST(ReconSetupTest, PrepareBedSetupMatchesFixedOverlapTableForSubsetBeds) {
-  ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"case_Bed2.bin", "case_Bed3.bin", "case_Bed4.bin"};
-  args.bedOverlaps = {11, 22, 33, 44, 55};
-  args.bedCropMethod = "sigmoid";
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{22, 33}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0}));
-  EXPECT_EQ(result.totalOverlap, 0);
-  EXPECT_EQ(args.Nz, 300);
-  EXPECT_TRUE(result.warnings.empty());
-}
-
-TEST(ReconSetupTest, PrepareBedSetupUsesSequentialBedsWhenPathHasNoBedNumber) {
-  ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"first.bin", "second.bin", "third.bin"};
-  args.bedOverlaps = {5, 6, 7, 8, 9};
-  args.bedCropMethod = "sigmoid";
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{5, 6}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0}));
-  EXPECT_EQ(args.Nz, 300);
-}
-
-TEST(ReconSetupTest, PrepareBedSetupUsesZeroForNonAdjacentSubsetBeds) {
-  ReconArgs args;
-  args.Nx = 100;
-  args.Ny = 100;
-  args.Nz = 100;
-  args.projPaths = {"case_Bed1.bin", "case_Bed3.bin"};
-  args.bedOverlaps = {5, 6, 7, 8, 9};
-  args.bedCropMethod = "sigmoid";
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{0}));
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0}));
-  EXPECT_EQ(result.totalOverlap, 0);
-  EXPECT_EQ(args.Nz, 200);
-  ASSERT_EQ(result.warnings.size(), 1u);
-  EXPECT_NE(result.warnings[0].find("Non-adjacent beds"), std::string::npos);
-}
-
 TEST(ReconSetupTest, PrepareBedSetupAcceptsCenter66FixedStepGeometry) {
   ReconArgs args;
   args.Nx = 108;
   args.Ny = 108;
   args.Nz = 160;
+  args.Vz = 0.3f;
+  args.dz = 0.3;
   args.projPaths = {"Bed1.bin", "Bed2.bin", "Bed3.bin"};
   args.bedOverlaps = {104, 104, 104, 104, 0};
 
@@ -277,19 +177,72 @@ TEST(ReconSetupTest, PrepareBedSetupAcceptsCenter66FixedStepGeometry) {
   EXPECT_EQ(result.baseNz, 160);
   EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{104, 104}));
   EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0, 0}));
+  EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 36.0f);
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 66.0f);
   EXPECT_NE(result.summary.find("overlapMode=output-center66_cosine10"),
             std::string::npos);
 }
 
-TEST(ReconSetupTest, PrepareBedSetupRejectsCenter66WrongBedStep) {
+TEST(ReconSetupTest, PrepareBedSetupAutoDerivesOverlapWhenNotProvided) {
   ReconArgs args;
   args.Nx = 108;
   args.Ny = 108;
   args.Nz = 160;
+  args.dz = 0.3;
+  args.projPaths = {"Bed1.bin", "Bed2.bin", "Bed3.bin"};
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  // No -bedOverlap given: derived from default 16.8 mm step -> 56 layers,
+  // overlap = 160 - 56 = 104 per joint (default 0s are re-derived).
+  EXPECT_EQ(result.baseNz, 160);
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{104, 104}));
+  EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 66);
+  EXPECT_EQ(result.canonicalGeom.blendOverlap, 10);
+  bool found = false;
+  for (const auto &w : result.warnings)
+    found = found || w.find("re-derived from the scanner bed step") !=
+                         std::string::npos;
+  EXPECT_TRUE(found);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupCorrectsWrongOverlapWithWarning) {
+  ReconArgs args;
+  args.Nx = 108;
+  args.Ny = 108;
+  args.Nz = 160;
+  args.dz = 0.3;
   args.projPaths = {"Bed1.bin", "Bed2.bin"};
   args.bedOverlaps = {103, 103, 103, 103, 0};
 
-  EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{104}));
+  EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
+  bool found = false;
+  for (const auto &w : result.warnings)
+    found = found || w.find("re-derived from the scanner bed step") !=
+                         std::string::npos;
+  EXPECT_TRUE(found);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupReDerivesOverlapForDifferentVoxel) {
+  // 0.4 mm voxels + default 16.8 mm step -> 42 layers, overlap = 160 - 42.
+  ReconArgs args;
+  args.Nx = 108;
+  args.Ny = 108;
+  args.Nz = 160;
+  args.Vz = 0.4f;
+  args.dz = 0.4;
+  args.projPaths = {"Bed1.bin", "Bed2.bin"};
+  args.bedOverlaps = {104, 104, 104, 104, 0};
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{118}));
+  EXPECT_EQ(result.canonicalGeom.stepLayers, 42);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 52);
 }
 
 TEST(ReconSetupTest, PrepareBedSetupRejectsMoreThanFiveBeds) {
@@ -301,6 +254,31 @@ TEST(ReconSetupTest, PrepareBedSetupRejectsMoreThanFiveBeds) {
                     "bed4.mat", "bed5.mat", "bed6.mat"};
 
   EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupCorrectsLegacyOverlapForSmallMatrixNz) {
+  // Device scenario: sampling-system matrix with Nz=100 (metadata override),
+  // while the deployment config still carries the 220-layer overlap 164.
+  // The 164 is clamped to Nz-1 and must then be re-derived from the scanner
+  // step (56 layers) -> overlap 44, NOT fail with step=1.
+  ReconArgs args;
+  args.Nx = 100;
+  args.Ny = 100;
+  args.Nz = 100;
+  args.dz = 0.3;
+  args.projPaths = {"Bed1.bin", "Bed2.bin"};
+  args.bedOverlaps = {164, 164, 164, 164, 0};
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{44}));
+  EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 66);
+  bool found = false;
+  for (const auto &w : result.warnings)
+    found = found || w.find("re-derived from the scanner bed step") !=
+                         std::string::npos;
+  EXPECT_TRUE(found);
 }
 
 TEST(ReconSetupTest, SharedBedPathParserHandlesSeparatorsAndCase) {

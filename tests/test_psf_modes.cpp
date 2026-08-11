@@ -111,7 +111,9 @@ TEST(PSFModeTest, OperatorPsfForwardBackwardAreAdjointAtBoundaries) {
     const double lhs = std::inner_product(gx.begin(), gx.end(), y.begin(), 0.0);
     const double rhs = std::inner_product(x.begin(), x.end(), gty.begin(), 0.0);
     const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
-    EXPECT_NEAR(lhs, rhs, 1e-12 * scale);
+    // Production PSF staging is float32 on CUDA; verify adjointness at its
+    // numerical precision rather than the retired CPU-double path.
+    EXPECT_NEAR(lhs, rhs, 2e-8 * scale);
 }
 
 TEST(PSFModeTest, GaussianKernelUsesConfiguredSigmaTruncation) {

@@ -4,6 +4,7 @@
 
 #include "cli/Version.h"
 #include "core/AttenuationCoefficients.h"
+#include "core/SixModuleGeometry.h"
 #include "io/BadDetectorMask.h"
 #include "io/DetZRowWeights.h"
 
@@ -48,9 +49,13 @@ std::string ArgumentParser::resolveDefaultConfigPath(char** argv) {
         std::filesystem::path("config") / "spect_config.ini",
         std::filesystem::path("spect_config.ini"),
     };
+    std::error_code ec;
     for (const auto& path : candidates) {
-        if (!path.empty() && std::filesystem::exists(path))
+        if (path.empty())
+            continue;
+        if (std::filesystem::exists(path, ec) && !ec)
             return path.string();
+        ec.clear();
     }
     return candidates.front().string();
 }
@@ -169,7 +174,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
                                                   ReconArgs& args) {
   try {
     // 0. Pre-scan for -config, -opti, -algoConf
-    std::string configPath = resolveDefaultConfigPath(argv);
+    std::string configPath;
     std::string preScanAlg;
     std::string preScanAlgoConf;
     for (int i = 1; i < argc; i++) {
@@ -183,6 +188,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             preScanAlgoConf = argv[++i];
         }
     }
+    if (!args.configExplicit)
+        configPath = resolveDefaultConfigPath(argv);
     args.configPath = configPath;
 
     if (const char* cudaDeviceEnv = std::getenv("SPECT_CUDA_DEVICE")) {
@@ -193,9 +200,21 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         }
     }
 
-    // 1. Load global config if exists
+    // 1. Load global config if it exists. Error-code overloads keep an
+    // inaccessible optional default from aborting before CLI parsing.
     ConfigParser cfg;
-    if (std::filesystem::exists(configPath)) {
+    std::error_code configExistsError;
+    const bool configExists =
+        std::filesystem::exists(configPath, configExistsError);
+    if (configExistsError) {
+        args.configFound = false;
+        if (args.configExplicit) {
+            std::cerr << "Error: Cannot access explicit config file '"
+                      << configPath << "': "
+                      << configExistsError.message() << ".\n";
+            return ParseResult::ExitFailure;
+        }
+    } else if (configExists) {
         args.configFound = true;
         if (cfg.load(configPath)) {
             args.configLoaded = true;
@@ -291,16 +310,6 @@ void ArgumentParser::bindHandlerAliases(
 
 void ArgumentParser::registerHandlers() {
     handlers_.clear();
-    auto rejectCliOption = [](const char* message) {
-        return [message](int& i, int argc, char** argv, ReconArgs& a) {
-            (void)i;
-            (void)argc;
-            (void)argv;
-            (void)a;
-            std::cerr << "Error: " << message << "\n";
-            return false;
-        };
-    };
 
     auto dataHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         // Treat -i/-input as aliases for -df (path normalization/drive-letter
@@ -398,9 +407,6 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases(threadsHandler, {"-th"});
     bindHandlerAliases(threadsHandler, {"-threads"});
     bindHandlerAliases(threadsHandler, {"-t"});
-    bindHandlerAliases(
-        rejectCliOption("-sparseBackend was removed; the sparse backend is fixed to CUDA."),
-        {"-sparseBackend", "-spBackend"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.cudaDeviceValue = ArgumentParser::getRequiredArg(i, argc, argv, "-cudaDevice");
         a.cudaDeviceRequested = true;
@@ -408,9 +414,6 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-cudaDevice"});
 
-    bindHandlerAliases(
-        rejectCliOption("-subsets was removed; the compact-symmetric layout is always single-subset (MLEM-style full update)."),
-        {"-subsets"});
 
     auto algHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
@@ -427,9 +430,6 @@ void ArgumentParser::registerHandlers() {
         return true;
     };
     bindHandlerAliases(algHandler, {"-opti"});
-    bindHandlerAliases(
-        rejectCliOption("-alg was removed; use -opti mlem|bsrem."),
-        {"-alg"});
 
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts = split(ArgumentParser::getRequiredArg(i, argc, argv, "-bsrem"), ',');
@@ -478,11 +478,6 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremSoftMask);
     }, {"-bsremSoftMask"});
-    bindHandlerAliases(
-        rejectCliOption("-bsremSoftBand was removed; the soft-mask transition band was never implemented "
-                        "(the mask is applied as a hard binary boost). Use -bsremSoftLambda to set the "
-                        "outside-mask weight."),
-        {"-bsremSoftBand"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bsremSoftMaskLambdaOut = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftLambda"));
@@ -495,8 +490,18 @@ void ArgumentParser::registerHandlers() {
             ArgumentParser::getRequiredArg(i, argc, argv, "-fout"), a);
     }, {"-fout"});
     auto outDirHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
+        // Value is the output directory itself (not a name prefix).
         const std::string k = argv[i];
-        a.outputDir = ArgumentParser::getRequiredArg(i, argc, argv, k);
+        const std::string dir = ArgumentParser::getRequiredArg(i, argc, argv, k);
+        std::filesystem::path p = std::filesystem::path(dir).lexically_normal();
+        if (p.is_absolute()) {
+            std::error_code absEc;
+            auto abs = std::filesystem::absolute(p, absEc);
+            a.outputDir =
+                (absEc ? p : abs).lexically_normal().make_preferred().string();
+        } else {
+            a.outputDir = p.empty() ? std::string(".") : p.string();
+        }
         return true;
     };
     bindHandlerAliases(outDirHandler, {"-o"});
@@ -528,9 +533,6 @@ void ArgumentParser::registerHandlers() {
     }, {"-v", "--version"});
 
     // --- Filtering & PSF ---
-    bindHandlerAliases(
-        rejectCliOption("-conv was removed; use image-domain -psf [fwhm_mm[,N]]."),
-        {"-conv"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         std::string value;
         if (i + 1 < argc) {
@@ -558,27 +560,41 @@ void ArgumentParser::registerHandlers() {
             a.psf.mode = PSFMode::Operator;
         return true;
     }, {"-psf"});
-    bindHandlerAliases(
-        rejectCliOption("-psfProj was removed; use image-domain -psf Operator."),
-        {"-psfProj"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string val =
             toLower(ArgumentParser::getRequiredArg(i, argc, argv, "-psfMode"));
         a.psfModeExplicit = true;
         if (val == "operator")
             a.psf.mode = PSFMode::Operator;
+        else if (val == "sieve")
+            a.psf.mode = PSFMode::Sieve;
         else if (val == "none")
             a.psf.mode = PSFMode::None;
         else {
-            std::cerr << "Error: -psfMode expects None|Operator; got '" << val << "'.\n";
+            std::cerr << "Error: -psfMode expects none|operator|sieve; got '" << val << "'.\n";
             return false;
         }
         return true;
     }, {"-psfMode"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const std::string val = toLower(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-psfKernel"));
+        if (val == "adjoint")
+            a.psf.kernel = PSFKernel::Adjoint;
+        else if (val == "castor")
+            a.psf.kernel = PSFKernel::Castor;
+        else {
+            std::cerr << "Error: -psfKernel expects adjoint|castor; got '"
+                      << val << "'.\n";
+            return false;
+        }
+        return true;
+    }, {"-psfKernel"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.useSmooth = true;
         a.smoothSigma =
             (float)std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-smooth"));
+        a.smoothApplyStage = "in_recon";  // CLI filter flags override INI stage
         return true;
     }, {"-smooth"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -595,6 +611,7 @@ void ArgumentParser::registerHandlers() {
         a.butterCutoff = std::stod(parts[0]);
         if (parts.size() > 1)
             a.butterOrder = std::stoi(parts[1]);
+        a.butterApplyStage = "in_recon";  // CLI filter flags override INI stage
         return true;
     }, {"-butter"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -602,9 +619,6 @@ void ArgumentParser::registerHandlers() {
             std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, "-butterOrder"));
         return true;
     }, {"-butterOrder"});
-    bindHandlerAliases(
-        rejectCliOption("-butterBackend was removed; Butterworth uses cuFFT."),
-        {"-butterBackend", "-bwBackend"});
 
     // --- Regularization ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -676,19 +690,6 @@ void ArgumentParser::registerHandlers() {
             a.reg.ct_weight_floor = value;
         return true;
     }, {"-regCtSigma", "-regCtFloor"});
-    bindHandlerAliases(
-        rejectCliOption("-regPower was removed; use -reg TV or -reg RDP."),
-        {"-regPower"});
-    bindHandlerAliases(
-        rejectCliOption("-regSigma was removed; use -reg TV or -reg RDP."),
-        {"-regSigma"});
-
-    const Handler removedRegOption =
-        rejectCliOption("this regularization option was removed; use -reg TV or -reg RDP.");
-    bindHandlerAliases(removedRegOption,
-                       {"-regKernel", "-regIter", "-regSubsets",
-                        "-regUpdateFreq", "-regUpdateStart", "-regUpdateEnd",
-                        "-regUpdateInterval", "-regUpdateType"});
 
     // --- Mask & Geometry Extras ---
     auto cylHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
@@ -699,6 +700,7 @@ void ArgumentParser::registerHandlers() {
         a.useCylindricalMask = true;
         a.cylinderDiameterMM = (float)std::stod(parts[0]);
         a.cylinderHeightMM = (float)std::stod(parts[1]);
+        a.cylinderDimsExplicit = true;
         return true;
     };
     bindHandlerAliases(cylHandler, {"-cyl"});
@@ -733,14 +735,15 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-bedOverlap"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedCropMethod = toLower(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-bedCropMethod"));
+        const double stepMm = std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-bedStepMm"));
+        if (stepMm <= 0.0) {
+            std::cerr << "Error: -bedStepMm must be positive.\n";
+            return false;
+        }
+        a.bedStepMm = stepMm;
         return true;
-    }, {"-bedCropMethod"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(i, argc, argv,
-                                                  a.bedSeamPostprocess);
-    }, {"-bedSeamPostprocess"});
+    }, {"-bedStepMm"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.detZEdgeCensor = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-detZEdgeCensor"));
@@ -762,42 +765,6 @@ void ArgumentParser::registerHandlers() {
         a.badDetectorFileExplicit = true;
         return true;
     }, {"-badDetectorFile"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedObjectProfile = toLower(ArgumentParser::getRequiredArg(
-            i, argc, argv, "-bedObjectProfile"));
-        return true;
-    }, {"-bedObjectProfile"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(
-            i, argc, argv, a.bedDerenzoPostprocess);
-    }, {"-derenzoPostprocess"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedDerenzoAxialStrength = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv,
-                                           "-derenzoAxialStrength"));
-        return true;
-    }, {"-derenzoAxialStrength"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        return ArgumentParser::parseOnOffOptional(
-            i, argc, argv, a.bedDerenzoAdhesion);
-    }, {"-derenzoAdhesion"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedDerenzoAdhesionInner = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv,
-                                           "-derenzoAdhesionInner"));
-        return true;
-    }, {"-derenzoAdhesionInner"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedDerenzoAdhesionOuter = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv,
-                                           "-derenzoAdhesionOuter"));
-        return true;
-    }, {"-derenzoAdhesionOuter"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        a.bedDerenzoCoreDamp = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-derenzoCoreDamp"));
-        return true;
-    }, {"-derenzoCoreDamp"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         auto parts =
             split(ArgumentParser::getRequiredArg(i, argc, argv, "-cropEnd"), ',');
@@ -883,9 +850,6 @@ void ArgumentParser::registerHandlers() {
         a.attMapPath = ArgumentParser::getRequiredArg(i, argc, argv, "-attMap");
         return true;
     }, {"-attMap"});
-    bindHandlerAliases(
-        rejectCliOption("-prior was removed with anatomical regularizers; use TV or RDP."),
-        {"-prior"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.bProjPath = ArgumentParser::getRequiredArg(i, argc, argv, "-bProj");
         return true;
@@ -897,18 +861,6 @@ void ArgumentParser::registerHandlers() {
     }, {"-bProjList"});
 
     // --- Performance & Misc ---
-    bindHandlerAliases(
-        rejectCliOption("-Aprune was removed; the compact chunk CSRB matrix is pruned at generation time."),
-        {"-Aprune"});
-    bindHandlerAliases(
-        rejectCliOption("-Astream was removed; compact chunk CSRB is always streamed/mmapped per chunk."),
-        {"-Astream"});
-    bindHandlerAliases(
-        rejectCliOption("-ApruneMask was removed; the compact chunk CSRB matrix is pruned at generation time."),
-        {"-ApruneMask"});
-    bindHandlerAliases(
-        rejectCliOption("-joe was removed; the Joseph-like smoothing pass is retired. Use -psf / -butter / -smooth instead."),
-        {"-joe"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         (void)argc;
         (void)argv;
@@ -1081,9 +1033,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.psf.mode = PSFMode::None;
         else if (psfModeLower == "operator")
             a.psf.mode = PSFMode::Operator;
+        else if (psfModeLower == "sieve")
+            a.psf.mode = PSFMode::Sieve;
         else {
             throw std::runtime_error(
-                "PSF mode in config must be None or Operator; got '" +
+                "PSF mode in config must be none, operator or sieve; got '" +
                 psfModeStr + "'.");
         }
         // If mode is set to something other than None, enable PSF
@@ -1092,6 +1046,20 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     }
     a.psf.fwhm_mm = cfg.getDouble("PSF", "fwhm", a.psf.fwhm_mm);
     a.psf.z_blur = cfg.getBool("PSF", "z_blur", a.psf.z_blur);
+
+    std::string psfKernelStr = cfg.getString("PSF", "kernel");
+    if (!psfKernelStr.empty()) {
+        std::string k = toLower(psfKernelStr);
+        if (k == "adjoint")
+            a.psf.kernel = PSFKernel::Adjoint;
+        else if (k == "castor")
+            a.psf.kernel = PSFKernel::Castor;
+        else {
+            throw std::runtime_error(
+                "PSF kernel in config must be adjoint or castor; got '" +
+                psfKernelStr + "'.");
+        }
+    }
 
     std::string minSigmas = cfg.getString("PSF", "min_sigmas");
     if (!minSigmas.empty()) {
@@ -1112,6 +1080,7 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         if (cd.size() >= 2) {
             a.cylinderDiameterMM = (float)std::stod(cd[0]);
             a.cylinderHeightMM = (float)std::stod(cd[1]);
+            a.cylinderDimsExplicit = true;
         }
     }
     std::string cylCenter = cfg.getString("Mask", "cylinder_center");
@@ -1126,17 +1095,22 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
 
     // Filtering
     if (cfg.hasSection("Filtering")) {
-        double bwCut = cfg.getDouble("Filtering", "butterworth_cutoff", 0.0);
-        if (bwCut > 0.0) {
-            a.butterCutoff = (float)bwCut;
-        }
+        const double bwCut = cfg.getDouble("Filtering", "butterworth_cutoff", 0.0);
+        a.butterCutoff = static_cast<float>(bwCut);
+        a.useButter = bwCut > 0.0;
         a.butterOrder = cfg.getInt("Filtering", "butterworth_order", a.butterOrder);
-        double gSigma = cfg.getDouble("Filtering", "gaussian_sigma", 0.0);
-        if (gSigma > 0.0) {
-            a.useSmooth = true;
-            a.smoothSigma = (float)gSigma;
-        }
+        const double gSigma = cfg.getDouble("Filtering", "gaussian_sigma", 0.0);
+        a.smoothSigma = static_cast<float>(gSigma);
+        a.useSmooth = gSigma > 0.0;
         a.smoothKernel = cfg.getInt("Filtering", "gaussian_kernel", a.smoothKernel);
+        std::string smoothStage =
+            toLower(cfg.getString("Filtering", "smooth_apply_stage"));
+        if (!smoothStage.empty())
+            a.smoothApplyStage = smoothStage;
+        std::string butterStage =
+            toLower(cfg.getString("Filtering", "butter_apply_stage"));
+        if (!butterStage.empty())
+            a.butterApplyStage = butterStage;
     }
 
     // MultiBed
@@ -1162,67 +1136,16 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
                 a.cropEndEnd = std::stoi(ce[1]);
             }
         }
-        a.bedCropMethod = toLower(cfg.getString(
-            "MultiBed", "crop_method", a.bedCropMethod));
-        a.bedSeamPostprocess = cfg.getBool(
-            "MultiBed", "seam_postprocess", a.bedSeamPostprocess);
         a.detZEdgeCensor = cfg.getInt(
             "MultiBed", "detz_edge_censor", a.detZEdgeCensor);
         a.detZRowWeightsFile = cfg.getString(
             "MultiBed", "detz_row_weights_file", a.detZRowWeightsFile);
         a.normFactorFile = cfg.getString(
             "MultiBed", "normalization_factor_file", a.normFactorFile);
-        a.bedObjectProfile = toLower(cfg.getString(
-            "MultiBed", "object_profile", a.bedObjectProfile));
-        a.bedDerenzoPostprocess = cfg.getBool(
-            "MultiBed", "derenzo_postprocess", a.bedDerenzoPostprocess);
-        a.bedDerenzoAxialStrength = cfg.getDouble(
-            "MultiBed", "derenzo_axial_strength",
-            a.bedDerenzoAxialStrength);
-        a.bedDerenzoAdhesion = cfg.getBool(
-            "MultiBed", "derenzo_adhesion", a.bedDerenzoAdhesion);
-        a.bedDerenzoAdhesionInner = cfg.getDouble(
-            "MultiBed", "derenzo_adhesion_inner", a.bedDerenzoAdhesionInner);
-        a.bedDerenzoAdhesionOuter = cfg.getDouble(
-            "MultiBed", "derenzo_adhesion_outer", a.bedDerenzoAdhesionOuter);
-        a.bedDerenzoCoreDamp = cfg.getDouble(
-            "MultiBed", "derenzo_core_damp", a.bedDerenzoCoreDamp);
-        a.bedPhantomCloseStrength = cfg.getDouble(
-            "MultiBed", "phantom_close_strength", a.bedPhantomCloseStrength);
-        a.bedEpguanCloseStrength = cfg.getDouble(
-            "MultiBed", "epguan_close_strength", a.bedEpguanCloseStrength);
-        a.bedEpguanWallMaxPreserve = cfg.getBool(
-            "MultiBed", "epguan_wall_max_preserve",
-            a.bedEpguanWallMaxPreserve);
-        a.bedEpguanSeamEdgeStrength = cfg.getDouble(
-            "MultiBed", "epguan_seam_edge_strength",
-            a.bedEpguanSeamEdgeStrength);
-        a.bedEpguanSeamFeatherSlices = cfg.getInt(
-            "MultiBed", "epguan_seam_feather_slices",
-            a.bedEpguanSeamFeatherSlices);
-        a.bedEpguanBackgroundFilter = cfg.getBool(
-            "MultiBed", "epguan_background_filter",
-            a.bedEpguanBackgroundFilter);
-        a.bedEpguanBackgroundRetain = cfg.getDouble(
-            "MultiBed", "epguan_background_retain",
-            a.bedEpguanBackgroundRetain);
-        a.bedEpguanSupportThreshold = cfg.getDouble(
-            "MultiBed", "epguan_support_threshold",
-            a.bedEpguanSupportThreshold);
-        a.bedEpguanSupportMarginMm = cfg.getDouble(
-            "MultiBed", "epguan_support_margin_mm",
-            a.bedEpguanSupportMarginMm);
-        a.bedZimuCloseStrength = cfg.getDouble(
-            "MultiBed", "zimu_close_strength", a.bedZimuCloseStrength);
-        a.bedMouseSeamStrength = cfg.getDouble(
-            "MultiBed", "mouse_seam_strength", a.bedMouseSeamStrength);
-        a.bedSeamHalfWidth = cfg.getInt(
-            "MultiBed", "seam_half_width", a.bedSeamHalfWidth);
-        a.fovRadiusMm = cfg.getDouble("MultiBed", "fov_radius_mm",
-                                      a.fovRadiusMm);
-        a.analysisFovRadiusMm = cfg.getDouble(
-            "MultiBed", "analysis_fov_radius_mm", a.analysisFovRadiusMm);
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
+        const double iniStepMm = cfg.getDouble("MultiBed", "bed_step_mm", 0.0);
+        if (iniStepMm > 0.0)
+            a.bedStepMm = iniStepMm;
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
     }
@@ -1329,7 +1252,7 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
     bool isPathArg =
         (argName == "-df" || argName == "-i" || argName == "-input" ||
          argName == "-dfList" || argName == "-bProjList" ||
-         argName == "-fout" ||
+         argName == "-fout" || argName == "-o" || argName == "-output" ||
          argName == "-chunkCSRDir" ||
          argName == "-attMap" || argName == "-regCT" || argName == "-bProj" ||
          argName == "-detZRowWeightsFile" || argName == "-normFactorFile" ||
@@ -1415,15 +1338,68 @@ void ArgumentParser::normalizeArgs(ReconArgs& args) {
                     (configDir / raw).lexically_normal().string();
         }
     }
+    // Absolute output directories stay absolute so log + MHD/RAW never fall back to
+    // a CWD-relative folder when `-fout`/`-o` carried a drive letter.
+    if (!args.outputDir.empty()) {
+        std::filesystem::path dir(args.outputDir);
+        if (dir.is_absolute()) {
+            std::error_code absEc;
+            auto abs = std::filesystem::absolute(dir, absEc);
+            args.outputDir =
+                (absEc ? dir : abs).lexically_normal().make_preferred().string();
+        }
+    }
 }
 
 bool ArgumentParser::parseOutputPath(const std::string& path, ReconArgs& args) {
     try {
-        std::filesystem::path p(path);
-        args.outputDir = p.parent_path().string();
-        args.outputName = p.filename().string();
+        const bool trailingSep =
+            !path.empty() && (path.back() == '/' || path.back() == '\\');
+        std::filesystem::path p = std::filesystem::path(path).lexically_normal();
+        const bool inputAbsolute = p.is_absolute();
+
+        std::error_code dirEc;
+        const bool existingDir = std::filesystem::is_directory(p, dirEc);
+
+        if (trailingSep || existingDir) {
+            // `-fout D:/out/case/` or an existing directory: write into that
+            // folder with the current/default name prefix.
+            args.outputDir = p.string();
+            if (args.outputName.empty())
+                args.outputName = "recon";
+        } else {
+            // Strip volume extensions so `-fout out/run.mhd` becomes prefix
+            // `run` → `run_itN.mhd`, not `run.mhd_itN.mhd`.
+            std::filesystem::path name = p.filename();
+            const auto ext = name.extension().string();
+            if (ext == ".mhd" || ext == ".MHD" || ext == ".raw" ||
+                ext == ".RAW" || ext == ".img" || ext == ".IMG")
+                name = name.stem();
+            args.outputName = name.string();
+            const auto parent = p.parent_path();
+            if (parent.empty()) {
+                // `D:/run` → dir `D:/`; relative `run` → `.`
+                args.outputDir =
+                    inputAbsolute ? p.root_path().string() : std::string(".");
+            } else {
+                args.outputDir = parent.string();
+            }
+        }
+
         if (args.outputDir.empty())
-            args.outputDir = ".";
+            args.outputDir = inputAbsolute ? p.root_path().string() : ".";
+
+        // Absolute -fout: keep an absolute outputDir so log and MHD/RAW both
+        // land under that drive/UNC path, independent of process CWD.
+        std::filesystem::path dir(args.outputDir);
+        if (inputAbsolute || dir.is_absolute()) {
+            if (dir.empty())
+                dir = p.root_path();
+            std::error_code absEc;
+            auto abs = std::filesystem::absolute(dir, absEc);
+            args.outputDir =
+                (absEc ? dir : abs).lexically_normal().make_preferred().string();
+        }
         return true;
     } catch (...) {
         return false;
@@ -1456,109 +1432,6 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     if (args.bedOverlaps.size() > static_cast<size_t>(spect::core::kMaxBeds)) {
         std::cerr << "Error: -bedOverlap supports at most "
                   << spect::core::kMaxBeds << " fixed bed slots.\n";
-        return false;
-    }
-    if (!std::isfinite(args.fovRadiusMm) || args.fovRadiusMm < 0.0) {
-        std::cerr << "Error: [MultiBed] fov_radius_mm must be finite and >= 0.\n";
-        return false;
-    }
-    if (!std::isfinite(args.analysisFovRadiusMm) ||
-        args.analysisFovRadiusMm < 0.0) {
-        std::cerr << "Error: [MultiBed] analysis_fov_radius_mm must be finite and >= 0.\n";
-        return false;
-    }
-    const bool weightedOutputStitch =
-        args.bedCropMethod == "sigmoid" ||
-        args.bedCropMethod == "center66_cosine10";
-    if (args.bedCropMethod != "direct" && !weightedOutputStitch) {
-        std::cerr << "Error: [MultiBed] crop_method must be direct, sigmoid, "
-                     "or center66_cosine10.\n";
-        return false;
-    }
-    if (args.bedSeamPostprocess && !weightedOutputStitch) {
-        std::cerr << "Error: [MultiBed] seam_postprocess requires weighted "
-                     "output stitching.\n";
-        return false;
-    }
-    if (args.bedObjectProfile != "auto" &&
-        args.bedObjectProfile != "mouse" &&
-        args.bedObjectProfile != "phantom" &&
-        args.bedObjectProfile != "epguan" &&
-        args.bedObjectProfile != "zimu" &&
-        args.bedObjectProfile != "derenzo") {
-        std::cerr << "Error: [MultiBed] object_profile must be auto, mouse, "
-                     "phantom, epguan, zimu, or derenzo.\n";
-        return false;
-    }
-    if (!std::isfinite(args.bedPhantomCloseStrength) ||
-        args.bedPhantomCloseStrength < 0.0 ||
-        args.bedPhantomCloseStrength > 1.0 ||
-        !std::isfinite(args.bedEpguanCloseStrength) ||
-        args.bedEpguanCloseStrength < 0.0 ||
-        args.bedEpguanCloseStrength > 1.0 ||
-        !std::isfinite(args.bedZimuCloseStrength) ||
-        args.bedZimuCloseStrength < 0.0 ||
-        args.bedZimuCloseStrength > 1.0 ||
-        !std::isfinite(args.bedMouseSeamStrength) ||
-        args.bedMouseSeamStrength < 0.0 ||
-        args.bedMouseSeamStrength > 1.0) {
-        std::cerr << "Error: [MultiBed] phantom_close_strength, "
-                     "epguan_close_strength, zimu_close_strength, and "
-                     "mouse_seam_strength must be "
-                     "finite and in [0,1].\n";
-        return false;
-    }
-    if (args.bedMouseSeamStrength > 0.0 &&
-        args.bedCropMethod != "sigmoid") {
-        std::cerr << "Error: [MultiBed] mouse_seam_strength > 0 requires "
-                     "crop_method=sigmoid.\n";
-        return false;
-    }
-    if (!std::isfinite(args.bedDerenzoAxialStrength) ||
-        args.bedDerenzoAxialStrength < 0.0 ||
-        args.bedDerenzoAxialStrength > 1.0) {
-        std::cerr << "Error: [MultiBed] derenzo_axial_strength must be "
-                     "finite and in [0,1].\n";
-        return false;
-    }
-    const auto inUnitRange = [](double value) {
-        return std::isfinite(value) && value >= 0.0 && value <= 1.0;
-    };
-    if (!inUnitRange(args.bedDerenzoAdhesionInner) ||
-        !inUnitRange(args.bedDerenzoAdhesionOuter) ||
-        args.bedDerenzoAdhesionInner > args.bedDerenzoAdhesionOuter) {
-        std::cerr << "Error: [MultiBed] derenzo_adhesion_inner/_outer must be "
-                     "finite, in [0,1] and inner <= outer.\n";
-        return false;
-    }
-    if (!inUnitRange(args.bedDerenzoCoreDamp)) {
-        std::cerr << "Error: [MultiBed] derenzo_core_damp must be finite and "
-                     "in [0,1].\n";
-        return false;
-    }
-    if (!std::isfinite(args.bedEpguanSeamEdgeStrength) ||
-        args.bedEpguanSeamEdgeStrength < 0.0 ||
-        args.bedEpguanSeamEdgeStrength > 1.0 ||
-        args.bedEpguanSeamFeatherSlices < 0) {
-        std::cerr << "Error: [MultiBed] epguan_seam_edge_strength must be "
-                     "finite and in [0,1], and epguan_seam_feather_slices "
-                     "must be >= 0.\n";
-        return false;
-    }
-    if (!std::isfinite(args.bedEpguanBackgroundRetain) ||
-        args.bedEpguanBackgroundRetain < 0.0 ||
-        args.bedEpguanBackgroundRetain > 1.0 ||
-        !std::isfinite(args.bedEpguanSupportThreshold) ||
-        args.bedEpguanSupportThreshold <= 0.0 ||
-        args.bedEpguanSupportThreshold > 1.0 ||
-        !std::isfinite(args.bedEpguanSupportMarginMm) ||
-        args.bedEpguanSupportMarginMm < 0.0) {
-        std::cerr << "Error: [MultiBed] EPguan background parameters require "
-                     "retain in [0,1], threshold in (0,1], and margin_mm >= 0.\n";
-        return false;
-    }
-    if (args.bedSeamHalfWidth < 0) {
-        std::cerr << "Error: [MultiBed] seam_half_width must be >= 0.\n";
         return false;
     }
     return true;
@@ -1783,6 +1656,53 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         return false;
     }
 
+    const auto isValidApplyStage = [](const std::string& stage) {
+        return stage == "none" || stage == "in_recon";
+    };
+    if (!isValidApplyStage(args.smoothApplyStage)) {
+        std::cerr << "Error: smooth_apply_stage must be none|in_recon; got '"
+                  << args.smoothApplyStage << "'.\n";
+        return false;
+    }
+    if (!isValidApplyStage(args.butterApplyStage)) {
+        std::cerr << "Error: butter_apply_stage must be none|in_recon; got '"
+                  << args.butterApplyStage << "'.\n";
+        return false;
+    }
+    if (args.smoothApplyStage == "in_recon" && args.smoothSigma <= 0) {
+        std::cerr << "Error: smooth_apply_stage=in_recon requires "
+                     "gaussian_sigma > 0 (or CLI -smooth).\n";
+        return false;
+    }
+    if (args.butterApplyStage == "in_recon" && args.butterCutoff <= 0) {
+        std::cerr << "Error: butter_apply_stage=in_recon requires "
+                     "butterworth_cutoff > 0 (or CLI -butter).\n";
+        return false;
+    }
+    if (args.psf.mode == PSFMode::Sieve &&
+        (args.smoothApplyStage == "in_recon" ||
+         args.butterApplyStage == "in_recon")) {
+        std::cerr << "Error: PSF mode sieve forbids in_recon filtering "
+                     "(smooth/butter); sieves never filter the iteration "
+                     "trajectory. Use smooth_apply_stage/butter_apply_stage "
+                     "none.\n";
+        return false;
+    }
+
+    if (args.psf.kernel == PSFKernel::Castor &&
+        args.psf.mode != PSFMode::None) {
+        // CASToR stationary Gaussian：横断面 x/y 必须各向同性（原型校验规则）。
+        const double fx =
+            args.psf.fwhm_x > 0.0 ? args.psf.fwhm_x : args.psf.fwhm_mm;
+        const double fy =
+            args.psf.fwhm_y > 0.0 ? args.psf.fwhm_y : args.psf.fwhm_mm;
+        if (std::fabs(fx - fy) > 1e-6 * std::max(1.0, fx)) {
+            std::cerr << "Error: -psfKernel castor requires equal x/y "
+                         "transaxial FWHM (CASToR stationary Gaussian).\n";
+            return false;
+        }
+    }
+
     if (args.useCylindricalMask) {
         if (args.cylinderDiameterMM <= 0) {
             std::cerr << "Error: Cylinder diameter (-cylMask) must be positive.\n";
@@ -1859,12 +1779,16 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "butterworth_cutoff  = " << a.butterCutoff << "\n";
     std::cout << "butterworth_order   = " << a.butterOrder << "\n";
     std::cout << "gaussian_sigma      = " << a.smoothSigma << "\n";
-    std::cout << "gaussian_kernel     = " << a.smoothKernel << "\n\n";
+    std::cout << "gaussian_kernel     = " << a.smoothKernel << "\n";
+    std::cout << "smooth_apply_stage  = " << a.smoothApplyStage << "\n";
+    std::cout << "butter_apply_stage  = " << a.butterApplyStage << "\n";
+    std::cout << "\n";
 
     std::cout << "[PSF]\n";
-    const char* psfModes[] = {"None","Operator"};
+    const char* psfModes[] = {"none", "operator", "sieve"};
     int psfIdx = static_cast<int>(a.psf.mode);
-    std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 1 ? psfModes[psfIdx] : "Unknown") << "\n";
+    std::cout << "mode = " << (psfIdx >= 0 && psfIdx <= 2 ? psfModes[psfIdx] : "unknown") << "\n";
+    std::cout << "kernel = " << (a.psf.kernel == PSFKernel::Castor ? "castor" : "adjoint") << "\n";
     std::cout << "fwhm = " << a.psf.fwhm_mm << "\n";
     std::cout << "z_blur = " << (a.psf.z_blur ? "true" : "false") << "\n";
     std::cout << "min_sigmas = " << a.psf.min_sigmas << "\n\n";
@@ -1877,6 +1801,23 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[Mask]\n";
     std::cout << "use_cylinder   = " << (a.useCylindricalMask ? "true" : "false") << "\n";
     std::cout << "cylinder_dims  = " << a.cylinderDiameterMM << "," << a.cylinderHeightMM << "\n\n";
+    std::cout << "[Fixed6ModuleGeometry]\n";
+    std::cout << "single_roi_mm = "
+              << spect::core::sixmodule::kSingleBedRoiDiameterMm << ","
+              << spect::core::sixmodule::kSingleBedRoiHeightMm << "\n";
+    std::cout << "single_mask_xyz = "
+              << spect::core::sixmodule::kOutputMaskNx << ","
+              << spect::core::sixmodule::kOutputMaskNy << ","
+              << spect::core::sixmodule::kSingleBedMaskNz << "\n";
+    std::cout << "multibed_roi_mm = "
+              << spect::core::sixmodule::kMultiBedRoiDiameterMm << ","
+              << spect::core::sixmodule::kMultiBedRoiHeightMm << "\n";
+    std::cout << "multibed_crop_xyz = "
+              << spect::core::sixmodule::kOutputMaskNx << ","
+              << spect::core::sixmodule::kOutputMaskNy << ","
+              << "step+" << spect::core::sixmodule::kDefaultBlendMarginLayers << " layers\n";
+    std::cout << "multibed_step_mm = "
+              << spect::core::sixmodule::kMultiBedStepMm << "\n";
 
     std::cout << "[Backend]\n";
     std::cout << "sparse = cuda\n";
@@ -1898,10 +1839,11 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         }
     }
     std::cout << "\n";
-    std::cout << "crop_method = " << a.bedCropMethod
-              << "  # center66_cosine10 (default)|sigmoid|direct; center crop uses step56/cosine10\n";
-    std::cout << "seam_postprocess = " << (a.bedSeamPostprocess ? 1 : 0)
-              << "  # request; active only for multi-bed output overlap stitch\n";
+    std::cout << "stitch_method = center66_cosine10  # canonical fixed output stitch\n";
+    std::cout << "bed_step_mm   = "
+              << (a.bedStepMm > 0.0 ? a.bedStepMm
+                                    : spect::core::sixmodule::kMultiBedStepMm)
+              << "  # scanner bed step; crop = step+10, stride = step\n";
     std::cout << "detz_edge_censor = " << a.detZEdgeCensor
               << "  # detZ edge rows censored per side (0=off; compact chunk layout only)\n";
     std::cout << "detz_row_weights_file = "
@@ -1910,49 +1852,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "normalization_factor_file = "
               << (a.normFactorFile.empty() ? "(none)" : a.normFactorFile)
               << "  # full projection correction c; reciprocal 1/c enters sensitivity\n";
-    std::cout << "object_profile = " << a.bedObjectProfile
-              << "  # auto|mouse|phantom|epguan|zimu|derenzo\n";
-    std::cout << "derenzo_postprocess = "
-              << (a.bedDerenzoPostprocess ? 1 : 0)
-              << "  # runs when the profile is derenzo (explicit or auto)\n";
-    std::cout << "derenzo_axial_strength = "
-              << a.bedDerenzoAxialStrength
-              << "  # positive-only per-rod fill [0,1]\n";
-    std::cout << "derenzo_adhesion = " << (a.bedDerenzoAdhesion ? 1 : 0)
-              << "  # in-plane rod adhesion fill + core damping\n";
-    std::cout << "derenzo_adhesion_inner = " << a.bedDerenzoAdhesionInner
-              << "  # adhesion fraction at the inner sectors [0,1]\n";
-    std::cout << "derenzo_adhesion_outer = " << a.bedDerenzoAdhesionOuter
-              << "  # adhesion fraction at the rim sectors [0,1]\n";
-    std::cout << "derenzo_core_damp = " << a.bedDerenzoCoreDamp
-              << "  # rod-core high-frequency damping [0,1]\n";
-    std::cout << "phantom_close_strength = " << a.bedPhantomCloseStrength
-              << "  # contour interpolation blend [0,1]\n";
-    std::cout << "epguan_close_strength = " << a.bedEpguanCloseStrength
-              << "  # EP tube contour interpolation blend [0,1]\n";
-    std::cout << "epguan_wall_max_preserve = "
-              << (a.bedEpguanWallMaxPreserve ? 1 : 0) << "\n";
-    std::cout << "epguan_seam_edge_strength = "
-              << a.bedEpguanSeamEdgeStrength << "  # [0,1]\n";
-    std::cout << "epguan_seam_feather_slices = "
-              << a.bedEpguanSeamFeatherSlices << "\n";
-    std::cout << "epguan_background_filter = "
-              << (a.bedEpguanBackgroundFilter ? 1 : 0) << "\n";
-    std::cout << "epguan_background_retain = "
-              << a.bedEpguanBackgroundRetain << "  # [0,1]\n";
-    std::cout << "epguan_support_threshold = "
-              << a.bedEpguanSupportThreshold << "  # (0,1]\n";
-    std::cout << "epguan_support_margin_mm = "
-              << a.bedEpguanSupportMarginMm << "\n";
-    std::cout << "zimu_close_strength = " << a.bedZimuCloseStrength
-              << "  # topology-locked Gaussian sigma=0.3mm blend [0,1]\n";
-    std::cout << "mouse_seam_strength = " << a.bedMouseSeamStrength
-              << "  # bilateral confidence fusion blend [0,1]\n";
-    std::cout << "seam_half_width = " << a.bedSeamHalfWidth
-              << "  # capped at overlap/2; zimu additionally capped at 4\n";
-    std::cout << "fov_radius_mm = " << a.fovRadiusMm << "  # 0=off\n";
-    std::cout << "analysis_fov_radius_mm = " << a.analysisFovRadiusMm
-              << "  # 0=follows fov_radius_mm\n";
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end slices zeroed\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
@@ -2021,16 +1920,18 @@ void ArgumentParser::printUsage() {
     std::cout << "  -regCtFloor <0..1>       Minimum CT edge weight (default 0.05)\n\n";
 
     std::cout << "=== Filtering ===\n";
-    std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2)\n";
-    std::cout << "  -smooth <sigma>          Gaussian smoothing sigma (mm)\n";
-    std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n\n";
+    std::cout << "  -butter <fc[,order]>     Butterworth low-pass (default: 0.35,2); implies butter_apply_stage=in_recon\n";
+    std::cout << "  -smooth <sigma>          Gaussian smoothing sigma (mm); implies smooth_apply_stage=in_recon\n";
+    std::cout << "  -smoothKernel <n>        Gaussian kernel half-width\n";
+    std::cout << "  INI [Filtering] stages:  smooth_apply_stage / butter_apply_stage = none|in_recon (default none)\n\n";
 
     std::cout << "=== PSF ===\n";
-    std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.5,4)\n";
-    std::cout << "  -psfMode <mode>          None | Operator\n";
+    std::cout << "  -psf [fwhm_mm[,N]]       PSF Gaussian FWHM (mm); N*sigma truncation (defaults: 1.3,3)\n";
+    std::cout << "  -psfMode <mode>          none | operator | sieve (sieve: operator in-loop + PSF-blurred save copies)\n";
+    std::cout << "  -psfKernel <kind>        adjoint | castor (castor: strict CASToR erf kernel, z-only boundary norm, forward-reuse backward)\n";
     std::cout << "\n";
     std::cout << "  SPECT_CUDA_PSF_DOUBLE=1  Force double-precision CUDA PSF (default float)\n";
-    std::cout << "  SPECT_CUDA_VOLUME_OPS=0  Disable CUDA volume ops; PSF uses CPU fallback\n";
+    std::cout << "  SPECT_CUDA_VOLUME_OPS=0  Disable CUDA volume ops; PSF-enabled reconstruction then fails\n";
 
     std::cout << "=== Geometry ===\n";
     std::cout << "  -dim <Nx,Ny,Nz>          Reconstruction grid (voxels)\n";
@@ -2041,20 +1942,12 @@ void ArgumentParser::printUsage() {
 
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
-    std::cout << "  -bedCropMethod <center66_cosine10|sigmoid|direct> Output stitching method (default center66_cosine10)\n";
-    std::cout << "  -bedSeamPostprocess <0|1> Request seam postprocess (default 1; only runs with multi-bed output overlap)\n";
+    std::cout << "  -bedStepMm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z)\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
     std::cout << "  -normFactorFile <f>       Full projection correction factors c; applies reciprocal 1/c to sensitivity\n";
-    std::cout << "  -bedObjectProfile <auto|mouse|phantom|epguan|zimu|derenzo> Override automatic object profile\n";
-    std::cout << "  -derenzoPostprocess <0|1> Enable Derenzo axial continuity processing (auto-detected profile)\n";
-    std::cout << "  -derenzoAxialStrength <s> Positive-only per-rod fill strength [0,1]\n";
-    std::cout << "  -derenzoAdhesion <0|1>    Enable Derenzo in-plane adhesion fill and rod-core damping\n";
-    std::cout << "  -derenzoAdhesionInner <s> Adhesion fraction at the inner sectors [0,1]\n";
-    std::cout << "  -derenzoAdhesionOuter <s> Adhesion fraction at the rim sectors [0,1]\n";
-    std::cout << "  -derenzoCoreDamp <s>      Rod-core high-frequency damping [0,1]\n";
     std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
-    std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (inside compact joint mapping for multi-bed)\n";
+    std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (default 1; inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";

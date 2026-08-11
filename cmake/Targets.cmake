@@ -25,29 +25,12 @@ target_compile_features(spect_interfaces INTERFACE cxx_std_17)
 # 便捷alias (用于外部项目)
 add_library(spect::interfaces ALIAS spect_interfaces)
 
-message(STATUS "SPECT modular libraries: spect_interfaces, spect_sparse, spect_filters, spect_regularizer, spect_cli, spect_io, spect_app, spect_pipeline")
+message(STATUS "SPECT modular libraries: spect_interfaces, spect_filters, spect_regularizer, spect_cli, spect_io, spect_app, spect_pipeline")
 
-# ----------------------------------
-# spect_sparse: 稀疏矩阵运算库 (SparseOpsDefaults等)
-# 【T3.1】统一SpMV实现
-# ----------------------------------
-add_library(spect_sparse STATIC
-  src/sparse/SparseOpsDefaults.cpp
-)
-target_include_directories(spect_sparse PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(spect_sparse PUBLIC spect_interfaces)
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(spect_sparse PUBLIC OpenMP::OpenMP_CXX)
-endif()
-add_library(spect::sparse ALIAS spect_sparse)
 
 if(SPECT_BUILD_CUDA_SCAFFOLD)
   add_library(spect_sparse_cuda STATIC
     src/sparse/cuda/SparseOpsCUDA.cpp
-    src/sparse/cuda/CudaSparseOpsFacade.cpp
     src/sparse/cuda/CudaChunkCache.cpp
     src/sparse/cuda/CudaCsrBuilder.cpp
     src/sparse/cuda/CudaProjKernelLauncher.cpp
@@ -58,7 +41,7 @@ if(SPECT_BUILD_CUDA_SCAFFOLD)
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
   )
-  target_link_libraries(spect_sparse_cuda PUBLIC spect_interfaces spect_sparse)
+  target_link_libraries(spect_sparse_cuda PUBLIC spect_interfaces)
   if(OpenMP_CXX_FOUND)
     target_link_libraries(spect_sparse_cuda PUBLIC OpenMP::OpenMP_CXX)
   endif()
@@ -180,7 +163,6 @@ add_library(spect_pipeline STATIC
   src/ctac/CTACFactorCache.cpp
   src/ctac/CTACOps.cpp
 
-  src/postprocess/SeamPostprocess.cpp
   src/postprocess/SmoothingOps.cpp
 
   src/pipeline/MainProgram.cpp
@@ -190,6 +172,7 @@ add_library(spect_pipeline STATIC
   src/pipeline/ReconSetup.cpp
   src/pipeline/RunLogger.cpp
   src/pipeline/RunLogging.cpp
+  src/pipeline/RunManifest.cpp
   src/pipeline/VolumeOutput.cpp
 )
 target_include_directories(spect_pipeline PUBLIC
@@ -201,7 +184,6 @@ target_include_directories(spect_pipeline PUBLIC
 target_link_libraries(spect_pipeline PUBLIC
   spect_io
   spect_cli
-  spect_sparse
   spect_filters
   spect_regularizer
 )
@@ -279,16 +261,6 @@ if((SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS) OR SPECT_ENABLE_B
   spect_bundle_cuda_runtime_for_target(SPECT_recon)
 endif()
 
-add_executable(spect_seam_postprocess
-  tools/seam_postprocess.cpp
-)
-target_include_directories(spect_seam_postprocess PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
-target_link_libraries(spect_seam_postprocess PRIVATE spect_pipeline)
-set_target_properties(spect_seam_postprocess PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
 
 add_executable(spect_forward_project
   tools/forward_project_multibed.cpp

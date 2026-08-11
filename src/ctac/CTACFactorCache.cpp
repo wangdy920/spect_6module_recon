@@ -140,6 +140,12 @@ void CTACFactorCache::save(const std::string &manifest,
     }
     outManifest.write(manifest.data(),
                       static_cast<std::streamsize>(manifest.size()));
+    outManifest.flush();
+    if (!outManifest) {
+      logWarn("Failed to flush CTAC factor cache manifest " +
+              manifestFile.string());
+      return;
+    }
   }
 
   {
@@ -150,6 +156,11 @@ void CTACFactorCache::save(const std::string &manifest,
     }
     outRaw.write(reinterpret_cast<const char *>(factors.data()),
                  static_cast<std::streamsize>(factors.size() * sizeof(uint16_t)));
+    outRaw.flush();
+    if (!outRaw) {
+      logWarn("Failed to flush CTAC factor cache raw " + rawFile.string());
+      return;
+    }
   }
 
   logInfo("CTAC factor cache saved: " + rawFile.string());

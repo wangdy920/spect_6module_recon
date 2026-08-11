@@ -1,4 +1,5 @@
 #include "filters/cuda/VolumeOpsCUDA.h"
+#include "filters/Convolution.h"
 
 #if CUDA_ENABLED
 
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -33,6 +35,14 @@ struct VolumeKernelCache {
   CUfunction convZF = nullptr;
   CUfunction convAdjoint = nullptr;
   CUfunction convAdjointF = nullptr;
+  CUfunction convXZero = nullptr;
+  CUfunction convYZero = nullptr;
+  CUfunction convZZero = nullptr;
+  CUfunction divZnorm = nullptr;
+  CUfunction convXZeroF = nullptr;
+  CUfunction convYZeroF = nullptr;
+  CUfunction convZZeroF = nullptr;
+  CUfunction divZnormF = nullptr;
   CUfunction attenLineIntegral = nullptr;
   CUfunction rdpGrad = nullptr;
   CUfunction tvGrad = nullptr;
@@ -72,10 +82,10 @@ bool runVolumeKernelGoldenSelfTest(CUfunction convX, CUfunction convXF);
 
 void disableVolumeOps(const char *reason) {
   g_volumeOpsDisabled.store(true, std::memory_order_relaxed);
-  std::fprintf(stderr,
-               "[WARN] CUDA volume ops disabled after NVRTC self-test/load "
-               "failure: %s\n",
-               reason);
+  // Use cerr (not fprintf) so ConsoleTeeGuard captures this in the run log.
+  std::cerr << "[NOTE] CUDA volume ops disabled after NVRTC self-test/load "
+               "failure: "
+            << reason << '\n';
 }
 void ensureVolumeKernelsLoaded() {
   if (!cudaVolumeOpsRequested() ||
@@ -196,6 +206,113 @@ extern "C" __global__ void conv_z_mirror_3d(const double* input,
     sum += kernel[t + radius] * input[src];
   }
   output[index] = sum;
+}
+
+extern "C" __global__ void conv_x_zero_3d(const double* input,
+                                           double* output,
+                                           int Nx, int Ny, int Nz,
+                                           const double* kernel,
+                                           int radius,
+                                           unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  double sum = 0.0;
+  for (int t = -radius; t <= radius; ++t) {
+    const int xx = x + t;
+    if (xx < 0 || xx >= Nx) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(xx) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(y) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(z);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+extern "C" __global__ void conv_y_zero_3d(const double* input,
+                                           double* output,
+                                           int Nx, int Ny, int Nz,
+                                           const double* kernel,
+                                           int radius,
+                                           unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  double sum = 0.0;
+  for (int t = -radius; t <= radius; ++t) {
+    const int yy = y + t;
+    if (yy < 0 || yy >= Ny) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(x) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(yy) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(z);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+extern "C" __global__ void conv_z_zero_3d(const double* input,
+                                           double* output,
+                                           int Nx, int Ny, int Nz,
+                                           const double* kernel,
+                                           int radius,
+                                           unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  double sum = 0.0;
+  for (int t = -radius; t <= radius; ++t) {
+    const int zz = z + t;
+    if (zz < 0 || zz >= Nz) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(x) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(y) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(zz);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+// CASToR z 边界补偿：逐体素除以 norm[z]（norm 为长度 Nz 的每z层因子）。
+extern "C" __global__ void div_znorm_3d(double* data,
+                                         const double* znorm,
+                                         int Nx, int Ny, int Nz,
+                                         unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+  double d = znorm[z];
+  if (!isfinite(d) || d < 1e-12) d = 1e-12;
+  data[index] /= d;
 }
 
 extern "C" __global__ void conv_mirror_adjoint_3d(
@@ -348,6 +465,112 @@ extern "C" __global__ void conv_z_mirror_3d_f(const float* input,
     sum += kernel[t + radius] * input[src];
   }
   output[index] = sum;
+}
+
+extern "C" __global__ void conv_x_zero_3d_f(const float* input,
+                                             float* output,
+                                             int Nx, int Ny, int Nz,
+                                             const float* kernel,
+                                             int radius,
+                                             unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  float sum = 0.0f;
+  for (int t = -radius; t <= radius; ++t) {
+    const int xx = x + t;
+    if (xx < 0 || xx >= Nx) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(xx) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(y) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(z);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+extern "C" __global__ void conv_y_zero_3d_f(const float* input,
+                                             float* output,
+                                             int Nx, int Ny, int Nz,
+                                             const float* kernel,
+                                             int radius,
+                                             unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  float sum = 0.0f;
+  for (int t = -radius; t <= radius; ++t) {
+    const int yy = y + t;
+    if (yy < 0 || yy >= Ny) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(x) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(yy) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(z);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+extern "C" __global__ void conv_z_zero_3d_f(const float* input,
+                                             float* output,
+                                             int Nx, int Ny, int Nz,
+                                             const float* kernel,
+                                             int radius,
+                                             unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const int x = static_cast<int>(index % static_cast<unsigned long long>(Nx));
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int y = static_cast<int>(yz % static_cast<unsigned long long>(Ny));
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+
+  float sum = 0.0f;
+  for (int t = -radius; t <= radius; ++t) {
+    const int zz = z + t;
+    if (zz < 0 || zz >= Nz) continue;
+    const unsigned long long src =
+        static_cast<unsigned long long>(x) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(y) +
+        static_cast<unsigned long long>(Nx) * static_cast<unsigned long long>(Ny) *
+            static_cast<unsigned long long>(zz);
+    sum += kernel[t + radius] * input[src];
+  }
+  output[index] = sum;
+}
+
+extern "C" __global__ void div_znorm_3d_f(float* data,
+                                           const float* znorm,
+                                           int Nx, int Ny, int Nz,
+                                           unsigned long long total) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= total) {
+    return;
+  }
+  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
+  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
+  float d = znorm[z];
+  if (!isfinite(d) || d < 1e-12f) d = 1e-12f;
+  data[index] /= d;
 }
 
 extern "C" __global__ void conv_mirror_adjoint_3d_f(
@@ -925,6 +1148,30 @@ extern "C" __global__ void tv_prox_primal_update_3d(
     SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convAdjointF,
                                           g_volumeKernelCache.module,
                                           "conv_mirror_adjoint_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convXZero,
+                                          g_volumeKernelCache.module,
+                                          "conv_x_zero_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convYZero,
+                                          g_volumeKernelCache.module,
+                                          "conv_y_zero_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZZero,
+                                          g_volumeKernelCache.module,
+                                          "conv_z_zero_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.divZnorm,
+                                          g_volumeKernelCache.module,
+                                          "div_znorm_3d"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convXZeroF,
+                                          g_volumeKernelCache.module,
+                                          "conv_x_zero_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convYZeroF,
+                                          g_volumeKernelCache.module,
+                                          "conv_y_zero_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZZeroF,
+                                          g_volumeKernelCache.module,
+                                          "conv_z_zero_3d_f"));
+    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.divZnormF,
+                                          g_volumeKernelCache.module,
+                                          "div_znorm_3d_f"));
     SPECT_CUDRV_CHECK(cuModuleGetFunction(
         &g_volumeKernelCache.attenLineIntegral, g_volumeKernelCache.module,
         "atten_line_integral_3d"));
@@ -1085,6 +1332,8 @@ struct VolumeOpsState {
   DeviceBuffer<float> kxF;
   DeviceBuffer<float> kyF;
   DeviceBuffer<float> kzF;
+  DeviceBuffer<double> znorm;
+  DeviceBuffer<float> znormF;
 
   // TV proximal (Chambolle-Pock) buffers
   DeviceBuffer<double> tvPx;
@@ -1389,6 +1638,121 @@ bool applySeparableConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
     state.secondary.download(f.data(), total);
   }
   return true;
+}
+
+namespace {
+
+bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
+                                      int Nz,
+                                      const std::vector<double> &kx,
+                                      const std::vector<double> &ky,
+                                      const std::vector<double> &kz,
+                                      bool useFloat,
+                                      bool forceFloat32Staging) {
+  if (!shouldUseCudaVolumeOps())
+    return false;
+  ensureVolumeKernelsLoaded();
+
+  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
+                       static_cast<size_t>(Nz);
+  if (f.size() != total)
+    throw std::runtime_error("CUDA CASToR PSF input size mismatch");
+  if (kx.empty() || ky.empty() || kz.empty())
+    throw std::runtime_error("CUDA CASToR PSF kernels must be non-empty");
+
+  auto &state = g_volumeOpsState;
+  unsigned long long totalCount = static_cast<unsigned long long>(total);
+  const int radiusX = static_cast<int>(kx.size()) / 2;
+  const int radiusY = static_cast<int>(ky.size()) / 2;
+  const int radiusZ = static_cast<int>(kz.size()) / 2;
+  const std::vector<double> znormHost =
+      filters::makeCastorZNorm1D(kz, Nz);
+
+  const bool useFloatStaging =
+      forceFloat32Staging || cudaPsfUseFloat(useFloat);
+  if (useFloatStaging) {
+    std::vector<float> ff(f.begin(), f.end());
+    state.primaryF.upload(ff.data(), total);
+    state.secondaryF.ensure(total);
+    uploadKernelIfNeededFloat(kx, state.cachedKxF, state.kxF);
+    uploadKernelIfNeededFloat(ky, state.cachedKyF, state.kyF);
+    uploadKernelIfNeededFloat(kz, state.cachedKzF, state.kzF);
+    std::vector<float> znormF(znormHost.begin(), znormHost.end());
+    state.znormF.upload(znormF.data(), znormF.size());
+
+    launchSeparableConvKernelFloat(g_volumeKernelCache.convXZeroF,
+                                   state.primaryF.get(),
+                                   state.secondaryF.get(), Nx, Ny, Nz,
+                                   state.kxF.get(), radiusX, totalCount);
+    launchSeparableConvKernelFloat(g_volumeKernelCache.convYZeroF,
+                                   state.secondaryF.get(),
+                                   state.primaryF.get(), Nx, Ny, Nz,
+                                   state.kyF.get(), radiusY, totalCount);
+    launchSeparableConvKernelFloat(g_volumeKernelCache.convZZeroF,
+                                   state.primaryF.get(),
+                                   state.secondaryF.get(), Nx, Ny, Nz,
+                                   state.kzF.get(), radiusZ, totalCount);
+    {
+      CUdeviceptr dataPtr =
+          reinterpret_cast<CUdeviceptr>(state.secondaryF.get());
+      CUdeviceptr normPtr =
+          reinterpret_cast<CUdeviceptr>(state.znormF.get());
+      void *args[] = {&dataPtr, &normPtr, &Nx, &Ny, &Nz, &totalCount};
+      launchVolumeKernel(g_volumeKernelCache.divZnormF, args, totalCount);
+    }
+    SPECT_CUDRV_CHECK(cuCtxSynchronize());
+    ff.resize(total);
+    state.secondaryF.download(ff.data(), total);
+    for (size_t i = 0; i < total; ++i)
+      f[i] = static_cast<double>(ff[i]);
+  } else {
+    state.primary.upload(f.data(), total);
+    state.secondary.ensure(total);
+    uploadKernelIfNeeded(kx, state.cachedKx, state.kx);
+    uploadKernelIfNeeded(ky, state.cachedKy, state.ky);
+    uploadKernelIfNeeded(kz, state.cachedKz, state.kz);
+    state.znorm.upload(znormHost.data(), znormHost.size());
+
+    launchSeparableConvKernel(g_volumeKernelCache.convXZero,
+                              state.primary.get(), state.secondary.get(),
+                              Nx, Ny, Nz, state.kx.get(), radiusX, totalCount);
+    launchSeparableConvKernel(g_volumeKernelCache.convYZero,
+                              state.secondary.get(), state.primary.get(),
+                              Nx, Ny, Nz, state.ky.get(), radiusY, totalCount);
+    launchSeparableConvKernel(g_volumeKernelCache.convZZero,
+                              state.primary.get(), state.secondary.get(),
+                              Nx, Ny, Nz, state.kz.get(), radiusZ, totalCount);
+    {
+      CUdeviceptr dataPtr =
+          reinterpret_cast<CUdeviceptr>(state.secondary.get());
+      CUdeviceptr normPtr =
+          reinterpret_cast<CUdeviceptr>(state.znorm.get());
+      void *args[] = {&dataPtr, &normPtr, &Nx, &Ny, &Nz, &totalCount};
+      launchVolumeKernel(g_volumeKernelCache.divZnorm, args, totalCount);
+    }
+    SPECT_CUDRV_CHECK(cuCtxSynchronize());
+    state.secondary.download(f.data(), total);
+  }
+  return true;
+}
+
+} // namespace
+
+bool applyCastorConv3DInplaceCUDA(std::vector<double> &f, int Nx, int Ny,
+                                  int Nz, const std::vector<double> &kx,
+                                  const std::vector<double> &ky,
+                                  const std::vector<double> &kz,
+                                  bool useFloat) {
+  return applyCastorConv3DInplaceCUDAImpl(f, Nx, Ny, Nz, kx, ky, kz,
+                                          useFloat, false);
+}
+
+bool applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+    std::vector<double> &f, int Nx, int Ny, int Nz,
+    const std::vector<double> &kx, const std::vector<double> &ky,
+    const std::vector<double> &kz) {
+  return applyCastorConv3DInplaceCUDAImpl(f, Nx, Ny, Nz, kx, ky, kz, true,
+                                          true);
 }
 
 bool applySeparableConv3DAdjointInplaceCUDA(

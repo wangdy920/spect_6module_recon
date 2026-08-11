@@ -24,4 +24,19 @@ void apply_psf_backward(
     const PSFKernels* psfKernels,
     int threads);
 
+/// Build the sieve save copy: per-bed local extract -> apply_psf_forward with
+/// the same kernels/mirror boundary as the iteration path -> accumulate back
+/// into a global save volume (honoring bedVirtualZFlip). The iteration state
+/// `image` is never modified. Single-bed degrades to one convolution of a
+/// copy of `image`.
+std::vector<double> build_sieve_save_volume(
+    const std::vector<double>& image,
+    int Nx, int Ny, int baseNz,
+    int bedCount,
+    const std::vector<int>& bedZStarts,
+    bool bedVirtualZFlip,
+    const ReconOpts& opts,
+    const PSFKernels* psfKernels,
+    int threads);
+
 } // namespace spect

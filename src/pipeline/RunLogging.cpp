@@ -1,5 +1,7 @@
 #include "pipeline/RunLogging.h"
 
+#include "pipeline/RunLogger.h"
+
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -18,8 +20,13 @@ protected:
   int overflow(int ch) override {
     if (ch == EOF)
       return 0;
-    const int r1 = primary_ ? primary_->sputc(static_cast<char>(ch)) : ch;
-    const int r2 = secondary_ ? secondary_->sputc(static_cast<char>(ch)) : ch;
+    const char c = static_cast<char>(ch);
+    const int r1 = primary_ ? primary_->sputc(c) : ch;
+    const int r2 = secondary_ ? secondary_->sputc(c) : ch;
+    // Flush the log file at line ends so a kill/crash keeps a usable tail.
+    // (ofstream unitbuf does not apply: writes go through filebuf::sputc.)
+    if (secondary_ && c == '\n')
+      secondary_->pubsync();
     return (r1 == EOF || r2 == EOF) ? EOF : ch;
   }
 
@@ -88,23 +95,37 @@ struct ConsoleTeeGuard::Impl {
   std::unique_ptr<TeeBuf> teeCerr;
   std::streambuf *oldCout = nullptr;
   std::streambuf *oldCerr = nullptr;
+  std::string error;
   bool active = false;
 };
 
 ConsoleTeeGuard::ConsoleTeeGuard(const std::filesystem::path &logPath)
     : impl_(std::make_unique<Impl>()) {
   impl_->path = logPath;
-  if (impl_->path.empty())
+  if (impl_->path.empty()) {
+    impl_->error = "empty log path";
     return;
+  }
 
   std::error_code error;
   const auto parent = impl_->path.parent_path();
-  if (!parent.empty())
+  if (!parent.empty()) {
     std::filesystem::create_directories(parent, error);
+    if (error) {
+      impl_->error = "create_directories(" + parent.string() +
+                     ") failed: " + error.message();
+      return;
+    }
+  }
 
+  // Disable the filebuf buffer before open so line-sync in TeeBuf is enough
+  // and ofstream::unitbuf is not relied upon (tee writes bypass ofstream).
+  impl_->file.rdbuf()->pubsetbuf(nullptr, 0);
   impl_->file.open(impl_->path, std::ios::out | std::ios::binary);
-  if (!impl_->file)
+  if (!impl_->file) {
+    impl_->error = "open(" + impl_->path.string() + ") failed";
     return;
+  }
 
   impl_->oldCout = std::cout.rdbuf();
   impl_->oldCerr = std::cerr.rdbuf();
@@ -114,12 +135,16 @@ ConsoleTeeGuard::ConsoleTeeGuard(const std::filesystem::path &logPath)
       std::make_unique<TeeBuf>(impl_->oldCerr, impl_->file.rdbuf());
   std::cout.rdbuf(impl_->teeCout.get());
   std::cerr.rdbuf(impl_->teeCerr.get());
+  // Quiet runs (-vb 0) suppress logInfo on cout; keep the durable log filled.
+  setFileLogStream(&impl_->file);
   impl_->active = true;
 }
 
 ConsoleTeeGuard::~ConsoleTeeGuard() {
   if (!impl_ || !impl_->active)
     return;
+  if (getFileLogStream() == &impl_->file)
+    setFileLogStream(nullptr);
   std::cout.flush();
   std::cerr.flush();
   std::cout.rdbuf(impl_->oldCout);
@@ -133,13 +158,20 @@ const std::filesystem::path &ConsoleTeeGuard::logPath() const {
   return impl_->path;
 }
 
+const std::string &ConsoleTeeGuard::errorMessage() const {
+  static const std::string kEmpty;
+  return impl_ ? impl_->error : kEmpty;
+}
+
 std::filesystem::path resolveLogDirectory(const ReconArgs &args,
                                           std::string &errorMessage) {
   try {
     std::filesystem::path dir(args.outputDir.empty() ? "output" : args.outputDir);
     std::filesystem::create_directories(dir);
     errorMessage.clear();
-    return dir;
+    std::error_code absError;
+    auto abs = std::filesystem::absolute(dir, absError);
+    return absError ? dir : abs;
   } catch (const std::exception &ex) {
     errorMessage = ex.what();
     return {};
@@ -153,7 +185,11 @@ std::filesystem::path makeDefaultLogPath(const ReconArgs &args) {
   const std::string stem =
       sanitizeFilename(args.outputName.empty() ? std::string("recon")
                                                : args.outputName);
-  return dir / (stem + "_" + timestampForFilename() + ".log");
+  const std::filesystem::path relative =
+      dir / (stem + "_" + timestampForFilename() + ".log");
+  std::error_code absError;
+  auto abs = std::filesystem::absolute(relative, absError);
+  return absError ? relative : abs;
 }
 
 std::string makeCommandLineString(int argc, char **argv) {

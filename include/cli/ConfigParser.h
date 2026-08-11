@@ -21,9 +21,9 @@ namespace cli {
  * Example INI file:
  * @code
  * [Basic]
- * dimensions = 200,200,200
- * voxel_size = 1.0,1.0,1.0
- * threads = 8
+ * dimensions = 120,120,220
+ * voxel_size = 0.3,0.3,0.3
+ * threads = 16
  * @endcode
  */
 class ConfigParser {

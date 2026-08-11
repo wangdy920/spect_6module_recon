@@ -252,41 +252,6 @@ TEST(IOTest, CompactSymmetricDefaultsSparseBackendToCuda) {
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
 }
 
-TEST(IOTest, PublicSparseBackendFlagIsRejected) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", "__missing_compact_test_config__.ini",
-        "-df", "proj.bin",
-        "-chunkCSRDir", "matrix_dir",
-        "-sparseBackend", "cpu",
-        "-opti", "mlem",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-
-TEST(IOTest, PublicAlgFlagIsRejected) {
-    spect::cli::ReconArgs args;
-    const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", "__missing_compact_test_config__.ini",
-        "-df", "proj.bin",
-        "-chunkCSRDir", "matrix_dir",
-        "-alg", "mlem",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
-
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-
 TEST(IOTest, OptiSelectsAlgorithm) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
@@ -330,18 +295,7 @@ TEST(IOTest, RegisteredCtRegularizationOptionsParse) {
     EXPECT_DOUBLE_EQ(args.reg.ct_weight_floor, 0.15);
 }
 
-TEST(IOTest, PublicPsfProjFlagIsRejected) {
-    auto argv = compactBaseArgs();
-    argv.push_back("-psf");
-    argv.push_back("1.5,4");
-    argv.push_back("-psfProj");
-    argv.push_back("off");
-
-    spect::cli::ReconArgs args;
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-
-TEST(IOTest, PublicPsfModeRejectsNonOperatorModes) {
+TEST(IOTest, PublicPsfModeRejectsRetiredPostSmooth) {
     auto argv = compactBaseArgs();
     argv.push_back("-psf");
     argv.push_back("1.5,4");
@@ -453,52 +407,6 @@ TEST(IOTest, ExplicitPsfModeNoneOverridesPsfDefaultOperator) {
     EXPECT_TRUE(args.usePSF);
     EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::None);
 }
-TEST(IOTest, CompactSymmetricParserRejectsUnsupportedPhase1Options) {
-    auto expectRejected = [](std::vector<std::string> argv) {
-        spect::cli::ReconArgs args;
-        EXPECT_FALSE(parseReconArgsForTest(argv, args));
-    };
-
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-sparseBackend");
-        argv.push_back("cpu");
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        auto it = std::find(argv.begin(), argv.end(), "mlem");
-        ASSERT_NE(it, argv.end());
-        *it = "admm";
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-subsets");
-        argv.push_back("2");
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-reg");
-        argv.push_back("RDP,0.01,1e-4,2.0");
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-psf");
-        argv.push_back("1.5");
-        argv.push_back("-psfProj");
-        argv.push_back("on");
-        expectRejected(argv);
-    }
-    {
-        auto argv = compactBaseArgs();
-        argv.push_back("-psfMode");
-        argv.push_back("PostSmooth");
-        expectRejected(argv);
-    }
-}
 TEST(IOTest, CompactSymmetricParserAcceptsBSREMRDP) {
     auto argv = compactBaseArgs();
     auto it = std::find(argv.begin(), argv.end(), "mlem");
@@ -606,6 +514,45 @@ TEST(IOTest, CtacAutoMuNuclideConfigResolvesWaterMu) {
     EXPECT_NEAR(args.ctacAutoMuValue, 0.010998703003107506, 1e-15);
 
     std::filesystem::remove(path);
+}
+
+TEST(CLITest, AbsoluteFoutKeepsDriveLetterOutputDir) {
+    using spect::cli::ReconArgs;
+
+    const auto parseFout = [](const std::string& path, ReconArgs& args) {
+        auto argv = compactBaseArgs();
+        argv.insert(argv.end(), {"-fout", path});
+        return parseReconArgsForTest(argv, args);
+    };
+
+    {
+        ReconArgs args;
+        ASSERT_TRUE(parseFout("D:/data/case/run1", args));
+        const std::filesystem::path dir(args.outputDir);
+        EXPECT_TRUE(dir.is_absolute());
+        EXPECT_EQ(dir.filename().string(), "case");
+        EXPECT_EQ(args.outputName, "run1");
+    }
+    {
+        ReconArgs args;
+        ASSERT_TRUE(parseFout("D:/data/case/run1.mhd", args));
+        EXPECT_TRUE(std::filesystem::path(args.outputDir).is_absolute());
+        EXPECT_EQ(args.outputName, "run1");
+    }
+    {
+        ReconArgs args;
+        ASSERT_TRUE(parseFout("D:/data/case/", args));
+        const std::filesystem::path dir(args.outputDir);
+        EXPECT_TRUE(dir.is_absolute());
+        EXPECT_EQ(dir.parent_path().filename().string(), "case");
+        EXPECT_EQ(args.outputName, "recon");
+    }
+    {
+        ReconArgs args;
+        ASSERT_TRUE(parseFout("rel/out/run1", args));
+        EXPECT_FALSE(std::filesystem::path(args.outputDir).is_absolute());
+        EXPECT_EQ(args.outputName, "run1");
+    }
 }
 
 } // namespace test

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "cuda/CudaConfig.h"
-#include "sparse/SparseOpsBackend.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED

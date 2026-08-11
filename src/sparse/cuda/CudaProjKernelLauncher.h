@@ -5,7 +5,7 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
-#include "sparse/SparseOpsBackend.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,16 +20,16 @@ void launchProjDomainRatioKernel(const float *yhat, const float *projections,
                                  cudaStream_t stream = nullptr);
 
 void launchCompactRatioKernel(
-    const float *yhat, const float *fullProjection, size_t fullProjectionCount,
+    const float *yhat, const double *fullProjection, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
-    float eps, cudaStream_t stream = nullptr);
+    double eps, cudaStream_t stream = nullptr);
 
 void launchCompactRatioBatchKernel(
-    const float *yhatBatch, const float *fullProjection,
+    const float *yhatBatch, const double *fullProjection,
     size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
     const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
-    float eps, cudaStream_t stream = nullptr);
+    double eps, cudaStream_t stream = nullptr);
 
 void launchCompactTransformBackwardAddKernel(
     const float *rotated, double *accum, size_t nvox,
@@ -59,15 +59,6 @@ void launchCompactAttenFusedBackwardKernel(
     const cuda::CompactAttenBakeParams &params,
     cudaStream_t stream = nullptr);
 
-void launchCompactBranchBatchForwardScaledU16(
-    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
-    const float *rowScales, const float *x, int cols, int batchSize, float *y,
-    int rows, cudaStream_t stream = nullptr);
-
-void launchCompactBranchBatchBackwardScaledU16(
-    const uint32_t *rowPtr, const uint32_t *colIdx, const uint16_t *values,
-    const float *rowScales, const float *y, int rows, int batchSize, float *x,
-    int cols, cudaStream_t stream = nullptr);
 
 } // namespace spect
 

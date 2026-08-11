@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace spect::io {
@@ -21,20 +22,6 @@ struct CompactChunkCSRInfo {
   uint64_t fileSizeBytes = 0;
 };
 
-struct CSRQuantizedView {
-  int rows = 0;
-  int cols = 0;
-  const uint32_t *row_ptr = nullptr;     // length = rows+1
-  const uint32_t *col_idx = nullptr;     // length = nnz
-  const uint16_t *quantized_values = nullptr; // length = nnz
-  const float *row_scales = nullptr;     // length = rows
-  uint64_t nnz = 0;
-
-  bool valid() const {
-    return row_ptr && col_idx && quantized_values && row_scales &&
-           rows >= 0 && cols >= 0 && nnz > 0;
-  }
-};
 
 struct CompactChunkCSRData {
   CompactChunkCSRInfo info;
@@ -42,28 +29,17 @@ struct CompactChunkCSRData {
   std::vector<uint32_t> rowPtr;
   std::vector<uint32_t> colIdx;
   std::vector<float> values;
-  // Quantized payload (version 2, per-row scaled uint16 values).
-  std::vector<uint16_t> quantizedValues;
-  std::vector<float> rowScales;
   std::shared_ptr<const void> mappedPayloadOwner;
   const uint32_t *mappedColIdx = nullptr;
   const float *mappedValues = nullptr;
-  const uint16_t *mappedQuantizedValues = nullptr;
-  const float *mappedRowScales = nullptr;
   uint64_t mappedPayloadBytes = 0;
 
   CSRView view() const;
-  CSRQuantizedView quantizedView() const;
-  uint64_t residentBytes() const;
-  bool isQuantized() const;
   const uint32_t *colIdxData() const;
   const float *valuesData() const;
-  const uint16_t *quantizedValuesData() const;
-  const float *rowScalesData() const;
   size_t colIdxCount() const;
   size_t valuesCount() const;
-  size_t quantizedValuesCount() const;
-  size_t rowScalesCount() const;
+  uint64_t residentBytes() const;
 };
 
 class CompactChunkCSRDirectory {
@@ -81,6 +57,10 @@ public:
   uint64_t cacheBudgetBytes() const { return cacheBudgetBytes_; }
 
   std::shared_ptr<const CompactChunkCSRData> loadChunk(size_t index) const;
+  std::shared_ptr<void> acceleratorLease() const { return acceleratorLease_; }
+  void setAcceleratorLease(std::shared_ptr<void> lease) const {
+    acceleratorLease_ = std::move(lease);
+  }
 
 private:
   std::filesystem::path directory_;
@@ -91,6 +71,8 @@ private:
   uint64_t cacheBudgetBytes_ = 0;
   mutable uint64_t cachedBytes_ = 0;
   mutable std::vector<std::shared_ptr<const CompactChunkCSRData>> cache_;
+  // Declared after cache_: release accelerator registrations before chunk data.
+  mutable std::shared_ptr<void> acceleratorLease_;
 };
 
 uint64_t defaultCompactChunkHostCacheBudgetBytes();

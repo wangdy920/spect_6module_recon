@@ -3,7 +3,6 @@
 #include "recon/ReconConfig.h"
 #include "cli/ReconArgs.h"
 #include "filters/PSFConfig.h"
-#include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "pipeline/ReconPreparation.h"
@@ -46,7 +45,6 @@ struct CompactSymmetricReconLoopContext {
   const OutputTransform *outputTransform = nullptr;
   const io::CompactSymmetryMetadata *compactMeta = nullptr;
   const std::string *compactMetaPath = nullptr;
-  bool compactChunkLayout = false;
   const io::CompactChunkCSRDirectory *compactChunks = nullptr;
   CompactExecutionTiming *timing = nullptr;
   std::chrono::steady_clock::time_point loadToIterationStart{};
@@ -60,15 +58,7 @@ struct CompactSymmetricReconLoopContext {
   const std::vector<int> *bedZStarts = nullptr;
 };
 
-class CompactSymmetricReconLoop {
-public:
-  explicit CompactSymmetricReconLoop(CompactSymmetricReconLoopContext context);
-
-  std::vector<double> run(const io::CSR &matrix) const;
-  std::vector<double> run(const io::CSRView &matrix) const;
-
-private:
-  CompactSymmetricReconLoopContext context_;
-};
+std::vector<double> runCompactSymmetricReconstruction(
+    const CompactSymmetricReconLoopContext &context);
 
 } // namespace spect::main

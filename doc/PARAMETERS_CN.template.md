@@ -6,7 +6,6 @@
 cd D:\path\to\<package_root>
 ```
 
-已废弃或改名的参数见 `CLI_CHANGES_CN.md`。迁移旧脚本时先看那份短表。
 
 ## 默认识别规则
 
@@ -52,25 +51,18 @@ cd D:\path\to\<package_root>
 ```powershell
 .\bin\SPECT_recon.exe `
   -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin;D:\scan\Bed3.bin;D:\scan\Bed4.bin" `
-  -bedOverlap 16,16,16,0,0 `
+  -bedOverlap 164,164,164,0,0 `
   -o recon_multibed `
-  -it 50:5
+  -it 50:50
 ```
 
-多床位规则（仅 stitch：各床独立重建，输出前拼接）：
-- 最多 5 个床位。
-- `-dfList` 默认按路径中的 `BedN` 排序。
-- `-bProjList` 使用同样排序规则。
-- `-bedOverlap b1,b2,b3,b4,b5` 是固定五槽表：
-  - `b1 = Bed1-Bed2`
-  - `b2 = Bed2-Bed3`
-  - `b3 = Bed3-Bed4`
-  - `b4 = Bed4-Bed5`
-  - `b5` 保留占位
-- 如果实际传入 `Bed2,Bed3,Bed4`，使用 `b2,b3`。
-- 如果只传 `-bedOverlap 16`，会复制到所有固定槽位。
-- 写 MHD 前按 `crop_method` 选择默认 `center66_cosine10`、legacy `sigmoid(k=12)` 或 `direct` hard-cut 拼接。
-- `crop_method=center66_cosine10`：每床输出中心 66 层，固定步进 56 层，在相邻床共同的 10 层中做归一化 cosine 融合；要求 `bed_overlap = 单床 Nz - 56`。
+固定合同：
+- 最多 5 个床位；路径含 `BedN` 时按床号排序。`Bed1` 是最大 physical-Z 床，后续床每次向较小 physical Z 移动 `16.8 mm`（扫描仪机械步进）。
+- `-bedOverlap` 表达重建空间的重叠层数；`-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，默认 `16.8`）声明扫描仪机械步进。输出步进由 `step = round(bed_step_mm / voxel_z)` 自动确定，**overlap 是派生值**：`overlap = baseNz - step`。不传 `-bedOverlap` 时自动推算；传错时自动纠正并打印 `[NOTE]`（`bed_step_mm` 是权威输入）。220 层 0.3 mm 床位为 `overlap = 220 - 56 = 164`（16.8 mm 步进）；其他步进/几何按同一关系换算。
+- `[MultiBed] z_bed_flip=1` 是发布默认，在 compact 多床映射内反转每床局部 Z；不要通过逆序文件或 `-zbedflip 0` 二次补偿。
+- 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合。
+- 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床固定输出为 `100×100×72`，ROI `30 mm × 21.6 mm`；多床 ROI 为 `36 mm × 66 mm`。
+- `sigmoid`、`direct`、对象感知 seam/profile 修补、输出 FOV mask 和离线自动拼接均已删除。
 
 ## 输出方向
 
@@ -78,37 +70,31 @@ cd D:\path\to\<package_root>
 
 ```ini
 [MultiBed]
-bed_overlap = 104,104,104,104,0  # 160 层单床对应固定 stride=56
-crop_method = center66_cosine10
-fov_radius_mm = 15.0
-analysis_fov_radius_mm = 15.0
-mouse_seam_strength = 0.0
-crop_end    = 0,0  # 将最终 Z 首尾指定层置零，不改变层数
-z_bed_flip  = 1  # 输出阶段按床 Z 翻转
+bed_overlap = 164,164,164,164,0
+crop_end    = 0,0
+z_bed_flip  = 1
 z_out_flip  = 0
 x_out_flip  = 0
 ```
 
-命令行覆盖：
+命令行只在确有坐标合同要求时覆盖：
 
 ```powershell
--zbedflip 0
--zoutflip 1
--xoutflip 1
+-zbedflip 1
+-zoutflip 0
+-xoutflip 0
 -cropEnd top,end
--bedCropMethod center66_cosine10
 ```
 
-处理顺序固定为：每床 Z 翻转 -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。
+处理顺序为：compact 多床映射内每床 Z 方向 -> canonical gain/stitch -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。矩阵入口与预处理投影必须配对：260601 chunk 对应 `PROJECTION_VARIANT=identity`，`z_bed_flip` 保持包默认 1。
 
-矩阵入口与预处理投影变体必须配对：`-chunkCSRDir`（260601 chunk）对应 `PROJECTION_VARIANT=identity`，`z_bed_flip` 保留本包 `[MultiBed]` 默认，勿擅自改。
 
 ## 常用覆盖参数
 
 - `-it N[:save]`：迭代次数与保存间隔，例如 `50:5`。
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
-- `-psf [fwhm_mm[,N]]`：启用 image-domain Operator PSF；FWHM 单位为 mm，默认 `1.5,4`。配置 `[PSF] z_blur=false` 可将 Z 核固定为 `{1}`，用于 XY-only Operator PSF 消融；默认 `true` 保持 XYZ PSF。
+- `-psf [fwhm_mm[,N]]`：启用 image-domain PSF；发布默认 `1.3,3`、模式 `sieve`、`psfKernel=castor`。`-psfKernel adjoint` 使用采样 Gaussian + 镜像边界 + 真伴随；`-psfKernel castor` 使用 erf 体素积分核 + 零边界 + Z-only 归一化，反向复用正向。
 - `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
 - `-opti mlem|bsrem`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。

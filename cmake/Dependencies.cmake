@@ -48,9 +48,6 @@ message(STATUS "VCPKG triplet: ${VCPKG_TARGET_TRIPLET}")
 message(STATUS "CUDA sparse backend option: ${SPECT_ENABLE_CUDA_SPARSEOPS}")
 message(STATUS "CUDA scaffold target option: ${SPECT_BUILD_CUDA_SCAFFOLD}")
 message(STATUS "Butterworth cuFFT option: ${SPECT_ENABLE_BUTTERWORTH_CUFFT}")
-if(SPECT_ENABLE_CUDA_SPARSEOPS AND NOT SPECT_BUILD_CUDA_SCAFFOLD)
-  message(WARNING "SPECT_ENABLE_CUDA_SPARSEOPS is ON, but no external CUDA sparse backend is wired yet; define SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL together with getSparseOpsCUDA().")
-endif()
 
 # ----------------------------------
 # 1) OpenMP（可选）

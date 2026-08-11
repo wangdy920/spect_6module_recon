@@ -39,12 +39,12 @@ extern "C" __global__ void compute_ratio_chunk(
 }
 
 extern "C" __global__ void compute_compact_ratio_chunk(
-    const float *yhat, const float *fullProjection,
+    const float *yhat, const double *fullProjection,
     unsigned long long fullProjectionCount, int symmetryMode,
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, int symId, int zMirror, float *ratio,
-    unsigned long long count, float eps) {
+    unsigned long long count, double eps) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= count || compactRaysPerAngle <= 0 || detNx <= 0) {
@@ -100,20 +100,20 @@ extern "C" __global__ void compute_compact_ratio_chunk(
     ratio[index] = 0.0f;
     return;
   }
-  float denom = yhat[index];
+  double denom = static_cast<double>(yhat[index]);
   if (denom < eps) {
     denom = eps;
   }
-  ratio[index] = fullProjection[fullIndex] / denom;
+  ratio[index] = static_cast<float>(fullProjection[fullIndex] / denom);
 }
 
 extern "C" __global__ void compute_compact_ratio_chunk_batch(
-    const float *yhatBatch, const float *fullProjection,
+    const float *yhatBatch, const double *fullProjection,
     unsigned long long fullProjectionCount, int symmetryMode,
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, const int *symIds, const int *zMirrors,
-    int batchSize, float *ratioBatch, unsigned long long rows, float eps) {
+    int batchSize, float *ratioBatch, unsigned long long rows, double eps) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -178,11 +178,12 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     ratioBatch[index] = 0.0f;
     return;
   }
-  float denom = yhatBatch[index];
+  double denom = static_cast<double>(yhatBatch[index]);
   if (denom < eps) {
     denom = eps;
   }
-  ratioBatch[index] = fullProjection[fullIndex] / denom;
+  ratioBatch[index] =
+      static_cast<float>(fullProjection[fullIndex] / denom);
 }
 
 )CU") + R"CU(
@@ -588,53 +589,6 @@ extern "C" __global__ void compact_atten_fused_spmvt(
         att, fullAngle, static_cast<unsigned long long>(col), symmetryMode,
         symId, zMirror, nx, ny, nz, plane, nvox);
     atomicAdd(&y[col], values[t] * factor * rowInput);
-  }
-}
-
-)CU" + R"CU(
-// Quantized branch-batch SpMM kernels (CSR with per-row scaled uint16 values).
-// Dense matrices are column-major: X[cols x batchSize], Y[rows x batchSize].
-extern "C" __global__ void compact_branch_batch_forward_scaled_u16(
-    const unsigned int *row_ptr, const unsigned int *col_idx,
-    const unsigned short *values, const float *row_scales, const float *x,
-    int cols, int batch_size, float *y, int rows) {
-  const int row = blockIdx.x;
-  if (row >= rows) {
-    return;
-  }
-  const unsigned int start = row_ptr[row];
-  const unsigned int end = row_ptr[row + 1];
-  const float scale = row_scales[row];
-  for (int b = threadIdx.x; b < batch_size; b += blockDim.x) {
-    float sum = 0.0f;
-    const int x_batch_offset = b * cols;
-    for (unsigned int i = start; i < end; ++i) {
-      const unsigned int col = col_idx[i];
-      sum += static_cast<float>(values[i]) * x[x_batch_offset + col];
-    }
-    y[b * rows + row] = sum * scale;
-  }
-}
-
-extern "C" __global__ void compact_branch_batch_backward_scaled_u16(
-    const unsigned int *row_ptr, const unsigned int *col_idx,
-    const unsigned short *values, const float *row_scales, const float *y,
-    int rows, int batch_size, float *x, int cols) {
-  const int row = blockIdx.x;
-  if (row >= rows) {
-    return;
-  }
-  const unsigned int start = row_ptr[row];
-  const unsigned int end = row_ptr[row + 1];
-  const float scale = row_scales[row];
-  for (int b = threadIdx.x; b < batch_size; b += blockDim.x) {
-    const float y_scaled = y[b * rows + row] * scale;
-    const int x_batch_offset = b * cols;
-    for (unsigned int i = start; i < end; ++i) {
-      const unsigned int col = col_idx[i];
-      atomicAdd(&x[x_batch_offset + col],
-                static_cast<float>(values[i]) * y_scaled);
-    }
   }
 }
 

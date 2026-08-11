@@ -24,6 +24,23 @@ inline size_t idx3(size_t i, size_t j, size_t k, size_t Nx, size_t Ny) {
 std::vector<double> makeGaussian1D(double fwhm_mm, double vox_mm,
                                    double min_sigmas = 4.0);
 
+// CASToR 严格对齐的 erf 体素积分核：k[i] = 0.5*(erf((i+0.5)*vox/(sqrt2*sigma))
+// - erf((i-0.5)*vox/(sqrt2*sigma)))，半径 = castor_round(sigma*N_sigmas/vox)
+// （小数部分 > 0.5 才进位，恰 0.5 舍去；半径可为 0）。
+std::vector<double> makeCastorErf1D(double fwhm_mm, double vox_mm,
+                                    double nb_sigmas);
+
+// CASToR z 边界补偿因子：norm[z] = 落入 [0,Nz) 的 kz 权重和（与 x,y 无关）。
+std::vector<double> makeCastorZNorm1D(const std::vector<double>& kz, int Nz);
+
+// CASToR 前向卷积 C = D_z^-1 * K：零扩展可分离卷积（x/y/z 均不补偿），
+// 随后逐体素除以 z 边界补偿因子。反向（伴随侧）按 CASToR 源码复用本函数。
+void conv3d_castor_forward_inplace(std::vector<double>& f, int Nx, int Ny,
+                                   int Nz, const std::vector<double>& kx,
+                                   const std::vector<double>& ky,
+                                   const std::vector<double>& kz,
+                                   int threads);
+
 // ================= 1D 卷积（内部使用）=================
 
 void conv1d_x_mirror(const std::vector<double>& in, std::vector<double>& out,

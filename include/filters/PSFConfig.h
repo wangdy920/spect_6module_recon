@@ -17,9 +17,15 @@ namespace filters {
 enum class PSFMode { 
     None, 
     Operator,         // PSF 作为算子在迭代中应用
+    Sieve,            // CASToR sieve：迭代内同 Operator，保存副本额外施加同一 PSF
 };
 
 enum class PSFInterp { Linear, Nearest };
+
+// PSF 数值内核选择：adjoint = 主线采样高斯 + 全轴镜像 + 真伴随；
+// castor = 严格 CASToR 对齐（erf 体素积分核、零扩展边界、仅 z 边界补偿
+// D_z、反向复用正向卷积器）。sieve + castor 即原型 sieve_castor_fwhm1p3。
+enum class PSFKernel { Adjoint, Castor };
 
 // 三维体素间距
 struct Spacing3 { 
@@ -50,6 +56,7 @@ struct PSFConf {
     bool z_dependent = false;
     PSFInterp interp = PSFInterp::Linear;
     double min_sigmas = 4.0;         // 核截断阈值：N * sigma
+    PSFKernel kernel = PSFKernel::Adjoint;  // PSF 数值内核（adjoint|castor）
 };
 
 // ================= Butterworth 滤波器配置 =================

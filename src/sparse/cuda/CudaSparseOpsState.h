@@ -1,18 +1,5 @@
 #pragma once
 
-#include <cstdlib>
-#include <cstring>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include "CudaChunkCache.h"
-#include "CudaCsrBuilder.h"
-#include "CudaProjKernelLauncher.h"
-#include "core/ReconLimits.h"
-#include "cuda/CudaLaunchConfig.h"
-#include "io/CompactChunkCSR.h"
-
 constexpr int kCompactDeviceBackwardMaxAccumulators =
   cuda::kCompactDeviceBackwardMaxAccumulators;
 
@@ -605,7 +592,7 @@ public:
     ratioTiming.recordStart(nullptr);
     launchCompactRatioKernel(dOutput_.get(), dCompactProjectionInput_[slot].get(),
                              fullProjectionCount, params, dChunkInput_.get(),
-                             static_cast<size_t>(rows), 1e-10f);
+                             static_cast<size_t>(rows), 1e-10);
     ratioTiming.recordStop(nullptr);
 
     CuSparseVecGuard vecXBackward;
@@ -788,7 +775,7 @@ public:
                              dCompactProjectionInput_[projectionSlot].get(),
                              fullProjectionCount, ratioParams,
                              dChunkInput.get(), static_cast<size_t>(rows),
-                             1e-10f, stream);
+                             1e-10, stream);
     ratioTiming.recordStop(stream);
 
     CuSparseVecGuard vecXBackward;
@@ -916,7 +903,7 @@ public:
                              dCompactProjectionInput_[projectionSlot].get(),
                              fullProjectionCount, ratioParams,
                              dChunkInput_.get(), static_cast<size_t>(rows),
-                             1e-10f);
+                             1e-10);
     ratioTiming.recordStop(nullptr);
 
     TimedCudaStagePair backwardTiming;
@@ -1028,7 +1015,7 @@ public:
         dBatchOutput_.get(), dCompactProjectionInput_[projectionSlot].get(),
         fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
         dBatchZMirrors_.get(), batchSize, dBatchOutput_.get(),
-        static_cast<size_t>(rows), 1e-10f);
+        static_cast<size_t>(rows), 1e-10);
     ratioTiming.recordStop(nullptr);
 
     CuSparseDnMatGuard matBBackward;
@@ -1150,212 +1137,7 @@ public:
     }
   }
 
-  void executeCompactBranchBatchDeviceRatioQuantizedSpmvTAccumulateFloat(
-      const io::CSRQuantizedView &matrix, const float *xBatch,
-      const double *fullProjection, size_t fullProjectionCount,
-      const cuda::CompactDeviceRatioParams &commonRatioParams,
-      const cuda::CompactDeviceTransformParams &commonTransformParams,
-      const int *symIds, const int *zMirrors, int batchSize,
-      cuda::CompactDeviceRatioTiming *ratioTimingOut,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
-    ensureCudaRuntimeAvailable();
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
-      throw std::runtime_error(
-          "compact branch-batch quantized cache slot out of range.");
-    }
-    if (batchSize <= 0) {
-      throw std::runtime_error(
-          "compact branch-batch quantized batchSize must be > 0.");
-    }
-    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device accumulator was not initialized.");
-    }
-    if (commonRatioParams.symmetryMode != 45 &&
-        commonRatioParams.symmetryMode != 90) {
-      throw std::runtime_error(
-          "compact branch-batch quantized helper requires symmetryMode 45 or 90.");
-    }
-    const CachedMatrix &cached = ensureCompactQuantizedMatrixUploaded(matrix);
-    if (cached.valueType != CachedMatrixValueType::ScaledU16) {
-      throw std::runtime_error(
-          "compact branch-batch quantized helper received non-quantized cache.");
-    }
-    const int64_t rows = cached.rows;
-    const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device accumulator size does not match matrix columns.");
-    }
-
-    const auto inputStart = std::chrono::steady_clock::now();
-    dBatchInput_.copyFromHost(
-        xBatch, static_cast<size_t>(cols) * static_cast<size_t>(batchSize));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      inputStart)
-            .count());
-    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(batchSize));
-    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(batchSize));
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
-                                        cacheSlot);
-    ensureProjDomainKernelsLoaded();
-
-    dBatchOutput_.allocate(static_cast<size_t>(rows) *
-                           static_cast<size_t>(batchSize));
-    dFullBatchOutput_.allocate(static_cast<size_t>(cols) *
-                               static_cast<size_t>(batchSize));
-
-    TimedCudaStagePair forwardTiming;
-    forwardTiming.recordStart(nullptr);
-    launchCompactBranchBatchForwardScaledU16(
-        reinterpret_cast<const uint32_t *>(cached.dRowPtr.get()),
-        reinterpret_cast<const uint32_t *>(cached.dColIdx.get()),
-        cached.dQuantizedValues.get(), cached.dRowScales.get(),
-        dBatchInput_.get(), static_cast<int>(cols), batchSize,
-        dBatchOutput_.get(), static_cast<int>(rows));
-    forwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair ratioTiming;
-    ratioTiming.recordStart(nullptr);
-    launchCompactRatioBatchKernel(
-        dBatchOutput_.get(), dCompactProjectionInput_[projectionSlot].get(),
-        fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
-        dBatchZMirrors_.get(), batchSize, dBatchOutput_.get(),
-        static_cast<size_t>(rows), 1e-10f);
-    ratioTiming.recordStop(nullptr);
-
-    CUDA_CHECK(cudaMemset(dFullBatchOutput_.get(), 0,
-                          static_cast<size_t>(cols) *
-                              static_cast<size_t>(batchSize) * sizeof(float)));
-    TimedCudaStagePair backwardTiming;
-    backwardTiming.recordStart(nullptr);
-    launchCompactBranchBatchBackwardScaledU16(
-        reinterpret_cast<const uint32_t *>(cached.dRowPtr.get()),
-        reinterpret_cast<const uint32_t *>(cached.dColIdx.get()),
-        cached.dQuantizedValues.get(), cached.dRowScales.get(),
-        dBatchOutput_.get(), static_cast<int>(rows), batchSize,
-        dFullBatchOutput_.get(), static_cast<int>(cols));
-    backwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair transformTiming;
-    transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddBatchKernel(
-        dFullBatchOutput_.get(), accum.get(), accumSize, batchSize,
-        commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
-    transformTiming.recordStop(nullptr);
-
-    transformTiming.synchronizeStop();
-    const double forwardSeconds = forwardTiming.elapsedSeconds();
-    const double ratioSeconds = ratioTiming.elapsedSeconds();
-    const double backwardSeconds = backwardTiming.elapsedSeconds();
-    const double transformSeconds = transformTiming.elapsedSeconds();
-    noteCudaCusparseForward(forwardSeconds, batchSize);
-    noteCudaRatio(ratioSeconds, batchSize);
-    noteCudaCusparseBackward(backwardSeconds, batchSize);
-    if (ratioTimingOut != nullptr) {
-      ratioTimingOut->forwardSeconds += forwardSeconds;
-      ratioTimingOut->ratioSeconds += ratioSeconds;
-      ratioTimingOut->backwardSeconds += backwardSeconds;
-    }
-    if (backwardTimingOut != nullptr) {
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-      backwardTimingOut->transformBackwardSeconds += transformSeconds;
-    }
-  }
-
-  void executeCompactSensitivityBranchBatchQuantizedSpmvTAccumulateFloat(
-      const io::CSRQuantizedView &matrix,
-      const cuda::CompactDeviceTransformParams &commonTransformParams,
-      const int *symIds, const int *zMirrors, int batchSize,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
-    ensureCudaRuntimeAvailable();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
-      throw std::runtime_error(
-          "compact sensitivity branch-batch quantized cache slot out of range.");
-    }
-    if (batchSize <= 0) {
-      throw std::runtime_error(
-          "compact sensitivity branch-batch quantized batchSize must be > 0.");
-    }
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device accumulator was not initialized.");
-    }
-    if (commonTransformParams.symmetryMode != 45 &&
-        commonTransformParams.symmetryMode != 90) {
-      throw std::runtime_error(
-          "compact sensitivity branch-batch quantized helper requires symmetryMode 45 or 90.");
-    }
-    const CachedMatrix &cached = ensureCompactQuantizedMatrixUploaded(matrix);
-    if (cached.valueType != CachedMatrixValueType::ScaledU16) {
-      throw std::runtime_error(
-          "compact sensitivity branch-batch quantized helper received non-quantized cache.");
-    }
-    const int64_t rows = cached.rows;
-    const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device accumulator size does not match matrix columns.");
-    }
-
-    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(batchSize));
-    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(batchSize));
-    ensureProjDomainKernelsLoaded();
-
-    const size_t batchedRows = static_cast<size_t>(rows) *
-                               static_cast<size_t>(batchSize);
-    dBatchOnes_.allocate(batchedRows);
-    {
-      std::vector<float> ones(batchedRows, 1.0f);
-      dBatchOnes_.copyFromHost(ones.data(), batchedRows);
-    }
-    dFullBatchOutput_.allocate(static_cast<size_t>(cols) *
-                               static_cast<size_t>(batchSize));
-    CUDA_CHECK(cudaMemset(dFullBatchOutput_.get(), 0,
-                          static_cast<size_t>(cols) *
-                              static_cast<size_t>(batchSize) * sizeof(float)));
-
-    TimedCudaStagePair backwardTiming;
-    backwardTiming.recordStart(nullptr);
-    launchCompactBranchBatchBackwardScaledU16(
-        reinterpret_cast<const uint32_t *>(cached.dRowPtr.get()),
-        reinterpret_cast<const uint32_t *>(cached.dColIdx.get()),
-        cached.dQuantizedValues.get(), cached.dRowScales.get(),
-        dBatchOnes_.get(), static_cast<int>(rows), batchSize,
-        dFullBatchOutput_.get(), static_cast<int>(cols));
-    backwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair transformTiming;
-    transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddBatchKernel(
-        dFullBatchOutput_.get(), accum.get(), accumSize, batchSize,
-        commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
-    transformTiming.recordStop(nullptr);
-
-    transformTiming.synchronizeStop();
-    backwardTiming.synchronizeStop();
-    const double backwardSeconds = backwardTiming.elapsedSeconds();
-    const double transformSeconds = transformTiming.elapsedSeconds();
-    noteCudaCusparseBackward(backwardSeconds, batchSize);
-    if (backwardTimingOut != nullptr) {
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-      backwardTimingOut->transformBackwardSeconds += transformSeconds;
-    }
-  }
 
   void downloadCompactDeviceBackward(double *y, size_t voxelCount,
                                      int accumulatorIndex) {
@@ -1368,7 +1150,13 @@ public:
       throw std::runtime_error(
           "compact device-backward download size does not match accumulator.");
     }
+    const auto outputStart = std::chrono::steady_clock::now();
     accum.copyToHost(y, voxelCount);
+    noteCudaCompactOutputD2H(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      outputStart)
+            .count(),
+        voxelCount * sizeof(double), true);
   }
 
   void executeSubsetSpMV(const io::CSRView &matrix,
@@ -1426,13 +1214,6 @@ public:
   }
 
 private:
-  static bool cudaSyncLegacyEnabled() {
-    static const bool enabled = []() {
-      const char *v = std::getenv("SPECT_CUDA_SYNC_LEGACY");
-      return v != nullptr && v[0] == '1';
-    }();
-    return enabled;
-  }
 
   static bool compactCtacBakedReferenceEnabled() {
     static const bool enabled = []() {
@@ -1443,20 +1224,12 @@ private:
   }
 
   void stageInputH2D(const float *x, size_t count) {
-    if (cudaSyncLegacyEnabled()) {
-      dInput_.copyFromHost(x, count);
-      return;
-    }
     pinnedInputStage_.copyFromHost(x, count);
     dInput_.copyFromHostAsync(pinnedInputStage_.data(), count, nullptr);
   }
 
   template <typename DeviceArrayT>
   void stageOutputD2H(const DeviceArrayT &dev, float *y, size_t count) {
-    if (cudaSyncLegacyEnabled()) {
-      dev.copyToHost(y, count);
-      return;
-    }
     pinnedOutputStage_.allocate(count);
     dev.copyToHostAsync(pinnedOutputStage_.data(), count, nullptr);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
@@ -1482,6 +1255,9 @@ private:
     if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
       throw std::runtime_error("compact projection cache slot out of range.");
     }
+    // The canonical host ratio divides the double measurement by a promoted
+    // float forward estimate, then casts once to float. Keep the measurement
+    // double on device so removing the round trip does not add an early cast.
     auto &dProjection = dCompactProjectionInput_[static_cast<size_t>(cacheSlot)];
     if (compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] == src &&
         compactProjectionCount_[static_cast<size_t>(cacheSlot)] == count &&
@@ -1489,14 +1265,14 @@ private:
       return;
     }
     const auto uploadStart = std::chrono::steady_clock::now();
-    uploadDouble(dProjection, src, count);
+    dProjection.copyFromHost(src, count);
     compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = src;
     compactProjectionCount_[static_cast<size_t>(cacheSlot)] = count;
     noteCudaCompactProjectionH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       uploadStart)
             .count(),
-        count * sizeof(float));
+        count * sizeof(double));
   }
 
   void uploadDoubleAsync(DeviceArray<float> &dev, const double *src,
@@ -1515,7 +1291,7 @@ private:
       dst[i] = static_cast<double>(hostFloatScratch_[i]);
   }
 
-  enum class CachedMatrixValueType { Float, ScaledU16 };
+  enum class CachedMatrixValueType { Float };
 
   struct CachedMatrix {
     MatrixCacheKey key;
@@ -1526,8 +1302,6 @@ private:
     DeviceArray<int32_t> dRowPtr;
     DeviceArray<int32_t> dColIdx;
     DeviceArray<float> dValues;
-    DeviceArray<uint16_t> dQuantizedValues;
-    DeviceArray<float> dRowScales;
     CuSparseMatGuard matA;
     mutable std::array<size_t, 2> spmvBufferSizes{};
     mutable std::array<bool, 2> spmvBufferSizeValid{};
@@ -1544,8 +1318,6 @@ private:
       dRowPtr.reset();
       dColIdx.reset();
       dValues.reset();
-      dQuantizedValues.reset();
-      dRowScales.reset();
       spmvBufferSizes = {};
       spmvBufferSizeValid = {};
       spmmBufferSizes = {};
@@ -1768,12 +1540,16 @@ private:
         opA == CUSPARSE_OPERATION_TRANSPOSE, stream);
   }
 
-  void uploadValuesAndCreateMatA(CachedMatrix *cache, const float *hostValues,
-                                 size_t valueCount) {
-    cache->dValues.copyFromHost(hostValues, valueCount);
+  void createMatA(CachedMatrix *cache) {
     cache->matA.create(cache->rows, cache->cols, cache->nnz,
                        cache->dRowPtr.get(), cache->dColIdx.get(),
                        cache->dValues.get());
+  }
+
+  void uploadValuesAndCreateMatA(CachedMatrix *cache, const float *hostValues,
+                                 size_t valueCount) {
+    cache->dValues.copyFromHost(hostValues, valueCount);
+    createMatA(cache);
   }
 
   void uploadHostCSR(const HostCSRData &host, const MatrixCacheKey &key,
@@ -1811,8 +1587,7 @@ private:
                                      stream);
     cache->dValues.copyFromHostAsync(host.values.data(), host.valuesCount,
                                      stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    uploadValuesAndCreateMatA(cache, host.values.data(), host.valuesCount);
+    createMatA(cache);
   }
 
   void uploadIoCsrView(const io::CSRView &matrix, const MatrixCacheKey &key,
@@ -1849,31 +1624,9 @@ private:
         static_cast<size_t>(matrix.nnz), stream);
     cache->dValues.copyFromHostAsync(matrix.val, static_cast<size_t>(matrix.nnz),
                                      stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    uploadValuesAndCreateMatA(cache, matrix.val,
-                              static_cast<size_t>(matrix.nnz));
+    createMatA(cache);
   }
 
-  void uploadQuantizedIoCsrView(const io::CSRQuantizedView &matrix,
-                                const MatrixCacheKey &key,
-                                CachedMatrix *cache) {
-    cache->reset();
-    cache->key = key;
-    cache->rows = matrix.rows;
-    cache->cols = matrix.cols;
-    cache->nnz = static_cast<int64_t>(matrix.nnz);
-    cache->valueType = CachedMatrixValueType::ScaledU16;
-    cache->dRowPtr.copyFromHost(
-        reinterpret_cast<const int32_t *>(matrix.row_ptr),
-        static_cast<size_t>(matrix.rows) + 1u);
-    cache->dColIdx.copyFromHost(
-        reinterpret_cast<const int32_t *>(matrix.col_idx),
-        static_cast<size_t>(matrix.nnz));
-    cache->dRowScales.copyFromHost(matrix.row_scales,
-                                   static_cast<size_t>(matrix.rows));
-    cache->dQuantizedValues.copyFromHost(matrix.quantized_values,
-                                         static_cast<size_t>(matrix.nnz));
-  }
 
   void validateIoCsrViewForUpload(const io::CSRView &matrix) const {
     if (!matrix.valid()) {
@@ -1892,23 +1645,6 @@ private:
     }
   }
 
-  void validateIoCsrQuantizedViewForUpload(
-      const io::CSRQuantizedView &matrix) const {
-    if (!matrix.valid()) {
-      throw std::runtime_error(
-          "Invalid io::CSRQuantizedView passed to CUDA sparse backend.");
-    }
-    const uint32_t nnz = matrix.row_ptr[static_cast<size_t>(matrix.rows)];
-    if (nnz > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
-        matrix.nnz > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
-      throw std::runtime_error(
-          "CUDA sparse backend only supports nnz representable as int32.");
-    }
-    if (matrix.cols > std::numeric_limits<int32_t>::max()) {
-      throw std::runtime_error(
-          "CUDA sparse backend only supports column dimensions representable as int32.");
-    }
-  }
 
   template <typename MatrixType>
   const CachedMatrix &ensureMatrixUploaded(const MatrixType &matrix) {
@@ -1956,27 +1692,6 @@ private:
     return cache_;
   }
 
-  const CachedMatrix &ensureCompactQuantizedMatrixUploaded(
-      const io::CSRQuantizedView &matrix) {
-    const MatrixCacheKey key = makeCacheKey(matrix);
-    for (const auto &entry : compactQuantizedMatrixCache_) {
-      if (entry.first == key) {
-        noteCudaCompactMatrixReuseHit();
-        return *entry.second;
-      }
-    }
-    validateIoCsrQuantizedViewForUpload(matrix);
-    const auto uploadStart = std::chrono::steady_clock::now();
-    auto cached = std::make_unique<CachedMatrix>();
-    uploadQuantizedIoCsrView(matrix, key, cached.get());
-    const CachedMatrix *result = cached.get();
-    compactQuantizedMatrixCache_.emplace_back(key, std::move(cached));
-    noteCudaCompactMatrixUpload(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      uploadStart)
-            .count());
-    return *result;
-  }
 
   const CachedMatrix &ensureSubsetUploaded(const io::CSRView &matrix,
                                            const std::vector<int> &subset_rows,
@@ -2212,14 +1927,26 @@ private:
 
     const uint64_t usedMiB =
         deviceChunkCache_.numCached * maxChunkBytes / cuda::kCudaMiB;
-    fprintf(stderr,
-            "[P3-D] Device chunk cache: %zu / %zu chunks cached "
-            "(%llu MiB VRAM)\n",
-            deviceChunkCache_.numCached, ranges.size(),
-            static_cast<unsigned long long>(usedMiB));
+    // cerr (not fprintf) so the process tee log captures cache residency.
+    std::cerr << "[P3-D] Device chunk cache: " << deviceChunkCache_.numCached
+              << " / " << ranges.size() << " chunks cached (" << usedMiB
+              << " MiB VRAM)\n";
   }
 
 public:
+  void refreshCompactProjection(const double *projection, size_t count,
+                                int cacheSlot) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+      throw std::runtime_error("compact projection cache slot out of range.");
+    }
+    // A recycled host address is not proof that a new reconstruction owns the
+    // same data. Refresh once per numerator pass; inner branches still reuse it.
+    compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = nullptr;
+    ensureCompactFullProjectionUploaded(projection, count, cacheSlot);
+  }
+
   bool warmupResidentMatrixSet(const std::vector<io::CSRView> &matrices,
                                uint64_t reserveBytes) {
     ensureCudaRuntimeAvailable();
@@ -2298,12 +2025,11 @@ public:
 
     CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
     residentMatrixSetCache_.initialized = true;
-    fprintf(stderr,
-            "[CompactChunkCUDA] Resident matrix cache: %zu / %zu matrices "
-            "cached (%llu MiB reserve=%llu MiB)\n",
-            residentMatrixSetCache_.numCached, matrices.size(),
-            static_cast<unsigned long long>(usedBytes / cuda::kCudaMiB),
-            static_cast<unsigned long long>(reserveBytes / cuda::kCudaMiB));
+    std::cerr << "[CompactChunkCUDA] Resident matrix cache: "
+              << residentMatrixSetCache_.numCached << " / " << matrices.size()
+              << " matrices cached (" << (usedBytes / cuda::kCudaMiB)
+              << " MiB reserve=" << (reserveBytes / cuda::kCudaMiB)
+              << " MiB)\n";
     return true;
   }
 
@@ -3223,8 +2949,6 @@ private:
   std::array<bool, kTransientRangeSlotCount> transientRangeUploadTimingPending_{};
   DeviceChunkCache deviceChunkCache_;            // P3-D
   ResidentMatrixSetCache residentMatrixSetCache_;
-  std::vector<std::pair<MatrixCacheKey, std::unique_ptr<CachedMatrix>>>
-      compactQuantizedMatrixCache_;
   HostCSRData subsetHostScratch_;
   std::array<CachedMatrix, 4> attenCache_;
   std::array<AttenCacheKey, 4> attenCacheKeys_{};
@@ -3234,7 +2958,8 @@ private:
   DeviceArray<float> dInput_;
   DeviceArray<float> dOutput_;
   DeviceArray<float> dProjectionInput_;
-  std::array<DeviceArray<float>, spect::core::kMaxBeds> dCompactProjectionInput_;
+  std::array<DeviceArray<double>, spect::core::kMaxBeds>
+      dCompactProjectionInput_;
   DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
   PinnedHostArray<float> pinnedOutputStage_;

@@ -42,6 +42,8 @@ std::string psfModeName(spect::filters::PSFMode mode) {
     return "off";
   case spect::filters::PSFMode::Operator:
     return "operator";
+  case spect::filters::PSFMode::Sieve:
+    return "sieve";
   }
   return "unknown";
 }
@@ -81,6 +83,9 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
       << "\n"
       << "  physics: ctac=" << ctacSummary(args)
       << ", psf=" << psfModeName(args.psf.mode)
+      << "/" << (args.psf.kernel == spect::filters::PSFKernel::Castor
+                     ? "castor"
+                     : "adjoint")
       << " fwhm_mm=" << args.psf.fwhm_mm
       << " z_blur=" << (args.psf.z_blur ? "on" : "off")
       << " trunc_sigma=" << args.psf.min_sigmas

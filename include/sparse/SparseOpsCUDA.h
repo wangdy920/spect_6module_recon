@@ -1,28 +1,19 @@
 /**
- * @file SparseOpsBackend.h
- * @brief Sparse backend selection helpers (CPU/Reference/CUDA placeholder)
+ * @file SparseOpsCUDA.h
+ * @brief CUDA sparse-operation declarations used by the compact workflow
  */
 
 #pragma once
 
-#include "sparse/ISparseOps.h"
 #include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <stdexcept>
 #include <vector>
 
 namespace spect {
 
-inline bool isCudaSparseOpsAvailable() {
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-    return true;
-#else
-    return false;
-#endif
-}
 
 namespace cuda {
 struct CompactDeviceRatioParams {
@@ -78,12 +69,12 @@ struct CompactAttenBakeParams {
 
 } // namespace cuda
 
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-const ISparseOps& getSparseOpsCUDA();
 
 namespace cuda {
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
+bool refreshCompactProjectionCUDA(const double* projection, size_t count,
+                                  int cacheSlot = 0);
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 /// spmv/spmvT with compact CTAC factors fused into the CUDA nnz loop.
@@ -194,127 +185,6 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
-bool compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-    const io::CSRQuantizedView& matrix,
-    const float* xBatch,
-    const double* fullProjection,
-    size_t fullProjectionCount,
-    const CompactDeviceRatioParams& commonRatioParams,
-    const CompactDeviceTransformParams& commonTransformParams,
-    const int* symIds,
-    const int* zMirrors,
-    int batchSize,
-    CompactDeviceRatioTiming* ratioTiming = nullptr,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
-bool compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-    const io::CSRQuantizedView& matrix,
-    const CompactDeviceTransformParams& commonTransformParams,
-    const int* symIds,
-    const int* zMirrors,
-    int batchSize,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
 }
-#endif
-
-#if !(defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL))
-inline const ISparseOps& getSparseOpsCUDA() {
-    throw std::runtime_error(
-        "SPECT_recon requires a CUDA-enabled sparse backend build.");
-}
-
-namespace cuda {
-inline bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>&,
-                                        uint64_t = 0) {
-    return false;
-}
-inline bool spmvFloatCUDA(const io::CSRView&, const float*, float*) {
-    return false;
-}
-inline bool spmvTFloatCUDA(const io::CSRView&, const float*, float*) {
-    return false;
-}
-inline bool compactAttenSpmvFloatCUDA(const io::CSRView&, const uint16_t*,
-                                      size_t, const CompactAttenBakeParams&,
-                                      const float*, float*, int = 0) {
-    return false;
-}
-inline bool compactAttenSpmvTFloatCUDA(const io::CSRView&, const uint16_t*,
-                                       size_t, const CompactAttenBakeParams&,
-                                       const float*, float*, int = 0) {
-    return false;
-}
-inline bool compactDeviceBackwardBeginCUDA(size_t, int = 0) {
-    return false;
-}
-inline bool compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-    const io::CSRView&, const float*, const CompactDeviceTransformParams&,
-    CompactDeviceBackwardTiming* = nullptr, int = 0) {
-    return false;
-}
-inline bool compactDeviceBackwardDownloadCUDA(double*, size_t, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
-    const io::CSRView&, const float*, const double*, size_t,
-    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
-    CompactDeviceRatioTiming* = nullptr,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioSpmvTAccumulateFloatAsyncCUDA(
-    const io::CSRView&, const float*, const double*, size_t,
-    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
-    int = 0, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioSynchronizeBedCUDA(int) { return false; }
-inline bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView&, const float*, const uint16_t*, size_t,
-    const cuda::CompactAttenBakeParams&, const double*, size_t,
-    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
-    CompactDeviceRatioTiming* = nullptr,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioSpmvTFloatCUDA(
-    const io::CSRView&, const float*, const double*, size_t,
-    const CompactDeviceRatioParams&, float*,
-    CompactDeviceRatioTiming* = nullptr, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView&, const float*, const double*, size_t,
-    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
-    const int*, const int*, int,
-    CompactDeviceRatioTiming* = nullptr,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-inline bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView&, const CompactDeviceTransformParams&,
-    const int*, const int*, int,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-inline bool compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-    const io::CSRQuantizedView&, const float*, const double*, size_t,
-    const CompactDeviceRatioParams&, const CompactDeviceTransformParams&,
-    const int*, const int*, int,
-    CompactDeviceRatioTiming* = nullptr,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-inline bool compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-    const io::CSRQuantizedView&, const CompactDeviceTransformParams&,
-    const int*, const int*, int,
-    CompactDeviceBackwardTiming* = nullptr, int = 0, int = 0) {
-    return false;
-}
-}
-#endif
 
 } // namespace spect

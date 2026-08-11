@@ -2,5 +2,7 @@
 # Also accepted: "link-<3|4>-FPGA-<0..5>-dector-<0..7>"
 # global = ((link==4 ? 6 : 0) + FPGA)*8 + dector
 # Example: 68 is "link-4-FPGA-2-dector-4"
+# Protected prototype 68 mask: angles 0..59, z 24..35, x 24..35.
 [
+68
 ]

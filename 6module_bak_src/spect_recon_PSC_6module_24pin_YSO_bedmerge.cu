@@ -1,43 +1,100 @@
 /*
- * SPECT 多床位单床重建与拼接程序。
+ * SPECT 多床位 MLEM/OSL 重建、图像卷积、后处理和余弦加权拼接程序。
  *
- * 流程：逐床位执行完整系统矩阵重建，按中心 mask 裁剪 x/y/z，
- * 在相邻床位重叠区估计标量增益，最后使用余弦平方权重平滑拼接。
- * 体素线性索引固定为 z*(Nx*Ny)+y*Nx+x，其中 x 为最快变化维。
+ * 功能与算法边界
+ * --------------
+ * 每个 BedN 投影拥有独立的局部 Nx*Ny*Nz 重建状态；不同床位只共享系统
+ * 矩阵和角度分块，不共享似然函数或先验。圆柱 ROI 同时限定有效体素和 CSR
+ * 非零元；每个保存轮次再中心裁剪用户指定的三维 mask，在相邻床位重叠区
+ * 独立估计标量增益，并用 cos^2/sin^2 权重完成轴向拼接。默认配置为
+ * --algorithm mlem --implementation omega，且关闭卷积、先验和滤波。
  *
- * 文件结构：
- * 1. 系统矩阵、投影数据和 CUDA MLEM 重建引擎；
- * 2. 单床位 mask 裁剪、增益估计和多床位拼接；
- * 3. 命令行入口及 NIfTI-1 成对文件输出。
- * 
-  编译：
-  nvcc -O3 -std=c++17 -arch=sm_89 \
-  recon/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu \
-  -o recon/process/spect_recon_PSC_6module_24pin_YSO_bedmerge_sm89 \
-  -lcusparse -lcufft
-
-  usage:
-  ./spect_recon_PSC_6module_24pin_YSO_bedmerge \
-  --matrix-dir  MCmatrix_PSC_48h\
-  --proj-dir  ep_168\
-  --out recon_ep168_mask100x100x72 \
-  --mask-size 100x100x72 \
-  --bed-step-mm 16.8 \
-  --norm-factor MCmatrix_PSC_48h/norm_factor.bin \
-  --roi-diameter-mm 32.4 \
-  --roi-height-mm 48 \
-  --iters 50 \
-  --gpus 2 
-
-  ./spect_recon_PSC_6module_24pin_YSO_bedmerge \
-  --matrix-dir /data/SPECT/MCmatrix_PSC \
-  --proj-dir /data/SPECT/simulation_preprocess \
-  --out /data/SPECT/recon_simulation_mask \
-  --mask-size 100x100x72 \
-  --bed-step-mm 16.8 \
-  --data-mode simulation \
-  --no-detector-mask \
-  --no-norm-factor
+ * MLEM/OSL 的参考实现
+ * -------------------
+ * --implementation 是 EM 数值策略和先验实现的唯一版本开关，避免把不同软件
+ * 的公式混入同一轮更新：
+ *
+ * 1. OMEGA 使用 epsilon 数值保护。投影域计算
+ *      r_i = g_i*y_i/(g_i*(A*x)_i + epsilon)，
+ *    sensitivity 小于 epsilon 时按 epsilon 使用；MLEM 更新分子再加 epsilon。
+ *    OSL 在 sensitivity+beta*prior_gradient 后加 epsilon；非正/非有限分母或
+ *    异常更新写入 epsilon positivity 下限，并输出逐类计数、范围和 beta 诊断。
+ * 2. CASToR 使用前向阈值。当 g_i*(A*x)_i 不大于 threshold 时令 r_i=g_i；
+ *    这里的 g_i 对应 CASToR 在隐式响应模型中使用的中性 ratio=1。MLEM 和
+ *    OSL 都对更新因子应用相同的最小/最大限制。OSL 分母非正时保持旧体素并
+ *    计数报警。
+ *
+ * MLEM 是无先验的最大似然更新；OSL 是将 prior 一阶导数延迟一轮计算的惩罚
+ * 似然更新。MAP-EM 是一类目标和算法族，不是一条由 OMEGA 与 CASToR 共同
+ * 定义的独立更新公式，因此本程序不把 --algorithm map-em 静默映射为 OSL。
+ * OMEGA 可配 TV 或 MRP；CASToR 3.2 只有本程序所参考的 MRP，没有 TV penalty，
+ * 所以 CASToR+TV 会在启动前报错。当前普通 TV/MRP 均不需要 CT；本文件不实现
+ * 解剖引导 TV、APLS 或其他需要配准先验图像的算法。
+ *
+ * PSF 与后处理
+ * ------------
+ * --conv-impl omega 使用 OMEGA 中心采样 Gaussian 和 symmetric 边界；castor
+ * 严格复现 CASToR 的 erf 体素积分核、仅 z 边界补偿以及“反向再次调用正向
+ * convolver”的行为；castor-adjoint 保持 CASToR 前向 C=D_z^-1*K 不变，但
+ * 将反向修正为真正的 C^T=K*D_z^-1。PSF 版本可独立选择以便对照实验，不参与
+ * EM/prior 版本绑定。post 只处理保存副本，sieve 严格复用同一个 CASToR
+ * convolver，intra/smooth 在迭代之间回写状态。smooth 可从指定轮次开始，
+ * 选择每轮、周期或仅最终轮执行；post 则仍只处理每个保存轮次的副本。
+ *
+ * 投影格式、坐标和线性索引
+ * --------------------------
+ * 投影文件头为两个小端 int32：full_num_angles 和 det_nx*det_nz。数据区
+ * 必须完整保存为 float32 或 float64，按角度优先展开：
+ *   row = angle*(det_nz*det_nx) + det_z*det_nx + det_x。
+ * 局部图像统一采用 0-based 索引并按
+ *   voxel = z*(Nx*Ny) + y*Nx + x
+ * 展平，x 连续。Bed1 位于最大物理 z，床号增加时沿负 z 移动
+ * --bed-step-mm；裁剪、增益拟合和拼接均遵循同一约定。
+ *
+ * 实测与仿真数据
+ * --------------
+ * 实测数据默认屏蔽 LINK4/FPGA2/DET4 探测器 bin，并可加载实测归一化/
+ * 系统响应因子 g_i。仿真模式默认关闭该坏道 mask；没有显式提供
+ * --norm-factor 时也关闭归一化因子自动发现，防止理想投影误用实测响应。
+ * 上传 GPU 前会拒绝 NaN、Inf 和负投影值。
+ *
+ * 调度、显存和卷积时机
+ * --------------------
+ * 调度顺序为 iteration -> angle slab -> Bed1..BedN -> 局部更新。
+ * --angle-batch 0 将完整 CSR 分配到多个 GPU；大于 0 时由 GPU0 分批加载
+ * compact angle slab。基础状态和反投影显存约为
+ * 2*beds*Nx*Ny*Nz*sizeof(float)。只有实际启用 PSF、OSL prior、Gaussian 或
+ * Butterworth 时才分配各自缓存；OMEGA 不分配 CASToR threshold 计数器或
+ * z-normalization 体积。Butterworth 截止频率使用 cycles/cm，并通过每轴
+ * 2 倍补零的 R2C/C2R FFT 减小循环串扰；可按 every、final、periodic 或
+ * last_n 调度；--butter-start-iter 可让前若干轮保持纯 MLEM/OSL，其中除
+ * final 外的滤波都会改变后续迭代轨迹。--stitch-filter 则只在增益拟合和
+ * cos^2/sin^2 拼接完成后生成派生体积，不回写任何单床重建状态。
+ *
+ * 输出目录
+ * --------
+ * 相对 --out 名称自动放入当前目录 recon_output/；绝对路径以及已以
+ * recon_output/ 开头的相对路径保持不变。single_bed_raw/BedN 暂存完整局部
+ * 图像，single_bed/BedN 保存中心 mask，stitched 保存各轮 NIfTI-1 hdr/img。
+ * 启用拼接后滤波时，额外写入 stitched_smooth_fwhm0p45/ 和/或
+ * stitched_butter_fc3cpcm_o8/ 等参数化目录，未滤波 stitched/ 始终保留。
+ * 默认每 50 次保存为 recon50、recon100
+ * 等，不生成 recon_final。未指定 --keep-raw 时，完整尺寸中间结果在 mask
+ * 写出后删除。文件中保留的全局联合引擎只用于底层诊断，公开 --proj-dir
+ * 入口始终使用上述独立局部状态调度器。
+ *
+ * Windows 编译示例：
+ *   nvcc -O3 -std=c++17 -arch=sm_120 ^
+ *     -Xcompiler "/utf-8,/Zc:preprocessor" ^
+ *     spect_recon_PSC_6module_24pin_YSO_bedmerge.cu ^
+ *     -o spect_recon_PSC_6module_24pin_YSO_bedmerge.exe -lcusparse -lcufft
+ *
+ * 仿真数据与 OMEGA OSL-TV 示例：
+ *   spect_recon_PSC_6module_24pin_YSO_bedmerge.exe ^
+ *     --matrix-dir MCmatrix_PSC --proj-dir simulation_preprocess ^
+ *     --out recon_tv --data-mode simulation --iters 50 ^
+ *     --algorithm osl --implementation omega --prior tv ^
+ *     --map-beta 1e-3 --tv-smoothing 1e-4
  */
 #include <cuda_runtime.h>
 #include <cusparse.h>
@@ -51,6 +108,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <cfloat>
 #include <cstdint>
 #include <cinttypes>
 #include <sys/stat.h>
@@ -68,6 +126,7 @@
 #include <thread>
 #include <numeric>
 #include <sstream>
+#include <iomanip>
 #include <cctype>
 #include <limits>
 #include <utility>
@@ -131,10 +190,36 @@ enum MapType {
     MAP_NONE = 0,
     MAP_QUADRATIC,
     MAP_TV,
+    MAP_MRP,
     MAP_HUBER,
     MAP_RELATIVE,
     MAP_LOGCOSH,
     MAP_HYPERBOLIC
+};
+
+// 公开多床位入口使用的算法与参考实现。枚举值会传入 CUDA kernel，必须保持为
+// 简单稳定的整数。ReferenceImplementation 是 EM 和 prior 的唯一版本来源。
+enum ReconstructionAlgorithm {
+    ALGORITHM_MLEM = 0,
+    ALGORITHM_OSL = 1
+};
+
+enum ReferenceImplementation {
+    IMPLEMENTATION_OMEGA = 0,
+    IMPLEMENTATION_CASTOR = 1
+};
+
+enum ConvolutionImplementation {
+    CONV_IMPLEMENTATION_CASTOR_ADJOINT = 0,
+    CONV_IMPLEMENTATION_OMEGA = 1,
+    CONV_IMPLEMENTATION_CASTOR = 2
+};
+
+enum MRPNeighborhoodShape {
+    MRP_NEIGHBORHOOD_AUTO = -1,
+    MRP_NEIGHBORHOOD_SIX_NEAREST = 0,
+    MRP_NEIGHBORHOOD_BOX = 1,
+    MRP_NEIGHBORHOOD_SPHERE = 2
 };
 
 // CUDA 重建引擎的参数。该结构只描述单次床位重建，不包含拼接 mask。
@@ -152,7 +237,7 @@ struct ReconConfig {
     // 圆柱 ROI、数据模式和坏探测器掩码。
     bool roi_enable = true;
     float roi_diameter_mm = 30.0f;
-    float roi_height_mm = 21.6f;
+    float roi_height_mm = 66.0f;
     float roi_center_mm[3] = {0.0f, 0.0f, 0.0f};
     std::string data_mode = "measured";
     bool detector_mask_enable = true;
@@ -164,7 +249,7 @@ struct ReconConfig {
     float sens_zsym_tol = 1e-4f;
 
     int num_iters = 50;
-    int save_interval = 5;
+    int save_interval = 50;
     int num_gpus = 1;
 
     int angle_batch = 0;
@@ -196,16 +281,21 @@ struct ReconConfig {
     float map_beta = 0.0f;
     int map_neigh26 = 1;
     float map_delta = 1e-6f;
+    float tv_smoothing = 1e-4f;
+    int mrp_radius[3] = {1, 1, 1};
+    float mrp_epsilon = 1e-8f;
+    bool mrp_no_norm = false;
     float map_huber_threshold = 0.01f;
     float map_relative_gamma = 2.0f;
     float map_relative_epsilon = 1e-6f;
 
-    // 正值约束和 Butterworth 频域滤波。
+    /* 正值约束和 Butterworth 频域滤波；截止频率使用物理单位 cycles/cm。 */
     bool positivity = false;
     bool butter_enable = false;
-    float butter_cutoff = 0.45f;
+    float butter_cutoff_cycles_per_cm = 0.0f;
     int butter_order = 8;
     std::string butter_mode = "final";
+    int butter_start_iter = 0;
     int butter_period = 5;
     int butter_last_n = 10;
 
@@ -217,6 +307,8 @@ struct ReconConfig {
     float bed_step_mm = 0.0f;
     bool bed_step_set = false;
     std::vector<float> bed_offsets_mm;
+    // 多床时在两端床位中心外各保留的轴向层数。
+    int multibed_edge_layers = 40;
 
     bool apply_roi_each_iter = true;
 };
@@ -671,15 +763,24 @@ static GlobalGeometry assign_bed_geometry(std::vector<BedInfo>& beds,
     gg.voxel_mm = meta.voxel_size;
     gg.min_bed_center_mm = min_center;
     gg.max_bed_center_mm = max_center;
-    gg.origin_z_mm = min_center - 0.5f * (float)(meta.Nz - 1) * meta.voxel_size;
+    const float local_half_center = 0.5f * (float)(meta.Nz - 1);
+    if (B == 1) {
+        gg.global_Nz = 72;
+        gg.origin_z_mm = beds[0].center_mm - 35.5f * meta.voxel_size;
+    } else {
+        const float span_raw = (max_center - min_center) / meta.voxel_size;
+        const float nearest_span = roundf(span_raw);
+        const float span_vox = fabsf(span_raw - nearest_span) < 1e-4f
+            ? nearest_span : ceilf(span_raw);
+        gg.global_Nz = (int)span_vox + 2 * cfg.multibed_edge_layers;
+        gg.origin_z_mm = min_center -
+            ((float)cfg.multibed_edge_layers - 0.5f) * meta.voxel_size;
+    }
 
-    float max_shift = 0.0f;
     for (BedInfo& bed : beds) {
-        float shift = (bed.center_mm - min_center) / meta.voxel_size;
-        if (shift < -1e-5f) {
-            fprintf(stderr, "Internal bed geometry error: negative shift %.8g\n", shift);
-            exit(1);
-        }
+        const float local_origin_mm =
+            bed.center_mm - local_half_center * meta.voxel_size;
+        float shift = (local_origin_mm - gg.origin_z_mm) / meta.voxel_size;
 
         int floor_shift = (int)floorf(shift);
         float frac = shift - (float)floor_shift;
@@ -693,12 +794,9 @@ static GlobalGeometry assign_bed_geometry(std::vector<BedInfo>& beds,
         bed.shift_vox = (float)floor_shift + frac;
         bed.shift_floor = floor_shift;
         bed.shift_frac = frac;
-        max_shift = std::max(max_shift, bed.shift_vox);
     }
-
-    gg.global_Nz = meta.Nz + (int)ceilf(max_shift - 1e-6f);
     gg.global_voxels = (int64_t)meta.Nx * meta.Ny * gg.global_Nz;
-    if (gg.global_Nz < meta.Nz || gg.global_voxels <= 0) {
+    if (gg.global_Nz <= 0 || gg.global_voxels <= 0) {
         fprintf(stderr, "Invalid global geometry: Nz=%d voxels=%" PRId64 "\n",
                 gg.global_Nz, gg.global_voxels);
         exit(1);
@@ -722,6 +820,7 @@ static MapType parse_map_type(const std::string& s) {
     if (s == "none" || s == "off") return MAP_NONE;
     if (s == "quadratic") return MAP_QUADRATIC;
     if (s == "tv" || s == "TV") return MAP_TV;
+    if (s == "mrp" || s == "MRP") return MAP_MRP;
     if (s == "huber") return MAP_HUBER;
     if (s == "relative" || s == "relative_difference" || s == "rd") return MAP_RELATIVE;
     if (s == "logcosh") return MAP_LOGCOSH;
@@ -819,9 +918,9 @@ static MatrixMeta read_metadata(const std::string& path) {
     IO_CHECK(fread(&m.use_90sym, 4, 1, f), 1);
     IO_CHECK(fread(&m.use_zsym, 4, 1, f), 1);
 
-    fread(&m.use_45sym, 4, 1, f);
-    fread(&m.sym_code, 4, 1, f);
-    fread(&m.symmetry_order, 4, 1, f);
+    IO_CHECK(fread(&m.use_45sym, 4, 1, f), 1);
+    IO_CHECK(fread(&m.sym_code, 4, 1, f), 1);
+    IO_CHECK(fread(&m.symmetry_order, 4, 1, f), 1);
     fclose(f);
 
     if (m.det_nz <= 0) {
@@ -1200,6 +1299,71 @@ struct TimedHostCSR {
     double build_sec = 0.0;
 };
 
+// 构造以矩阵几何中心为原点的圆柱 ROI。体素线性索引固定为
+// col = z*(Nx*Ny) + y*Nx + x（0-based，x 最快变化），与 CSR 列号一致。
+// mask[col]=1 表示该体素及指向该列的系统矩阵非零元参与重建。
+static std::vector<uint8_t> build_centered_cylinder_roi_mask(
+    int Nx, int Ny, int Nz, float voxel_mm,
+    float diameter_mm, float height_mm, int64_t& active_voxels)
+{
+    const int64_t total_voxels = (int64_t)Nx * Ny * Nz;
+    std::vector<uint8_t> mask((size_t)total_voxels, 0);
+    // 使用与 CUDA ROI kernel 相同的 float 运算，避免恰好位于边界的体素在
+    // Host CSR 筛选和 Device 状态清零之间产生精度分歧。
+    const float radius = 0.5f * diameter_mm;
+    const float radius2 = radius * radius;
+    const float half_height = 0.5f * height_mm;
+    active_voxels = 0;
+    for (int z = 0; z < Nz; ++z) {
+        const float zz = ((float)z - 0.5f * (float)(Nz - 1)) * voxel_mm;
+        if (fabsf(zz) > half_height) continue;
+        for (int y = 0; y < Ny; ++y) {
+            const float yy = ((float)y - 0.5f * (float)(Ny - 1)) * voxel_mm;
+            for (int x = 0; x < Nx; ++x) {
+                const float xx = ((float)x - 0.5f * (float)(Nx - 1)) * voxel_mm;
+                if (xx * xx + yy * yy > radius2) continue;
+                const int64_t col = (int64_t)z * Nx * Ny + (int64_t)y * Nx + x;
+                mask[(size_t)col] = 1;
+                ++active_voxels;
+            }
+        }
+    }
+    return mask;
+}
+
+// 原地删除 CSR 中指向 ROI 外体素的非零元。num_cols 保持完整矩阵体素数，
+// 因而图像缓冲、对称变换和输出索引均不改变；只有实际 SpMV 的 nnz 被裁剪。
+static int64_t prune_host_csr_to_roi(HostCSR64& csr,
+                                     const std::vector<uint8_t>& roi_mask)
+{
+    if ((int64_t)roi_mask.size() != csr.num_cols) {
+        throw std::runtime_error("ROI mask length does not match CSR column count");
+    }
+    const int64_t original_nnz = csr.nnz;
+    int64_t write = 0;
+    int64_t old_begin = 0;
+    for (int64_t row = 0; row < csr.num_rows; ++row) {
+        const int64_t old_end = csr.row_ptr[(size_t)row + 1];
+        csr.row_ptr[(size_t)row] = write;
+        for (int64_t p = old_begin; p < old_end; ++p) {
+            const int32_t col = csr.col_idx[(size_t)p];
+            if (col < 0 || (int64_t)col >= csr.num_cols) {
+                throw std::runtime_error("system-matrix CSR column index is out of range");
+            }
+            if (roi_mask[(size_t)col] == 0) continue;
+            csr.col_idx[(size_t)write] = col;
+            csr.values[(size_t)write] = csr.values[(size_t)p];
+            ++write;
+        }
+        old_begin = old_end;
+    }
+    csr.row_ptr[(size_t)csr.num_rows] = write;
+    csr.nnz = write;
+    csr.col_idx.resize((size_t)write);
+    csr.values.resize((size_t)write);
+    return original_nnz - write;
+}
+
 static TimedHostCSR build_worker_csr_timed(
     const std::vector<ChunkInfo>& chunks,
     int start_ck, int end_ck,
@@ -1273,6 +1437,25 @@ struct BadDetectorMaskStats {
     double removed_sum = 0.0;
 };
 
+// Poisson MLEM 要求测量计数有限且非负。在转换为 float 前校验，防止异常仿真
+// 文件把 NaN、Inf 或负的比值分子静默传入 cuSPARSE。
+static void validate_projection_counts(const std::vector<double>& data,
+                                       const std::string& path) {
+    int64_t nonfinite = 0;
+    int64_t negative = 0;
+    for (double value : data) {
+        if (!std::isfinite(value)) ++nonfinite;
+        else if (value < 0.0) ++negative;
+    }
+    if (nonfinite != 0 || negative != 0) {
+        fprintf(stderr,
+                "Invalid projection counts in %s: nonfinite=%" PRId64
+                " negative=%" PRId64 "; expected finite non-negative bins.\n",
+                path.c_str(), nonfinite, negative);
+        exit(1);
+    }
+}
+
 template <typename T>
 static BadDetectorMaskStats zero_link4_fpga2_det4(
     std::vector<T>& data, int full_num_angles, int det_nx, int det_nz)
@@ -1308,12 +1491,6 @@ static BadDetectorMaskStats zero_link4_fpga2_det4(
         }
     }
     return stats;
-}
-
-static std::vector<float> to_float_vector(const std::vector<double>& in) {
-    std::vector<float> out(in.size());
-    for (size_t i = 0; i < in.size(); i++) out[i] = (float)in[i];
-    return out;
 }
 
 static std::string find_normalization_factor(const ReconConfig& cfg) {
@@ -1415,7 +1592,7 @@ static std::vector<float> read_system_response_factor(int proj_na,
     int64_t bad_invert = 0;
     int64_t zero_count = 0;
     double sum_g = 0.0;
-    double min_g = HUGE_VAL;
+    double min_g = std::numeric_limits<double>::infinity();
     double max_g = 0.0;
 
     for (size_t i = 0; i < factor.size(); i++) {
@@ -1838,8 +2015,8 @@ static void save_sensitivity_edge_pngs(const float* a,
     int z1 = Nz - 1;
     int64_t nxy = (int64_t)Nx * Ny;
 
-    double vmin = HUGE_VAL;
-    double vmax = -HUGE_VAL;
+    double vmin = std::numeric_limits<double>::infinity();
+    double vmax = -std::numeric_limits<double>::infinity();
     for (int pass = 0; pass < 2; pass++) {
         int z = pass == 0 ? z0 : z1;
         const float* sl = a + (int64_t)z * nxy;
@@ -1990,19 +2167,9 @@ __global__ void k_apply_multibed_roi(float* a,
 
     float x = ((float)ix - 0.5f * (float)(Nx - 1)) * voxel_mm - center_x_mm;
     float y = ((float)iy - 0.5f * (float)(Ny - 1)) * voxel_mm - center_y_mm;
-    float z = origin_z_mm + (float)iz * voxel_mm;
-
     float r = 0.5f * diameter_mm;
     bool inside_xy = (x*x + y*y <= r*r);
-    bool inside_z = false;
-    float half_h = 0.5f * valid_height_mm;
-    for (int b = 0; b < num_beds; ++b) {
-        if (fabsf(z - bed_centers_mm[b]) <= half_h) {
-            inside_z = true;
-            break;
-        }
-    }
-    if (!(inside_xy && inside_z)) a[idx] = 0.0f;
+    if (!inside_xy) a[idx] = 0.0f;
 }
 
 static int64_t count_multibed_roi_voxels(int Nx, int Ny, int global_Nz,
@@ -2013,18 +2180,8 @@ static int64_t count_multibed_roi_voxels(int Nx, int Ny, int global_Nz,
 {
     double r = 0.5 * (double)diameter_mm;
     double r2 = r * r;
-    double half_h = 0.5 * (double)valid_height_mm;
     int64_t cnt = 0;
     for (int iz = 0; iz < global_Nz; ++iz) {
-        double z = (double)origin_z_mm + (double)iz * voxel_mm;
-        bool inside_z = false;
-        for (const BedInfo& bed : beds) {
-            if (fabs(z - (double)bed.center_mm) <= half_h) {
-                inside_z = true;
-                break;
-            }
-        }
-        if (!inside_z) continue;
         for (int iy = 0; iy < Ny; ++iy) {
             double y = ((double)iy - 0.5 * (double)(Ny - 1)) * voxel_mm - center_y_mm;
             for (int ix = 0; ix < Nx; ++ix) {
@@ -2045,21 +2202,12 @@ static void apply_multibed_roi_host(float* a,
 {
     double r = 0.5 * (double)diameter_mm;
     double r2 = r * r;
-    double half_h = 0.5 * (double)valid_height_mm;
     for (int iz = 0; iz < global_Nz; ++iz) {
-        double z = (double)origin_z_mm + (double)iz * voxel_mm;
-        bool inside_z = false;
-        for (const BedInfo& bed : beds) {
-            if (fabs(z - (double)bed.center_mm) <= half_h) {
-                inside_z = true;
-                break;
-            }
-        }
         for (int iy = 0; iy < Ny; ++iy) {
             double y = ((double)iy - 0.5 * (double)(Ny - 1)) * voxel_mm - center_y_mm;
             for (int ix = 0; ix < Nx; ++ix) {
                 double x = ((double)ix - 0.5 * (double)(Nx - 1)) * voxel_mm - center_x_mm;
-                if (!(inside_z && x*x + y*y <= r2)) {
+                if (x*x + y*y > r2) {
                     int64_t idx = (int64_t)iz * Nx * Ny + (int64_t)iy * Nx + ix;
                     a[idx] = 0.0f;
                 }
@@ -2068,77 +2216,27 @@ static void apply_multibed_roi_host(float* a,
     }
 }
 
-__global__ void k_apply_cylinder_roi(float* a,
-                                     int Nx, int Ny, int Nz,
-                                     float voxel_mm,
-                                     float diameter_mm, float height_mm,
-                                     float center_x_mm, float center_y_mm, float center_z_mm,
-                                     int64_t n)
+// 独立床位调度器为每个床位保存一幅局部图像，因此这里的 ROI 使用局部矩阵坐标；
+// 上面的 k_apply_multibed_roi 则用于拼接后的全局坐标。
+__global__ void k_apply_local_cylinder_roi(float* a,
+                                           int Nx, int Ny, int Nz,
+                                           float voxel_mm,
+                                           float diameter_mm, float height_mm,
+                                           float center_x_mm, float center_y_mm,
+                                           float center_z_mm, int64_t n)
 {
-    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
-
-    int iz = (int)(idx / ((int64_t)Nx * Ny));
-    int rem = (int)(idx - (int64_t)iz * Nx * Ny);
-    int iy = rem / Nx;
-    int ix = rem - iy * Nx;
-
-    float x = ((float)ix - 0.5f * (float)(Nx - 1)) * voxel_mm - center_x_mm;
-    float y = ((float)iy - 0.5f * (float)(Ny - 1)) * voxel_mm - center_y_mm;
-    float z = ((float)iz - 0.5f * (float)(Nz - 1)) * voxel_mm - center_z_mm;
-
-    float r = 0.5f * diameter_mm;
-    float h = 0.5f * height_mm;
-    bool inside = (x*x + y*y <= r*r) && (fabsf(z) <= h);
-    if (!inside) a[idx] = 0.0f;
-}
-
-static int64_t count_cylinder_roi_voxels(int Nx, int Ny, int Nz,
-                                         float voxel_mm,
-                                         float diameter_mm, float height_mm,
-                                         const float center_mm[3])
-{
-    double r = 0.5 * (double)diameter_mm;
-    double h = 0.5 * (double)height_mm;
-    double r2 = r * r;
-    int64_t cnt = 0;
-    for (int iz = 0; iz < Nz; iz++) {
-        double z = ((double)iz - 0.5 * (double)(Nz - 1)) * voxel_mm - center_mm[2];
-        if (fabs(z) > h) continue;
-        for (int iy = 0; iy < Ny; iy++) {
-            double y = ((double)iy - 0.5 * (double)(Ny - 1)) * voxel_mm - center_mm[1];
-            for (int ix = 0; ix < Nx; ix++) {
-                double x = ((double)ix - 0.5 * (double)(Nx - 1)) * voxel_mm - center_mm[0];
-                if (x*x + y*y <= r2) cnt++;
-            }
-        }
-    }
-    return cnt;
-}
-
-static void apply_cylinder_roi_host(float* a,
-                                    int Nx, int Ny, int Nz,
-                                    float voxel_mm,
-                                    float diameter_mm, float height_mm,
-                                    const float center_mm[3])
-{
-    double r = 0.5 * (double)diameter_mm;
-    double h = 0.5 * (double)height_mm;
-    double r2 = r * r;
-    for (int iz = 0; iz < Nz; iz++) {
-        double z = ((double)iz - 0.5 * (double)(Nz - 1)) * voxel_mm - center_mm[2];
-        for (int iy = 0; iy < Ny; iy++) {
-            double y = ((double)iy - 0.5 * (double)(Ny - 1)) * voxel_mm - center_mm[1];
-            for (int ix = 0; ix < Nx; ix++) {
-                double x = ((double)ix - 0.5 * (double)(Nx - 1)) * voxel_mm - center_mm[0];
-                bool inside = (x*x + y*y <= r2) && (fabs(z) <= h);
-                if (!inside) {
-                    int64_t idx = (int64_t)iz * Nx * Ny + (int64_t)iy * Nx + ix;
-                    a[idx] = 0.0f;
-                }
-            }
-        }
-    }
+    const int iz = (int)(idx / ((int64_t)Nx * Ny));
+    const int rem = (int)(idx - (int64_t)iz * Nx * Ny);
+    const int iy = rem / Nx;
+    const int ix = rem - iy * Nx;
+    const float x = ((float)ix - 0.5f * (float)(Nx - 1)) * voxel_mm - center_x_mm;
+    const float y = ((float)iy - 0.5f * (float)(Ny - 1)) * voxel_mm - center_y_mm;
+    const float z = ((float)iz - 0.5f * (float)(Nz - 1)) * voxel_mm - center_z_mm;
+    const float radius = 0.5f * diameter_mm;
+    const float half_height = 0.5f * height_mm;
+    if (x*x + y*y > radius*radius || fabsf(z) > half_height) a[idx] = 0.0f;
 }
 
 static void check_sensitivity_zsym_host(const float* a,
@@ -2240,6 +2338,401 @@ __global__ void k_mlem_update(float* f, const float* bp, const float* sens,
         if (!isfinite(old) || !isfinite(back)) { f[i] = 0.0f; return; }
         const float v = old * back / denom;
         f[i] = (isfinite(v) && v > 0.0f) ? v : 0.0f;
+    }
+}
+
+enum OslDiagnosticCounter {
+    OSL_DIAG_ACTIVE_ROI = 0,
+    OSL_DIAG_OLD_NONFINITE,
+    OSL_DIAG_OLD_NONPOSITIVE,
+    OSL_DIAG_BP_NONFINITE,
+    OSL_DIAG_BP_NEGATIVE,
+    OSL_DIAG_SENS_NONFINITE,
+    OSL_DIAG_SENS_NONPOSITIVE,
+    OSL_DIAG_GRAD_NONFINITE,
+    OSL_DIAG_PENALTY_NONFINITE,
+    OSL_DIAG_RAW_DENOM_NONFINITE,
+    OSL_DIAG_RAW_DENOM_NONPOSITIVE,
+    OSL_DIAG_EFFECTIVE_DENOM_NONFINITE,
+    OSL_DIAG_EFFECTIVE_DENOM_NONPOSITIVE,
+    OSL_DIAG_OMEGA_EPSILON_FLOOR,
+    OSL_DIAG_CASTOR_KEEP_OLD,
+    OSL_DIAG_COUNTER_COUNT
+};
+
+enum OslDiagnosticRange {
+    OSL_RANGE_SENSITIVITY = 0,
+    OSL_RANGE_PENALTY,
+    OSL_RANGE_RAW_DENOMINATOR,
+    OSL_RANGE_EFFECTIVE_DENOMINATOR,
+    OSL_RANGE_BETA_LIMIT,
+    OSL_RANGE_NEGATIVE_PENALTY_FRACTION,
+    OSL_RANGE_COUNT
+};
+
+struct OslDiagnostics {
+    unsigned long long counts[OSL_DIAG_COUNTER_COUNT];
+    float minima[OSL_RANGE_COUNT];
+    float maxima[OSL_RANGE_COUNT];
+};
+
+static OslDiagnostics empty_osl_diagnostics()
+{
+    OslDiagnostics diagnostics{};
+    for (int i = 0; i < OSL_RANGE_COUNT; ++i) {
+        diagnostics.minima[i] = std::numeric_limits<float>::infinity();
+        diagnostics.maxima[i] = -std::numeric_limits<float>::infinity();
+    }
+    return diagnostics;
+}
+
+__device__ void atomic_min_float(float* address, float value)
+{
+    int* integer_address = reinterpret_cast<int*>(address);
+    int old = *integer_address;
+    while (value < __int_as_float(old)) {
+        const int assumed = old;
+        old = atomicCAS(integer_address, assumed, __float_as_int(value));
+        if (old == assumed) break;
+    }
+}
+
+__device__ void atomic_max_float(float* address, float value)
+{
+    int* integer_address = reinterpret_cast<int*>(address);
+    int old = *integer_address;
+    while (value > __int_as_float(old)) {
+        const int assumed = old;
+        old = atomicCAS(integer_address, assumed, __float_as_int(value));
+        if (old == assumed) break;
+    }
+}
+
+/*
+ * OSL 诊断独立于更新公式，只读当前轮更新前的数据。每个 block 先在共享内存中
+ * 归约，再对全局统计做一次原子操作，避免为数百万体素逐点争用全局原子变量。
+ * raw denominator 始终指 sensitivity+beta*gradient；effective denominator
+ * 则包含 OMEGA 的 sensitivity 下限和末尾 epsilon，或 CASToR 的原始分母。
+ */
+__global__ void k_collect_osl_diagnostics(
+    const float* old_image, const float* backprojection,
+    const float* sensitivity, const float* prior_gradient,
+    const uint8_t* roi_mask, float beta, float omega_epsilon,
+    int reference_implementation, OslDiagnostics* diagnostics, int64_t n)
+{
+    __shared__ unsigned int shared_counts[OSL_DIAG_COUNTER_COUNT][BLK];
+    __shared__ float shared_minima[OSL_RANGE_COUNT][BLK];
+    __shared__ float shared_maxima[OSL_RANGE_COUNT][BLK];
+
+    const int lane = threadIdx.x;
+    const int64_t index = (int64_t)blockIdx.x * blockDim.x + lane;
+    unsigned int local_counts[OSL_DIAG_COUNTER_COUNT] = {};
+    float local_minima[OSL_RANGE_COUNT];
+    float local_maxima[OSL_RANGE_COUNT];
+    #pragma unroll
+    for (int range = 0; range < OSL_RANGE_COUNT; ++range) {
+        local_minima[range] = FLT_MAX;
+        local_maxima[range] = -FLT_MAX;
+    }
+
+    if (index < n && (!roi_mask || roi_mask[index] != 0)) {
+        local_counts[OSL_DIAG_ACTIVE_ROI] = 1;
+        const float old_value = old_image[index];
+        const float bp_value = backprojection[index];
+        const float sens_value = sensitivity[index];
+        const float grad_value = prior_gradient ? prior_gradient[index] : 0.0f;
+
+        if (!isfinite(old_value)) local_counts[OSL_DIAG_OLD_NONFINITE] = 1;
+        else if (old_value <= 0.0f) local_counts[OSL_DIAG_OLD_NONPOSITIVE] = 1;
+        if (!isfinite(bp_value)) local_counts[OSL_DIAG_BP_NONFINITE] = 1;
+        else if (bp_value < 0.0f) local_counts[OSL_DIAG_BP_NEGATIVE] = 1;
+
+        if (!isfinite(sens_value)) {
+            local_counts[OSL_DIAG_SENS_NONFINITE] = 1;
+        } else {
+            if (sens_value <= 0.0f) local_counts[OSL_DIAG_SENS_NONPOSITIVE] = 1;
+            local_minima[OSL_RANGE_SENSITIVITY] = sens_value;
+            local_maxima[OSL_RANGE_SENSITIVITY] = sens_value;
+        }
+
+        if (!isfinite(grad_value)) {
+            local_counts[OSL_DIAG_GRAD_NONFINITE] = 1;
+        } else {
+            const float penalty = beta * grad_value;
+            if (!isfinite(penalty)) {
+                local_counts[OSL_DIAG_PENALTY_NONFINITE] = 1;
+            } else {
+                local_minima[OSL_RANGE_PENALTY] = penalty;
+                local_maxima[OSL_RANGE_PENALTY] = penalty;
+                if (isfinite(sens_value)) {
+                    const float raw_denominator = sens_value + penalty;
+                    if (!isfinite(raw_denominator)) {
+                        local_counts[OSL_DIAG_RAW_DENOM_NONFINITE] = 1;
+                    } else {
+                        if (raw_denominator <= 0.0f) {
+                            local_counts[OSL_DIAG_RAW_DENOM_NONPOSITIVE] = 1;
+                        }
+                        local_minima[OSL_RANGE_RAW_DENOMINATOR] = raw_denominator;
+                        local_maxima[OSL_RANGE_RAW_DENOMINATOR] = raw_denominator;
+                    }
+
+                    const float base_sensitivity =
+                        reference_implementation == IMPLEMENTATION_OMEGA
+                            ? fmaxf(sens_value, omega_epsilon) + omega_epsilon
+                            : sens_value;
+                    const float effective_denominator = base_sensitivity + penalty;
+                    if (!isfinite(effective_denominator)) {
+                        local_counts[OSL_DIAG_EFFECTIVE_DENOM_NONFINITE] = 1;
+                    } else {
+                        if (effective_denominator <= 0.0f) {
+                            local_counts[OSL_DIAG_EFFECTIVE_DENOM_NONPOSITIVE] = 1;
+                        }
+                        local_minima[OSL_RANGE_EFFECTIVE_DENOMINATOR] =
+                            effective_denominator;
+                        local_maxima[OSL_RANGE_EFFECTIVE_DENOMINATOR] =
+                            effective_denominator;
+                    }
+                    if (grad_value < 0.0f && base_sensitivity > 0.0f &&
+                        isfinite(base_sensitivity)) {
+                        const float beta_limit = base_sensitivity / (-grad_value);
+                        const float negative_penalty_fraction =
+                            (-penalty) / base_sensitivity;
+                        if (isfinite(beta_limit)) {
+                            local_minima[OSL_RANGE_BETA_LIMIT] = beta_limit;
+                            local_maxima[OSL_RANGE_BETA_LIMIT] = beta_limit;
+                        }
+                        if (isfinite(negative_penalty_fraction)) {
+                            local_minima[OSL_RANGE_NEGATIVE_PENALTY_FRACTION] =
+                                negative_penalty_fraction;
+                            local_maxima[OSL_RANGE_NEGATIVE_PENALTY_FRACTION] =
+                                negative_penalty_fraction;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int counter = 0; counter < OSL_DIAG_COUNTER_COUNT; ++counter) {
+        shared_counts[counter][lane] = local_counts[counter];
+    }
+    #pragma unroll
+    for (int range = 0; range < OSL_RANGE_COUNT; ++range) {
+        shared_minima[range][lane] = local_minima[range];
+        shared_maxima[range][lane] = local_maxima[range];
+    }
+    __syncthreads();
+
+    for (int stride = BLK / 2; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            #pragma unroll
+            for (int counter = 0; counter < OSL_DIAG_COUNTER_COUNT; ++counter) {
+                shared_counts[counter][lane] += shared_counts[counter][lane + stride];
+            }
+            #pragma unroll
+            for (int range = 0; range < OSL_RANGE_COUNT; ++range) {
+                shared_minima[range][lane] = fminf(
+                    shared_minima[range][lane], shared_minima[range][lane + stride]);
+                shared_maxima[range][lane] = fmaxf(
+                    shared_maxima[range][lane], shared_maxima[range][lane + stride]);
+            }
+        }
+        __syncthreads();
+    }
+
+    if (lane == 0) {
+        #pragma unroll
+        for (int counter = 0; counter < OSL_DIAG_COUNTER_COUNT; ++counter) {
+            if (shared_counts[counter][0] != 0) {
+                atomicAdd(&diagnostics->counts[counter],
+                          (unsigned long long)shared_counts[counter][0]);
+            }
+        }
+        #pragma unroll
+        for (int range = 0; range < OSL_RANGE_COUNT; ++range) {
+            if (shared_minima[range][0] != FLT_MAX) {
+                atomic_min_float(&diagnostics->minima[range],
+                                 shared_minima[range][0]);
+            }
+            if (shared_maxima[range][0] != -FLT_MAX) {
+                atomic_max_float(&diagnostics->maxima[range],
+                                 shared_maxima[range][0]);
+            }
+        }
+    }
+}
+
+/*
+ * 公开入口的版本化 EM 图像域更新。reference_implementation 与投影域 ratio
+ * 使用同一个枚举，主机端不能分别选择，从结构上阻止混搭。
+ *
+ * OMEGA MLEM（MLEM_im.m、algorithms.h、subiterStep.h）:
+ *   x_new = x_old * (backprojection + epsilon)
+ *                   / max(sensitivity, epsilon)
+ * OMEGA OSL:
+ *   x_new = x_old * (backprojection + epsilon)
+ *                   / (max(sensitivity, epsilon)
+ *                      + beta*prior_gradient + epsilon)
+ * OMEGA 没有 CASToR 的更新因子上下限。原始 sensitivity+penalty 非正或任一
+ * 更新输入非有限时，把该体素设为 omega_epsilon，等价于 OMEGA 更新后的
+ * positivity constraint 下限，避免 0 体素在乘法 EM 中永久无法恢复。
+ *
+ * CASToR MLEM/OSL（iOptimizerMLEM.cc、iOptimizerOneStepLate.cc）:
+ *   update_factor = backprojection / (sensitivity [+ penalty])
+ * MLEM 与 OSL 都应用相同的最小/最大更新因子。OSL 分母非正时 update_factor=1，
+ * 即保持旧体素，并计数报警。最大更新因子为 0 表示关闭上限。
+ */
+__global__ void k_em_update_versioned(
+    float* f, const float* bp, const float* sens, const float* prior_grad,
+    int algorithm, int reference_implementation, float beta,
+    float omega_epsilon,
+    float castor_min_update, float castor_max_update,
+    unsigned long long* nonpositive_denom_count,
+    OslDiagnostics* diagnostics, int64_t n)
+{
+    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    const float old_value = f[i];
+    if (!isfinite(old_value) || old_value <= 0.0f) {
+        f[i] = 0.0f;
+        return;
+    }
+
+    const float backprojection = bp[i];
+    const float raw_sensitivity = sens[i];
+    if (!isfinite(backprojection) || backprojection < 0.0f ||
+        !isfinite(raw_sensitivity)) {
+        if (algorithm == ALGORITHM_OSL && nonpositive_denom_count) {
+            atomicAdd(nonpositive_denom_count, 1ULL);
+        }
+        if (algorithm == ALGORITHM_OSL &&
+            reference_implementation == IMPLEMENTATION_CASTOR) {
+            f[i] = old_value;
+            if (diagnostics) {
+                atomicAdd(&diagnostics->counts[OSL_DIAG_CASTOR_KEEP_OLD], 1ULL);
+            }
+        } else if (algorithm == ALGORITHM_OSL &&
+                   reference_implementation == IMPLEMENTATION_OMEGA) {
+            f[i] = omega_epsilon;
+            if (diagnostics) {
+                atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR], 1ULL);
+            }
+        } else {
+            f[i] = 0.0f;
+        }
+        return;
+    }
+
+    if (reference_implementation == IMPLEMENTATION_OMEGA) {
+        const float sensitivity = fmaxf(raw_sensitivity, omega_epsilon);
+        float denominator = sensitivity;
+        if (algorithm == ALGORITHM_OSL) {
+            const float gradient = prior_grad ? prior_grad[i] : 0.0f;
+            if (!isfinite(gradient)) {
+                if (nonpositive_denom_count) {
+                    atomicAdd(nonpositive_denom_count, 1ULL);
+                }
+                f[i] = omega_epsilon;
+                if (diagnostics) {
+                    atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR],
+                              1ULL);
+                }
+                return;
+            }
+            const float raw_denominator = sensitivity + beta * gradient;
+            if (!isfinite(raw_denominator) || raw_denominator <= 0.0f) {
+                if (nonpositive_denom_count) {
+                    atomicAdd(nonpositive_denom_count, 1ULL);
+                }
+                f[i] = omega_epsilon;
+                if (diagnostics) {
+                    atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR],
+                              1ULL);
+                }
+                return;
+            }
+            denominator = raw_denominator + omega_epsilon;
+        }
+        const float numerator = backprojection + omega_epsilon;
+        if (!isfinite(denominator) || denominator <= 0.0f) {
+            f[i] = algorithm == ALGORITHM_OSL ? omega_epsilon : 0.0f;
+            if (algorithm == ALGORITHM_OSL && diagnostics) {
+                atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR], 1ULL);
+            }
+            return;
+        }
+        const float value = old_value * numerator / denominator;
+        if (algorithm == ALGORITHM_OSL) {
+            if (!isfinite(value) || value <= 0.0f) {
+                if (nonpositive_denom_count) {
+                    atomicAdd(nonpositive_denom_count, 1ULL);
+                }
+                f[i] = omega_epsilon;
+                if (diagnostics) {
+                    atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR],
+                              1ULL);
+                }
+            } else {
+                f[i] = fmaxf(value, omega_epsilon);
+                if (value < omega_epsilon && diagnostics) {
+                    atomicAdd(&diagnostics->counts[OSL_DIAG_OMEGA_EPSILON_FLOOR],
+                              1ULL);
+                }
+            }
+        } else {
+            f[i] = (isfinite(value) && value > 0.0f) ? value : 0.0f;
+        }
+        return;
+    }
+
+    // CASToR 的 MLEM 和 OSL 共用更新因子上下限；只有 OSL 有 penalty 分母规则。
+    float denominator = raw_sensitivity;
+    if (algorithm == ALGORITHM_OSL) {
+        const float gradient = prior_grad ? prior_grad[i] : 0.0f;
+        if (!isfinite(gradient)) {
+            if (nonpositive_denom_count) {
+                atomicAdd(nonpositive_denom_count, 1ULL);
+            }
+            f[i] = old_value;
+            if (diagnostics) {
+                atomicAdd(&diagnostics->counts[OSL_DIAG_CASTOR_KEEP_OLD], 1ULL);
+            }
+            return;
+        }
+        denominator += beta * gradient;
+        if (!isfinite(denominator) || denominator <= 0.0f) {
+            if (nonpositive_denom_count) {
+                atomicAdd(nonpositive_denom_count, 1ULL);
+            }
+            f[i] = old_value;
+            if (diagnostics) {
+                atomicAdd(&diagnostics->counts[OSL_DIAG_CASTOR_KEEP_OLD], 1ULL);
+            }
+            return;
+        }
+    } else if (denominator <= 0.0f) {
+        f[i] = 0.0f;
+        return;
+    }
+
+    float update_factor = backprojection / denominator;
+    if (castor_min_update > 0.0f && update_factor < castor_min_update) {
+        update_factor = castor_min_update;
+    }
+    if (castor_max_update > 0.0f && update_factor > castor_max_update) {
+        update_factor = castor_max_update;
+    }
+    const float value = old_value * update_factor;
+    if (algorithm == ALGORITHM_OSL && (!isfinite(value) || value <= 0.0f)) {
+        if (nonpositive_denom_count) atomicAdd(nonpositive_denom_count, 1ULL);
+        f[i] = old_value;
+        if (diagnostics) {
+            atomicAdd(&diagnostics->counts[OSL_DIAG_CASTOR_KEEP_OLD], 1ULL);
+        }
+    } else {
+        f[i] = (isfinite(value) && value > 0.0f) ? value : 0.0f;
     }
 }
 
@@ -2396,9 +2889,13 @@ __global__ void k_calc_ratio_batched(const float* __restrict__ y,
                                      int sym_mode,
                                      int sym_id,
                                      int z_mirror,
-                                     int compact_num_angles,
-                                     int full_num_angles,
-                                     int recon_angle_step)
+                                      int compact_num_angles,
+                                      int full_num_angles,
+                                      int recon_angle_step,
+                                      int reference_implementation,
+                                      float omega_epsilon,
+                                      float castor_threshold,
+                                      unsigned long long* low_forward_count)
 {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= local_rows) return;
@@ -2442,13 +2939,34 @@ __global__ void k_calc_ratio_batched(const float* __restrict__ y,
     float g = G_full[full_idx];
     float p = P_full[full_idx];
     float yy = y[r];
-    if (!isfinite(g) || !isfinite(p) || !isfinite(yy) || g <= 0.0f || p < 0.0f) {
+    if (!isfinite(g) || !isfinite(p) || !isfinite(yy) ||
+        g <= 0.0f || p < 0.0f || yy < 0.0f) {
         ratio[r] = 0.0f;
         return;
     }
 
-    float pred = g * yy;
-    if (!isfinite(pred) || pred < 1e-10f) pred = 1e-10f;
+    const float pred = g * yy;
+    if (!isfinite(pred) || pred < 0.0f) {
+        ratio[r] = 0.0f;
+        return;
+    }
+    if (reference_implementation == IMPLEMENTATION_OMEGA) {
+        // OMEGA 在投影分母中加 epsilon，不使用 CASToR 的阈值中性分支。
+        const float denominator = pred + omega_epsilon;
+        const float value = (g * p) / denominator;
+        ratio[r] = (isfinite(value) && value >= 0.0f) ? value : 0.0f;
+        return;
+    }
+    if (pred <= castor_threshold) {
+        /*
+         * CASToR 在 forwardModel 过小时令 data-space ratio=1，因为该行仍包含
+         * 在 sensitivity 中。本工程将响应因子 g 显式放入 sensitivity=A^T*g，
+         * 所以相同的中性反投影贡献必须是 ratio=g；只有 g=1 时字面值才为 1。
+         */
+        ratio[r] = g;
+        if (low_forward_count) atomicAdd(low_forward_count, 1ULL);
+        return;
+    }
     const float value = (g * p) / pred;
     ratio[r] = (isfinite(value) && value >= 0.0f) ? value : 0.0f;
 }
@@ -2563,6 +3081,85 @@ __global__ void k_conv_z(const float* __restrict__ in, float* __restrict__ out,
     out[idx] = s;
 }
 
+// OMEGA padding.m 使用包含边界体素的 symmetric 镜像，例如 -1->0、N->N-1。
+__device__ __forceinline__ int symmetric_reflect_index(int value, int size) {
+    while (value < 0 || value >= size) {
+        value = value < 0 ? -value - 1 : 2 * size - value - 1;
+    }
+    return value;
+}
+
+__global__ void k_conv_x_symmetric(const float* __restrict__ in,
+                                    float* __restrict__ out,
+                                    int Nx, int Ny, int Nz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int z = (int)(idx / ((int64_t)Nx * Ny));
+    const int rem = (int)(idx - (int64_t)z * Nx * Ny);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+    float sum = 0.0f;
+    for (int k = -c_hx; k <= c_hx; ++k) {
+        const int xx = symmetric_reflect_index(x + k, Nx);
+        sum += in[(int64_t)z * Nx * Ny + (int64_t)y * Nx + xx]
+             * c_kx[k + c_hx];
+    }
+    out[idx] = sum;
+}
+
+__global__ void k_conv_y_symmetric(const float* __restrict__ in,
+                                    float* __restrict__ out,
+                                    int Nx, int Ny, int Nz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int z = (int)(idx / ((int64_t)Nx * Ny));
+    const int rem = (int)(idx - (int64_t)z * Nx * Ny);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+    float sum = 0.0f;
+    for (int k = -c_hy; k <= c_hy; ++k) {
+        const int yy = symmetric_reflect_index(y + k, Ny);
+        sum += in[(int64_t)z * Nx * Ny + (int64_t)yy * Nx + x]
+             * c_ky[k + c_hy];
+    }
+    out[idx] = sum;
+}
+
+__global__ void k_conv_z_symmetric(const float* __restrict__ in,
+                                    float* __restrict__ out,
+                                    int Nx, int Ny, int Nz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int z = (int)(idx / ((int64_t)Nx * Ny));
+    const int rem = (int)(idx - (int64_t)z * Nx * Ny);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+    float sum = 0.0f;
+    for (int k = -c_hz; k <= c_hz; ++k) {
+        const int zz = symmetric_reflect_index(z + k, Nz);
+        sum += in[(int64_t)zz * Nx * Ny + (int64_t)y * Nx + x]
+             * c_kz[k + c_hz];
+    }
+    out[idx] = sum;
+}
+
+// CASToR stationary convolver 只补偿轴向 z 截断，不补偿横断面 x/y 边界。
+__global__ void k_build_castor_z_norm(float* norm, int Nx, int Ny, int Nz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int z = (int)(idx / ((int64_t)Nx * Ny));
+    float sum = 0.0f;
+    for (int k = -c_hz; k <= c_hz; ++k) {
+        const int zz = z + k;
+        if (zz >= 0 && zz < Nz) sum += c_kz[k + c_hz];
+    }
+    norm[idx] = (isfinite(sum) && sum > 1e-12f) ? sum : 1.0f;
+}
+
 __global__ void k_div_norm(float* a, const float* norm, int64_t n) {
     int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
@@ -2572,10 +3169,23 @@ __global__ void k_div_norm(float* a, const float* norm, int64_t n) {
     }
 }
 
+__global__ void k_div_norm_to(const float* __restrict__ in,
+                              const float* __restrict__ norm,
+                              float* __restrict__ out, int64_t n) {
+    int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float d = norm[i];
+        if (!isfinite(d) || d < 1e-12f) d = 1e-12f;
+        float v = in[i] / d;
+        out[i] = isfinite(v) ? v : 0.0f;
+    }
+}
+
 static int castor_round_host(float x) {
     int h = (int)floorf(x);
     if ((x - h) > 0.5f) h++;
-    if (h < 1) h = 1;
+    // CASToR 允许半核为 0，对很小的 FWHM 得到 1 个体素的恒等核。
+    if (h < 0) h = 0;
     return h;
 }
 
@@ -2601,6 +3211,31 @@ static std::vector<float> build_castor_erf_1d(float fwhm_mm, float voxel_mm, flo
     return k;
 }
 
+// OMEGA PSFKernel.m：半径 ceil(2*sigma/voxel)，在体素中心采样 Gaussian。
+static std::vector<float> build_omega_sampled_1d(float fwhm_mm,
+                                                  float voxel_mm) {
+    const float sigma = fwhm_mm /
+        (2.0f * sqrtf(2.0f * logf(2.0f)));
+    const int half = (int)ceilf(2.0f * sigma / voxel_mm);
+    if (2 * half + 1 > MAX_KERNEL_LEN) {
+        fprintf(stderr,
+                "OMEGA Gaussian kernel too large: %d > %d, reduce FWHM or increase MAX_KERNEL_LEN\n",
+                2 * half + 1, MAX_KERNEL_LEN);
+        exit(1);
+    }
+    std::vector<float> kernel((size_t)2 * half + 1);
+    float sum = 0.0f;
+    for (int i = -half; i <= half; ++i) {
+        const float distance = (float)i * voxel_mm;
+        const float value = expf(-0.5f * distance * distance / (sigma * sigma));
+        kernel[(size_t)(i + half)] = value;
+        sum += value;
+    }
+    if (!isfinite(sum) || sum <= 0.0f) sum = 1.0f;
+    for (float& value : kernel) value /= sum;
+    return kernel;
+}
+
 static void upload_gaussian_kernel(const std::vector<float>& kx,
                                    const std::vector<float>& ky,
                                    const std::vector<float>& kz)
@@ -2616,12 +3251,18 @@ static void upload_gaussian_kernel(const std::vector<float>& kx,
     CUDA_CHECK(cudaMemcpyToSymbol(c_hz, &hz, sizeof(int)));
 }
 
-static void gpu_conv3d_renorm(float* d_in, float* d_out, float* d_tmp,
-                              const float* d_norm,
-                              int Nx, int Ny, int Nz,
-                              const std::vector<float>& kx,
-                              const std::vector<float>& ky,
-                              const std::vector<float>& kz)
+/*
+ * 以下全边界归一化卷积是旧的底层联合诊断引擎所用辅助函数。它以
+ * C=D_xyz^-1*K 保持整个有限图像上的常量，但这并不是 CASToR 3.2 的前向
+ * 模型，因为 CASToR 只补偿 z 边界。公开 --proj-dir 入口不再把它暴露为
+ * “adjoint”版本；真正的 CASToR 伴随修正版见 gpu_conv3d_castor_adjoint()。
+ */
+static void gpu_conv3d_forward_renorm(const float* d_in, float* d_out,
+                                      float* d_tmp, const float* d_norm,
+                                      int Nx, int Ny, int Nz,
+                                      const std::vector<float>& kx,
+                                      const std::vector<float>& ky,
+                                      const std::vector<float>& kz)
 {
     int64_t N2 = (int64_t)Nx * Ny * Nz;
     int nb = (int)((N2 + BLK - 1) / BLK);
@@ -2631,6 +3272,26 @@ static void gpu_conv3d_renorm(float* d_in, float* d_out, float* d_tmp,
     k_conv_z<<<nb, BLK>>>(d_out, d_tmp, Nx, Ny, Nz);
     CUDA_CHECK(cudaMemcpy(d_out, d_tmp, (size_t)N2*sizeof(float), cudaMemcpyDeviceToDevice));
     k_div_norm<<<nb, BLK>>>(d_out, d_norm, N2);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+static void gpu_conv3d_transpose_renorm(const float* d_in, float* d_out,
+                                        float* d_tmp, const float* d_norm,
+                                        int Nx, int Ny, int Nz,
+                                        const std::vector<float>& kx,
+                                        const std::vector<float>& ky,
+                                        const std::vector<float>& kz)
+{
+    int64_t N2 = (int64_t)Nx * Ny * Nz;
+    int nb = (int)((N2 + BLK - 1) / BLK);
+    upload_gaussian_kernel(kx, ky, kz);
+    k_div_norm_to<<<nb, BLK>>>(d_in, d_norm, d_out, N2);
+    k_conv_x<<<nb, BLK>>>(d_out, d_tmp, Nx, Ny, Nz);
+    k_conv_y<<<nb, BLK>>>(d_tmp, d_out, Nx, Ny, Nz);
+    k_conv_z<<<nb, BLK>>>(d_out, d_tmp, Nx, Ny, Nz);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(d_out, d_tmp, (size_t)N2*sizeof(float),
+                          cudaMemcpyDeviceToDevice));
 }
 
 static void build_conv_norm(float* d_norm, float* d_tmp1, float* d_tmp2,
@@ -2647,18 +3308,141 @@ static void build_conv_norm(float* d_norm, float* d_tmp1, float* d_tmp2,
     k_conv_y<<<nb, BLK>>>(d_tmp1, d_tmp2, Nx, Ny, Nz);
     k_conv_z<<<nb, BLK>>>(d_tmp2, d_norm, Nx, Ny, Nz);
     k_clamp_min<<<nb, BLK>>>(d_norm, 1e-12f, N2);
+    CUDA_CHECK(cudaGetLastError());
 }
 
-__global__ void k_real_to_complex(const float* r, cufftComplex* c, int64_t n) {
-    int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) { c[i].x = r[i]; c[i].y = 0.0f; }
+static void gpu_conv3d_zero_padded(const float* d_in, float* d_out,
+                                   float* d_tmp, int Nx, int Ny, int Nz,
+                                   const std::vector<float>& kx,
+                                   const std::vector<float>& ky,
+                                   const std::vector<float>& kz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    upload_gaussian_kernel(kx, ky, kz);
+    k_conv_x<<<blocks, BLK>>>(d_in, d_tmp, Nx, Ny, Nz);
+    k_conv_y<<<blocks, BLK>>>(d_tmp, d_out, Nx, Ny, Nz);
+    k_conv_z<<<blocks, BLK>>>(d_out, d_tmp, Nx, Ny, Nz);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(d_out, d_tmp, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToDevice));
 }
 
-__global__ void k_complex_to_real(const cufftComplex* c, float* r, int64_t n, float invn) {
-    int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        float v = c[i].x * invn;
-        r[i] = (v > 0.0f) ? v : 0.0f;
+static void gpu_conv3d_omega_symmetric(const float* d_in, float* d_out,
+                                       float* d_tmp, int Nx, int Ny, int Nz,
+                                       const std::vector<float>& kx,
+                                       const std::vector<float>& ky,
+                                       const std::vector<float>& kz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    upload_gaussian_kernel(kx, ky, kz);
+    k_conv_x_symmetric<<<blocks, BLK>>>(d_in, d_tmp, Nx, Ny, Nz);
+    k_conv_y_symmetric<<<blocks, BLK>>>(d_tmp, d_out, Nx, Ny, Nz);
+    k_conv_z_symmetric<<<blocks, BLK>>>(d_out, d_tmp, Nx, Ny, Nz);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(d_out, d_tmp, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToDevice));
+}
+
+static void build_castor_z_norm(float* d_norm, int Nx, int Ny, int Nz,
+                                const std::vector<float>& kx,
+                                const std::vector<float>& ky,
+                                const std::vector<float>& kz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    upload_gaussian_kernel(kx, ky, kz);
+    k_build_castor_z_norm<<<blocks, BLK>>>(d_norm, Nx, Ny, Nz);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+static void gpu_conv3d_castor(const float* d_in, float* d_out,
+                              float* d_tmp, const float* d_z_norm,
+                              int Nx, int Ny, int Nz,
+                              const std::vector<float>& kx,
+                              const std::vector<float>& ky,
+                              const std::vector<float>& kz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    gpu_conv3d_zero_padded(d_in, d_out, d_tmp, Nx, Ny, Nz, kx, ky, kz);
+    k_div_norm<<<blocks, BLK>>>(d_out, d_z_norm, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+/*
+ * CASToR stationary Gaussian 的正向为 C=D_z^-1*K，其中 K 是 x/y/z 零扩展
+ * 卷积，D_z 只补偿 z 方向有限边界。严格伴随必须按相反顺序执行
+ * C^T=K^T*D_z^-1；Gaussian 核对称，所以 K^T=K。先把输入除以 D_z，再做
+ * 零扩展卷积。d_out 可同时作为缩放后的输入和最终输出，因为第一轴卷积写入
+ * 独立的 d_tmp，kernel 启动顺序由同一 CUDA stream 保证。
+ */
+static void gpu_conv3d_castor_adjoint(
+    const float* d_in, float* d_out, float* d_tmp,
+    const float* d_z_norm, int Nx, int Ny, int Nz,
+    const std::vector<float>& kx, const std::vector<float>& ky,
+    const std::vector<float>& kz) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    k_div_norm_to<<<blocks, BLK>>>(d_in, d_z_norm, d_out, n);
+    CUDA_CHECK(cudaGetLastError());
+    gpu_conv3d_zero_padded(d_out, d_out, d_tmp,
+                           Nx, Ny, Nz, kx, ky, kz);
+}
+
+static bool convolution_requires_castor_norm(int implementation) {
+    return implementation == CONV_IMPLEMENTATION_CASTOR ||
+           implementation == CONV_IMPLEMENTATION_CASTOR_ADJOINT;
+}
+
+static void build_gaussian_kernel_set(
+    int implementation, const float fwhm_mm[3], float voxel_mm,
+    float nb_sigmas, std::vector<float>& kx, std::vector<float>& ky,
+    std::vector<float>& kz) {
+    if (implementation == CONV_IMPLEMENTATION_OMEGA) {
+        kx = build_omega_sampled_1d(fwhm_mm[0], voxel_mm);
+        ky = build_omega_sampled_1d(fwhm_mm[1], voxel_mm);
+        kz = build_omega_sampled_1d(fwhm_mm[2], voxel_mm);
+    } else {
+        kx = build_castor_erf_1d(fwhm_mm[0], voxel_mm, nb_sigmas);
+        ky = build_castor_erf_1d(fwhm_mm[1], voxel_mm, nb_sigmas);
+        kz = build_castor_erf_1d(fwhm_mm[2], voxel_mm, nb_sigmas);
+    }
+}
+
+static void prepare_convolution_normalization(
+    int implementation, float* d_norm, int Nx, int Ny, int Nz,
+    const std::vector<float>& kx, const std::vector<float>& ky,
+    const std::vector<float>& kz) {
+    if (convolution_requires_castor_norm(implementation)) {
+        build_castor_z_norm(d_norm, Nx, Ny, Nz, kx, ky, kz);
+    }
+}
+
+static void apply_convolution_forward(
+    int implementation, const float* d_in, float* d_out, float* d_tmp,
+    const float* d_norm, int Nx, int Ny, int Nz,
+    const std::vector<float>& kx, const std::vector<float>& ky,
+    const std::vector<float>& kz) {
+    if (implementation == CONV_IMPLEMENTATION_OMEGA) {
+        gpu_conv3d_omega_symmetric(d_in, d_out, d_tmp,
+                                   Nx, Ny, Nz, kx, ky, kz);
+    } else {
+        // strict CASToR 与伴随修正版共享完全相同的前向模型。
+        gpu_conv3d_castor(d_in, d_out, d_tmp, d_norm,
+                          Nx, Ny, Nz, kx, ky, kz);
+    }
+}
+
+static void apply_convolution_backward(
+    int implementation, const float* d_in, float* d_out, float* d_tmp,
+    const float* d_norm, int Nx, int Ny, int Nz,
+    const std::vector<float>& kx, const std::vector<float>& ky,
+    const std::vector<float>& kz) {
+    if (implementation == CONV_IMPLEMENTATION_CASTOR_ADJOINT) {
+        gpu_conv3d_castor_adjoint(d_in, d_out, d_tmp, d_norm,
+                                  Nx, Ny, Nz, kx, ky, kz);
+    } else {
+        // OMEGA 与严格 CASToR 均按各自源码在反投影/sensitivity 后重用正向卷积。
+        apply_convolution_forward(implementation, d_in, d_out, d_tmp, d_norm,
+                                  Nx, Ny, Nz, kx, ky, kz);
     }
 }
 
@@ -2671,39 +3455,446 @@ __global__ void k_butter_mul(cufftComplex* data, const float* filt, int64_t n) {
     }
 }
 
-static std::vector<float> build_butterworth_filter(int Nx, int Ny, int Nz,
-                                                   float cutoff, int order)
+/*
+ * SPECT 文献中常用的三维 Butterworth 后滤波：
+ *
+ *   H(f) = 1 / (1 + (f/fc)^(2n)),
+ *   f = sqrt(fx^2 + fy^2 + fz^2)。
+ *
+ * fc 使用 cycles/cm，转换为 cycles/mm 后与每轴真实物理频率比较。旧实现把
+ * 三维对角 Nyquist 归一化为 1，同一个参数会随维数定义改变，无法与论文或不同
+ * 体素大小的数据比较，因此不再保留。每轴使用 2 倍零填充，并把原图放在补零
+ * 体积中央，避免未补零 FFT 把图像两侧当作相邻位置进行循环卷积。
+ */
+struct ButterworthWorkspace {
+    int nx = 0, ny = 0, nz = 0;
+    int padded_nx = 0, padded_ny = 0, padded_nz = 0;
+    int offset_x = 0, offset_y = 0, offset_z = 0;
+    int64_t padded_real_count = 0;
+    int64_t spectrum_count = 0;
+    float* d_padded_real = nullptr;
+    cufftComplex* d_spectrum = nullptr;
+    float* d_response = nullptr;
+    cufftHandle forward_plan = 0;
+    cufftHandle inverse_plan = 0;
+};
+
+__global__ void k_butter_embed_centered(const float* input, float* padded,
+                                        int nx, int ny, int nz,
+                                        int padded_nx, int padded_ny,
+                                        int offset_x, int offset_y, int offset_z,
+                                        int64_t input_count)
 {
-    std::vector<float> h((size_t)Nx*Ny*Nz);
-    float invsqrt3 = 1.0f / sqrtf(3.0f);
-    for (int z = 0; z < Nz; z++) {
-        int wz = (z + Nz/2) % Nz - Nz/2;
-        for (int y = 0; y < Ny; y++) {
-            int wy = (y + Ny/2) % Ny - Ny/2;
-            for (int x = 0; x < Nx; x++) {
-                int wx = (x + Nx/2) % Nx - Nx/2;
-                float u = (float)wx / (Nx / 2.0f);
-                float v = (float)wy / (Ny / 2.0f);
-                float w = (float)wz / (Nz / 2.0f);
-                float D = sqrtf(u*u + v*v + w*w) * invsqrt3;
-                float r = D / cutoff;
-                float rpow = 1.0f;
-                for (int k = 0; k < 2*order; k++) rpow *= r;
-                h[(int64_t)z*Nx*Ny + y*Nx + x] = 1.0f / (1.0f + rpow);
+    const int64_t index = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= input_count) return;
+    const int z = (int)(index / ((int64_t)nx * ny));
+    const int rem = (int)(index - (int64_t)z * nx * ny);
+    const int y = rem / nx;
+    const int x = rem - y * nx;
+    const int64_t padded_index =
+        (int64_t)(z + offset_z) * padded_nx * padded_ny +
+        (int64_t)(y + offset_y) * padded_nx + x + offset_x;
+    padded[padded_index] = input[index];
+}
+
+__global__ void k_butter_crop_centered(const float* padded, float* output,
+                                       int nx, int ny, int nz,
+                                       int padded_nx, int padded_ny,
+                                       int offset_x, int offset_y, int offset_z,
+                                       float inverse_fft_size,
+                                       bool clamp_for_next_em_iteration,
+                                       int64_t output_count)
+{
+    const int64_t index = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= output_count) return;
+    const int z = (int)(index / ((int64_t)nx * ny));
+    const int rem = (int)(index - (int64_t)z * nx * ny);
+    const int y = rem / nx;
+    const int x = rem - y * nx;
+    const int64_t padded_index =
+        (int64_t)(z + offset_z) * padded_nx * padded_ny +
+        (int64_t)(y + offset_y) * padded_nx + x + offset_x;
+    float value = padded[padded_index] * inverse_fft_size;
+    if (!isfinite(value)) value = 0.0f;
+    // 只有还要进入下一轮 EM 时才恢复非负定义域；最终后滤波保持线性结果。
+    if (clamp_for_next_em_iteration && value < 0.0f) value = 0.0f;
+    output[index] = value;
+}
+
+static std::vector<float> build_butterworth_response(
+    int padded_nx, int padded_ny, int padded_nz,
+    float voxel_mm, float cutoff_cycles_per_cm, int order)
+{
+    const int freq_nx = padded_nx / 2 + 1;
+    const int64_t spectrum_count =
+        (int64_t)padded_nz * padded_ny * freq_nx;
+    std::vector<float> response((size_t)spectrum_count, 0.0f);
+    const double cutoff_cycles_per_mm =
+        (double)cutoff_cycles_per_cm / 10.0;
+    for (int z = 0; z < padded_nz; ++z) {
+        const int kz = (z <= padded_nz / 2) ? z : z - padded_nz;
+        const double fz = (double)kz / ((double)padded_nz * voxel_mm);
+        for (int y = 0; y < padded_ny; ++y) {
+            const int ky = (y <= padded_ny / 2) ? y : y - padded_ny;
+            const double fy = (double)ky / ((double)padded_ny * voxel_mm);
+            for (int x = 0; x < freq_nx; ++x) {
+                const double fx = (double)x / ((double)padded_nx * voxel_mm);
+                const double frequency = std::sqrt(fx * fx + fy * fy + fz * fz);
+                const double ratio = frequency / cutoff_cycles_per_mm;
+                const double power = std::pow(ratio, 2.0 * (double)order);
+                const int64_t index =
+                    (int64_t)z * padded_ny * freq_nx + (int64_t)y * freq_nx + x;
+                response[(size_t)index] =
+                    std::isfinite(power) ? (float)(1.0 / (1.0 + power)) : 0.0f;
             }
         }
     }
-    return h;
+    return response;
 }
 
-static bool should_apply_filter(int iter, int total_iters, const std::string& mode,
-                                int period, int last_n)
+static void initialize_butterworth_workspace(
+    ButterworthWorkspace& workspace, int nx, int ny, int nz,
+    float voxel_mm, float cutoff_cycles_per_cm, int order)
 {
-    if (mode == "every") return true;
-    if (mode == "final") return iter == total_iters;
-    if (mode == "periodic") return (period > 0 && iter % period == 0) || iter == total_iters;
-    if (mode == "last_n") return iter > total_iters - last_n;
+    workspace.nx = nx;
+    workspace.ny = ny;
+    workspace.nz = nz;
+    workspace.padded_nx = 2 * nx;
+    workspace.padded_ny = 2 * ny;
+    workspace.padded_nz = 2 * nz;
+    workspace.offset_x = (workspace.padded_nx - nx) / 2;
+    workspace.offset_y = (workspace.padded_ny - ny) / 2;
+    workspace.offset_z = (workspace.padded_nz - nz) / 2;
+    workspace.padded_real_count =
+        (int64_t)workspace.padded_nx * workspace.padded_ny * workspace.padded_nz;
+    workspace.spectrum_count =
+        (int64_t)workspace.padded_nz * workspace.padded_ny *
+        (workspace.padded_nx / 2 + 1);
+
+    const std::vector<float> response = build_butterworth_response(
+        workspace.padded_nx, workspace.padded_ny, workspace.padded_nz,
+        voxel_mm, cutoff_cycles_per_cm, order);
+    CUDA_CHECK(cudaMalloc(&workspace.d_padded_real,
+                          (size_t)workspace.padded_real_count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&workspace.d_spectrum,
+                          (size_t)workspace.spectrum_count * sizeof(cufftComplex)));
+    CUDA_CHECK(cudaMalloc(&workspace.d_response,
+                          (size_t)workspace.spectrum_count * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(workspace.d_response, response.data(),
+                          response.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUFFT_CHECK(cufftPlan3d(&workspace.forward_plan,
+                            workspace.padded_nz,
+                            workspace.padded_ny,
+                            workspace.padded_nx,
+                            CUFFT_R2C));
+    CUFFT_CHECK(cufftPlan3d(&workspace.inverse_plan,
+                            workspace.padded_nz,
+                            workspace.padded_ny,
+                            workspace.padded_nx,
+                            CUFFT_C2R));
+}
+
+static void apply_butterworth_filter(ButterworthWorkspace& workspace,
+                                     const float* input, float* output,
+                                     bool clamp_for_next_em_iteration)
+{
+    const int64_t input_count =
+        (int64_t)workspace.nx * workspace.ny * workspace.nz;
+    const int input_blocks = (int)((input_count + BLK - 1) / BLK);
+    const int spectrum_blocks =
+        (int)((workspace.spectrum_count + BLK - 1) / BLK);
+    CUDA_CHECK(cudaMemset(workspace.d_padded_real, 0,
+                          (size_t)workspace.padded_real_count * sizeof(float)));
+    k_butter_embed_centered<<<input_blocks, BLK>>>(
+        input, workspace.d_padded_real,
+        workspace.nx, workspace.ny, workspace.nz,
+        workspace.padded_nx, workspace.padded_ny,
+        workspace.offset_x, workspace.offset_y, workspace.offset_z,
+        input_count);
+    CUDA_CHECK(cudaGetLastError());
+    CUFFT_CHECK(cufftExecR2C(workspace.forward_plan, workspace.d_padded_real,
+                             workspace.d_spectrum));
+    k_butter_mul<<<spectrum_blocks, BLK>>>(
+        workspace.d_spectrum, workspace.d_response, workspace.spectrum_count);
+    CUDA_CHECK(cudaGetLastError());
+    CUFFT_CHECK(cufftExecC2R(workspace.inverse_plan, workspace.d_spectrum,
+                             workspace.d_padded_real));
+    k_butter_crop_centered<<<input_blocks, BLK>>>(
+        workspace.d_padded_real, output,
+        workspace.nx, workspace.ny, workspace.nz,
+        workspace.padded_nx, workspace.padded_ny,
+        workspace.offset_x, workspace.offset_y, workspace.offset_z,
+        1.0f / (float)workspace.padded_real_count,
+        clamp_for_next_em_iteration, input_count);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+static void destroy_butterworth_workspace(ButterworthWorkspace& workspace)
+{
+    if (workspace.inverse_plan) CUFFT_CHECK(cufftDestroy(workspace.inverse_plan));
+    if (workspace.forward_plan) CUFFT_CHECK(cufftDestroy(workspace.forward_plan));
+    if (workspace.d_response) CUDA_CHECK(cudaFree(workspace.d_response));
+    if (workspace.d_spectrum) CUDA_CHECK(cudaFree(workspace.d_spectrum));
+    if (workspace.d_padded_real) CUDA_CHECK(cudaFree(workspace.d_padded_real));
+    workspace = ButterworthWorkspace{};
+}
+
+// Butterworth 的 start=0 保留旧版调度：periodic 按全局迭代编号整除。
+// start>0 时，start 是第一次允许滤波的轮次，periodic 也从该轮开始计周期。
+static bool should_apply_filter(int iteration, int total_iterations, const std::string& schedule_mode, int first_iteration, int interval, int trailing_count)
+{
+    if (first_iteration > 0 && iteration < first_iteration) return false;
+    if (schedule_mode == "every") return true;
+    if (schedule_mode == "final") return iteration == total_iterations;
+    if (schedule_mode == "periodic") {
+        const bool on_period = interval > 0 &&
+            (first_iteration > 0
+                ? (iteration - first_iteration) % interval == 0
+                : iteration % interval == 0);
+        return on_period || iteration == total_iterations;
+    }
+    if (schedule_mode == "last_n") {
+        return iteration > total_iterations - trailing_count;
+    }
     return false;
+}
+
+// smooth 的历史行为本来就是从 smooth_start_iter 起按相对周期执行，因此默认
+// periodic 完全兼容旧命令；final 只在最后一次 EM 更新后回写一次平滑结果。
+static bool should_apply_smooth(int iteration, int total_iterations, const std::string& schedule_mode, int first_iteration, int interval)
+{
+    if (iteration < first_iteration) return false;
+    if (schedule_mode == "every") return true;
+    if (schedule_mode == "final") return iteration == total_iterations;
+    return interval > 0 &&
+        (iteration - first_iteration) % interval == 0;
+}
+
+__device__ __forceinline__ void tv_forward_normalized(
+    const float* __restrict__ f, int x, int y, int z,
+    int Nx, int Ny, int Nz, float smoothing,
+    float& px, float& py, float& pz)
+{
+    const int64_t plane = (int64_t)Nx * Ny;
+    const int64_t idx = (int64_t)z * plane + (int64_t)y * Nx + x;
+    const float center = f[idx];
+    const float dx = (x + 1 < Nx) ? f[idx + 1] - center : 0.0f;
+    const float dy = (y + 1 < Ny) ? f[idx + Nx] - center : 0.0f;
+    const float dz = (z + 1 < Nz) ? f[idx + plane] - center : 0.0f;
+    float denom = sqrtf(dx*dx + dy*dy + dz*dz + smoothing);
+    if (!isfinite(denom) || denom < 1e-12f) denom = 1e-12f;
+    px = dx / denom;
+    py = dy / denom;
+    pz = dz / denom;
+}
+
+/*
+ * OMEGA 普通非解剖 isotropic TV：先计算 x/y/z 前向差分并以
+ * sqrt(dx^2+dy^2+dz^2+TVsmoothing) 归一化，再取负散度。边界使用零法向
+ * 前向差分，相当于 Neumann 边界；常量图像的梯度严格为零。
+ */
+__global__ void k_tv_gradient_omega(const float* __restrict__ f,
+                                    float* __restrict__ grad,
+                                    int Nx, int Ny, int Nz,
+                                    float smoothing)
+{
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int64_t plane = (int64_t)Nx * Ny;
+    const int z = (int)(idx / plane);
+    const int rem = (int)(idx - (int64_t)z * plane);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+
+    float px, py, pz;
+    tv_forward_normalized(f, x, y, z, Nx, Ny, Nz, smoothing, px, py, pz);
+    float value = -(px + py + pz);
+    if (x > 0) {
+        float qx, qy, qz;
+        tv_forward_normalized(f, x - 1, y, z, Nx, Ny, Nz,
+                              smoothing, qx, qy, qz);
+        value += qx;
+    }
+    if (y > 0) {
+        float qx, qy, qz;
+        tv_forward_normalized(f, x, y - 1, z, Nx, Ny, Nz,
+                              smoothing, qx, qy, qz);
+        value += qy;
+    }
+    if (z > 0) {
+        float qx, qy, qz;
+        tv_forward_normalized(f, x, y, z - 1, Nx, Ny, Nz,
+                              smoothing, qx, qy, qz);
+        value += qz;
+    }
+    grad[idx] = isfinite(value) ? value : 0.0f;
+}
+
+#define MAX_MRP_RADIUS 2
+#define MAX_MRP_WINDOW 125
+
+__device__ __forceinline__ int mrp_symmetric_index(int value, int size) {
+    while (value < 0 || value >= size) {
+        value = (value < 0) ? -value - 1 : 2 * size - value - 1;
+    }
+    return value;
+}
+
+/*
+ * OMEGA MRP：对称填充后取 (2*rx+1)*(2*ry+1)*(2*rz+1) 邻域中值。
+ * 默认输出 (x-median)/(median+epsilon)；mrp_no_norm=true 时只输出差值。
+ * 固定上限避免运行时动态数组，半径 0..2 对应最多 125 个样本。
+ */
+__global__ void k_mrp_gradient_omega(const float* __restrict__ f,
+                                     float* __restrict__ grad,
+                                     int Nx, int Ny, int Nz,
+                                     int rx, int ry, int rz,
+                                     float epsilon, bool mrp_no_norm)
+{
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int64_t plane = (int64_t)Nx * Ny;
+    const int z = (int)(idx / plane);
+    const int rem = (int)(idx - (int64_t)z * plane);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+
+    float values[MAX_MRP_WINDOW];
+    int count = 0;
+    for (int dz = -rz; dz <= rz; ++dz) {
+        const int zz = mrp_symmetric_index(z + dz, Nz);
+        for (int dy = -ry; dy <= ry; ++dy) {
+            const int yy = mrp_symmetric_index(y + dy, Ny);
+            for (int dx = -rx; dx <= rx; ++dx) {
+                const int xx = mrp_symmetric_index(x + dx, Nx);
+                float value = f[(int64_t)zz * plane + (int64_t)yy * Nx + xx];
+                if (!isfinite(value)) value = 0.0f;
+                int insert = count;
+                while (insert > 0 && values[insert - 1] > value) {
+                    values[insert] = values[insert - 1];
+                    --insert;
+                }
+                values[insert] = value;
+                ++count;
+            }
+        }
+    }
+    const float median = values[count / 2];
+    const float diff = f[idx] - median;
+    const float value = mrp_no_norm ? diff : diff / (median + epsilon);
+    grad[idx] = isfinite(value) ? value : 0.0f;
+}
+
+__device__ __forceinline__ bool voxel_inside_centered_cylinder(
+    int x, int y, int z, int Nx, int Ny, int Nz, float voxel_mm,
+    float roi_diameter_mm, float roi_height_mm) {
+    const float xx = ((float)x - 0.5f * (float)(Nx - 1)) * voxel_mm;
+    const float yy = ((float)y - 0.5f * (float)(Ny - 1)) * voxel_mm;
+    const float zz = ((float)z - 0.5f * (float)(Nz - 1)) * voxel_mm;
+    const float radius = 0.5f * roi_diameter_mm;
+    return xx * xx + yy * yy <= radius * radius &&
+           fabsf(zz) <= 0.5f * roi_height_mm;
+}
+
+/*
+ * CASToR iPenaltyMedianRootPrior 的邻域和边界语义：
+ * - 中心体素包含在邻域中；
+ * - 图像范围外或被重建 ROI/mask 屏蔽的邻居直接丢弃，不做镜像/补零；
+ * - 有偶数个有效值时，中值取中间两项平均；
+ * - median==0 时一阶导数为 0，否则为 (x-median)/median；
+ * - sphere 包围半径按 max(1,floor(radius_mm/voxel_mm)) 计算，体素中心距离
+ *   必须严格小于 radius，等于半径的体素不进入邻域。
+ *
+ * 为控制 CUDA 每线程局部数组，box order 和 sphere 的轴向包围半径均限制为 2，
+ * 因而有效样本最多 5^3=125。该限制只缩小可配置范围，不改变范围内的公式。
+ */
+__global__ void k_mrp_gradient_castor(
+    const float* __restrict__ f, float* __restrict__ grad,
+    int Nx, int Ny, int Nz, int neighborhood_shape, int box_order,
+    bool box_exclude_corners, float sphere_radius_mm, float voxel_mm,
+    float roi_diameter_mm, float roi_height_mm) {
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    const int64_t plane = (int64_t)Nx * Ny;
+    const int z = (int)(idx / plane);
+    const int rem = (int)(idx - (int64_t)z * plane);
+    const int y = rem / Nx;
+    const int x = rem - y * Nx;
+    if (!voxel_inside_centered_cylinder(
+            x, y, z, Nx, Ny, Nz, voxel_mm,
+            roi_diameter_mm, roi_height_mm)) {
+        grad[idx] = 0.0f;
+        return;
+    }
+
+    int extent = 1;
+    if (neighborhood_shape == MRP_NEIGHBORHOOD_BOX) {
+        extent = box_order;
+    } else if (neighborhood_shape == MRP_NEIGHBORHOOD_SPHERE) {
+        const int radius_voxels = (int)(sphere_radius_mm / voxel_mm);
+        extent = radius_voxels > 1 ? radius_voxels : 1;
+    }
+    if (extent > MAX_MRP_RADIUS) {
+        grad[idx] = 0.0f;
+        return;
+    }
+
+    float values[MAX_MRP_WINDOW];
+    int count = 0;
+    for (int dz = -extent; dz <= extent; ++dz) {
+        for (int dy = -extent; dy <= extent; ++dy) {
+            for (int dx = -extent; dx <= extent; ++dx) {
+                bool include = false;
+                if (neighborhood_shape == MRP_NEIGHBORHOOD_SIX_NEAREST) {
+                    include = abs(dx) + abs(dy) + abs(dz) <= 1;
+                } else if (neighborhood_shape == MRP_NEIGHBORHOOD_BOX) {
+                    include = true;
+                    if (box_exclude_corners && box_order > 0 &&
+                        abs(dx) == box_order && abs(dy) == box_order &&
+                        abs(dz) == box_order) {
+                        include = false;
+                    }
+                } else {
+                    const float distance2 = (float)(dx * dx + dy * dy + dz * dz)
+                                          * voxel_mm * voxel_mm;
+                    include = distance2 < sphere_radius_mm * sphere_radius_mm;
+                }
+                if (!include) continue;
+                const int xx = x + dx;
+                const int yy = y + dy;
+                const int zz = z + dz;
+                if (xx < 0 || xx >= Nx || yy < 0 || yy >= Ny ||
+                    zz < 0 || zz >= Nz) continue;
+                if (!voxel_inside_centered_cylinder(
+                        xx, yy, zz, Nx, Ny, Nz, voxel_mm,
+                        roi_diameter_mm, roi_height_mm)) continue;
+
+                float value = f[(int64_t)zz * plane + (int64_t)yy * Nx + xx];
+                if (!isfinite(value)) value = 0.0f;
+                int insert = count;
+                while (insert > 0 && values[insert - 1] > value) {
+                    values[insert] = values[insert - 1];
+                    --insert;
+                }
+                values[insert] = value;
+                ++count;
+            }
+        }
+    }
+
+    if (count <= 0) {
+        grad[idx] = 0.0f;
+        return;
+    }
+    float median = values[count / 2];
+    if ((count & 1) == 0) {
+        median = 0.5f * (median + values[count / 2 - 1]);
+    }
+    const float value = median != 0.0f ? (f[idx] - median) / median : 0.0f;
+    grad[idx] = isfinite(value) ? value : 0.0f;
 }
 
 __global__ void k_map_gradient(const float* __restrict__ f,
@@ -2727,23 +3918,6 @@ __global__ void k_map_gradient(const float* __restrict__ f,
     float fi = f[idx];
 
     float g = 0.0f;
-    float tv_sum = delta * delta;
-
-    if (map_type == MAP_TV) {
-        for (int dz = -1; dz <= 1; dz++)
-        for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0 && dz == 0) continue;
-            if (!neigh26 && abs(dx) + abs(dy) + abs(dz) != 1) continue;
-            int x = ix + dx, y = iy + dy, z = iz + dz;
-            if (x < 0 || x >= Nx || y < 0 || y >= Ny || z < 0 || z >= Nz) continue;
-            float w = rsqrtf((float)(dx*dx + dy*dy + dz*dz));
-            float d = fi - f[(int64_t)z*Nx*Ny + y*Nx + x];
-            tv_sum += w * d * d;
-        }
-    }
-    float tv_den = sqrtf(tv_sum);
-    if (tv_den < 1e-12f) tv_den = 1e-12f;
 
     for (int dz = -1; dz <= 1; dz++)
     for (int dy = -1; dy <= 1; dy++)
@@ -2758,8 +3932,6 @@ __global__ void k_map_gradient(const float* __restrict__ f,
 
         if (map_type == MAP_QUADRATIC) {
             g += 2.0f * w * d;
-        } else if (map_type == MAP_TV) {
-            g += w * d / tv_den;
         } else if (map_type == MAP_HUBER) {
             float ad = fabsf(d);
             float gc = (ad <= huber_T) ? (2.0f * d) : (2.0f * huber_T * ((d >= 0) ? 1.0f : -1.0f));
@@ -2804,6 +3976,7 @@ public:
     float* d_img_rot = nullptr;
     float* d_y = nullptr;
     float* d_ratio = nullptr;
+    unsigned long long* d_low_forward_count = nullptr;
     float* d_bp_rot = nullptr;
     float* d_bp_part = nullptr;
     float* d_sens_part = nullptr;
@@ -2824,7 +3997,8 @@ public:
 
     void init(int device_id, const HostCSR64& hcsr, const MatrixMeta& meta,
               const std::vector<float>& P_all, size_t projection_stride,
-              int bed_count, const std::vector<float>& G_full)
+              int bed_count, const std::vector<float>& G_full,
+              bool track_low_forward = false)
     {
         dev = device_id;
         start_ck = hcsr.start_ck;
@@ -2910,6 +4084,13 @@ public:
         CUDA_CHECK(cudaMalloc(&d_sens_part, (size_t)N2*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_y,         (size_t)local_rows*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ratio,     (size_t)local_rows*sizeof(float)));
+        // 只有 CASToR threshold 路径需要该计数器；OMEGA 不分配未使用的显存。
+        if (track_low_forward) {
+            CUDA_CHECK(cudaMalloc(&d_low_forward_count,
+                                  sizeof(unsigned long long)));
+            CUDA_CHECK(cudaMemset(d_low_forward_count, 0,
+                                  sizeof(unsigned long long)));
+        }
         CUDA_CHECK(cudaMalloc(&d_P_all,     P_all.size()*sizeof(float)));
         CUDA_CHECK(cudaMemcpy(d_P_all, P_all.data(), P_all.size()*sizeof(float), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMalloc(&d_G_full,    G_full.size()*sizeof(float)));
@@ -2965,6 +4146,23 @@ public:
             CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf));
     }
 
+    // 每轮开始前清零；读取时同步当前 device，供主机端按轮次汇总报警。
+    void reset_low_forward_count() {
+        if (!d_low_forward_count) return;
+        CUDA_CHECK(cudaSetDevice(dev));
+        CUDA_CHECK(cudaMemset(d_low_forward_count, 0,
+                              sizeof(unsigned long long)));
+    }
+
+    unsigned long long read_low_forward_count() const {
+        if (!d_low_forward_count) return 0;
+        CUDA_CHECK(cudaSetDevice(dev));
+        unsigned long long count = 0;
+        CUDA_CHECK(cudaMemcpy(&count, d_low_forward_count, sizeof(count),
+                              cudaMemcpyDeviceToHost));
+        return count;
+    }
+
     // 多床位复用同一系统矩阵时，只替换投影和响应因子，不重新创建 CSR。
     void update_projection(const std::vector<float>& P_all_new,
                            size_t projection_stride_new,
@@ -2996,6 +4194,7 @@ public:
         if (d_spmv_buf) cudaFree(d_spmv_buf);
         if (d_G_full) cudaFree(d_G_full);
         if (d_P_all) cudaFree(d_P_all);
+        if (d_low_forward_count) cudaFree(d_low_forward_count);
         if (d_ratio) cudaFree(d_ratio);
         if (d_y) cudaFree(d_y);
         if (d_sens_part) cudaFree(d_sens_part);
@@ -3054,7 +4253,8 @@ static void print_usage() {
     printf("  --roi-cylinder            enable cylindrical image support crop [default on]\n");
     printf("  --no-roi, --no-roi-cylinder disable cylindrical image support crop\n");
     printf("  --roi-diameter-mm F       cylindrical support diameter in mm [30.0]\n");
-    printf("  --roi-height-mm F         valid axial FOV per bed in mm [21.6]; multi-bed uses interval union\n");
+    printf("  --roi-height-mm F         valid axial FOV per bed in mm [66.0]; multi-bed uses interval union\n");
+    printf("  --multibed-edge-layers N  axial layers retained beyond each end bed center [40]\n");
     printf("  --no-detector-mask        keep LINK4/FPGA2/DET4 bins (for ideal projections)\n");
     printf("  --data-mode MODE          measured or simulation\n");
     printf("  --no-norm-factor          use g_i=1\n");
@@ -3071,7 +4271,7 @@ static void print_usage() {
     printf("  --no-slab-prefetch        disable overlap for A/B timing or constrained host memory\n");
     printf("  --slab-prefetch-early     also overlap GPU setup; holds current+next Host CSR simultaneously\n");
     printf("  --gpu-slab-cache N        keep first N angle slabs resident on GPU [0]\n");
-    printf("  --save-every N            save interval [5]\n");
+    printf("  --save-every N            save reconN every N iterations; no recon_final [50]\n");
     printf("  --sym auto|none|zonly|180|z180|90|45|45z [auto]\n");
     printf("  --recon-angle-step N      use every N-th full angle [1]\n");
     printf("  --conv-mode none|psf|post|sieve [none]\n");
@@ -3090,9 +4290,10 @@ static void print_usage() {
     printf("  --map-huber-threshold F   Huber threshold [0.01]\n");
     printf("  --map-relative-gamma F    relative difference gamma [2]\n");
     printf("  --map-relative-epsilon F  relative difference epsilon [1e-6]\n");
-    printf("  --butter-cutoff F         Butterworth cutoff, 0=off [off]\n");
+    printf("  --butter-cutoff-cm F      3D Butterworth cutoff, cycles/cm; omitted=off\n");
     printf("  --butter-order N          Butterworth order [8]\n");
     printf("  --butter-mode every|final|periodic|last_n [final]\n");
+    printf("  --butter-start-iter N     first eligible filtering iteration [0=legacy schedule]\n");
     printf("  --butter-period N         periodic interval [5]\n");
     printf("  --butter-last-n N         last_n window [10]\n");
 }
@@ -3114,6 +4315,9 @@ static ReconConfig parse_args(int argc, char** argv) {
         }
         else if (a == "--bed-offsets-mm" || a == "--bed-centers-mm") {
             c.bed_offsets_mm = parse_float_list(need(a.c_str()));
+        }
+        else if (a == "--multibed-edge-layers") {
+            c.multibed_edge_layers = atoi(need("--multibed-edge-layers"));
         }
         else if (a == "--out") {
             c.output_dir = need("--out");
@@ -3192,12 +4396,19 @@ static ReconConfig parse_args(int argc, char** argv) {
         else if (a == "--map-huber-threshold") c.map_huber_threshold = (float)atof(need("--map-huber-threshold"));
         else if (a == "--map-relative-gamma") c.map_relative_gamma = (float)atof(need("--map-relative-gamma"));
         else if (a == "--map-relative-epsilon") c.map_relative_epsilon = (float)atof(need("--map-relative-epsilon"));
-        else if (a == "--butter-cutoff") {
-            c.butter_cutoff = (float)atof(need("--butter-cutoff"));
-            c.butter_enable = c.butter_cutoff > 0.0f;
+        else if (a == "--butter-cutoff-cm") {
+            c.butter_cutoff_cycles_per_cm =
+                (float)atof(need("--butter-cutoff-cm"));
+            if (!std::isfinite(c.butter_cutoff_cycles_per_cm) ||
+                c.butter_cutoff_cycles_per_cm <= 0.0f) {
+                fprintf(stderr, "--butter-cutoff-cm must be finite and > 0\n");
+                exit(1);
+            }
+            c.butter_enable = true;
         }
         else if (a == "--butter-order") c.butter_order = atoi(need("--butter-order"));
         else if (a == "--butter-mode") c.butter_mode = need("--butter-mode");
+        else if (a == "--butter-start-iter") c.butter_start_iter = atoi(need("--butter-start-iter"));
         else if (a == "--butter-period") c.butter_period = atoi(need("--butter-period"));
         else if (a == "--butter-last-n") c.butter_last_n = atoi(need("--butter-last-n"));
         else if (a == "--help" || a == "-h") { print_usage(); exit(0); }
@@ -3206,14 +4417,38 @@ static ReconConfig parse_args(int argc, char** argv) {
     if (c.matrix_dir.empty() || c.proj_path.empty()) { print_usage(); exit(1); }
     if (c.num_gpus < 1) c.num_gpus = 1;
     if (c.angle_batch < 0) c.angle_batch = 0;
+    if (c.multibed_edge_layers < 1) {
+        fprintf(stderr, "--multibed-edge-layers must be a positive integer\n");
+        exit(1);
+    }
     if (c.gpu_slab_cache < 0) c.gpu_slab_cache = 0;
     if (c.recon_angle_step < 1) c.recon_angle_step = 1;
+    if (c.butter_order < 1 || c.butter_order > 32) {
+        fprintf(stderr, "--butter-order must be in [1,32]\n");
+        exit(1);
+    }
+    if (c.butter_start_iter < 0 || c.butter_start_iter > c.num_iters ||
+        c.butter_period < 1 || c.butter_last_n < 1) {
+        fprintf(stderr,
+                "Butterworth schedule requires start in [0,iters], period >=1, last_n >=1\n");
+        exit(1);
+    }
+    if (c.save_interval <= 0 || c.save_interval > c.num_iters) {
+        fprintf(stderr, "--save-every must be in [1, --iters]; recon_final is disabled\n");
+        exit(1);
+    }
     if (c.roi_diameter_mm <= 0.0f || c.roi_height_mm <= 0.0f) {
         fprintf(stderr, "Invalid cylinder ROI size: diameter=%.6g height=%.6g\n",
                 c.roi_diameter_mm, c.roi_height_mm);
         exit(1);
     }
     if (c.sens_zsym_tol <= 0.0f || !std::isfinite(c.sens_zsym_tol)) c.sens_zsym_tol = 1e-4f;
+    if (c.data_mode == "simulation" && c.norm_factor_enable &&
+        c.norm_factor_path.empty()) {
+        c.norm_factor_enable = false;
+        printf("[simulation] no explicit --norm-factor: disable automatic "
+               "normalisation-factor discovery (g_i=1)\n");
+    }
     return c;
 }
 
@@ -3250,7 +4485,9 @@ static void enable_peer_access(int num_gpus) {
     }
 }
 
-static void broadcast_image_from_gpu0(float* d_src0, std::vector<GPUWorker>& workers, int64_t n) {
+static void broadcast_image_from_gpu0(const float* d_src0,
+                                      std::vector<GPUWorker>& workers,
+                                      int64_t n) {
     for (auto& w : workers) {
         if (w.dev == 0) {
             CUDA_CHECK(cudaSetDevice(0));
@@ -3282,7 +4519,9 @@ static void reduce_parts_to_gpu0(float* d_out0, float* d_tmp0,
 
 // CUDA 重建引擎入口：解析底层重建参数并输出系统矩阵完整尺寸的 NIfTI。
 // 底层入口：完成一次床位的完整系统矩阵重建并写出完整尺寸图像。
-static int bedmerge_reconstruct_main(int argc, char** argv) {
+// 该历史全局联合实现仅保留给源码级诊断。公开入口固定调用后面的独立状态调度器，
+// 使每床似然定义与既有基线保持一致。
+[[maybe_unused]] static int bedmerge_reconstruct_main(int argc, char** argv) {
     ReconConfig cfg = parse_args(argc, argv);
     if (!cfg.output_dir_explicit) {
         cfg.output_dir = default_output_dir_from_projection(cfg.proj_path);
@@ -3303,6 +4542,17 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                 "metadata total_voxels mismatch: Nx*Ny*Nz=%" PRId64 " total_voxels=%d\n",
                 (int64_t)meta.Nx * meta.Ny * meta.Nz, meta.total_voxels);
         exit(1);
+    }
+    if (cfg.butter_enable) {
+        const float nyquist_cycles_per_cm = 5.0f / meta.voxel_size;
+        if (cfg.butter_cutoff_cycles_per_cm > nyquist_cycles_per_cm) {
+            fprintf(stderr,
+                    "--butter-cutoff-cm %.9g exceeds voxel Nyquist %.9g cycles/cm "
+                    "(voxel=%.9g mm)\n",
+                    (double)cfg.butter_cutoff_cycles_per_cm,
+                    (double)nyquist_cycles_per_cm, (double)meta.voxel_size);
+            exit(1);
+        }
     }
 
     SymMode sym_mode = parse_sym_mode(cfg.sym_override, meta);
@@ -3356,6 +4606,7 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                     meta.full_num_angles, full_rpa);
             exit(1);
         }
+        validate_projection_counts(p_double, projection_paths[b]);
         if (b == 0) {
             proj_na = na;
             proj_rpa = rpa;
@@ -3644,24 +4895,22 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
         printf("[7] Global PSF off\n");
     }
 
-    cufftHandle fft_plan = 0;
-    cufftComplex* d_fft = nullptr;
-    float* d_butter = nullptr;
+    ButterworthWorkspace butter_workspace;
     if (cfg.butter_enable) {
-        std::vector<float> h_butter = build_butterworth_filter(
-            gg.Nx, gg.Ny, gg.global_Nz,
-            cfg.butter_cutoff, cfg.butter_order);
-        CUDA_CHECK(cudaMalloc(&d_butter, (size_t)global_N * sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_butter, h_butter.data(),
-                              (size_t)global_N * sizeof(float),
-                              cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMalloc(&d_fft,
-                              (size_t)global_N * sizeof(cufftComplex)));
-        CUFFT_CHECK(cufftPlan3d(&fft_plan, gg.global_Nz, gg.Ny, gg.Nx,
-                                CUFFT_C2C));
-        printf("[8] Global Butterworth on: cutoff=%.3f order=%d mode=%s\n",
-               cfg.butter_cutoff, cfg.butter_order,
-               cfg.butter_mode.c_str());
+        initialize_butterworth_workspace(
+            butter_workspace, gg.Nx, gg.Ny, gg.global_Nz, gg.voxel_mm,
+            cfg.butter_cutoff_cycles_per_cm, cfg.butter_order);
+        const double workspace_mib =
+            ((double)butter_workspace.padded_real_count * sizeof(float) +
+             (double)butter_workspace.spectrum_count *
+                 (sizeof(cufftComplex) + sizeof(float))) /
+            (1024.0 * 1024.0);
+        printf("[8] Global Butterworth on: cutoff=%.6g cycles/cm order=%d "
+               "mode=%s padding=%dx%dx%d workspace=%.1f MiB\n",
+               cfg.butter_cutoff_cycles_per_cm, cfg.butter_order,
+               cfg.butter_mode.c_str(), butter_workspace.padded_nx,
+               butter_workspace.padded_ny, butter_workspace.padded_nz,
+               workspace_mib);
     } else {
         printf("[8] Global Butterworth off\n");
     }
@@ -3871,10 +5120,10 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
     }
 
     if (use_psf) {
-        gpu_conv3d_renorm(d_global_sens, d_f_eff, d_conv_tmp1,
-                          d_psf_norm,
-                          gg.Nx, gg.Ny, gg.global_Nz,
-                          psf_kx, psf_ky, psf_kz);
+        gpu_conv3d_transpose_renorm(d_global_sens, d_f_eff, d_conv_tmp1,
+                                    d_psf_norm,
+                                    gg.Nx, gg.Ny, gg.global_Nz,
+                                    psf_kx, psf_ky, psf_kz);
         CUDA_CHECK(cudaMemcpy(d_global_sens, d_f_eff,
                               (size_t)global_N * sizeof(float),
                               cudaMemcpyDeviceToDevice));
@@ -3923,10 +5172,10 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
 
         float* d_current = d_f;
         if (use_psf) {
-            gpu_conv3d_renorm(d_f, d_f_eff, d_conv_tmp1,
-                              d_psf_norm,
-                              gg.Nx, gg.Ny, gg.global_Nz,
-                              psf_kx, psf_ky, psf_kz);
+            gpu_conv3d_forward_renorm(d_f, d_f_eff, d_conv_tmp1,
+                                      d_psf_norm,
+                                      gg.Nx, gg.Ny, gg.global_Nz,
+                                      psf_kx, psf_ky, psf_kz);
             d_current = d_f_eff;
         }
 
@@ -3974,7 +5223,9 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                                     (int)sym_mode, s, zm,
                                     meta.compact_num_angles,
                                     meta.full_num_angles,
-                                    cfg.recon_angle_step);
+                                    cfg.recon_angle_step,
+                                    IMPLEMENTATION_CASTOR,
+                                    1e-5f, 1e-10f, nullptr);
                                 w.spmv_backward();
                                 k_transform_bwd_add<<<nb_img, BLK>>>(
                                     w.d_bp_rot, w.d_bp_part,
@@ -4038,7 +5289,9 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                                 (int)sym_mode, s, zm,
                                 meta.compact_num_angles,
                                 meta.full_num_angles,
-                                cfg.recon_angle_step);
+                                cfg.recon_angle_step,
+                                IMPLEMENTATION_CASTOR,
+                                1e-5f, 1e-10f, nullptr);
                             w.spmv_backward();
                             k_transform_bwd_add<<<nb_img, BLK>>>(
                                 w.d_bp_rot, w.d_bp_part,
@@ -4137,10 +5390,10 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
         }
 
         if (use_psf) {
-            gpu_conv3d_renorm(d_global_bp, d_f_eff, d_conv_tmp1,
-                              d_psf_norm,
-                              gg.Nx, gg.Ny, gg.global_Nz,
-                              psf_kx, psf_ky, psf_kz);
+            gpu_conv3d_transpose_renorm(d_global_bp, d_f_eff, d_conv_tmp1,
+                                        d_psf_norm,
+                                        gg.Nx, gg.Ny, gg.global_Nz,
+                                        psf_kx, psf_ky, psf_kz);
             CUDA_CHECK(cudaMemcpy(d_global_bp, d_f_eff,
                                   (size_t)global_N * sizeof(float),
                                   cudaMemcpyDeviceToDevice));
@@ -4148,13 +5401,24 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
 
         float* map_ptr = nullptr;
         if (cfg.map_type != MAP_NONE && cfg.map_beta > 0.0f) {
-            k_map_gradient<<<nb_global, BLK>>>(
-                d_f, d_map_grad,
-                gg.Nx, gg.Ny, gg.global_Nz,
-                (int)cfg.map_type, cfg.map_neigh26,
-                cfg.map_delta, cfg.map_huber_threshold,
-                cfg.map_relative_gamma,
-                cfg.map_relative_epsilon);
+            if (cfg.map_type == MAP_TV) {
+                k_tv_gradient_omega<<<nb_global, BLK>>>(
+                    d_f, d_map_grad, gg.Nx, gg.Ny, gg.global_Nz,
+                    cfg.tv_smoothing);
+            } else if (cfg.map_type == MAP_MRP) {
+                k_mrp_gradient_omega<<<nb_global, BLK>>>(
+                    d_f, d_map_grad, gg.Nx, gg.Ny, gg.global_Nz,
+                    cfg.mrp_radius[0], cfg.mrp_radius[1], cfg.mrp_radius[2],
+                    cfg.mrp_epsilon, cfg.mrp_no_norm);
+            } else {
+                k_map_gradient<<<nb_global, BLK>>>(
+                    d_f, d_map_grad,
+                    gg.Nx, gg.Ny, gg.global_Nz,
+                    (int)cfg.map_type, cfg.map_neigh26,
+                    cfg.map_delta, cfg.map_huber_threshold,
+                    cfg.map_relative_gamma,
+                    cfg.map_relative_epsilon);
+            }
             map_ptr = d_map_grad;
         }
 
@@ -4188,10 +5452,10 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                 build_conv_norm(d_post_norm, d_conv_tmp1, d_conv_tmp2,
                                 gg.Nx, gg.Ny, gg.global_Nz,
                                 pkx, pky, pkz);
-                gpu_conv3d_renorm(d_f, d_f_eff, d_conv_tmp1,
-                                  d_post_norm,
-                                  gg.Nx, gg.Ny, gg.global_Nz,
-                                  pkx, pky, pkz);
+                gpu_conv3d_forward_renorm(d_f, d_f_eff, d_conv_tmp1,
+                                          d_post_norm,
+                                          gg.Nx, gg.Ny, gg.global_Nz,
+                                          pkx, pky, pkz);
                 CUDA_CHECK(cudaMemcpy(d_f, d_f_eff,
                                       (size_t)global_N * sizeof(float),
                                       cudaMemcpyDeviceToDevice));
@@ -4204,16 +5468,12 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
         if (cfg.butter_enable &&
             should_apply_filter(iter, cfg.num_iters,
                                 cfg.butter_mode,
+                                cfg.butter_start_iter,
                                 cfg.butter_period,
                                 cfg.butter_last_n)) {
-            k_real_to_complex<<<nb_global, BLK>>>(d_f, d_fft, global_N);
-            CUFFT_CHECK(cufftExecC2C(fft_plan, d_fft, d_fft,
-                                     CUFFT_FORWARD));
-            k_butter_mul<<<nb_global, BLK>>>(d_fft, d_butter, global_N);
-            CUFFT_CHECK(cufftExecC2C(fft_plan, d_fft, d_fft,
-                                     CUFFT_INVERSE));
-            k_complex_to_real<<<nb_global, BLK>>>(
-                d_fft, d_f, global_N, 1.0f / (float)global_N);
+            apply_butterworth_filter(
+                butter_workspace, d_f, d_f,
+                iter < cfg.num_iters || cfg.positivity);
         }
 
         if (cfg.roi_enable && cfg.apply_roi_each_iter) {
@@ -4229,11 +5489,8 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
         double iter_sec = std::chrono::duration<double>(
             std::chrono::high_resolution_clock::now() - iter_t0).count();
 
-        // Save only the requested interval and the final iteration. The
-        // outer bedmerge wrapper can crop and stitch these checkpoints.
-        bool do_save = (cfg.save_interval > 0 &&
-                        iter % cfg.save_interval == 0) ||
-                       (iter == cfg.num_iters);
+        bool do_save = cfg.save_interval > 0 &&
+                       iter % cfg.save_interval == 0;
         if (do_save) {
             CUDA_CHECK(cudaMemcpy(h_out.data(), d_f,
                                   (size_t)global_N * sizeof(float),
@@ -4247,7 +5504,7 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
                     roi_beds);
             }
             char fn[1024];
-            snprintf(fn, sizeof(fn), "%s/recon_iter%03d",
+            snprintf(fn, sizeof(fn), "%s/recon%d",
                      cfg.output_dir.c_str(), iter);
             save_volume_outputs(fn, h_out.data(),
                                 gg.Nx, gg.Ny, gg.global_Nz,
@@ -4267,26 +5524,7 @@ static int bedmerge_reconstruct_main(int argc, char** argv) {
            total_sec / 60.0,
            total_sec / std::max(1, cfg.num_iters));
 
-    CUDA_CHECK(cudaSetDevice(0));
-    CUDA_CHECK(cudaMemcpy(h_out.data(), d_f,
-                          (size_t)global_N * sizeof(float),
-                          cudaMemcpyDeviceToHost));
-    if (cfg.roi_enable) {
-        apply_multibed_roi_host(
-            h_out.data(), gg.Nx, gg.Ny, gg.global_Nz,
-            gg.voxel_mm, gg.origin_z_mm,
-            cfg.roi_diameter_mm, cfg.roi_height_mm,
-            cfg.roi_center_mm[0], cfg.roi_center_mm[1],
-            roi_beds);
-    }
-    save_volume_outputs(cfg.output_dir + "/recon_final",
-                        h_out.data(), gg.Nx, gg.Ny, gg.global_Nz,
-                        gg.voxel_mm, gg.origin_z_mm,
-                        cfg.save_raw1);
-
-    if (fft_plan) cufftDestroy(fft_plan);
-    if (d_fft) cudaFree(d_fft);
-    if (d_butter) cudaFree(d_butter);
+    if (cfg.butter_enable) destroy_butterworth_workspace(butter_workspace);
 
     cudaFree(d_bed_centers);
     cudaFree(d_map_grad);
@@ -4324,12 +5562,84 @@ struct BedMergeOptions {
     int mask_nz = 72;  // 输出 mask 的 Z 尺寸（体素）。
     double gain_roi_diameter_mm = 30.0;
     double roi_diameter_mm = 30.0;
-    double roi_height_mm = 21.6;
+    // ROI controls which full system-matrix voxels participate in reconstruction.
+    // It is independent of --mask-size, which only center-crops saved images.
+    double roi_height_mm = 66.0;
+    // 全局多床视野在两端床中心外各保留的层数。
+    // 单床保持72层；多床拼接窗口轴向尺寸为2*edge_layers。
+    int multibed_edge_layers = 40;
     int iterations = 50;
-    int save_interval = 0; // 0=final only; positive value saves every N iterations.
+    // 只保存 save_interval 的整数倍迭代，不额外生成 recon_final。
+    int save_interval = 50;
     int gpus = 1;
     int angle_batch = 0;
     int gpu_slab_cache = 6;
+
+    // 重建算法。默认 OMEGA 纯 MLEM；只有 OSL 才分配和计算 prior gradient。
+    int algorithm = ALGORITHM_MLEM;
+    bool algorithm_explicit = false;
+    int implementation = IMPLEMENTATION_OMEGA;
+    bool implementation_explicit = false;
+    std::string implementation_source;
+    bool legacy_version_alias_used = false;
+    bool legacy_numeric_alias_used = false;
+    float omega_epsilon = 1e-5f;
+    float castor_min_update = 0.01f;
+    float castor_max_update = 0.0f; // 0 表示不限制最大更新因子。
+    float castor_threshold = 1e-10f;
+
+    // 卷积时机：post 仅处理保存副本，smooth/intra 会回写迭代状态。
+    std::string conv_mode = "none";
+    int conv_implementation = CONV_IMPLEMENTATION_CASTOR_ADJOINT;
+    bool conv_implementation_explicit = false;
+    float psf_fwhm_mm[3] = {1.5f, 1.5f, 1.5f};
+    float psf_nb_sigmas = 3.0f;
+    float post_fwhm_mm = 0.45f;
+    bool post_fwhm_explicit = false;
+    std::string smooth_schedule = "constant";
+    std::string smooth_mode = "periodic";
+    float smooth_fwhm_start_mm = 0.60f;
+    float smooth_fwhm_end_mm = 0.15f;
+    int smooth_start_iter = 1;
+    int smooth_apply_every = 1;
+
+    // OSL prior。实现版本由 implementation 统一绑定，不能独立选择。
+    MapType map_type = MAP_NONE;
+    bool map_type_alias_used = false;
+    bool prior_option_used = false;
+    float map_beta = 0.0f;
+    float tv_smoothing = 1e-4f;
+    int mrp_radius[3] = {1, 1, 1};
+    bool mrp_radius_explicit = false;
+    float mrp_epsilon = 1e-8f;
+    bool mrp_epsilon_explicit = false;
+    bool mrp_no_norm = false;
+    int mrp_neighborhood = MRP_NEIGHBORHOOD_AUTO;
+    bool mrp_neighborhood_explicit = false;
+    int mrp_box_order = 1;
+    bool mrp_box_order_explicit = false;
+    bool mrp_box_exclude_corners = false;
+    float mrp_sphere_radius_mm = 1.0f;
+    bool mrp_sphere_radius_explicit = false;
+
+    /* 修正版 3D Butterworth：物理截止频率，单位 cycles/cm；0 表示关闭。 */
+    bool butter_enable = false;
+    float butter_cutoff_cycles_per_cm = 0.0f;
+    int butter_order = 8;
+    std::string butter_mode = "final";
+    int butter_start_iter = 0;
+    int butter_period = 5;
+    int butter_last_n = 10;
+
+    // 拼接后滤波只处理已经完成增益校正和 cos^2/sin^2 融合的派生体积。
+    // 默认关闭，因此纯重建不会为这些输出分配任何额外 GPU 缓冲。
+    std::string stitch_filter = "none";
+    float stitch_smooth_fwhm_mm = 0.45f;
+    float stitch_smooth_sigmas = 3.0f;
+    float stitch_butter_cutoff_cycles_per_cm = 3.0f;
+    int stitch_butter_order = 8;
+    std::vector<std::pair<float, int>> stitch_butter_variants;
+
     std::string data_mode = "measured";
     bool no_norm_factor = false;
     fs::path norm_factor;
@@ -4338,6 +5648,7 @@ struct BedMergeOptions {
     // 默认删除重建后用于裁剪的完整尺寸中间结果，只保留 mask 和拼接结果。
     bool keep_raw = false;
     bool dry_run = false;
+    bool self_test_algorithms = false;
 };
 
 struct BedInput {
@@ -4392,6 +5703,100 @@ static double parse_positive_double(const char* value, const char* name) {
     return parsed;
 }
 
+static double parse_nonnegative_double(const char* value, const char* name) {
+    char* end = nullptr;
+    const double parsed = std::strtod(value, &end);
+    if (!end || *end != '\0' || !std::isfinite(parsed) || parsed < 0.0) {
+        fail(std::string(name) + " must be a finite non-negative number");
+    }
+    return parsed;
+}
+
+static const char* algorithm_name(int value) {
+    return value == ALGORITHM_OSL ? "osl" : "mlem";
+}
+
+static const char* reference_implementation_name(int value) {
+    return value == IMPLEMENTATION_CASTOR ? "castor" : "omega";
+}
+
+static const char* conv_implementation_name(int value) {
+    if (value == CONV_IMPLEMENTATION_OMEGA) return "omega";
+    if (value == CONV_IMPLEMENTATION_CASTOR) return "castor";
+    return "castor-adjoint";
+}
+
+static const char* mrp_neighborhood_name(int value) {
+    if (value == MRP_NEIGHBORHOOD_AUTO) return "auto";
+    if (value == MRP_NEIGHBORHOOD_SIX_NEAREST) return "6-nearest";
+    if (value == MRP_NEIGHBORHOOD_SPHERE) return "sphere";
+    return "box";
+}
+
+static int parse_reference_implementation(const std::string& value,
+                                          const char* option_name) {
+    if (value == "omega") return IMPLEMENTATION_OMEGA;
+    if (value == "castor") return IMPLEMENTATION_CASTOR;
+    fail(std::string(option_name) + " must be omega or castor");
+    return IMPLEMENTATION_OMEGA;
+}
+
+// 新旧版本参数最终都写入同一个字段。重复指定同一版本允许，指定不同版本则
+// 立即报错，避免旧脚本在 OSL 与 MRP 之间形成静默混搭。
+static void select_reference_implementation(BedMergeOptions& options,
+                                            int implementation,
+                                            const char* option_name,
+                                            bool legacy_alias) {
+    if (options.implementation_explicit &&
+        options.implementation != implementation) {
+        fail(std::string(option_name) + "=" +
+             reference_implementation_name(implementation) +
+             " conflicts with " + options.implementation_source + "=" +
+             reference_implementation_name(options.implementation));
+    }
+    options.implementation = implementation;
+    options.implementation_explicit = true;
+    if (options.implementation_source.empty()) {
+        options.implementation_source = option_name;
+    }
+    options.legacy_version_alias_used =
+        options.legacy_version_alias_used || legacy_alias;
+}
+
+static void parse_positive_float3(const char* text, const char* name,
+                                  float out[3]) {
+    std::vector<std::string> fields = split(text, ',');
+    if (fields.size() != 1 && fields.size() != 3) {
+        fail(std::string(name) + " must be F or Fx,Fy,Fz");
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+        char* end = nullptr;
+        const double value = std::strtod(fields[i].c_str(), &end);
+        if (!end || *end != '\0' || !finite_positive(value) ||
+            value > std::numeric_limits<float>::max()) {
+            fail(std::string(name) + " must contain finite positive values");
+        }
+        out[i] = static_cast<float>(value);
+    }
+    if (fields.size() == 1) out[1] = out[2] = out[0];
+}
+
+static void parse_mrp_radius3(const char* text, int out[3]) {
+    std::vector<std::string> fields = split(text, ',');
+    if (fields.size() != 1 && fields.size() != 3) {
+        fail("--mrp-radius must be R or Rx,Ry,Rz");
+    }
+    for (size_t i = 0; i < fields.size(); ++i) {
+        char* end = nullptr;
+        const long value = std::strtol(fields[i].c_str(), &end, 10);
+        if (!end || *end != '\0' || value < 0 || value > MAX_MRP_RADIUS) {
+            fail("--mrp-radius values must be integers in [0,2]");
+        }
+        out[i] = static_cast<int>(value);
+    }
+    if (fields.size() == 1) out[1] = out[2] = out[0];
+}
+
 // 解析中心 mask 尺寸，支持 100,100,72、100x100x72 和 100X100X72。
 static void parse_mask_size(const char* text, int& nx, int& ny, int& nz) {
     std::string value(text);
@@ -4416,31 +5821,95 @@ static const char* need_value(int argc, char** argv, int& index, const char* nam
 }
 
 static void bedmerge_print_usage() {
+    // NVCC 13.1 会误解析紧跟在 UTF-8 中文字符后的转义换行，因此以 ASCII %s
+    // 结束这些格式串，并把换行作为独立参数传入。
     std::printf(
-        "Usage: spect_recon_PSC_6module_24pin_YSO_bedmerge "
+        "用法: spect_recon_PSC_6module_24pin_YSO_bedmerge "
         "--proj-dir DIR --out DIR [options]\n\n"
-        "The input directory must contain Bed1.bin and optionally Bed2.bin, ... .\n"
-        "Each bed is reconstructed with the CUDA engine; stitching is CPU-side.\n\n"
-        "Options:\n"
-        "  --matrix-dir DIR          system matrix directory [MCmatrix_PSC]\n"
-        "  --bed-step-mm F           bed-center spacing [16.8]\n"
-        "  --mask-size Nx,Ny,Nz      centered output mask in voxels [100,100,72]\n"
-        "  --gain-roi-diameter-mm F ROI diameter for scalar gain fitting [30]\n"
-        "  --roi-diameter-mm F       reconstruction cylindrical ROI diameter [30]\n"
-        "  --roi-height-mm F         reconstruction valid height per bed [21.6]\n"
-        "  --iters N                  MLEM iterations [50]\n"
-        "  --save-every N             save single-bed and stitched images every N iterations; 0=final only [0]\n"
-        "  --gpus N                  CUDA GPUs [1]\n"
-        "  --angle-batch N           compact-angle batch [0; resident CSR for bedmerge]\n"
-        "  --gpu-slab-cache N        resident angle slabs [6]\n"
-        "  --data-mode measured|simulation [measured]\n"
-        "  --no-detector-mask        disable measured-data bad-detector mask\n"
-        "  --keep-raw                keep full matrix-size intermediate bed volumes\n"
-        "  --no-norm-factor          force g_i=1 and disable factor auto-search\n"
-        "  --norm-factor FILE        explicit normalization factor\n"
+        "输入目录必须包含 Bed1.bin，可继续包含 Bed2.bin、Bed3.bin 等。%s"
+        "各床位保持独立局部图像，共享常驻 CSR/角度分块，最后在 CPU 端拼接。%s"
+        "基础参数:\n"
+        "  --matrix-dir DIR          系统矩阵目录 [MCmatrix_PSC]\n"
+        "  --out DIR                 输出目录；相对名称自动置于 recon_output/\n"
+        "  --bed-step-mm F           床位中心间距，单位 mm [16.8]\n"
+        "  --mask-size Nx,Ny,Nz      中心输出 mask，单位体素 [100,100,72]\n"
+        "  --gain-roi-diameter-mm F  增益拟合 ROI 直径，单位 mm [30]\n"
+        "  --roi-diameter-mm F       重建圆柱 ROI 直径，单位 mm [30]\n"
+        "  --roi-height-mm F         每床有效高度，单位 mm [66.0]\n"
+        "  --multibed-edge-layers N  全局视野两端延长层数 [40]\n"
+        "  --iters N                 MLEM/OSL 迭代次数 [50]\n"
+        "  --save-every N            每 N 次保存 reconN；不生成 recon_final [50]\n"
+        "  --gpus N                  CUDA GPU 数量 [1]\n"
+        "  --angle-batch N           compact angle 分批；0=完整 CSR 常驻 [0]\n"
+        "  --gpu-slab-cache N        GPU 常驻角度分块数；0=关闭 [6]\n\n"
+        "重建算法与数值阈值:\n"
+        "  --algorithm mlem|osl      重建更新；纯 MLEM 不分配 prior 缓冲 [mlem]\n"
+        "  --implementation MODE     omega|castor；同时绑定 EM 和 prior [omega]\n"
+        "  --omega-epsilon F         OMEGA 投影/图像域防零常数，必须 >0 [1e-5]\n"
+        "  --castor-threshold F      CASToR g*A*x 阈值，必须 >0 [1e-10]\n"
+        "  --castor-min-update F     CASToR MLEM/OSL 最小更新因子；0=关闭 [0.01]\n"
+        "  --castor-max-update F     CASToR MLEM/OSL 最大更新因子；0=关闭 [0]\n"
+        "  兼容别名: --osl-version/--mrp-version、--osl-epsilon,\n"
+        "            --forward-threshold、--osl-min-update/--osl-max-update%s"
+        "Gaussian 卷积:\n"
+        "  --conv-mode MODE          none|psf|post|sieve|intra|smooth [none]\n"
+        "                            psf=系统模型；post=仅处理保存副本；sieve=psf+post\n"
+        "                            intra/smooth=迭代间平滑并回写状态%s"
+        "  --conv-impl MODE          omega|castor|castor-adjoint [castor-adjoint]\n"
+        "                            omega=中心采样+镜像；castor=严格源码行为\n"
+        "                            castor-adjoint=CASToR 前向+严格伴随%s"
+        "  --psf-fwhm F|Fx,Fy,Fz    PSF FWHM，单位 mm [1.5,1.5,1.5]\n"
+        "                            CASToR 要求 Fx=Fy；FWHM 取决于系统空间分辨率\n"
+        "  --psf-sigmas F            CASToR/castor-adjoint 截断 sigma 数 (0,10] [3]\n"
+        "                            OMEGA 固定使用 2 sigma，因此忽略此参数\n"
+        "  --post-fwhm F             post/intra Gaussian FWHM，单位 mm [0.45]\n"
+        "  --smooth-mode MODE        every|periodic|final [periodic]\n"
+        "  --smooth-schedule MODE    constant|linear|exponential [constant]\n"
+        "  --smooth-fwhm-start F     linear/exponential 起始 FWHM，mm [0.60]\n"
+        "  --smooth-fwhm-end F       linear/exponential 结束 FWHM，mm [0.15]\n"
+        "  --smooth-start-iter N     intra 首次执行迭代 [1]\n"
+        "  --smooth-every N          intra 执行周期 [1]\n\n"
+        "OSL 空间 prior（版本必须与 --implementation 一致）:\n"
+        "  --prior none|tv|mrp       空间 prior [none]\n"
+        "  --map-type none|tv|mrp    --prior 的旧兼容名称\n"
+        "  --map-beta F              OSL 分母中的先验权重 beta；启用先验时必须 >0\n"
+        "  --tv-smoothing F          TV 根号内平滑量，必须 >0 [1e-4]\n"
+        "                            仅 OMEGA；与图像强度尺度和 beta 共同调节\n"
+        "  --mrp-radius R|Rx,Ry,Rz   MRP 半径，单位体素，每轴范围 [0,2] [1,1,1]\n"
+        "  --mrp-epsilon F           OMEGA MRP 分母防零常数 [1e-8]\n"
+        "  --mrp-no-norm             OMEGA 使用 x-median，不做 median 归一化%s"
+        "  --mrp-neighborhood MODE   CASToR 6-nearest|box|sphere [6-nearest]\n"
+        "  --mrp-box-order N         CASToR box 阶数，范围 [0,2] [1]\n"
+        "  --mrp-box-exclude-corners CASToR box 丢弃最外层 8 个角点%s"
+        "  --mrp-sphere-radius-mm F  CASToR sphere 半径，单位 mm [1]\n"
+        "                            sphere 包围盒每轴最多 2 体素%s"
+        "Butterworth 后处理:\n"
+        "  --butter-cutoff-cm F      三维径向截止频率，cycles/cm；不填=关闭\n"
+        "                            合法上限由体素 Nyquist=5/voxel_mm 决定\n"
+        "  --butter-order N          阶数，范围 [1,32] [8]\n"
+        "  --butter-mode MODE        every|final|periodic|last_n [final]\n"
+        "  --butter-start-iter N     首次允许滤波轮次；0=旧调度，范围 [0,iters] [0]\n"
+        "  --butter-period N         periodic 周期 [5]\n"
+        "  --butter-last-n N         last_n 窗口 [10]\n\n"
+        "拼接后一次性滤波（不回写单床重建）:\n"
+        "  --stitch-filter MODE      none|smooth|butterworth|both [none]\n"
+        "  --stitch-smooth-fwhm-mm F Gaussian FWHM，单位 mm [0.45]\n"
+        "  --stitch-smooth-sigmas F  CASToR Gaussian 截断 sigma 数 (0,10] [3]\n"
+        "  --stitch-butter-cutoff-cm F Butterworth 截止频率，cycles/cm [3]\n"
+        "  --stitch-butter-order N   Butterworth 阶数，范围 [1,32] [8]\n\n"
+        "  --stitch-butter-variant F,N 可重复指定多组截止频率和阶数\n\n"
+        "数据与其他参数:\n"
+        "  --data-mode measured|simulation [measured]；仿真默认 g_i=1\n"
+        "  --no-detector-mask        关闭实测坏探测器 mask\n"
+        "  --keep-raw                保留完整矩阵尺寸的单床中间体积%s"
+        "  --no-norm-factor          强制 g_i=1，关闭因子自动搜索%s"
+        "  --norm-factor FILE        显式归一化因子%s"
         "  --norm-factor-mode MODE   auto|matrix|projection [projection]\n"
-        "  --dry-run                 validate and print the CUDA configuration only\n"
-        "  --help                    show this help\n");
+        "  --dry-run                 只校验并打印配置\n"
+        "  --self-test-algorithms    运行 PSF、ratio、MLEM/OSL、TV/MRP、Butterworth 与 ROI 数值自检\n"
+        "  --help                    显示帮助\n",
+        "\n\n", "\n", "\n", "\n\n", "\n", "\n", "\n", "\n",
+        "\n", "\n", "\n");
 }
 
 static BedMergeOptions parse_options(int argc, char** argv) {
@@ -4471,18 +5940,201 @@ static BedMergeOptions parse_options(int argc, char** argv) {
         } else if (arg == "--roi-height-mm") {
             options.roi_height_mm = parse_positive_double(
                 need_value(argc, argv, i, "--roi-height-mm"), "--roi-height-mm");
+        } else if (arg == "--multibed-edge-layers") {
+            options.multibed_edge_layers = parse_int(
+                need_value(argc, argv, i, "--multibed-edge-layers"),
+                "--multibed-edge-layers");
         } else if (arg == "--iters") {
             options.iterations = parse_int(need_value(argc, argv, i, "--iters"), "--iters");
         } else if (arg == "--save-every") {
-            options.save_interval = parse_nonnegative_int(
+            options.save_interval = parse_int(
                 need_value(argc, argv, i, "--save-every"), "--save-every");
         } else if (arg == "--gpus") {
             options.gpus = parse_int(need_value(argc, argv, i, "--gpus"), "--gpus");
         } else if (arg == "--angle-batch") {
-            options.angle_batch = parse_int(need_value(argc, argv, i, "--angle-batch"), "--angle-batch");
+            options.angle_batch = parse_nonnegative_int(
+                need_value(argc, argv, i, "--angle-batch"), "--angle-batch");
         } else if (arg == "--gpu-slab-cache") {
-            options.gpu_slab_cache = parse_int(
+            options.gpu_slab_cache = parse_nonnegative_int(
                 need_value(argc, argv, i, "--gpu-slab-cache"), "--gpu-slab-cache");
+        } else if (arg == "--algorithm") {
+            const std::string value = need_value(argc, argv, i, "--algorithm");
+            if (value == "mlem") options.algorithm = ALGORITHM_MLEM;
+            else if (value == "osl") options.algorithm = ALGORITHM_OSL;
+            else fail("--algorithm must be mlem or osl");
+            options.algorithm_explicit = true;
+        } else if (arg == "--implementation" || arg == "--osl-version" ||
+                   arg == "--mrp-version") {
+            const std::string value = need_value(argc, argv, i, arg.c_str());
+            select_reference_implementation(
+                options, parse_reference_implementation(value, arg.c_str()),
+                arg.c_str(), arg != "--implementation");
+        } else if (arg == "--omega-epsilon" || arg == "--osl-epsilon") {
+            options.omega_epsilon = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+            options.legacy_numeric_alias_used =
+                options.legacy_numeric_alias_used || arg == "--osl-epsilon";
+        } else if (arg == "--castor-min-update" || arg == "--osl-min-update") {
+            options.castor_min_update = static_cast<float>(parse_nonnegative_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+            options.legacy_numeric_alias_used =
+                options.legacy_numeric_alias_used || arg == "--osl-min-update";
+        } else if (arg == "--castor-max-update" || arg == "--osl-max-update") {
+            options.castor_max_update = static_cast<float>(parse_nonnegative_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+            options.legacy_numeric_alias_used =
+                options.legacy_numeric_alias_used || arg == "--osl-max-update";
+        } else if (arg == "--castor-threshold" ||
+                   arg == "--forward-threshold") {
+            options.castor_threshold = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+            options.legacy_numeric_alias_used =
+                options.legacy_numeric_alias_used || arg == "--forward-threshold";
+        } else if (arg == "--conv-mode") {
+            options.conv_mode = need_value(argc, argv, i, "--conv-mode");
+        } else if (arg == "--conv-impl") {
+            const std::string value = need_value(argc, argv, i, "--conv-impl");
+            if (value == "castor-adjoint" || value == "adjoint") {
+                options.conv_implementation = CONV_IMPLEMENTATION_CASTOR_ADJOINT;
+            } else if (value == "omega") {
+                options.conv_implementation = CONV_IMPLEMENTATION_OMEGA;
+            } else if (value == "castor") {
+                options.conv_implementation = CONV_IMPLEMENTATION_CASTOR;
+            } else {
+                fail("--conv-impl must be omega, castor, or castor-adjoint");
+            }
+            options.conv_implementation_explicit = true;
+        } else if (arg == "--psf-fwhm") {
+            parse_positive_float3(need_value(argc, argv, i, "--psf-fwhm"),
+                                  "--psf-fwhm", options.psf_fwhm_mm);
+        } else if (arg == "--psf-sigmas") {
+            options.psf_nb_sigmas = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--psf-sigmas"), "--psf-sigmas"));
+        } else if (arg == "--post-fwhm") {
+            options.post_fwhm_mm = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--post-fwhm"), "--post-fwhm"));
+            options.post_fwhm_explicit = true;
+        } else if (arg == "--smooth-mode") {
+            options.smooth_mode = need_value(argc, argv, i, "--smooth-mode");
+        } else if (arg == "--smooth-schedule" || arg == "--post-schedule") {
+            options.smooth_schedule = need_value(argc, argv, i, arg.c_str());
+        } else if (arg == "--smooth-fwhm-start" || arg == "--post-fwhm-start") {
+            options.smooth_fwhm_start_mm = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+        } else if (arg == "--smooth-fwhm-end" || arg == "--post-fwhm-end") {
+            options.smooth_fwhm_end_mm = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str()));
+        } else if (arg == "--smooth-start-iter" || arg == "--post-start-iter") {
+            options.smooth_start_iter = parse_int(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str());
+        } else if (arg == "--smooth-every" || arg == "--post-every") {
+            options.smooth_apply_every = parse_int(
+                need_value(argc, argv, i, arg.c_str()), arg.c_str());
+        } else if (arg == "--prior" || arg == "--map-type") {
+            options.map_type = parse_map_type(
+                need_value(argc, argv, i, arg.c_str()));
+            if (options.map_type != MAP_NONE && options.map_type != MAP_TV &&
+                options.map_type != MAP_MRP) {
+                fail("--prior/--map-type supports only none, tv, or mrp");
+            }
+            if (arg == "--map-type") options.map_type_alias_used = true;
+            else options.prior_option_used = true;
+        } else if (arg == "--map-beta") {
+            options.map_beta = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--map-beta"), "--map-beta"));
+        } else if (arg == "--tv-smoothing") {
+            options.tv_smoothing = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--tv-smoothing"), "--tv-smoothing"));
+        } else if (arg == "--mrp-radius") {
+            parse_mrp_radius3(need_value(argc, argv, i, "--mrp-radius"),
+                              options.mrp_radius);
+            options.mrp_radius_explicit = true;
+        } else if (arg == "--mrp-epsilon") {
+            options.mrp_epsilon = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--mrp-epsilon"), "--mrp-epsilon"));
+            options.mrp_epsilon_explicit = true;
+        } else if (arg == "--mrp-no-norm") {
+            options.mrp_no_norm = true;
+        } else if (arg == "--mrp-neighborhood") {
+            const std::string value = need_value(argc, argv, i,
+                                                 "--mrp-neighborhood");
+            if (value == "6-nearest") {
+                options.mrp_neighborhood = MRP_NEIGHBORHOOD_SIX_NEAREST;
+            } else if (value == "box") {
+                options.mrp_neighborhood = MRP_NEIGHBORHOOD_BOX;
+            } else if (value == "sphere") {
+                options.mrp_neighborhood = MRP_NEIGHBORHOOD_SPHERE;
+            } else {
+                fail("--mrp-neighborhood must be 6-nearest, box, or sphere");
+            }
+            options.mrp_neighborhood_explicit = true;
+        } else if (arg == "--mrp-box-order") {
+            options.mrp_box_order = parse_nonnegative_int(
+                need_value(argc, argv, i, "--mrp-box-order"),
+                "--mrp-box-order");
+            options.mrp_box_order_explicit = true;
+        } else if (arg == "--mrp-box-exclude-corners") {
+            options.mrp_box_exclude_corners = true;
+        } else if (arg == "--mrp-sphere-radius-mm") {
+            options.mrp_sphere_radius_mm = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--mrp-sphere-radius-mm"),
+                "--mrp-sphere-radius-mm"));
+            options.mrp_sphere_radius_explicit = true;
+        } else if (arg == "--butter-cutoff-cm") {
+            options.butter_cutoff_cycles_per_cm =
+                static_cast<float>(parse_positive_double(
+                    need_value(argc, argv, i, "--butter-cutoff-cm"),
+                    "--butter-cutoff-cm"));
+            options.butter_enable = true;
+        } else if (arg == "--butter-order") {
+            options.butter_order = parse_int(
+                need_value(argc, argv, i, "--butter-order"), "--butter-order");
+        } else if (arg == "--butter-mode") {
+            options.butter_mode = need_value(argc, argv, i, "--butter-mode");
+        } else if (arg == "--butter-start-iter") {
+            options.butter_start_iter = parse_int(
+                need_value(argc, argv, i, "--butter-start-iter"),
+                "--butter-start-iter");
+        } else if (arg == "--butter-period") {
+            options.butter_period = parse_int(
+                need_value(argc, argv, i, "--butter-period"), "--butter-period");
+        } else if (arg == "--butter-last-n") {
+            options.butter_last_n = parse_int(
+                need_value(argc, argv, i, "--butter-last-n"), "--butter-last-n");
+        } else if (arg == "--stitch-filter") {
+            options.stitch_filter = need_value(argc, argv, i, "--stitch-filter");
+        } else if (arg == "--stitch-smooth-fwhm-mm") {
+            options.stitch_smooth_fwhm_mm = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--stitch-smooth-fwhm-mm"),
+                "--stitch-smooth-fwhm-mm"));
+        } else if (arg == "--stitch-smooth-sigmas") {
+            options.stitch_smooth_sigmas = static_cast<float>(parse_positive_double(
+                need_value(argc, argv, i, "--stitch-smooth-sigmas"),
+                "--stitch-smooth-sigmas"));
+        } else if (arg == "--stitch-butter-cutoff-cm") {
+            options.stitch_butter_cutoff_cycles_per_cm =
+                static_cast<float>(parse_positive_double(
+                    need_value(argc, argv, i, "--stitch-butter-cutoff-cm"),
+                    "--stitch-butter-cutoff-cm"));
+        } else if (arg == "--stitch-butter-order") {
+            options.stitch_butter_order = parse_int(
+                need_value(argc, argv, i, "--stitch-butter-order"),
+                "--stitch-butter-order");
+        } else if (arg == "--stitch-butter-variant") {
+            const std::string value = need_value(
+                argc, argv, i, "--stitch-butter-variant");
+            const std::vector<std::string> fields = split(value, ',');
+            if (fields.size() != 2) {
+                fail("--stitch-butter-variant must be cutoff_cycles_per_cm,order");
+            }
+            const float cutoff = static_cast<float>(parse_positive_double(
+                fields[0].c_str(), "stitch Butterworth cutoff"));
+            const int order = parse_int(
+                fields[1].c_str(), "stitch Butterworth order");
+            if (order > 32) {
+                fail("stitch Butterworth variant order must be in [1,32]");
+            }
+            options.stitch_butter_variants.emplace_back(cutoff, order);
         } else if (arg == "--data-mode") {
             options.data_mode = need_value(argc, argv, i, "--data-mode");
             if (options.data_mode != "measured" && options.data_mode != "simulation") {
@@ -4505,12 +6157,170 @@ static BedMergeOptions parse_options(int argc, char** argv) {
             }
         } else if (arg == "--dry-run") {
             options.dry_run = true;
+        } else if (arg == "--self-test-algorithms") {
+            options.self_test_algorithms = true;
         } else {
             fail("unknown option: " + arg);
         }
     }
+    if (options.self_test_algorithms) return options;
+    if (options.legacy_version_alias_used) {
+        std::fprintf(stderr,
+                     "[compatibility] --osl-version/--mrp-version now select the complete EM+prior implementation; prefer --implementation.\n");
+    }
+    if (options.legacy_numeric_alias_used) {
+        std::fprintf(stderr,
+                     "[compatibility] legacy OSL numeric option accepted; prefer --omega-epsilon or --castor-*.\n");
+    }
+    if (options.map_type_alias_used && options.prior_option_used) {
+        fail("do not combine --prior with the legacy --map-type alias");
+    }
+    if (options.map_type_alias_used && options.map_type != MAP_NONE &&
+        !options.algorithm_explicit) {
+        options.algorithm = ALGORITHM_OSL;
+        std::fprintf(stderr,
+                     "[compatibility] --map-type is deprecated; selecting --algorithm osl. Use --prior in new commands.\n");
+    }
+    if (options.prior_option_used && options.map_type != MAP_NONE &&
+        !options.algorithm_explicit) {
+        fail("--prior tv/mrp requires explicit --algorithm osl");
+    }
+    if (options.algorithm == ALGORITHM_MLEM && options.map_type != MAP_NONE) {
+        fail("pure MLEM cannot include TV/MRP in its update; use --algorithm osl");
+    }
+    if (options.algorithm == ALGORITHM_OSL && options.map_type == MAP_NONE) {
+        fail("--algorithm osl requires --prior tv or mrp");
+    }
+    if (options.algorithm == ALGORITHM_OSL && !(options.map_beta > 0.0f)) {
+        fail("--algorithm osl requires --map-beta >0");
+    }
+    if (options.algorithm == ALGORITHM_MLEM && options.map_beta > 0.0f) {
+        fail("--map-beta is only valid with --algorithm osl and a prior");
+    }
+    if (options.castor_max_update > 0.0f &&
+        options.castor_max_update < options.castor_min_update) {
+        fail("--castor-max-update must be 0 or >= --castor-min-update");
+    }
+    if (options.algorithm == ALGORITHM_OSL && options.map_type == MAP_TV &&
+        options.implementation == IMPLEMENTATION_CASTOR) {
+        fail("CASToR 3.2 has no TV penalty; use --implementation omega for TV");
+    }
+    if (options.algorithm == ALGORITHM_OSL && options.map_type == MAP_MRP) {
+        if (options.implementation == IMPLEMENTATION_OMEGA) {
+            if (options.mrp_neighborhood_explicit ||
+                options.mrp_box_order_explicit ||
+                options.mrp_box_exclude_corners ||
+                options.mrp_sphere_radius_explicit) {
+                fail("CASToR MRP neighborhood options cannot be used with --implementation omega");
+            }
+        } else {
+            if (options.mrp_radius_explicit || options.mrp_epsilon_explicit ||
+                options.mrp_no_norm) {
+                fail("OMEGA MRP radius/epsilon/no-norm options cannot be used with --implementation castor");
+            }
+            if (options.mrp_neighborhood == MRP_NEIGHBORHOOD_AUTO) {
+                // CASToR 配套 MRP.conf 的第一个有效配置是 6-nearest。
+                options.mrp_neighborhood = MRP_NEIGHBORHOOD_SIX_NEAREST;
+            }
+        }
+    }
     if (options.proj_dir.empty() || options.out.empty()) {
         fail("--proj-dir and --out are required");
+    }
+    // Keep output clutter out of the working directory without overriding an
+    // explicit absolute destination.  Normalising first also accepts
+    // ./recon_output/name without creating recon_output/recon_output/name.
+    if (options.out.is_relative()) {
+        const fs::path normal_out = options.out.lexically_normal();
+        const auto first = normal_out.begin();
+        if (first == normal_out.end() || *first != fs::path("recon_output")) {
+            options.out = fs::path("recon_output") / normal_out;
+        } else {
+            options.out = normal_out;
+        }
+    }
+    if (options.save_interval > options.iterations) {
+        fail("--save-every must not exceed --iters because recon_final is not written");
+    }
+    const bool valid_conv_mode =
+        options.conv_mode == "none" || options.conv_mode == "psf" ||
+        options.conv_mode == "post" || options.conv_mode == "sieve" ||
+        options.conv_mode == "intra" || options.conv_mode == "smooth";
+    if (!valid_conv_mode) {
+        fail("--conv-mode must be none, psf, post, sieve, intra, or smooth");
+    }
+    if (options.conv_mode == "sieve") {
+        if (options.conv_implementation_explicit &&
+            options.conv_implementation != CONV_IMPLEMENTATION_CASTOR) {
+            fail("strict CASToR sieve requires --conv-impl castor");
+        }
+        options.conv_implementation = CONV_IMPLEMENTATION_CASTOR;
+        if (options.post_fwhm_explicit) {
+            fail("strict CASToR sieve reuses --psf-fwhm and rejects --post-fwhm");
+        }
+    }
+    if ((options.conv_mode == "psf" || options.conv_mode == "sieve") &&
+        convolution_requires_castor_norm(options.conv_implementation) &&
+        fabsf(options.psf_fwhm_mm[0] - options.psf_fwhm_mm[1]) >
+            1e-6f * fmaxf(1.0f, options.psf_fwhm_mm[0])) {
+        fail("CASToR stationary Gaussian requires equal x/y transaxial FWHM");
+    }
+    if (options.psf_nb_sigmas > 10.0f) {
+        fail("--psf-sigmas must be in (0,10]");
+    }
+    if (options.smooth_schedule != "constant" &&
+        options.smooth_schedule != "linear" &&
+        options.smooth_schedule != "exponential") {
+        fail("--smooth-schedule must be constant, linear, or exponential");
+    }
+    if (options.smooth_mode != "every" && options.smooth_mode != "periodic" &&
+        options.smooth_mode != "final") {
+        fail("--smooth-mode must be every, periodic, or final");
+    }
+    if (options.smooth_start_iter < 1 ||
+        options.smooth_start_iter > options.iterations) {
+        fail("--smooth-start-iter must be in [1,iters]");
+    }
+    if (options.smooth_apply_every < 1) {
+        fail("--smooth-every must be >=1");
+    }
+    if (options.mrp_box_order > MAX_MRP_RADIUS) {
+        fail("--mrp-box-order must be in [0,2]");
+    }
+    if (options.map_type == MAP_MRP &&
+        options.implementation == IMPLEMENTATION_CASTOR &&
+        options.mrp_no_norm) {
+        fail("--mrp-no-norm is an OMEGA-only option");
+    }
+    if (options.butter_order < 1 || options.butter_order > 32) {
+        fail("--butter-order must be in [1,32]");
+    }
+    if (options.butter_mode != "every" && options.butter_mode != "final" &&
+        options.butter_mode != "periodic" && options.butter_mode != "last_n") {
+        fail("--butter-mode must be every, final, periodic, or last_n");
+    }
+    if (options.butter_start_iter < 0 ||
+        options.butter_start_iter > options.iterations) {
+        fail("--butter-start-iter must be in [0,iters]");
+    }
+    if (options.butter_period < 1) fail("--butter-period must be >=1");
+    if (options.butter_last_n < 1) fail("--butter-last-n must be >=1");
+    if (options.stitch_filter != "none" &&
+        options.stitch_filter != "smooth" &&
+        options.stitch_filter != "butterworth" &&
+        options.stitch_filter != "both") {
+        fail("--stitch-filter must be none, smooth, butterworth, or both");
+    }
+    if (options.stitch_smooth_sigmas > 10.0f) {
+        fail("--stitch-smooth-sigmas must be in (0,10]");
+    }
+    if (options.stitch_butter_order < 1 || options.stitch_butter_order > 32) {
+        fail("--stitch-butter-order must be in [1,32]");
+    }
+    if (options.stitch_butter_variants.empty()) {
+        options.stitch_butter_variants.emplace_back(
+            options.stitch_butter_cutoff_cycles_per_cm,
+            options.stitch_butter_order);
     }
     if (!fs::is_directory(options.proj_dir)) fail("projection directory not found: " + options.proj_dir.string());
     if (!fs::is_directory(options.matrix_dir)) fail("matrix directory not found: " + options.matrix_dir.string());
@@ -4520,6 +6330,12 @@ static BedMergeOptions parse_options(int argc, char** argv) {
     }
     if (!options.norm_factor.empty() && !fs::is_regular_file(options.norm_factor)) {
         fail("normalization factor not found: " + options.norm_factor.string());
+    }
+    if (options.data_mode == "simulation" && !options.no_norm_factor &&
+        options.norm_factor.empty()) {
+        options.no_norm_factor = true;
+        std::printf("[simulation] no explicit --norm-factor: disable automatic "
+                    "normalisation-factor discovery (g_i=1)\n");
     }
     return options;
 }
@@ -4571,9 +6387,8 @@ static double read_metadata_value(const fs::path& metadata_path,
         }
         return value;
     }
-    // Some sysmatrix generators keep the authoritative geometry only in
-    // metadata.bin.  The CUDA reader already uses that binary record; mirror
-    // the same values here so the crop/stitch wrapper remains compatible.
+    // 某些系统矩阵生成器只在 metadata.bin 中保存权威几何信息。CUDA 读取器已使用
+    // 该二进制记录；这里读取同一组值，保证裁剪和拼接包装层兼容这些矩阵。
     if (key == "Nx" || key == "Ny" || key == "Nz" || key == "voxel_size_mm") {
         const fs::path binary_path = metadata_path.parent_path() / "metadata.bin";
         std::ifstream binary(binary_path, std::ios::binary);
@@ -4634,9 +6449,8 @@ static float read_le_float(const unsigned char* p) {
     return value;
 }
 
-// 读取底层引擎生成的 NIfTI-1 成对 hdr/img，并检查尺寸、体素大小和 NaN/Inf。
-static Volume read_nifti(const fs::path& directory,
-                         const std::string& stem = "recon_final") {
+// 读取指定保存轮次的 NIfTI-1 成对 hdr/img，并检查尺寸、体素大小和 NaN/Inf。
+static Volume read_nifti(const fs::path& directory, const std::string& stem) {
     const fs::path hdr_path = directory / (stem + ".hdr");
     const fs::path img_path = directory / (stem + ".img");
     std::ifstream header_file(hdr_path, std::ios::binary);
@@ -4674,23 +6488,817 @@ static Volume read_nifti(const fs::path& directory,
     return volume;
 }
 
-static std::vector<int> discover_saved_iterations(const fs::path& directory) {
-    std::regex pattern("^recon_iter([0-9]+)\\.hdr$");
-    std::vector<int> iterations;
-    for (const auto& entry : fs::directory_iterator(directory)) {
-        if (!entry.is_regular_file()) continue;
-        std::smatch match;
-        const std::string name = entry.path().filename().string();
-        if (!std::regex_match(name, match, pattern)) continue;
-        const int iteration = parse_int(match[1].str().c_str(), "saved iteration");
-        if (!fs::is_regular_file(directory / ("recon_iter" + match[1].str() + ".img"))) {
-            fail("saved iteration is missing its .img companion: " + name);
-        }
-        iterations.push_back(iteration);
+static float scheduled_smooth_fwhm(const BedMergeOptions& options, int iter) {
+    if (options.smooth_schedule == "constant") return options.post_fwhm_mm;
+    const float t = options.iterations <= 1
+        ? 0.0f
+        : (float)(iter - 1) / (float)(options.iterations - 1);
+    if (options.smooth_schedule == "linear") {
+        return options.smooth_fwhm_start_mm +
+               t * (options.smooth_fwhm_end_mm - options.smooth_fwhm_start_mm);
     }
-    std::sort(iterations.begin(), iterations.end());
-    iterations.erase(std::unique(iterations.begin(), iterations.end()), iterations.end());
-    return iterations;
+    const float start = options.smooth_fwhm_start_mm;
+    const float end = options.smooth_fwhm_end_mm;
+    return start * expf(-logf(start / end) * t);
+}
+
+// 一个 CUDA 调度上下文保存所有床位，但每个 BedN 仍拥有独立的局部似然和图像状态。
+// 床位重叠不会在迭代中相加，跨床操作只发生在最终 CPU 增益拟合与拼接阶段。
+static int run_independent_iteration_major_reconstruction(
+    const BedMergeOptions& options, const std::vector<BedInput>& beds,
+    const fs::path& raw_root) {
+    const MatrixMeta meta = read_metadata(
+        (options.matrix_dir / "metadata.bin").string());
+    const int64_t local_n = meta.total_voxels;
+    if ((int64_t)meta.Nx * meta.Ny * meta.Nz != local_n) {
+        fail("metadata.bin has inconsistent Nx*Ny*Nz and total_voxels");
+    }
+    if (options.butter_enable) {
+        const float nyquist_cycles_per_cm = 5.0f / meta.voxel_size;
+        if (options.butter_cutoff_cycles_per_cm > nyquist_cycles_per_cm) {
+            std::ostringstream message;
+            message << "--butter-cutoff-cm "
+                    << options.butter_cutoff_cycles_per_cm
+                    << " exceeds voxel Nyquist " << nyquist_cycles_per_cm
+                    << " cycles/cm (voxel=" << meta.voxel_size << " mm)";
+            fail(message.str());
+        }
+    }
+
+    const SymMode sym_mode = parse_sym_mode("auto", meta);
+    const int sym_count = xy_sym_count(sym_mode);
+    const int z_count = ((mode_uses_z(sym_mode) || meta.use_zsym != 0) &&
+                         meta.compact_det_z < meta.det_nz) ? 2 : 1;
+    const int full_rpa = meta.det_nx * meta.det_nz;
+    const size_t bed_count = beds.size();
+    const float effective_roi_height_mm = bed_count == 1
+        ? 72.0f * meta.voxel_size
+        : (float)meta.Nz * meta.voxel_size;
+    const bool use_detector_mask =
+        options.data_mode == "measured" && !options.no_detector_mask;
+    const bool use_psf =
+        options.conv_mode == "psf" || options.conv_mode == "sieve";
+    const bool use_post =
+        options.conv_mode == "post" || options.conv_mode == "sieve";
+    const bool use_intra =
+        options.conv_mode == "intra" || options.conv_mode == "smooth";
+    const bool track_castor_threshold =
+        options.implementation == IMPLEMENTATION_CASTOR;
+    const bool need_convolution_norm =
+        convolution_requires_castor_norm(options.conv_implementation);
+
+    if (options.algorithm == ALGORITHM_OSL && options.map_type == MAP_MRP &&
+        options.implementation == IMPLEMENTATION_CASTOR &&
+        options.mrp_neighborhood == MRP_NEIGHBORHOOD_SPHERE &&
+        std::max(1, (int)(options.mrp_sphere_radius_mm / meta.voxel_size)) >
+        MAX_MRP_RADIUS) {
+        fail("CASToR MRP sphere radius exceeds the supported two-voxel bounding radius");
+    }
+
+    if ((sym_mode == SYM_45 || sym_mode == SYM_45Z || sym_mode == SYM_90) &&
+        meta.Nx != meta.Ny) {
+        fail("45/90 degree system-matrix symmetry requires Nx == Ny");
+    }
+
+    // 所有投影在主机端只保存一份，每个活动 worker 也只上传一份。worker 通过
+    // d_P_all + bed_index*projection_stride 选择当前床位。
+    std::vector<float> p_all;
+    size_t projection_stride = 0;
+    int projection_angles = 0;
+    int projection_rpa = 0;
+    for (size_t b = 0; b < bed_count; ++b) {
+        int na = 0;
+        int rpa = 0;
+        std::vector<double> projection = read_projection_bin_double(
+            beds[b].path.string(), &na, &rpa);
+        if (na != meta.full_num_angles || rpa != full_rpa) {
+            fail("projection shape mismatch for " + beds[b].path.string() +
+                 ": expected (angles,rpa)=(" +
+                 std::to_string(meta.full_num_angles) + "," +
+                 std::to_string(full_rpa) + ")");
+        }
+        validate_projection_counts(projection, beds[b].path.string());
+        if (b == 0) {
+            projection_angles = na;
+            projection_rpa = rpa;
+            projection_stride = projection.size();
+            p_all.reserve(projection_stride * bed_count);
+        } else if (projection.size() != projection_stride) {
+            fail("projection length mismatch between beds");
+        }
+
+        if (use_detector_mask) {
+            const BadDetectorMaskStats stats = zero_link4_fpga2_det4(
+                projection, na, meta.det_nx, meta.det_nz);
+            std::printf("[input] Bed%zu measured detector mask: bins=%" PRId64
+                        " removed_counts=%.6e\n",
+                        b + 1, stats.bins, stats.removed_sum);
+        }
+        double counts = 0.0;
+        for (double value : projection) counts += value;
+        const size_t offset = p_all.size();
+        p_all.resize(offset + projection_stride);
+        for (size_t i = 0; i < projection_stride; ++i) {
+            p_all[offset + i] = static_cast<float>(projection[i]);
+        }
+        std::printf("[input] Bed%zu counts=%.6e file=%s\n", b + 1, counts,
+                    beds[b].path.string().c_str());
+    }
+
+    // 复用底层因子读取器，确保 matrix/projection 因子方向与底层引擎一致。除非用户
+    // 显式提供因子，仿真数据进入此处时 no_norm_factor=true。
+    ReconConfig factor_cfg;
+    factor_cfg.matrix_dir = options.matrix_dir.string();
+    factor_cfg.norm_factor_enable = !options.no_norm_factor;
+    factor_cfg.norm_factor_path = options.norm_factor.string();
+    // 自动发现实测因子时保留历史 auto 语义；外层默认 projection 只用于用户显式
+    // 指定因子文件的情况。
+    factor_cfg.norm_factor_mode = options.norm_factor.empty()
+        ? "auto" : options.norm_factor_mode;
+    std::vector<float> g_full(projection_stride, 1.0f);
+    const std::string factor_path = find_normalization_factor(factor_cfg);
+    if (!factor_path.empty()) {
+        const std::string factor_mode = resolve_normalization_factor_mode(
+            factor_cfg, factor_path);
+        g_full = read_system_response_factor(projection_angles, projection_rpa,
+                                             factor_path, factor_mode);
+        std::printf("[normalisation] %s (%s)\n", factor_path.c_str(),
+                    factor_mode.c_str());
+    } else {
+        std::printf("[normalisation] g_i=1\n");
+    }
+    if (use_detector_mask) {
+        zero_link4_fpga2_det4(g_full, projection_angles,
+                              meta.det_nx, meta.det_nz);
+    }
+
+    int available_gpus = 0;
+    CUDA_CHECK(cudaGetDeviceCount(&available_gpus));
+    if (available_gpus <= 0) fail("no CUDA device is available");
+    int num_gpus = std::min(options.gpus, available_gpus);
+    const bool use_angle_batch = options.angle_batch > 0;
+    if (use_angle_batch && num_gpus != 1) {
+        std::printf("[scheduler] --angle-batch uses GPU0 only; forcing --gpus 1\n");
+        num_gpus = 1;
+    }
+    enable_peer_access(num_gpus);
+
+    const std::vector<ChunkInfo> chunks = scan_chunks(
+        options.matrix_dir.string());
+    int64_t active_roi_voxels = 0;
+    const std::vector<uint8_t> roi_mask = build_centered_cylinder_roi_mask(
+        meta.Nx, meta.Ny, meta.Nz, meta.voxel_size,
+        (float)options.roi_diameter_mm, effective_roi_height_mm,
+        active_roi_voxels);
+    if (active_roi_voxels <= 0) fail("cylindrical reconstruction ROI contains no voxels");
+    std::printf("[roi] active voxels=%" PRId64 "/%d (%.3f%%), "
+                "diameter=%.6g mm height=%.6g mm\n",
+                active_roi_voxels, meta.total_voxels,
+                100.0 * (double)active_roi_voxels / (double)meta.total_voxels,
+                options.roi_diameter_mm, (double)effective_roi_height_mm);
+
+    // 每个驻留 CSR 或临时角度分块都使用同一 ROI 列表裁剪。图像列空间保持完整，
+    // 但 ROI 外非零元不会上传 GPU，也不会进入 sensitivity/前投影/反投影。
+    auto build_roi_csr = [&](int start_ck, int end_ck) {
+        TimedHostCSR built = build_worker_csr_timed(
+            chunks, start_ck, end_ck, meta.compact_rpa, meta.total_voxels);
+        const int64_t original_nnz = built.csr.nnz;
+        const auto prune_start = std::chrono::high_resolution_clock::now();
+        const int64_t removed = prune_host_csr_to_roi(built.csr, roi_mask);
+        if (built.csr.nnz <= 0) {
+            fail("cylindrical ROI leaves an empty system-matrix angle block");
+        }
+        built.build_sec += std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - prune_start).count();
+        const double kept_percent = original_nnz > 0
+            ? 100.0 * (double)built.csr.nnz / (double)original_nnz : 100.0;
+        std::printf("[roi] CSR angles [%d,%d): nnz=%" PRId64
+                    "/%" PRId64 " (%.3f%%), removed=%" PRId64 "\n",
+                    start_ck, end_ck, built.csr.nnz, original_nnz,
+                    kept_percent, removed);
+        return built;
+    };
+    std::vector<GPUWorker> workers;
+    std::vector<GPUWorker> cached_slab_workers;
+    int cached_end_ck = 0;
+    if (!use_angle_batch) {
+        workers.resize((size_t)num_gpus);
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            const int start_ck = gpu * meta.compact_num_angles / num_gpus;
+            const int end_ck = (gpu + 1) * meta.compact_num_angles / num_gpus;
+            const TimedHostCSR built = build_roi_csr(start_ck, end_ck);
+            workers[(size_t)gpu].init(gpu, built.csr, meta, p_all,
+                                      projection_stride, (int)bed_count, g_full,
+                                      track_castor_threshold);
+            std::printf("[scheduler] resident CSR GPU%d angles [%d,%d), "
+                        "build=%.3fs\n", gpu, start_ck, end_ck,
+                        built.build_sec);
+        }
+    } else if (options.gpu_slab_cache > 0) {
+        const int batch = std::max(1, options.angle_batch);
+        const int total_slabs =
+            (meta.compact_num_angles + batch - 1) / batch;
+        const int cached_count = std::min(options.gpu_slab_cache, total_slabs);
+        cached_slab_workers.resize((size_t)cached_count);
+        for (int slab = 0; slab < cached_count; ++slab) {
+            const int start_ck = slab * batch;
+            const int end_ck = std::min(meta.compact_num_angles,
+                                        start_ck + batch);
+            const TimedHostCSR built = build_roi_csr(start_ck, end_ck);
+            cached_slab_workers[(size_t)slab].init(
+                0, built.csr, meta, p_all, projection_stride,
+                (int)bed_count, g_full, track_castor_threshold);
+            std::printf("[scheduler] cached angle slab [%d,%d), build=%.3fs\n",
+                        start_ck, end_ck, built.build_sec);
+        }
+        cached_end_ck = std::min(meta.compact_num_angles, cached_count * batch);
+    }
+
+    CUDA_CHECK(cudaSetDevice(0));
+    const int blocks_local = (int)((local_n + BLK - 1) / BLK);
+    float* d_states = nullptr;
+    float* d_backprojections = nullptr;
+    float* d_sensitivity = nullptr;
+    float* d_reduce_tmp = nullptr;
+    float* d_effective_states = nullptr;
+    float* d_conv_work = nullptr;
+    float* d_conv_tmp = nullptr;
+    float* d_psf_norm = nullptr;
+    float* d_post_norm = nullptr;
+    float* d_map_grad = nullptr;
+    unsigned long long* d_nonpositive_osl_count = nullptr;
+    OslDiagnostics* d_osl_diagnostics = nullptr;
+    uint8_t* d_osl_roi_mask = nullptr;
+    ButterworthWorkspace butter_workspace;
+    CUDA_CHECK(cudaMalloc(&d_states, bed_count * (size_t)local_n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_backprojections,
+                          bed_count * (size_t)local_n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_sensitivity, (size_t)local_n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_reduce_tmp, (size_t)local_n * sizeof(float)));
+
+    const bool any_gaussian = use_psf || use_post || use_intra;
+    if (any_gaussian) {
+        CUDA_CHECK(cudaMalloc(&d_conv_work, (size_t)local_n * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_conv_tmp, (size_t)local_n * sizeof(float)));
+    }
+    if (use_psf) {
+        CUDA_CHECK(cudaMalloc(&d_effective_states,
+                              bed_count * (size_t)local_n * sizeof(float)));
+        if (need_convolution_norm) {
+            CUDA_CHECK(cudaMalloc(&d_psf_norm,
+                                  (size_t)local_n * sizeof(float)));
+        }
+    }
+    if (need_convolution_norm &&
+        ((use_post && options.conv_mode != "sieve") || use_intra)) {
+        CUDA_CHECK(cudaMalloc(&d_post_norm, (size_t)local_n * sizeof(float)));
+    }
+    if (options.algorithm == ALGORITHM_OSL) {
+        CUDA_CHECK(cudaMalloc(&d_map_grad, (size_t)local_n * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_nonpositive_osl_count,
+                              sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMalloc(&d_osl_diagnostics, sizeof(OslDiagnostics)));
+        CUDA_CHECK(cudaMalloc(&d_osl_roi_mask,
+                              (size_t)local_n * sizeof(uint8_t)));
+        CUDA_CHECK(cudaMemcpy(d_osl_roi_mask, roi_mask.data(),
+                              (size_t)local_n * sizeof(uint8_t),
+                              cudaMemcpyHostToDevice));
+    }
+    if (options.butter_enable) {
+        initialize_butterworth_workspace(
+            butter_workspace, meta.Nx, meta.Ny, meta.Nz, meta.voxel_size,
+            options.butter_cutoff_cycles_per_cm, options.butter_order);
+        const double workspace_mib =
+            ((double)butter_workspace.padded_real_count * sizeof(float) +
+             (double)butter_workspace.spectrum_count *
+                 (sizeof(cufftComplex) + sizeof(float))) /
+            (1024.0 * 1024.0);
+        std::printf("[butterworth] cutoff=%.6g cycles/cm order=%d "
+                    "padding=%dx%dx%d workspace=%.1f MiB\n",
+                    options.butter_cutoff_cycles_per_cm,
+                    options.butter_order,
+                    butter_workspace.padded_nx,
+                    butter_workspace.padded_ny,
+                    butter_workspace.padded_nz,
+                    workspace_mib);
+    }
+
+    std::vector<float> psf_kx, psf_ky, psf_kz;
+    if (use_psf) {
+        build_gaussian_kernel_set(
+            options.conv_implementation, options.psf_fwhm_mm,
+            meta.voxel_size, options.psf_nb_sigmas,
+            psf_kx, psf_ky, psf_kz);
+        prepare_convolution_normalization(
+            options.conv_implementation, d_psf_norm,
+            meta.Nx, meta.Ny, meta.Nz, psf_kx, psf_ky, psf_kz);
+    }
+
+    std::vector<float> post_kx, post_ky, post_kz;
+    if (use_post) {
+        if (options.conv_mode == "sieve") {
+            // CASToR sieve 复用同一个 convolver：核、截断和边界归一化完全相同。
+            post_kx = psf_kx;
+            post_ky = psf_ky;
+            post_kz = psf_kz;
+        } else {
+            const float post_fwhm[3] = {
+                options.post_fwhm_mm, options.post_fwhm_mm,
+                options.post_fwhm_mm};
+            build_gaussian_kernel_set(
+                options.conv_implementation, post_fwhm, meta.voxel_size,
+                options.psf_nb_sigmas, post_kx, post_ky, post_kz);
+            prepare_convolution_normalization(
+                options.conv_implementation, d_post_norm,
+                meta.Nx, meta.Ny, meta.Nz,
+                post_kx, post_ky, post_kz);
+        }
+    }
+
+    std::printf("[algorithm] algorithm=%s implementation=%s conv=%s/%s "
+                "psf=%s post=%s intra=%s prior=%s beta=%.6g "
+                "butterworth=%s\n",
+                algorithm_name(options.algorithm),
+                reference_implementation_name(options.implementation),
+                options.conv_mode.c_str(),
+                conv_implementation_name(options.conv_implementation),
+                use_psf ? "on" : "off",
+                use_post ? "on" : "off", use_intra ? "on" : "off",
+                options.map_type == MAP_TV ? "tv" :
+                (options.map_type == MAP_MRP ? "mrp" : "none"),
+                options.map_beta, options.butter_enable ? "on" : "off");
+
+    for (size_t b = 0; b < bed_count; ++b) {
+        float* state = d_states + b * (size_t)local_n;
+        k_fill<<<blocks_local, BLK>>>(state, 1.0f, local_n);
+        if (options.roi_diameter_mm > 0.0) {
+            k_apply_local_cylinder_roi<<<blocks_local, BLK>>>(
+                state, meta.Nx, meta.Ny, meta.Nz, meta.voxel_size,
+                (float)options.roi_diameter_mm, effective_roi_height_mm,
+                0.0f, 0.0f, 0.0f, local_n);
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto accumulate_worker_sensitivity = [&](GPUWorker& worker) {
+        CUDA_CHECK(cudaSetDevice(worker.dev));
+        const int blocks_rows = (worker.local_rows + BLK - 1) / BLK;
+        const int blocks_image = (int)(((int64_t)worker.N2 + BLK - 1) / BLK);
+        CUDA_CHECK(cudaMemset(worker.d_sens_part, 0,
+                              (size_t)worker.N2 * sizeof(float)));
+        for (int s = 0; s < sym_count; ++s) {
+            for (int zm = 0; zm < z_count; ++zm) {
+                k_make_unit_ratio_batched<<<blocks_rows, BLK>>>(
+                    worker.d_ratio, worker.d_G_full, worker.local_rows,
+                    worker.start_ck, worker.compact_rpa, worker.det_nx,
+                    worker.compact_det_z, worker.det_nz, full_rpa,
+                    (int)sym_mode, s, zm, meta.compact_num_angles,
+                    meta.full_num_angles, 1);
+                worker.spmv_backward();
+                k_transform_bwd_add<<<blocks_image, BLK>>>(
+                    worker.d_bp_rot, worker.d_sens_part,
+                    worker.Nx, worker.Ny, worker.Nz, (int)sym_mode, s, zm);
+            }
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+    };
+
+    std::printf("[scheduler] sensitivity: one local A^T 1 shared by %zu beds\n",
+                bed_count);
+    if (!use_angle_batch) {
+        std::vector<std::thread> sensitivity_threads;
+        for (int gpu = 0; gpu < num_gpus; ++gpu) {
+            sensitivity_threads.emplace_back([&, gpu]() {
+                accumulate_worker_sensitivity(workers[(size_t)gpu]);
+            });
+        }
+        for (std::thread& thread : sensitivity_threads) thread.join();
+        reduce_parts_to_gpu0(d_sensitivity, d_reduce_tmp, workers,
+                             &GPUWorker::d_sens_part, local_n);
+    } else {
+        CUDA_CHECK(cudaMemset(d_sensitivity, 0, (size_t)local_n * sizeof(float)));
+        auto add_sensitivity_slab = [&](GPUWorker& worker) {
+            accumulate_worker_sensitivity(worker);
+            CUDA_CHECK(cudaSetDevice(0));
+            k_add_inplace<<<blocks_local, BLK>>>(d_sensitivity,
+                                                  worker.d_sens_part, local_n);
+            CUDA_CHECK(cudaDeviceSynchronize());
+        };
+        for (GPUWorker& worker : cached_slab_workers) add_sensitivity_slab(worker);
+        const int batch = std::max(1, options.angle_batch);
+        for (int start_ck = cached_end_ck; start_ck < meta.compact_num_angles;
+             start_ck += batch) {
+            const int end_ck = std::min(meta.compact_num_angles, start_ck + batch);
+            const TimedHostCSR built = build_roi_csr(start_ck, end_ck);
+            GPUWorker worker;
+            worker.init(0, built.csr, meta, p_all, projection_stride,
+                        (int)bed_count, g_full, track_castor_threshold);
+            add_sensitivity_slab(worker);
+            worker.destroy();
+        }
+    }
+    CUDA_CHECK(cudaSetDevice(0));
+    if (use_psf) {
+        // castor-adjoint 用真转置；OMEGA/严格 CASToR 按各自源码重用正向卷积。
+        apply_convolution_backward(
+            options.conv_implementation, d_sensitivity, d_conv_work,
+            d_conv_tmp, d_psf_norm, meta.Nx, meta.Ny, meta.Nz,
+            psf_kx, psf_ky, psf_kz);
+        CUDA_CHECK(cudaMemcpy(d_sensitivity, d_conv_work,
+                              (size_t)local_n * sizeof(float),
+                              cudaMemcpyDeviceToDevice));
+    }
+    // 不在此处统一 clamp：OMEGA 在更新核内按 omega_epsilon 设下限，CASToR
+    // 使用原始 sensitivity。统一 1e-12 会改变两套参考实现的零灵敏度语义。
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto run_worker_backprojection = [&](GPUWorker& worker, size_t bed_index) {
+        CUDA_CHECK(cudaSetDevice(worker.dev));
+        const int blocks_rows = (worker.local_rows + BLK - 1) / BLK;
+        const int blocks_image = (int)(((int64_t)worker.N2 + BLK - 1) / BLK);
+        CUDA_CHECK(cudaMemset(worker.d_bp_part, 0,
+                              (size_t)worker.N2 * sizeof(float)));
+        const float* projection = worker.d_P_all + bed_index * worker.proj_stride;
+        for (int s = 0; s < sym_count; ++s) {
+            for (int zm = 0; zm < z_count; ++zm) {
+                k_transform_fwd<<<blocks_image, BLK>>>(
+                    worker.d_img_in, worker.d_img_rot,
+                    worker.Nx, worker.Ny, worker.Nz, (int)sym_mode, s, zm);
+                worker.spmv_forward();
+                k_calc_ratio_batched<<<blocks_rows, BLK>>>(
+                    worker.d_y, worker.d_ratio, projection, worker.d_G_full,
+                    worker.local_rows, worker.start_ck, worker.compact_rpa,
+                    worker.det_nx, worker.compact_det_z, worker.det_nz,
+                    full_rpa, (int)sym_mode, s, zm, meta.compact_num_angles,
+                    meta.full_num_angles, 1, options.implementation,
+                    options.omega_epsilon, options.castor_threshold,
+                    worker.d_low_forward_count);
+                worker.spmv_backward();
+                k_transform_bwd_add<<<blocks_image, BLK>>>(
+                    worker.d_bp_rot, worker.d_bp_part,
+                    worker.Nx, worker.Ny, worker.Nz, (int)sym_mode, s, zm);
+            }
+        }
+    };
+
+    std::printf("[scheduler] independent local %s: order=iteration -> "
+                "matrix/slab -> Bed1..Bed%zu\n",
+                algorithm_name(options.algorithm), bed_count);
+    std::vector<float> host_state((size_t)local_n);
+    const float local_origin_z =
+        -0.5f * (float)(meta.Nz - 1) * meta.voxel_size;
+    const auto total_start = std::chrono::high_resolution_clock::now();
+    for (int iteration = 1; iteration <= options.iterations; ++iteration) {
+        const auto iteration_start = std::chrono::high_resolution_clock::now();
+        unsigned long long streamed_low_forward_count = 0;
+        for (GPUWorker& worker : workers) worker.reset_low_forward_count();
+        for (GPUWorker& worker : cached_slab_workers) {
+            worker.reset_low_forward_count();
+        }
+        CUDA_CHECK(cudaSetDevice(0));
+        if (d_nonpositive_osl_count) {
+            CUDA_CHECK(cudaMemset(d_nonpositive_osl_count, 0,
+                                  sizeof(unsigned long long)));
+            const OslDiagnostics empty_diagnostics = empty_osl_diagnostics();
+            CUDA_CHECK(cudaMemcpy(d_osl_diagnostics, &empty_diagnostics,
+                                  sizeof(empty_diagnostics),
+                                  cudaMemcpyHostToDevice));
+        }
+        if (use_psf) {
+            // 前投影使用 A_eff*x=A*(C*x)，所有床位只计算一次有效模糊状态。
+            for (size_t b = 0; b < bed_count; ++b) {
+                apply_convolution_forward(
+                    options.conv_implementation,
+                    d_states + b * (size_t)local_n,
+                    d_effective_states + b * (size_t)local_n,
+                    d_conv_tmp, d_psf_norm,
+                    meta.Nx, meta.Ny, meta.Nz,
+                    psf_kx, psf_ky, psf_kz);
+            }
+        }
+        if (!use_angle_batch) {
+            for (size_t b = 0; b < bed_count; ++b) {
+                float* state = d_states + b * (size_t)local_n;
+                const float* projected_state = use_psf
+                    ? d_effective_states + b * (size_t)local_n
+                    : state;
+                broadcast_image_from_gpu0(projected_state, workers, local_n);
+                std::vector<std::thread> worker_threads;
+                for (int gpu = 0; gpu < num_gpus; ++gpu) {
+                    worker_threads.emplace_back([&, gpu, b]() {
+                        GPUWorker& worker = workers[(size_t)gpu];
+                        run_worker_backprojection(worker, b);
+                        CUDA_CHECK(cudaDeviceSynchronize());
+                    });
+                }
+                for (std::thread& thread : worker_threads) thread.join();
+                CUDA_CHECK(cudaSetDevice(0));
+                reduce_parts_to_gpu0(d_backprojections + b * (size_t)local_n,
+                                     d_reduce_tmp, workers,
+                                     &GPUWorker::d_bp_part, local_n);
+            }
+        } else {
+            CUDA_CHECK(cudaSetDevice(0));
+            CUDA_CHECK(cudaMemset(d_backprojections, 0,
+                                  bed_count * (size_t)local_n * sizeof(float)));
+            auto process_slab = [&](GPUWorker& worker) {
+                for (size_t b = 0; b < bed_count; ++b) {
+                    const float* projected_state = use_psf
+                        ? d_effective_states + b * (size_t)local_n
+                        : d_states + b * (size_t)local_n;
+                    CUDA_CHECK(cudaMemcpy(worker.d_img_in,
+                                          projected_state,
+                                          (size_t)local_n * sizeof(float),
+                                          cudaMemcpyDeviceToDevice));
+                    run_worker_backprojection(worker, b);
+                    CUDA_CHECK(cudaSetDevice(0));
+                    k_add_inplace<<<blocks_local, BLK>>>(
+                        d_backprojections + b * (size_t)local_n,
+                        worker.d_bp_part, local_n);
+                }
+                CUDA_CHECK(cudaDeviceSynchronize());
+            };
+            for (GPUWorker& worker : cached_slab_workers) process_slab(worker);
+            const int batch = std::max(1, options.angle_batch);
+            for (int start_ck = cached_end_ck; start_ck < meta.compact_num_angles;
+                 start_ck += batch) {
+                const int end_ck = std::min(meta.compact_num_angles,
+                                            start_ck + batch);
+                const TimedHostCSR built = build_roi_csr(start_ck, end_ck);
+                GPUWorker worker;
+                worker.init(0, built.csr, meta, p_all, projection_stride,
+                            (int)bed_count, g_full, track_castor_threshold);
+                process_slab(worker);
+                streamed_low_forward_count += worker.read_low_forward_count();
+                worker.destroy();
+            }
+        }
+
+        CUDA_CHECK(cudaSetDevice(0));
+        const bool apply_intra = use_intra &&
+            should_apply_smooth(iteration, options.iterations,
+                                options.smooth_mode,
+                                options.smooth_start_iter,
+                                options.smooth_apply_every);
+        std::vector<float> intra_kx, intra_ky, intra_kz;
+        if (apply_intra) {
+            const float fwhm = scheduled_smooth_fwhm(options, iteration);
+            const float intra_fwhm[3] = {fwhm, fwhm, fwhm};
+            build_gaussian_kernel_set(
+                options.conv_implementation, intra_fwhm, meta.voxel_size,
+                options.psf_nb_sigmas, intra_kx, intra_ky, intra_kz);
+            prepare_convolution_normalization(
+                options.conv_implementation, d_post_norm,
+                meta.Nx, meta.Ny, meta.Nz,
+                intra_kx, intra_ky, intra_kz);
+        }
+        const bool apply_butter = options.butter_enable &&
+            should_apply_filter(iteration, options.iterations,
+                                options.butter_mode,
+                                options.butter_start_iter,
+                                options.butter_period,
+                                options.butter_last_n);
+
+        for (size_t b = 0; b < bed_count; ++b) {
+            float* state = d_states + b * (size_t)local_n;
+            float* bp = d_backprojections + b * (size_t)local_n;
+
+            if (use_psf) {
+                apply_convolution_backward(
+                    options.conv_implementation, bp, d_conv_work,
+                    d_conv_tmp, d_psf_norm, meta.Nx, meta.Ny, meta.Nz,
+                    psf_kx, psf_ky, psf_kz);
+                CUDA_CHECK(cudaMemcpy(bp, d_conv_work,
+                                      (size_t)local_n * sizeof(float),
+                                      cudaMemcpyDeviceToDevice));
+            }
+
+            const float* map_gradient = nullptr;
+            if (options.algorithm == ALGORITHM_OSL &&
+                options.map_type == MAP_TV) {
+                k_tv_gradient_omega<<<blocks_local, BLK>>>(
+                    state, d_map_grad, meta.Nx, meta.Ny, meta.Nz,
+                    options.tv_smoothing);
+                CUDA_CHECK(cudaGetLastError());
+                map_gradient = d_map_grad;
+            } else if (options.algorithm == ALGORITHM_OSL &&
+                       options.map_type == MAP_MRP) {
+                if (options.implementation == IMPLEMENTATION_OMEGA) {
+                    k_mrp_gradient_omega<<<blocks_local, BLK>>>(
+                        state, d_map_grad, meta.Nx, meta.Ny, meta.Nz,
+                        options.mrp_radius[0], options.mrp_radius[1],
+                        options.mrp_radius[2], options.mrp_epsilon,
+                        options.mrp_no_norm);
+                } else {
+                    k_mrp_gradient_castor<<<blocks_local, BLK>>>(
+                        state, d_map_grad, meta.Nx, meta.Ny, meta.Nz,
+                        options.mrp_neighborhood, options.mrp_box_order,
+                        options.mrp_box_exclude_corners,
+                        options.mrp_sphere_radius_mm, meta.voxel_size,
+                        (float)options.roi_diameter_mm,
+                        effective_roi_height_mm);
+                }
+                CUDA_CHECK(cudaGetLastError());
+                map_gradient = d_map_grad;
+            }
+            if (options.algorithm == ALGORITHM_OSL) {
+                k_collect_osl_diagnostics<<<blocks_local, BLK>>>(
+                    state, bp, d_sensitivity, map_gradient,
+                    d_osl_roi_mask, options.map_beta,
+                    options.omega_epsilon, options.implementation,
+                    d_osl_diagnostics, local_n);
+                CUDA_CHECK(cudaGetLastError());
+            }
+            k_em_update_versioned<<<blocks_local, BLK>>>(
+                state, bp, d_sensitivity, map_gradient,
+                options.algorithm, options.implementation,
+                options.map_beta, options.omega_epsilon,
+                options.castor_min_update, options.castor_max_update,
+                d_nonpositive_osl_count, d_osl_diagnostics, local_n);
+            CUDA_CHECK(cudaGetLastError());
+
+            if (apply_intra) {
+                apply_convolution_forward(
+                    options.conv_implementation, state, d_conv_work,
+                    d_conv_tmp, d_post_norm, meta.Nx, meta.Ny, meta.Nz,
+                    intra_kx, intra_ky, intra_kz);
+                CUDA_CHECK(cudaMemcpy(state, d_conv_work,
+                                      (size_t)local_n * sizeof(float),
+                                      cudaMemcpyDeviceToDevice));
+            }
+
+            if (apply_butter) {
+                apply_butterworth_filter(
+                    butter_workspace, state, state,
+                    iteration < options.iterations);
+            }
+
+            // 后处理可能把圆柱外体素重新填入非零值，因此最后重新施加支持域。
+            k_apply_local_cylinder_roi<<<blocks_local, BLK>>>(
+                state, meta.Nx, meta.Ny, meta.Nz, meta.voxel_size,
+                (float)options.roi_diameter_mm, effective_roi_height_mm,
+                0.0f, 0.0f, 0.0f, local_n);
+        }
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        unsigned long long low_forward_count = streamed_low_forward_count;
+        for (const GPUWorker& worker : workers) {
+            low_forward_count += worker.read_low_forward_count();
+        }
+        for (const GPUWorker& worker : cached_slab_workers) {
+            low_forward_count += worker.read_low_forward_count();
+        }
+        CUDA_CHECK(cudaSetDevice(0));
+        unsigned long long nonpositive_osl_count = 0;
+        OslDiagnostics osl_diagnostics = empty_osl_diagnostics();
+        if (d_nonpositive_osl_count) {
+            CUDA_CHECK(cudaMemcpy(&nonpositive_osl_count,
+                                  d_nonpositive_osl_count,
+                                  sizeof(nonpositive_osl_count),
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(&osl_diagnostics, d_osl_diagnostics,
+                                  sizeof(osl_diagnostics),
+                                  cudaMemcpyDeviceToHost));
+        }
+        if (low_forward_count > 0) {
+            std::fprintf(stderr,
+                         "[warning] iteration %d: %llu CASToR data-space evaluations had g*A*x <= %.9g; neutral ratio=g was used.\n",
+                         iteration, low_forward_count,
+                         (double)options.castor_threshold);
+        }
+        if (nonpositive_osl_count > 0) {
+            const unsigned long long active =
+                osl_diagnostics.counts[OSL_DIAG_ACTIVE_ROI];
+            const double abnormal_percent = active > 0
+                ? 100.0 * (double)nonpositive_osl_count / (double)active
+                : 0.0;
+            std::fprintf(stderr,
+                         "[osl-diagnostic] iteration=%d implementation=%s "
+                         "active_roi_voxels=%llu abnormal_updates=%llu (%.6f%%)\n",
+                         iteration,
+                         reference_implementation_name(options.implementation),
+                         active, nonpositive_osl_count, abnormal_percent);
+            std::fprintf(stderr,
+                         "[osl-diagnostic] counts old_nonfinite=%llu old_nonpositive=%llu "
+                         "bp_nonfinite=%llu bp_negative=%llu sens_nonfinite=%llu "
+                         "sens_nonpositive=%llu grad_nonfinite=%llu penalty_nonfinite=%llu\n",
+                         osl_diagnostics.counts[OSL_DIAG_OLD_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_OLD_NONPOSITIVE],
+                         osl_diagnostics.counts[OSL_DIAG_BP_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_BP_NEGATIVE],
+                         osl_diagnostics.counts[OSL_DIAG_SENS_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_SENS_NONPOSITIVE],
+                         osl_diagnostics.counts[OSL_DIAG_GRAD_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_PENALTY_NONFINITE]);
+            std::fprintf(stderr,
+                         "[osl-diagnostic] denominator_counts raw_nonfinite=%llu "
+                         "raw_nonpositive=%llu effective_nonfinite=%llu "
+                         "effective_nonpositive=%llu\n",
+                         osl_diagnostics.counts[OSL_DIAG_RAW_DENOM_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_RAW_DENOM_NONPOSITIVE],
+                         osl_diagnostics.counts[OSL_DIAG_EFFECTIVE_DENOM_NONFINITE],
+                         osl_diagnostics.counts[OSL_DIAG_EFFECTIVE_DENOM_NONPOSITIVE]);
+            std::fprintf(stderr,
+                         "[osl-diagnostic] ranges sensitivity=[%.9g,%.9g] "
+                         "penalty_beta_grad=[%.9g,%.9g] raw_denominator=[%.9g,%.9g] "
+                         "effective_denominator=[%.9g,%.9g]\n",
+                         (double)osl_diagnostics.minima[OSL_RANGE_SENSITIVITY],
+                         (double)osl_diagnostics.maxima[OSL_RANGE_SENSITIVITY],
+                         (double)osl_diagnostics.minima[OSL_RANGE_PENALTY],
+                         (double)osl_diagnostics.maxima[OSL_RANGE_PENALTY],
+                         (double)osl_diagnostics.minima[OSL_RANGE_RAW_DENOMINATOR],
+                         (double)osl_diagnostics.maxima[OSL_RANGE_RAW_DENOMINATOR],
+                         (double)osl_diagnostics.minima[OSL_RANGE_EFFECTIVE_DENOMINATOR],
+                         (double)osl_diagnostics.maxima[OSL_RANGE_EFFECTIVE_DENOMINATOR]);
+            std::fprintf(stderr,
+                         "[osl-diagnostic] beta current=%.9g estimated_safe_upper=%.9g "
+                         "max_negative_penalty_fraction=%.9g actions omega_epsilon_floor=%llu "
+                         "castor_keep_old=%llu omega_epsilon=%.9g\n",
+                         (double)options.map_beta,
+                         (double)osl_diagnostics.minima[OSL_RANGE_BETA_LIMIT],
+                         (double)osl_diagnostics.maxima[
+                             OSL_RANGE_NEGATIVE_PENALTY_FRACTION],
+                         osl_diagnostics.counts[OSL_DIAG_OMEGA_EPSILON_FLOOR],
+                         osl_diagnostics.counts[OSL_DIAG_CASTOR_KEEP_OLD],
+                         (double)options.omega_epsilon);
+            std::fprintf(stderr,
+                         "[warning] iteration %d: %llu OSL voxels had sensitivity+penalty <=0 or non-finite inputs. implementation=%s.\n",
+                         iteration, nonpositive_osl_count,
+                         reference_implementation_name(options.implementation));
+            std::fflush(stderr);
+        }
+
+        const bool save_iteration = iteration % options.save_interval == 0;
+        if (save_iteration) {
+            const std::string stem = "recon" + std::to_string(iteration);
+            for (size_t b = 0; b < bed_count; ++b) {
+                const float* saved_state = d_states + b * (size_t)local_n;
+                if (use_post) {
+                    // post 只处理保存副本；sieve 复用 PSF 的核和归一化。
+                    const float* post_norm = options.conv_mode == "sieve"
+                        ? d_psf_norm : d_post_norm;
+                    apply_convolution_forward(
+                        options.conv_implementation,
+                        saved_state, d_conv_work, d_conv_tmp, post_norm,
+                        meta.Nx, meta.Ny, meta.Nz,
+                        post_kx, post_ky, post_kz);
+                    k_apply_local_cylinder_roi<<<blocks_local, BLK>>>(
+                        d_conv_work, meta.Nx, meta.Ny, meta.Nz,
+                        meta.voxel_size,
+                        (float)options.roi_diameter_mm,
+                        effective_roi_height_mm,
+                        0.0f, 0.0f, 0.0f, local_n);
+                    CUDA_CHECK(cudaGetLastError());
+                    saved_state = d_conv_work;
+                }
+                CUDA_CHECK(cudaMemcpy(host_state.data(), saved_state,
+                                      (size_t)local_n * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+                const fs::path bed_dir = raw_root /
+                    ("Bed" + std::to_string(beds[b].number));
+                make_parent_dirs(bed_dir);
+                save_volume_outputs((bed_dir / stem).string(),
+                                    host_state.data(),
+                                    meta.Nx, meta.Ny, meta.Nz,
+                                    meta.voxel_size, local_origin_z, false);
+            }
+        }
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::high_resolution_clock::now() - iteration_start).count();
+        std::printf("  Iter %3d/%d | %s%s | %.3fs\n", iteration,
+                    options.iterations,
+                    use_angle_batch ? "slabs shared across beds" : "resident CSR",
+                    save_iteration ? " | saved" : "",
+                    seconds);
+    }
+    const double total_seconds = std::chrono::duration<double>(
+        std::chrono::high_resolution_clock::now() - total_start).count();
+    std::printf("[scheduler] complete: %.2f min, %.3f s/iteration\n",
+                total_seconds / 60.0,
+                total_seconds / std::max(1, options.iterations));
+
+    CUDA_CHECK(cudaSetDevice(0));
+    if (options.butter_enable) {
+        destroy_butterworth_workspace(butter_workspace);
+    }
+    if (d_nonpositive_osl_count) {
+        CUDA_CHECK(cudaFree(d_nonpositive_osl_count));
+    }
+    if (d_osl_diagnostics) CUDA_CHECK(cudaFree(d_osl_diagnostics));
+    if (d_osl_roi_mask) CUDA_CHECK(cudaFree(d_osl_roi_mask));
+    if (d_map_grad) CUDA_CHECK(cudaFree(d_map_grad));
+    if (d_post_norm) CUDA_CHECK(cudaFree(d_post_norm));
+    if (d_psf_norm) CUDA_CHECK(cudaFree(d_psf_norm));
+    if (d_conv_tmp) CUDA_CHECK(cudaFree(d_conv_tmp));
+    if (d_conv_work) CUDA_CHECK(cudaFree(d_conv_work));
+    if (d_effective_states) CUDA_CHECK(cudaFree(d_effective_states));
+    CUDA_CHECK(cudaFree(d_reduce_tmp));
+    CUDA_CHECK(cudaFree(d_sensitivity));
+    CUDA_CHECK(cudaFree(d_backprojections));
+    CUDA_CHECK(cudaFree(d_states));
+    for (GPUWorker& worker : cached_slab_workers) worker.destroy();
+    for (GPUWorker& worker : workers) worker.destroy();
+    return 0;
 }
 
 // 在 x/y/z 三个方向进行中心裁剪；原点同步移动，保持裁剪后物理坐标不变。
@@ -4884,6 +7492,11 @@ static std::vector<double> fit_gains(const std::vector<Volume>& volumes,
                                      int step_layers,
                                      double voxel_mm, double roi_diameter_mm) {
     const int count = static_cast<int>(volumes.size());
+    if (!volumes.empty() && volumes[0].nz == step_layers) {
+        std::printf("gain fitting skipped: mask Nz equals bed step; "
+                    "adjacent beds do not overlap, using gain=1 for all beds\n");
+        return std::vector<double>((size_t)count, 1.0);
+    }
     std::vector<double> log_gain(count, 0.0);
     for (int low_number = count; low_number >= 2; --low_number) {
         const int low = low_number - 1;
@@ -4958,6 +7571,173 @@ static Volume stitch_volumes(const std::vector<Volume>& volumes,
     return output;
 }
 
+struct VolumeDiagnostics {
+    double minimum = 0.0;
+    double maximum = 0.0;
+    double sum = 0.0;
+    uint64_t negative_voxels = 0;
+};
+
+static VolumeDiagnostics diagnose_volume(const Volume& volume) {
+    if (volume.data.empty()) fail("cannot diagnose an empty volume");
+    VolumeDiagnostics result;
+    result.minimum = std::numeric_limits<double>::infinity();
+    result.maximum = -std::numeric_limits<double>::infinity();
+    for (double value : volume.data) {
+        if (!std::isfinite(value)) fail("filtered stitched volume contains NaN/Inf");
+        result.minimum = std::min(result.minimum, value);
+        result.maximum = std::max(result.maximum, value);
+        result.sum += value;
+        if (value < 0.0) ++result.negative_voxels;
+    }
+    return result;
+}
+
+static void print_stitch_filter_diagnostics(
+    const char* name, const VolumeDiagnostics& before,
+    const VolumeDiagnostics& after) {
+    const double relative_sum_change = before.sum != 0.0
+        ? (after.sum - before.sum) / before.sum : 0.0;
+    std::printf(
+        "[stitch-filter] %s: min %.9g -> %.9g, max %.9g -> %.9g, "
+        "negative %llu -> %llu, sum %.9g -> %.9g (relative %.9g)\n",
+        name, before.minimum, after.minimum, before.maximum, after.maximum,
+        static_cast<unsigned long long>(before.negative_voxels),
+        static_cast<unsigned long long>(after.negative_voxels),
+        before.sum, after.sum, relative_sum_change);
+}
+
+static std::string decimal_path_token(double value) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(6) << value;
+    std::string token = stream.str();
+    while (!token.empty() && token.back() == '0') token.pop_back();
+    if (!token.empty() && token.back() == '.') token.pop_back();
+    std::replace(token.begin(), token.end(), '.', 'p');
+    return token;
+}
+
+// 拼接后 Gaussian 使用 CASToR 的 erf 体素积分核和有限边界前向语义。
+// castor-adjoint 与 strict CASToR 的前向完全相同；这里没有反向步骤。输入/输出
+// 转成 float32 以复用重建阶段已经验证的 CUDA kernel，NIfTI 仍按 float64 写出。
+static Volume smooth_stitched_volume(const Volume& input, float fwhm_mm,
+                                     float nb_sigmas) {
+    const int64_t count64 = (int64_t)input.nx * input.ny * input.nz;
+    if (count64 <= 0 || (uint64_t)count64 != input.data.size()) {
+        fail("stitched Gaussian input geometry/data size mismatch");
+    }
+    std::vector<float> host((size_t)count64);
+    for (size_t i = 0; i < host.size(); ++i) {
+        if (!std::isfinite(input.data[i]) ||
+            std::abs(input.data[i]) > std::numeric_limits<float>::max()) {
+            fail("stitched Gaussian input cannot be represented as float32");
+        }
+        host[i] = static_cast<float>(input.data[i]);
+    }
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    float* d_tmp = nullptr;
+    float* d_norm = nullptr;
+    auto cleanup = [&]() {
+        if (d_norm) CUDA_CHECK(cudaFree(d_norm));
+        if (d_tmp) CUDA_CHECK(cudaFree(d_tmp));
+        if (d_output) CUDA_CHECK(cudaFree(d_output));
+        if (d_input) CUDA_CHECK(cudaFree(d_input));
+    };
+    try {
+        const size_t bytes = host.size() * sizeof(float);
+        CUDA_CHECK(cudaSetDevice(0));
+        CUDA_CHECK(cudaMalloc(&d_input, bytes));
+        CUDA_CHECK(cudaMalloc(&d_output, bytes));
+        CUDA_CHECK(cudaMalloc(&d_tmp, bytes));
+        CUDA_CHECK(cudaMalloc(&d_norm, bytes));
+        CUDA_CHECK(cudaMemcpy(d_input, host.data(), bytes,
+                              cudaMemcpyHostToDevice));
+        const float fwhm[3] = {fwhm_mm, fwhm_mm, fwhm_mm};
+        std::vector<float> kx, ky, kz;
+        build_gaussian_kernel_set(CONV_IMPLEMENTATION_CASTOR_ADJOINT,
+                                  fwhm, (float)input.voxel_mm, nb_sigmas,
+                                  kx, ky, kz);
+        prepare_convolution_normalization(
+            CONV_IMPLEMENTATION_CASTOR_ADJOINT, d_norm,
+            input.nx, input.ny, input.nz, kx, ky, kz);
+        apply_convolution_forward(
+            CONV_IMPLEMENTATION_CASTOR_ADJOINT, d_input, d_output, d_tmp,
+            d_norm, input.nx, input.ny, input.nz, kx, ky, kz);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(host.data(), d_output, bytes,
+                              cudaMemcpyDeviceToHost));
+        cleanup();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    Volume output = input;
+    for (size_t i = 0; i < host.size(); ++i) {
+        if (!std::isfinite(host[i])) fail("stitched Gaussian produced NaN/Inf");
+        output.data[i] = host[i];
+    }
+    return output;
+}
+
+// 拼接后 Butterworth 复用修正版 2x 零填充实现。最后一次后处理保持线性，
+// 因而不会把可能存在的负旁瓣静默截断为 0。
+static Volume butterworth_stitched_volume(const Volume& input,
+                                           float cutoff_cycles_per_cm,
+                                           int order) {
+    const int64_t count64 = (int64_t)input.nx * input.ny * input.nz;
+    if (count64 <= 0 || (uint64_t)count64 != input.data.size()) {
+        fail("stitched Butterworth input geometry/data size mismatch");
+    }
+    std::vector<float> host((size_t)count64);
+    for (size_t i = 0; i < host.size(); ++i) {
+        if (!std::isfinite(input.data[i]) ||
+            std::abs(input.data[i]) > std::numeric_limits<float>::max()) {
+            fail("stitched Butterworth input cannot be represented as float32");
+        }
+        host[i] = static_cast<float>(input.data[i]);
+    }
+
+    float* d_input = nullptr;
+    float* d_output = nullptr;
+    ButterworthWorkspace workspace;
+    bool workspace_initialized = false;
+    auto cleanup = [&]() {
+        if (workspace_initialized) destroy_butterworth_workspace(workspace);
+        if (d_output) CUDA_CHECK(cudaFree(d_output));
+        if (d_input) CUDA_CHECK(cudaFree(d_input));
+    };
+    try {
+        const size_t bytes = host.size() * sizeof(float);
+        CUDA_CHECK(cudaSetDevice(0));
+        CUDA_CHECK(cudaMalloc(&d_input, bytes));
+        CUDA_CHECK(cudaMalloc(&d_output, bytes));
+        CUDA_CHECK(cudaMemcpy(d_input, host.data(), bytes,
+                              cudaMemcpyHostToDevice));
+        initialize_butterworth_workspace(
+            workspace, input.nx, input.ny, input.nz, (float)input.voxel_mm,
+            cutoff_cycles_per_cm, order);
+        workspace_initialized = true;
+        apply_butterworth_filter(workspace, d_input, d_output, false);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(host.data(), d_output, bytes,
+                              cudaMemcpyDeviceToHost));
+        cleanup();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+
+    Volume output = input;
+    for (size_t i = 0; i < host.size(); ++i) {
+        if (!std::isfinite(host[i])) fail("stitched Butterworth produced NaN/Inf");
+        output.data[i] = host[i];
+    }
+    return output;
+}
+
 static std::string json_path(const fs::path& path) {
     std::string text = path.generic_string();
     std::string escaped;
@@ -4972,21 +7752,96 @@ static std::string json_path(const fs::path& path) {
 static void write_report(const fs::path& path, const BedMergeOptions& options,
                          const std::vector<BedInput>& beds,
                          const std::vector<double>& gains,
-                         const Volume& output, int mask_layers, int step_layers,
-                         const std::vector<int>& saved_iterations) {
+                         const std::vector<int>& saved_iterations,
+                         const Volume& output, int mask_layers, int step_layers) {
     std::ofstream report(path);
     report << "{\n"
-           << "  \"method\": \"single_bed_reconstruction_center_mask_then_cosine_stitch\",\n"
+           << "  \"method\": \"versioned_independent_local_mlem_or_osl_then_cosine_stitch\",\n"
            << "  \"projection_directory\": \"" << json_path(options.proj_dir) << "\",\n"
            << "  \"matrix_directory\": \"" << json_path(options.matrix_dir) << "\",\n"
+           << "  \"scheduler\": {\"image_states\": \"independent_local_per_bed\", "
+           << "\"matrix_traversal\": \"iteration_major\", "
+           << "\"angle_batch\": " << options.angle_batch << ", "
+           << "\"gpu_slab_cache\": " << options.gpu_slab_cache << "},\n"
+           << "  \"reconstruction\": {\"iterations\": " << options.iterations
+           << ", \"algorithm\": \"" << algorithm_name(options.algorithm)
+           << "\", \"implementation\": \""
+           << reference_implementation_name(options.implementation)
+           << "\", \"omega_epsilon\": " << options.omega_epsilon
+           << ", \"castor_threshold\": " << options.castor_threshold
+           << ", \"castor_min_update\": " << options.castor_min_update
+           << ", \"castor_max_update\": " << options.castor_max_update
+           // 以下旧字段保留给已有报告读取脚本，值与新统一字段完全一致。
+           << ", \"osl_version\": \""
+           << reference_implementation_name(options.implementation)
+           << "\", \"osl_epsilon\": " << options.omega_epsilon
+           << ", \"osl_min_update\": " << options.castor_min_update
+           << ", \"osl_max_update\": " << options.castor_max_update
+           << ", \"forward_threshold\": " << options.castor_threshold
+           << ", \"conv_mode\": \"" << options.conv_mode
+           << "\", \"conv_impl\": \""
+           << conv_implementation_name(options.conv_implementation)
+           << "\", \"psf_fwhm_mm\": [" << options.psf_fwhm_mm[0] << ", "
+           << options.psf_fwhm_mm[1] << ", " << options.psf_fwhm_mm[2]
+           << "], \"psf_sigmas\": " << options.psf_nb_sigmas
+           << ", \"post_fwhm_mm\": " << options.post_fwhm_mm
+           << ", \"smooth_mode\": \"" << options.smooth_mode
+           << "\", \"smooth_schedule\": \"" << options.smooth_schedule
+           << "\", \"smooth_fwhm_start_mm\": " << options.smooth_fwhm_start_mm
+           << ", \"smooth_fwhm_end_mm\": " << options.smooth_fwhm_end_mm
+           << ", \"smooth_start_iter\": " << options.smooth_start_iter
+           << ", \"smooth_every\": " << options.smooth_apply_every
+           << ", \"sieve_reuses_psf_convolver\": "
+           << (options.conv_mode == "sieve" ? "true" : "false")
+           << ", \"prior\": \""
+           << (options.map_type == MAP_TV ? "tv" :
+               (options.map_type == MAP_MRP ? "mrp" : "none"))
+           << "\", \"map_beta\": " << options.map_beta
+           << ", \"tv_smoothing\": " << options.tv_smoothing
+           << ", \"prior_implementation\": \""
+           << reference_implementation_name(options.implementation)
+           << "\", \"mrp_version\": \""
+           << reference_implementation_name(options.implementation)
+           << "\", \"mrp_radius_xyz\": [" << options.mrp_radius[0] << ", "
+           << options.mrp_radius[1] << ", " << options.mrp_radius[2]
+           << "], \"mrp_epsilon\": " << options.mrp_epsilon
+           << ", \"mrp_no_norm\": " << (options.mrp_no_norm ? "true" : "false")
+           << ", \"mrp_neighborhood\": \""
+           << mrp_neighborhood_name(options.mrp_neighborhood)
+           << "\", \"mrp_box_order\": " << options.mrp_box_order
+           << ", \"mrp_box_exclude_corners\": "
+           << (options.mrp_box_exclude_corners ? "true" : "false")
+           << ", \"mrp_sphere_radius_mm\": "
+           << options.mrp_sphere_radius_mm
+           << ", \"butterworth_enabled\": "
+           << (options.butter_enable ? "true" : "false")
+           << ", \"butterworth_cutoff_cycles_per_cm\": "
+           << options.butter_cutoff_cycles_per_cm
+           << ", \"butterworth_order\": " << options.butter_order
+           << ", \"butterworth_mode\": \"" << options.butter_mode
+           << "\", \"butterworth_start_iter\": "
+           << options.butter_start_iter
+           << ", \"butterworth_period\": " << options.butter_period
+           << ", \"butterworth_last_n\": " << options.butter_last_n
+           << ", \"stitch_filter\": \"" << options.stitch_filter
+           << "\", \"stitch_smooth_fwhm_mm\": "
+           << options.stitch_smooth_fwhm_mm
+           << ", \"stitch_smooth_sigmas\": "
+           << options.stitch_smooth_sigmas
+           << ", \"stitch_butterworth_cutoff_cycles_per_cm\": "
+           << options.stitch_butter_cutoff_cycles_per_cm
+           << ", \"stitch_butterworth_order\": "
+           << options.stitch_butter_order
+           << ", \"stitch_butterworth_variant_count\": "
+           << options.stitch_butter_variants.size()
+           << ", \"save_interval\": " << options.save_interval << "},\n"
+           << "  \"roi\": {\"shape\": \"centered_cylinder\", "
+           << "\"diameter_mm\": " << options.roi_diameter_mm
+           << ", \"height_mm\": " << options.roi_height_mm
+           << ", \"csr_columns_pruned\": true},\n"
            << "  \"bed_step_mm\": " << options.bed_step_mm << ",\n"
-           << "  \"save_interval\": " << options.save_interval << ",\n"
-           << "  \"saved_iterations\": [";
-    for (size_t i = 0; i < saved_iterations.size(); ++i) {
-        report << saved_iterations[i]
-               << (i + 1 == saved_iterations.size() ? "" : ", ");
-    }
-    report << "],\n"
+           << "  \"multibed_edge_layers\": "
+           << options.multibed_edge_layers << ",\n"
            << "  \"mask_shape_xyz\": [" << options.mask_nx << ", "
            << options.mask_ny << ", " << options.mask_nz << "],\n"
            << "  \"mask_layers\": " << mask_layers << ",\n"
@@ -4997,6 +7852,12 @@ static void write_report(const fs::path& path, const BedMergeOptions& options,
            << "  \"data_mode\": \"" << options.data_mode << "\",\n"
            << "  \"normalization_factor\": \""
            << (options.no_norm_factor ? "disabled" : json_path(options.norm_factor)) << "\",\n"
+           << "  \"saved_iterations\": [";
+    for (size_t i = 0; i < saved_iterations.size(); ++i) {
+        report << saved_iterations[i]
+               << (i + 1 == saved_iterations.size() ? "" : ", ");
+    }
+    report << "],\n"
            << "  \"beds\": [\n";
     for (size_t i = 0; i < beds.size(); ++i) {
         report << "    {\"name\": \"Bed" << beds[i].number
@@ -5005,76 +7866,830 @@ static void write_report(const fs::path& path, const BedMergeOptions& options,
                << (i + 1 == beds.size() ? "\n" : ",\n");
     }
     report << "  ],\n"
-           << "  \"outputs\": ["
-           << (options.keep_raw ? "\"single_bed_raw/BedN/recon_final.img\", " : "")
-           << "\"single_bed/BedN/recon_final.img\", "
-           << "\"single_bed/BedN/recon_iterNNN.hdr/.img\", "
-           << "\"stitched/recon_stitched_minimal.hdr\", \"stitched/recon_stitched_minimal.img\", "
-           << "\"stitched/recon_stitched_iterNNN.hdr/.img\"]\n"
-           << "}\n";
+           << "  \"output_pattern\": {"
+           << (options.keep_raw
+                   ? "\"full_size\": \"single_bed_raw/BedN/recon<iteration>.hdr|img\", "
+                   : "")
+           << "\"single_bed\": \"single_bed/BedN/recon<iteration>.hdr|img\", "
+           << "\"stitched\": \"stitched/recon<iteration>.hdr|img\"";
+    if (options.stitch_filter == "smooth" || options.stitch_filter == "both") {
+        report << ", \"stitched_smooth\": \"stitched_smooth_fwhm"
+               << decimal_path_token(options.stitch_smooth_fwhm_mm)
+               << "/recon<iteration>.hdr|img\"";
+    }
+    if (options.stitch_filter == "butterworth" ||
+        options.stitch_filter == "both") {
+        report << ", \"stitched_butterworth\": [";
+        for (size_t i = 0; i < options.stitch_butter_variants.size(); ++i) {
+            const auto& variant = options.stitch_butter_variants[i];
+            report << "\"stitched_butter_fc"
+                   << decimal_path_token(variant.first)
+                   << "cpcm_o" << variant.second
+                   << "/recon<iteration>.hdr|img\""
+                   << (i + 1 == options.stitch_butter_variants.size()
+                           ? "" : ", ");
+        }
+        report << "]";
+    }
+    report << "}\n}\n";
 }
 
-// 逐床调用 CUDA 引擎；完整尺寸结果先写入 raw_root，随后由主流程统一裁剪。
-// 逐床调用底层 CUDA 引擎；完整尺寸结果只作为裁剪阶段的中间数据。
+// 公开调度器由一个 CUDA 上下文管理全部 BedN 状态：局部似然彼此独立，只共享完整
+// CSR 或当前加载的角度分块。raw_root 只是现有裁剪/拼接流程的中间目录。
 static int run_reconstruction(const BedMergeOptions& options,
                               const std::vector<BedInput>& beds,
                               const fs::path& raw_root) {
-    for (const BedInput& bed : beds) {
-        const fs::path bed_out = raw_root / ("Bed" + std::to_string(bed.number));
-        std::vector<std::string> arguments = {
-            "bedmerge-reconstruction", "--matrix-dir", options.matrix_dir.string(),
-            "--proj", bed.path.string(), "--out", bed_out.string(),
-            "--iters", std::to_string(options.iterations),
-            "--save-every", std::to_string(options.save_interval),
-            "--gpus", std::to_string(options.gpus),
-            "--angle-batch", std::to_string(options.angle_batch),
-            "--gpu-slab-cache", std::to_string(options.gpu_slab_cache),
-            "--slab-prefetch-early", "--no-raw1",
-            "--data-mode", options.data_mode,
-            "--roi-diameter-mm", std::to_string(options.roi_diameter_mm),
-            "--roi-height-mm", std::to_string(options.roi_height_mm),
-        };
-        if (options.no_detector_mask || options.data_mode == "simulation") {
-            arguments.push_back("--no-detector-mask");
-        }
-        if (options.no_norm_factor) {
-            arguments.push_back("--no-norm-factor");
-        } else if (!options.norm_factor.empty()) {
-            arguments.push_back("--norm-factor");
-            arguments.push_back(options.norm_factor.string());
-            arguments.push_back("--norm-factor-mode");
-            arguments.push_back(options.norm_factor_mode);
-        }
-        std::vector<char*> argv;
-        argv.reserve(arguments.size());
-        for (std::string& argument : arguments) argv.push_back(argument.data());
-        const int status = bedmerge_reconstruct_main(static_cast<int>(argv.size()), argv.data());
-        if (status != 0) return status;
+    return run_independent_iteration_major_reconstruction(options, beds, raw_root);
+}
+
+static int self_test_mirror_index(int value, int size) {
+    while (value < 0 || value >= size) {
+        value = value < 0 ? -value - 1 : 2 * size - value - 1;
     }
-    return 0;
+    return value;
+}
+
+static float self_test_tv_forward_denom(const std::vector<float>& image,
+                                        int x, int y, int z,
+                                        int Nx, int Ny, int Nz,
+                                        float smoothing) {
+    const int64_t plane = (int64_t)Nx * Ny;
+    const int64_t index = (int64_t)z * plane + (int64_t)y * Nx + x;
+    const float center = image[(size_t)index];
+    const float dx = x + 1 < Nx ? image[(size_t)(index + 1)] - center : 0.0f;
+    const float dy = y + 1 < Ny ? image[(size_t)(index + Nx)] - center : 0.0f;
+    const float dz = z + 1 < Nz ? image[(size_t)(index + plane)] - center : 0.0f;
+    return sqrtf(dx * dx + dy * dy + dz * dz + smoothing);
+}
+
+/*
+ * 不读取投影和系统矩阵的快速数值自检：
+ * 1. 对比严格 CASToR PSF 的原始反向和 castor-adjoint 真伴随，并验证两者
+ *    前向逐点相同；检查 OMEGA symmetric 卷积保持常量；
+ * 2. 分别检查 OMEGA epsilon ratio 与 CASToR threshold 中性 ratio；
+ * 3. 分别检查 OMEGA/CASToR 的 MLEM、OSL、更新上下限及非正分母规则；
+ * 4. 检查 TV，并将 OMEGA/CASToR MRP 与各自 CPU 参考逐体素比较；
+ * 5. 检查 Butterworth 保持直流分量并衰减高频分量；
+ * 6. 检查 ROI 对 Host CSR 列的裁剪；
+ * 7. 检查拼接后 Gaussian/Butterworth 包装层的尺寸和有限值。
+ */
+static int run_algorithm_self_tests() {
+    // 调度边界是 1-based：start=101 表示前100轮不滤波，第101轮首次滤波。
+    if (should_apply_filter(100, 1000, "every", 101, 5, 10) ||
+        !should_apply_filter(101, 1000, "every", 101, 5, 10) ||
+        !should_apply_filter(101, 1000, "periodic", 101, 5, 10) ||
+        should_apply_filter(102, 1000, "periodic", 101, 5, 10) ||
+        !should_apply_filter(106, 1000, "periodic", 101, 5, 10) ||
+        !should_apply_filter(1000, 1000, "final", 101, 5, 10) ||
+        should_apply_smooth(100, 1000, "every", 101, 5) ||
+        !should_apply_smooth(101, 1000, "every", 101, 5) ||
+        !should_apply_smooth(101, 1000, "periodic", 101, 5) ||
+        should_apply_smooth(102, 1000, "periodic", 101, 5) ||
+        !should_apply_smooth(106, 1000, "periodic", 101, 5) ||
+        !should_apply_smooth(1000, 1000, "final", 101, 5)) {
+        fail("filter scheduling self-test failed");
+    }
+    std::printf("Filter scheduling boundary test: PASS\n");
+
+    int device_count = 0;
+    CUDA_CHECK(cudaGetDeviceCount(&device_count));
+    if (device_count < 1) fail("algorithm self-test requires a CUDA device");
+    CUDA_CHECK(cudaSetDevice(0));
+
+    const int Nx = 17, Ny = 15, Nz = 13;
+    const int64_t n = (int64_t)Nx * Ny * Nz;
+    const int blocks = (int)((n + BLK - 1) / BLK);
+    std::vector<float> x((size_t)n), y((size_t)n), cx((size_t)n), cty((size_t)n);
+    for (int64_t i = 0; i < n; ++i) {
+        x[(size_t)i] = 0.3f + 0.2f * sinf((float)i * 0.017f) +
+                       0.05f * cosf((float)i * 0.071f);
+        y[(size_t)i] = -0.1f + 0.3f * cosf((float)i * 0.023f) -
+                       0.04f * sinf((float)i * 0.113f);
+    }
+
+    float *d_x = nullptr, *d_y = nullptr, *d_cx = nullptr, *d_cty = nullptr;
+    float *d_norm = nullptr, *d_tmp1 = nullptr, *d_tmp2 = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_x, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_y, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cx, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cty, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_norm, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_tmp1, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_tmp2, (size_t)n * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_x, x.data(), (size_t)n * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_y, y.data(), (size_t)n * sizeof(float),
+                          cudaMemcpyHostToDevice));
+
+    const std::vector<float> castor_kernel =
+        build_castor_erf_1d(1.5f, 0.3f, 3.0f);
+    build_castor_z_norm(d_norm, Nx, Ny, Nz,
+                        castor_kernel, castor_kernel, castor_kernel);
+    apply_convolution_forward(
+        CONV_IMPLEMENTATION_CASTOR, d_x, d_cx, d_tmp1, d_norm,
+        Nx, Ny, Nz, castor_kernel, castor_kernel, castor_kernel);
+    CUDA_CHECK(cudaMemcpy(cx.data(), d_cx, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    std::vector<float> strict_backward((size_t)n);
+    apply_convolution_backward(
+        CONV_IMPLEMENTATION_CASTOR, d_y, d_cty, d_tmp1, d_norm,
+        Nx, Ny, Nz, castor_kernel, castor_kernel, castor_kernel);
+    CUDA_CHECK(cudaMemcpy(strict_backward.data(), d_cty,
+                          (size_t)n * sizeof(float), cudaMemcpyDeviceToHost));
+    apply_convolution_backward(
+        CONV_IMPLEMENTATION_CASTOR_ADJOINT, d_y, d_cty, d_tmp1, d_norm,
+        Nx, Ny, Nz, castor_kernel, castor_kernel, castor_kernel);
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double lhs = 0.0, strict_rhs = 0.0, adjoint_rhs = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        lhs += (double)cx[(size_t)i] * y[(size_t)i];
+        strict_rhs += (double)x[(size_t)i] * strict_backward[(size_t)i];
+        adjoint_rhs += (double)x[(size_t)i] * cty[(size_t)i];
+    }
+    const double strict_castor_adjoint_error = fabs(lhs - strict_rhs) /
+        std::max(1e-12, std::max(fabs(lhs), fabs(strict_rhs)));
+    const double fixed_castor_adjoint_error = fabs(lhs - adjoint_rhs) /
+        std::max(1e-12, std::max(fabs(lhs), fabs(adjoint_rhs)));
+
+    apply_convolution_forward(
+        CONV_IMPLEMENTATION_CASTOR_ADJOINT, d_x, d_cty, d_tmp1, d_norm,
+        Nx, Ny, Nz, castor_kernel, castor_kernel, castor_kernel);
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double castor_forward_match_error = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        castor_forward_match_error = std::max(
+            castor_forward_match_error,
+            fabs((double)cx[(size_t)i] - cty[(size_t)i]));
+    }
+
+    std::fill(x.begin(), x.end(), 1.0f);
+    CUDA_CHECK(cudaMemcpy(d_x, x.data(), (size_t)n * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    const std::vector<float> omega_kernel =
+        build_omega_sampled_1d(1.5f, 0.3f);
+    apply_convolution_forward(
+        CONV_IMPLEMENTATION_OMEGA, d_x, d_cx, d_tmp1, nullptr,
+        Nx, Ny, Nz, omega_kernel, omega_kernel, omega_kernel);
+    CUDA_CHECK(cudaMemcpy(cx.data(), d_cx, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double omega_constant_error = 0.0;
+    for (float value : cx) {
+        omega_constant_error = std::max(
+            omega_constant_error, fabs((double)value - 1.0));
+    }
+
+    // 三条投影线覆盖 OMEGA epsilon、CASToR 阈值相等和正常除法三种情况。
+    const int ratio_count = 3;
+    const std::vector<float> ratio_forward = {0.0f, 0.05f, 2.0f};
+    const std::vector<float> ratio_projection = {5.0f, 5.0f, 5.0f};
+    const std::vector<float> ratio_response = {2.0f, 2.0f, 2.0f};
+    CUDA_CHECK(cudaMemcpy(d_x, ratio_forward.data(),
+                          ratio_count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_cx, ratio_projection.data(),
+                          ratio_count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_cty, ratio_response.data(),
+                          ratio_count * sizeof(float), cudaMemcpyHostToDevice));
+    unsigned long long* d_test_counter = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_test_counter, sizeof(unsigned long long)));
+    CUDA_CHECK(cudaMemset(d_test_counter, 0, sizeof(unsigned long long)));
+
+    k_calc_ratio_batched<<<1, BLK>>>(
+        d_x, d_y, d_cx, d_cty, ratio_count, 0, ratio_count,
+        ratio_count, 1, 1, ratio_count, SYM_NONE, 0, 0, 1, 1, 1,
+        IMPLEMENTATION_OMEGA, 0.1f, 0.1f, nullptr);
+    CUDA_CHECK(cudaGetLastError());
+    std::vector<float> ratio_result((size_t)ratio_count);
+    CUDA_CHECK(cudaMemcpy(ratio_result.data(), d_y,
+                          ratio_count * sizeof(float), cudaMemcpyDeviceToHost));
+    const std::vector<double> omega_ratio_expected = {
+        100.0, 50.0, 10.0 / 4.1};
+    double omega_ratio_error = 0.0;
+    for (int i = 0; i < ratio_count; ++i) {
+        omega_ratio_error = std::max(
+            omega_ratio_error,
+            fabs((double)ratio_result[(size_t)i] -
+                 omega_ratio_expected[(size_t)i]));
+    }
+
+    k_calc_ratio_batched<<<1, BLK>>>(
+        d_x, d_y, d_cx, d_cty, ratio_count, 0, ratio_count,
+        ratio_count, 1, 1, ratio_count, SYM_NONE, 0, 0, 1, 1, 1,
+        IMPLEMENTATION_CASTOR, 0.1f, 0.1f, d_test_counter);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(ratio_result.data(), d_y,
+                          ratio_count * sizeof(float), cudaMemcpyDeviceToHost));
+    unsigned long long castor_threshold_count = 0;
+    CUDA_CHECK(cudaMemcpy(&castor_threshold_count, d_test_counter,
+                          sizeof(castor_threshold_count),
+                          cudaMemcpyDeviceToHost));
+    const std::vector<double> castor_ratio_expected = {2.0, 2.0, 2.5};
+    double castor_ratio_error = 0.0;
+    for (int i = 0; i < ratio_count; ++i) {
+        castor_ratio_error = std::max(
+            castor_ratio_error,
+            fabs((double)ratio_result[(size_t)i] -
+                 castor_ratio_expected[(size_t)i]));
+    }
+
+    /*
+     * 用包含 NaN、负 sensitivity、非正 raw denominator 和非正旧值的四体素
+     * 用例直接核对详细诊断。正式更新与诊断 kernel 相互独立，因此这里既检查
+     * 分类计数和范围，也在后续更新中检查两种实现的实际动作计数。
+     */
+    const int diagnostic_count = 4;
+    const std::vector<float> diagnostic_old = {2.0f, 2.0f, 2.0f, 0.0f};
+    const std::vector<float> diagnostic_bp = {
+        3.0f, 3.0f, std::numeric_limits<float>::quiet_NaN(), 3.0f};
+    const std::vector<float> diagnostic_sensitivity = {4.0f, 0.1f, 0.1f, -0.5f};
+    const std::vector<float> diagnostic_gradient = {0.5f, -0.075f, 0.0f, 0.1f};
+    const std::vector<uint8_t> diagnostic_roi((size_t)diagnostic_count, 1);
+    CUDA_CHECK(cudaMemcpy(d_x, diagnostic_old.data(),
+                          diagnostic_count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_y, diagnostic_bp.data(),
+                          diagnostic_count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_cx, diagnostic_sensitivity.data(),
+                          diagnostic_count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_cty, diagnostic_gradient.data(),
+                          diagnostic_count * sizeof(float), cudaMemcpyHostToDevice));
+
+    OslDiagnostics* d_test_osl_diagnostics = nullptr;
+    uint8_t* d_test_osl_roi = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_test_osl_diagnostics, sizeof(OslDiagnostics)));
+    CUDA_CHECK(cudaMalloc(&d_test_osl_roi,
+                          diagnostic_count * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMemcpy(d_test_osl_roi, diagnostic_roi.data(),
+                          diagnostic_count * sizeof(uint8_t),
+                          cudaMemcpyHostToDevice));
+    const OslDiagnostics empty_test_diagnostics = empty_osl_diagnostics();
+    CUDA_CHECK(cudaMemcpy(d_test_osl_diagnostics, &empty_test_diagnostics,
+                          sizeof(OslDiagnostics), cudaMemcpyHostToDevice));
+    k_collect_osl_diagnostics<<<1, BLK>>>(
+        d_x, d_y, d_cx, d_cty, d_test_osl_roi,
+        2.0f, 0.1f, IMPLEMENTATION_OMEGA,
+        d_test_osl_diagnostics, diagnostic_count);
+    CUDA_CHECK(cudaGetLastError());
+    OslDiagnostics collected_diagnostics = empty_osl_diagnostics();
+    CUDA_CHECK(cudaMemcpy(&collected_diagnostics, d_test_osl_diagnostics,
+                          sizeof(OslDiagnostics), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_test_osl_roi));
+
+    const bool osl_diagnostic_counts_pass =
+        collected_diagnostics.counts[OSL_DIAG_ACTIVE_ROI] == 4 &&
+        collected_diagnostics.counts[OSL_DIAG_OLD_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_OLD_NONPOSITIVE] == 1 &&
+        collected_diagnostics.counts[OSL_DIAG_BP_NONFINITE] == 1 &&
+        collected_diagnostics.counts[OSL_DIAG_BP_NEGATIVE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_SENS_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_SENS_NONPOSITIVE] == 1 &&
+        collected_diagnostics.counts[OSL_DIAG_GRAD_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_PENALTY_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_RAW_DENOM_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_RAW_DENOM_NONPOSITIVE] == 2 &&
+        collected_diagnostics.counts[OSL_DIAG_EFFECTIVE_DENOM_NONFINITE] == 0 &&
+        collected_diagnostics.counts[OSL_DIAG_EFFECTIVE_DENOM_NONPOSITIVE] == 0;
+    double osl_diagnostic_range_error = 0.0;
+    auto update_diagnostic_range_error = [&](int range,
+                                             double expected_minimum,
+                                             double expected_maximum) {
+        osl_diagnostic_range_error = std::max(
+            osl_diagnostic_range_error,
+            fabs((double)collected_diagnostics.minima[range] - expected_minimum));
+        osl_diagnostic_range_error = std::max(
+            osl_diagnostic_range_error,
+            fabs((double)collected_diagnostics.maxima[range] - expected_maximum));
+    };
+    update_diagnostic_range_error(OSL_RANGE_SENSITIVITY, -0.5, 4.0);
+    update_diagnostic_range_error(OSL_RANGE_PENALTY, -0.15, 1.0);
+    update_diagnostic_range_error(OSL_RANGE_RAW_DENOMINATOR, -0.3, 5.0);
+    update_diagnostic_range_error(OSL_RANGE_EFFECTIVE_DENOMINATOR, 0.05, 5.1);
+    update_diagnostic_range_error(OSL_RANGE_BETA_LIMIT, 0.2 / 0.075,
+                                  0.2 / 0.075);
+    update_diagnostic_range_error(OSL_RANGE_NEGATIVE_PENALTY_FRACTION,
+                                  0.75, 0.75);
+    OslDiagnostics last_em_diagnostics = empty_osl_diagnostics();
+
+    // 用同一启动辅助分别执行四条 EM 路径，主机端公式作为独立参考。
+    auto run_em_case = [&](const std::vector<float>& old_values,
+                           const std::vector<float>& backprojection,
+                           const std::vector<float>& sensitivity,
+                           const std::vector<float>& gradient,
+                           int algorithm, int implementation, float beta,
+                           float epsilon, float min_update,
+                           float max_update) {
+        const int64_t count = (int64_t)old_values.size();
+        CUDA_CHECK(cudaMemcpy(d_x, old_values.data(),
+                              (size_t)count * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_y, backprojection.data(),
+                              (size_t)count * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_cx, sensitivity.data(),
+                              (size_t)count * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        if (algorithm == ALGORITHM_OSL) {
+            CUDA_CHECK(cudaMemcpy(d_cty, gradient.data(),
+                                  (size_t)count * sizeof(float),
+                                  cudaMemcpyHostToDevice));
+        }
+        CUDA_CHECK(cudaMemset(d_test_counter, 0,
+                              sizeof(unsigned long long)));
+        const OslDiagnostics empty_em_diagnostics = empty_osl_diagnostics();
+        CUDA_CHECK(cudaMemcpy(d_test_osl_diagnostics, &empty_em_diagnostics,
+                              sizeof(OslDiagnostics), cudaMemcpyHostToDevice));
+        k_em_update_versioned<<<1, BLK>>>(
+            d_x, d_y, d_cx,
+            algorithm == ALGORITHM_OSL ? d_cty : nullptr,
+            algorithm, implementation, beta, epsilon,
+            min_update, max_update, d_test_counter,
+            d_test_osl_diagnostics, count);
+        CUDA_CHECK(cudaGetLastError());
+        std::vector<float> output((size_t)count);
+        CUDA_CHECK(cudaMemcpy(output.data(), d_x,
+                              (size_t)count * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+        unsigned long long warning_count = 0;
+        CUDA_CHECK(cudaMemcpy(&warning_count, d_test_counter,
+                              sizeof(warning_count), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&last_em_diagnostics, d_test_osl_diagnostics,
+                              sizeof(OslDiagnostics), cudaMemcpyDeviceToHost));
+        return std::make_pair(output, warning_count);
+    };
+
+    const std::vector<float> em_old = {2.0f, 2.0f, 2.0f};
+    const std::vector<float> zero_gradient = {0.0f, 0.0f, 0.0f};
+    const auto omega_mlem = run_em_case(
+        em_old, {3.0f, 0.0f, 1.0f}, {4.0f, 0.01f, 0.0f},
+        zero_gradient, ALGORITHM_MLEM, IMPLEMENTATION_OMEGA,
+        0.0f, 0.1f, 0.5f, 2.0f);
+    const std::vector<double> omega_mlem_expected = {1.55, 2.0, 22.0};
+    double omega_mlem_error = 0.0;
+    for (size_t i = 0; i < em_old.size(); ++i) {
+        omega_mlem_error = std::max(
+            omega_mlem_error,
+            fabs((double)omega_mlem.first[i] - omega_mlem_expected[i]));
+    }
+
+    const auto castor_mlem = run_em_case(
+        em_old, {0.1f, 12.0f, 3.0f}, {1.0f, 2.0f, 4.0f},
+        zero_gradient, ALGORITHM_MLEM, IMPLEMENTATION_CASTOR,
+        0.0f, 0.1f, 0.5f, 2.0f);
+    const std::vector<double> castor_mlem_expected = {1.0, 4.0, 1.5};
+    double castor_mlem_error = 0.0;
+    for (size_t i = 0; i < em_old.size(); ++i) {
+        castor_mlem_error = std::max(
+            castor_mlem_error,
+            fabs((double)castor_mlem.first[i] - castor_mlem_expected[i]));
+    }
+
+    const auto omega_osl = run_em_case(
+        em_old, {3.0f, 3.0f, 3.0f}, {4.0f, 0.1f, 0.1f},
+        {0.5f, -0.075f, -0.2f}, ALGORITHM_OSL,
+        IMPLEMENTATION_OMEGA, 2.0f, 0.1f, 0.5f, 2.0f);
+    const unsigned long long omega_osl_floor_actions =
+        last_em_diagnostics.counts[OSL_DIAG_OMEGA_EPSILON_FLOOR];
+    const std::vector<double> omega_osl_expected = {
+        2.0 * 3.1 / 5.1, 0.1, 0.1};
+    double omega_osl_error = 0.0;
+    for (size_t i = 0; i < em_old.size(); ++i) {
+        omega_osl_error = std::max(
+            omega_osl_error,
+            fabs((double)omega_osl.first[i] - omega_osl_expected[i]));
+    }
+
+    const auto castor_osl = run_em_case(
+        em_old, {3.0f, 3.0f, 20.0f}, {4.0f, 1.0f, 4.0f},
+        {0.5f, -1.0f, 0.0f}, ALGORITHM_OSL,
+        IMPLEMENTATION_CASTOR, 2.0f, 0.1f, 0.5f, 2.0f);
+    const unsigned long long castor_osl_keep_actions =
+        last_em_diagnostics.counts[OSL_DIAG_CASTOR_KEEP_OLD];
+    const std::vector<double> castor_osl_expected = {1.2, 2.0, 4.0};
+    double castor_osl_error = 0.0;
+    for (size_t i = 0; i < em_old.size(); ++i) {
+        castor_osl_error = std::max(
+            castor_osl_error,
+            fabs((double)castor_osl.first[i] - castor_osl_expected[i]));
+    }
+    CUDA_CHECK(cudaFree(d_test_osl_diagnostics));
+    CUDA_CHECK(cudaFree(d_test_counter));
+
+    std::fill(x.begin(), x.end(), 1.0f);
+    CUDA_CHECK(cudaMemcpy(d_x, x.data(), (size_t)n * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    k_tv_gradient_omega<<<blocks, BLK>>>(d_x, d_cty, Nx, Ny, Nz, 1e-4f);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double tv_constant_error = 0.0;
+    for (float value : cty) tv_constant_error = std::max(tv_constant_error,
+                                                         fabs((double)value));
+
+    for (int64_t i = 0; i < n; ++i) {
+        x[(size_t)i] = 0.25f + 0.01f * (float)(i % 19) +
+                       0.03f * sinf((float)i * 0.11f);
+    }
+    CUDA_CHECK(cudaMemcpy(d_x, x.data(), (size_t)n * sizeof(float),
+                          cudaMemcpyHostToDevice));
+    k_tv_gradient_omega<<<blocks, BLK>>>(d_x, d_cty, Nx, Ny, Nz, 1e-4f);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double tv_reference_error = 0.0;
+    const int64_t plane = (int64_t)Nx * Ny;
+    for (int z = 0; z < Nz; ++z) {
+        for (int yy = 0; yy < Ny; ++yy) {
+            for (int xx = 0; xx < Nx; ++xx) {
+                const int64_t index = (int64_t)z * plane + (int64_t)yy * Nx + xx;
+                const float center = x[(size_t)index];
+                const float xp = xx + 1 < Nx ? x[(size_t)(index + 1)] : center;
+                const float yp = yy + 1 < Ny ? x[(size_t)(index + Nx)] : center;
+                const float zp = z + 1 < Nz ? x[(size_t)(index + plane)] : center;
+                double expected = (3.0 * center - xp - yp - zp) /
+                    self_test_tv_forward_denom(x, xx, yy, z, Nx, Ny, Nz, 1e-4f);
+                if (xx > 0) {
+                    expected += (center - x[(size_t)(index - 1)]) /
+                        self_test_tv_forward_denom(x, xx - 1, yy, z,
+                                                   Nx, Ny, Nz, 1e-4f);
+                }
+                if (yy > 0) {
+                    expected += (center - x[(size_t)(index - Nx)]) /
+                        self_test_tv_forward_denom(x, xx, yy - 1, z,
+                                                   Nx, Ny, Nz, 1e-4f);
+                }
+                if (z > 0) {
+                    expected += (center - x[(size_t)(index - plane)]) /
+                        self_test_tv_forward_denom(x, xx, yy, z - 1,
+                                                   Nx, Ny, Nz, 1e-4f);
+                }
+                tv_reference_error = std::max(
+                    tv_reference_error,
+                    fabs((double)cty[(size_t)index] - expected));
+            }
+        }
+    }
+
+    k_mrp_gradient_omega<<<blocks, BLK>>>(d_x, d_cty, Nx, Ny, Nz,
+                                          1, 1, 1, 1e-8f, false);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double omega_mrp_error = 0.0;
+    for (int z = 0; z < Nz; ++z) {
+        for (int yy = 0; yy < Ny; ++yy) {
+            for (int xx = 0; xx < Nx; ++xx) {
+                std::vector<float> values;
+                values.reserve(27);
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const int zz = self_test_mirror_index(z + dz, Nz);
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        const int y2 = self_test_mirror_index(yy + dy, Ny);
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int x2 = self_test_mirror_index(xx + dx, Nx);
+                            values.push_back(x[(int64_t)zz * Nx * Ny +
+                                               (int64_t)y2 * Nx + x2]);
+                        }
+                    }
+                }
+                std::sort(values.begin(), values.end());
+                const int64_t index = (int64_t)z * Nx * Ny +
+                                      (int64_t)yy * Nx + xx;
+                const double median = values[values.size() / 2];
+                const double expected = (x[(size_t)index] - median) /
+                                        (median + 1e-8);
+                omega_mrp_error = std::max(
+                    omega_mrp_error,
+                    fabs((double)cty[(size_t)index] - expected));
+            }
+        }
+    }
+
+    // CASToR 默认 6-nearest 包含中心体素，边界外邻居丢弃，偶数样本取中间平均。
+    k_mrp_gradient_castor<<<blocks, BLK>>>(
+        d_x, d_cty, Nx, Ny, Nz, MRP_NEIGHBORHOOD_SIX_NEAREST,
+        1, false, 1.0f, 1.0f, 1.0e6f, 1.0e6f);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double castor_mrp_error = 0.0;
+    const int neighbor_dx[7] = {0, -1, 1, 0, 0, 0, 0};
+    const int neighbor_dy[7] = {0, 0, 0, -1, 1, 0, 0};
+    const int neighbor_dz[7] = {0, 0, 0, 0, 0, -1, 1};
+    for (int z = 0; z < Nz; ++z) {
+        for (int yy = 0; yy < Ny; ++yy) {
+            for (int xx = 0; xx < Nx; ++xx) {
+                std::vector<float> values;
+                values.reserve(7);
+                for (int k = 0; k < 7; ++k) {
+                    const int x2 = xx + neighbor_dx[k];
+                    const int y2 = yy + neighbor_dy[k];
+                    const int z2 = z + neighbor_dz[k];
+                    if (x2 < 0 || x2 >= Nx || y2 < 0 || y2 >= Ny ||
+                        z2 < 0 || z2 >= Nz) continue;
+                    values.push_back(x[(int64_t)z2 * Nx * Ny +
+                                       (int64_t)y2 * Nx + x2]);
+                }
+                std::sort(values.begin(), values.end());
+                double median = values[values.size() / 2];
+                if ((values.size() & 1u) == 0u) {
+                    median = 0.5 * (median + values[values.size() / 2 - 1]);
+                }
+                const int64_t index = (int64_t)z * Nx * Ny +
+                                      (int64_t)yy * Nx + xx;
+                const double expected = median != 0.0
+                    ? ((double)x[(size_t)index] - median) / median : 0.0;
+                castor_mrp_error = std::max(
+                    castor_mrp_error,
+                    fabs((double)cty[(size_t)index] - expected));
+            }
+        }
+    }
+
+    // radius=voxel 时严格“距离 < radius”只保留中心体素，梯度应全为 0。
+    k_mrp_gradient_castor<<<blocks, BLK>>>(
+        d_x, d_cty, Nx, Ny, Nz, MRP_NEIGHBORHOOD_SPHERE,
+        1, false, 1.0f, 1.0f, 1.0e6f, 1.0e6f);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(cty.data(), d_cty, (size_t)n * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double castor_sphere_strict_error = 0.0;
+    for (float value : cty) {
+        castor_sphere_strict_error = std::max(
+            castor_sphere_strict_error, fabs((double)value));
+    }
+
+    /* 令 cutoff 精确落在补零后 x 轴第 5 个频点，直接验证 H(fc)=0.5。 */
+    const float butter_voxel_mm = 1.0f;
+    const int butter_order = 4;
+    const float butter_cutoff_cycles_per_cm =
+        10.0f * 5.0f / (float)(2 * Nx);
+    ButterworthWorkspace butter_workspace;
+    initialize_butterworth_workspace(
+        butter_workspace, Nx, Ny, Nz, butter_voxel_mm,
+        butter_cutoff_cycles_per_cm, butter_order);
+    const std::vector<float> butter_response = build_butterworth_response(
+        butter_workspace.padded_nx, butter_workspace.padded_ny,
+        butter_workspace.padded_nz, butter_voxel_mm,
+        butter_cutoff_cycles_per_cm, butter_order);
+    const double butter_dc_error = fabs((double)butter_response[0] - 1.0);
+    const double butter_cutoff_error = fabs((double)butter_response[5] - 0.5);
+    const double butter_nyquist_gain =
+        butter_response[(size_t)(butter_workspace.padded_nx / 2)];
+
+    auto apply_self_test_butterworth = [&]() {
+        CUDA_CHECK(cudaMemcpy(d_x, x.data(), (size_t)n * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        apply_butterworth_filter(butter_workspace, d_x, d_cx, false);
+        CUDA_CHECK(cudaMemcpy(cx.data(), d_cx, (size_t)n * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+    };
+
+    const int64_t edge_index = (int64_t)(Nz / 2) * plane +
+                               (int64_t)(Ny / 2) * Nx;
+    std::fill(x.begin(), x.end(), 0.0f);
+    x[(size_t)edge_index] = 1.0f;
+    apply_self_test_butterworth();
+    const std::vector<float> positive_impulse = cx;
+    const double butter_wrap_ratio =
+        fabs((double)cx[(size_t)(edge_index + Nx - 1)]) /
+        std::max(1e-12, fabs((double)cx[(size_t)edge_index]));
+
+    // 正负输入应严格反号；该检查可发现旧实现的无条件负值截断。
+    x[(size_t)edge_index] = -1.0f;
+    apply_self_test_butterworth();
+    double butter_linearity_error = 0.0;
+    for (size_t i = 0; i < cx.size(); ++i) {
+        butter_linearity_error = std::max(
+            butter_linearity_error,
+            fabs((double)positive_impulse[i] + (double)cx[i]));
+    }
+
+    double input_ac_energy = 0.0;
+    for (int z = 0; z < Nz; ++z) {
+        for (int yy = 0; yy < Ny; ++yy) {
+            for (int xx = 0; xx < Nx; ++xx) {
+                const int64_t index = (int64_t)z * plane + (int64_t)yy * Nx + xx;
+                x[(size_t)index] = ((xx + yy + z) & 1) ? 1.0f : 0.0f;
+                const double centered = (double)x[(size_t)index] - 0.5;
+                input_ac_energy += centered * centered;
+            }
+        }
+    }
+    apply_self_test_butterworth();
+    const double output_mean = std::accumulate(cx.begin(), cx.end(), 0.0) /
+                               (double)cx.size();
+    double output_ac_energy = 0.0;
+    for (float value : cx) {
+        const double centered = (double)value - output_mean;
+        output_ac_energy += centered * centered;
+    }
+    const double butter_ac_ratio = output_ac_energy /
+        std::max(1e-12, input_ac_energy);
+
+    destroy_butterworth_workspace(butter_workspace);
+
+    CUDA_CHECK(cudaFree(d_tmp2));
+    CUDA_CHECK(cudaFree(d_tmp1));
+    CUDA_CHECK(cudaFree(d_norm));
+    CUDA_CHECK(cudaFree(d_cty));
+    CUDA_CHECK(cudaFree(d_cx));
+    CUDA_CHECK(cudaFree(d_y));
+    CUDA_CHECK(cudaFree(d_x));
+
+    // 小型 Host CSR 检查：3x3x1 网格中直径 1.1 mm 的圆柱只保留中心列 4。
+    int64_t roi_active = 0;
+    const std::vector<uint8_t> roi_test_mask =
+        build_centered_cylinder_roi_mask(3, 3, 1, 1.0f,
+                                         1.1f, 1.1f, roi_active);
+    HostCSR64 roi_test_csr;
+    roi_test_csr.num_rows = 2;
+    roi_test_csr.num_cols = 9;
+    roi_test_csr.nnz = 7;
+    roi_test_csr.row_ptr = {0, 4, 7};
+    roi_test_csr.col_idx = {0, 4, 8, 3, 4, 5, 6};
+    roi_test_csr.values = {1.0f, 2.0f, 3.0f, 4.0f,
+                           5.0f, 6.0f, 7.0f};
+    const int64_t roi_removed =
+        prune_host_csr_to_roi(roi_test_csr, roi_test_mask);
+    const bool roi_csr_pass =
+        roi_active == 1 && roi_removed == 5 && roi_test_csr.nnz == 2 &&
+        roi_test_csr.row_ptr == std::vector<int64_t>({0, 1, 2}) &&
+        roi_test_csr.col_idx == std::vector<int32_t>({4, 4}) &&
+        roi_test_csr.values == std::vector<float>({2.0f, 5.0f});
+
+    // 直接经过拼接后包装层，验证 double<->float 转换、按需 GPU 缓冲和输出几何。
+    Volume stitch_filter_test;
+    stitch_filter_test.nx = 9;
+    stitch_filter_test.ny = 7;
+    stitch_filter_test.nz = 5;
+    stitch_filter_test.voxel_mm = 1.0;
+    stitch_filter_test.data.assign(9u * 7u * 5u, 0.0);
+    stitch_filter_test.data[stitch_filter_test.data.size() / 2] = 1.0;
+    const Volume stitch_smooth_test = smooth_stitched_volume(
+        stitch_filter_test, 1.2f, 3.0f);
+    const Volume stitch_butter_test = butterworth_stitched_volume(
+        stitch_filter_test, 3.0f, 8);
+    const VolumeDiagnostics stitch_smooth_diagnostics =
+        diagnose_volume(stitch_smooth_test);
+    const VolumeDiagnostics stitch_butter_diagnostics =
+        diagnose_volume(stitch_butter_test);
+    const bool stitch_filter_wrapper_pass =
+        stitch_smooth_test.data.size() == stitch_filter_test.data.size() &&
+        stitch_butter_test.data.size() == stitch_filter_test.data.size() &&
+        stitch_smooth_diagnostics.maximum > 0.0 &&
+        stitch_smooth_diagnostics.sum > 0.0 &&
+        std::isfinite(stitch_butter_diagnostics.sum) &&
+        stitch_butter_diagnostics.maximum > 0.0;
+
+    std::printf("[self-test] strict CASToR PSF adjoint error = %.9e\n",
+                strict_castor_adjoint_error);
+    std::printf("[self-test] fixed CASToR PSF adjoint error  = %.9e\n",
+                fixed_castor_adjoint_error);
+    std::printf("[self-test] CASToR PSF forward match error  = %.9e\n",
+                castor_forward_match_error);
+    std::printf("[self-test] OMEGA PSF constant max error    = %.9e\n",
+                omega_constant_error);
+    std::printf("[self-test] OMEGA ratio max error           = %.9e\n",
+                omega_ratio_error);
+    std::printf("[self-test] CASToR ratio max error/count    = %.9e / %llu\n",
+                castor_ratio_error, castor_threshold_count);
+    std::printf("[self-test] OMEGA MLEM max error            = %.9e\n",
+                omega_mlem_error);
+    std::printf("[self-test] CASToR MLEM max error           = %.9e\n",
+                castor_mlem_error);
+    std::printf("[self-test] OMEGA OSL max error/warnings    = %.9e / %llu\n",
+                omega_osl_error, omega_osl.second);
+    std::printf("[self-test] CASToR OSL max error/warnings   = %.9e / %llu\n",
+                castor_osl_error, castor_osl.second);
+    std::printf("[self-test] OSL diagnostic counts          = %s\n",
+                osl_diagnostic_counts_pass ? "PASS" : "FAIL");
+    std::printf("[self-test] OSL diagnostic range error     = %.9e\n",
+                osl_diagnostic_range_error);
+    std::printf("[self-test] OSL omega-floor/castor-keep    = %llu / %llu\n",
+                omega_osl_floor_actions, castor_osl_keep_actions);
+    std::printf("[self-test] TV constant max error    = %.9e\n", tv_constant_error);
+    std::printf("[self-test] TV CPU/GPU max error     = %.9e\n", tv_reference_error);
+    std::printf("[self-test] OMEGA MRP max error       = %.9e\n", omega_mrp_error);
+    std::printf("[self-test] CASToR MRP max error      = %.9e\n", castor_mrp_error);
+    std::printf("[self-test] CASToR sphere strict err  = %.9e\n",
+                castor_sphere_strict_error);
+    std::printf("[self-test] Butterworth H(0) error    = %.9e\n", butter_dc_error);
+    std::printf("[self-test] Butterworth H(fc) error   = %.9e\n", butter_cutoff_error);
+    std::printf("[self-test] Butterworth Nyquist gain  = %.9e\n", butter_nyquist_gain);
+    std::printf("[self-test] Butterworth wrap ratio    = %.9e\n", butter_wrap_ratio);
+    std::printf("[self-test] Butterworth linearity err = %.9e\n", butter_linearity_error);
+    std::printf("[self-test] Butterworth AC ratio      = %.9e\n", butter_ac_ratio);
+    std::printf("[self-test] ROI CSR prune             = %s\n",
+                roi_csr_pass ? "PASS" : "FAIL");
+    std::printf("[self-test] stitched filter wrappers = %s\n",
+                stitch_filter_wrapper_pass ? "PASS" : "FAIL");
+    const bool passed =
+        fixed_castor_adjoint_error < 5e-6 &&
+        fixed_castor_adjoint_error <= strict_castor_adjoint_error + 1e-12 &&
+        castor_forward_match_error < 1e-7 && omega_constant_error < 5e-6 &&
+        omega_ratio_error < 2e-5 && castor_ratio_error < 2e-6 &&
+        castor_threshold_count == 2 && omega_mlem_error < 2e-5 &&
+        castor_mlem_error < 2e-6 && omega_osl_error < 2e-4 &&
+        castor_osl_error < 2e-6 && omega_osl.second == 2 &&
+        castor_osl.second == 1 && osl_diagnostic_counts_pass &&
+        osl_diagnostic_range_error < 2e-5 &&
+        omega_osl_floor_actions == 2 && castor_osl_keep_actions == 1 &&
+        tv_constant_error < 1e-6 &&
+        tv_reference_error < 2e-5 && omega_mrp_error < 2e-5 &&
+        castor_mrp_error < 2e-5 && castor_sphere_strict_error < 1e-6 &&
+        butter_dc_error < 1e-7 && butter_cutoff_error < 1e-6 &&
+        butter_nyquist_gain < 0.01 && butter_wrap_ratio < 0.1 &&
+        butter_linearity_error < 2e-5 && butter_ac_ratio < 0.5 &&
+        roi_csr_pass && stitch_filter_wrapper_pass;
+    std::printf("[self-test] %s\n", passed ? "PASS" : "FAIL");
+    return passed ? 0 : 1;
 }
 
 // 主流程：发现床位、参数校验、重建、mask 裁剪、增益拟合和拼接。
 int main(int argc, char** argv) {
     try {
         const BedMergeOptions options = parse_options(argc, argv);
+        if (options.self_test_algorithms) return run_algorithm_self_tests();
         const std::vector<BedInput> beds = discover_beds(options.proj_dir);
         const double voxel_mm = read_metadata_value(options.matrix_dir / "metadata.txt", "voxel_size_mm");
         const int matrix_nz = static_cast<int>(read_metadata_value(options.matrix_dir / "metadata.txt", "Nz"));
         const int matrix_nx = static_cast<int>(read_metadata_value(options.matrix_dir / "metadata.txt", "Nx"));
         const int matrix_ny = static_cast<int>(read_metadata_value(options.matrix_dir / "metadata.txt", "Ny"));
         const int step_layers = static_cast<int>(std::llround(options.bed_step_mm / voxel_mm));
+        const double nyquist_cycles_per_cm = 5.0 / voxel_mm;
+        const bool stitch_uses_butterworth =
+            options.stitch_filter == "butterworth" ||
+            options.stitch_filter == "both";
+        if (stitch_uses_butterworth) {
+            for (const auto& variant : options.stitch_butter_variants) {
+                if (variant.first > nyquist_cycles_per_cm) {
+                    std::ostringstream message;
+                    message << "stitch Butterworth cutoff " << variant.first
+                            << " exceeds voxel Nyquist " << nyquist_cycles_per_cm
+                            << " cycles/cm (voxel=" << voxel_mm << " mm)";
+                    fail(message.str());
+                }
+            }
+        }
         if (options.mask_nx > matrix_nx || options.mask_ny > matrix_ny ||
             options.mask_nz > matrix_nz) {
             fail("mask size must not exceed system-matrix dimensions");
         }
-        if (beds.size() > 1 && (step_layers <= 0 || options.mask_nz <= step_layers)) {
-            fail("multi-bed mask Nz must be greater than bed-step in voxel units");
+        const double geometry_tolerance_mm = 1e-6 * std::max(1.0, voxel_mm);
+        // The ROI prunes full system-matrix columns during reconstruction.  The
+        // mask is applied only after reconstruction to crop saved single-bed
+        // images, so neither spatial extent is allowed to constrain the other.
+        if (options.gain_roi_diameter_mm > options.roi_diameter_mm + geometry_tolerance_mm) {
+            fail("--gain-roi-diameter-mm must not exceed --roi-diameter-mm");
+        }
+        if (beds.size() > 1 &&
+            (step_layers <= 0 || options.mask_nz < step_layers)) {
+            fail("multi-bed mask Nz must be at least the bed-step in voxel units");
         }
         if (options.dry_run) {
-            std::printf("single-bed reconstruction and mask stitch: %zu beds, mask=%dx%dx%d, step=%d layers, overlap=%d layers\n",
+            std::printf("输出目录: %s\n", options.out.string().c_str());
+            std::printf("独立床位 iteration-major 重建与拼接: "
+                        "%zu beds, mask=%dx%dx%d, step=%d layers, overlap=%d layers\n",
                         beds.size(), options.mask_nx, options.mask_ny, options.mask_nz,
                         step_layers, options.mask_nz - step_layers);
+            std::printf("算法: %s; implementation=%s; conv=%s/%s; prior=%s; "
+                         "beta=%.6g; butterworth=%s\n",
+                         algorithm_name(options.algorithm),
+                         reference_implementation_name(options.implementation),
+                         options.conv_mode.c_str(),
+                         conv_implementation_name(options.conv_implementation),
+                         options.map_type == MAP_TV ? "tv" :
+                         (options.map_type == MAP_MRP ? "mrp" : "none"),
+                         options.map_beta,
+                         options.butter_enable ? "on" : "off");
+            std::printf("数值保护: OMEGA epsilon=%.9g; CASToR threshold=%.9g; "
+                         "CASToR update=[%.6g,%.6g]\n",
+                         (double)options.omega_epsilon,
+                         (double)options.castor_threshold,
+                        (double)options.castor_min_update,
+                        (double)options.castor_max_update);
+            std::printf("ROI: centered cylinder diameter=%.6g mm height=%.6g mm; "
+                        "CSR columns outside ROI are pruned\n",
+                        options.roi_diameter_mm, options.roi_height_mm);
+            std::printf("轴向重建ROI: %s; 拼接输入mask=%d层\n",
+                        beds.size() == 1 ? "single-bed fixed 72 layers" :
+                        "multi-bed local matrix 220 layers, then global crop",
+                        options.mask_nz);
+            std::printf("保存: every %d iterations -> reconN; recon_final disabled\n",
+                        options.save_interval);
+            std::printf("拼接后滤波: %s; smooth=%.6g mm/%g sigma; "
+                        "butterworth variants=",
+                        options.stitch_filter.c_str(),
+                        (double)options.stitch_smooth_fwhm_mm,
+                        (double)options.stitch_smooth_sigmas);
+            for (size_t i = 0; i < options.stitch_butter_variants.size(); ++i) {
+                const auto& variant = options.stitch_butter_variants[i];
+                std::printf("%s%.6g cycles/cm,o%d",
+                            i == 0 ? "" : "; ",
+                            (double)variant.first, variant.second);
+            }
+            std::printf("\n");
             return 0;
         }
 
@@ -5086,38 +8701,91 @@ int main(int argc, char** argv) {
         std::printf("[bedmerge] reconstruct %zu beds, then center-crop mask %dx%dx%d\n",
                     beds.size(), options.mask_nx, options.mask_ny, options.mask_nz);
         const int status = run_reconstruction(options, beds, raw_root);
-        if (status != 0) fail("single-bed CUDA reconstruction returned nonzero status");
+        if (status != 0) fail("iteration-major CUDA reconstruction returned nonzero status");
 
-        std::vector<Volume> volumes;
-        volumes.reserve(beds.size());
-        const fs::path first_raw_bed = raw_root / ("Bed" + std::to_string(beds.front().number));
         std::vector<int> saved_iterations;
-        if (options.save_interval > 0) {
-            saved_iterations = discover_saved_iterations(first_raw_bed);
+        for (int iteration = options.save_interval;
+             iteration <= options.iterations;
+             iteration += options.save_interval) {
+            saved_iterations.push_back(iteration);
         }
-        for (const BedInput& bed : beds) {
-            const fs::path raw_bed_dir = raw_root / ("Bed" + std::to_string(bed.number));
-            const fs::path single_bed_dir = single_root / ("Bed" + std::to_string(bed.number));
-            const Volume full = read_nifti(raw_bed_dir);
-            Volume masked = crop_center_mask(full, options.mask_nx,
-                                             options.mask_ny, options.mask_nz);
-            write_nifti(single_bed_dir, masked, "recon_final");
-            volumes.push_back(std::move(masked));
-
-            if (options.save_interval > 0) {
-                const std::vector<int> bed_iterations = discover_saved_iterations(raw_bed_dir);
-                if (bed_iterations != saved_iterations) {
-                    fail("saved iteration sets differ between beds; cannot stitch intermediate outputs");
-                }
-                for (int iteration : saved_iterations) {
-                    char stem_buffer[32] = {};
-                    std::snprintf(stem_buffer, sizeof(stem_buffer), "recon_iter%03d", iteration);
-                    const Volume full_iteration = read_nifti(raw_bed_dir, stem_buffer);
-                    Volume masked_iteration = crop_center_mask(
-                        full_iteration, options.mask_nx, options.mask_ny, options.mask_nz);
-                    write_nifti(single_bed_dir, masked_iteration, stem_buffer);
+        std::vector<double> report_gains;
+        Volume report_output;
+        int report_mask_layers = 0;
+        int report_step_layers = 0;
+        const fs::path stitch_dir = options.out / "stitched";
+        for (int iteration : saved_iterations) {
+            const std::string stem = "recon" + std::to_string(iteration);
+            std::vector<Volume> volumes;
+            volumes.reserve(beds.size());
+            for (const BedInput& bed : beds) {
+                const fs::path bed_dir = raw_root /
+                    ("Bed" + std::to_string(bed.number));
+                const Volume full = read_nifti(bed_dir, stem);
+                Volume masked = crop_center_mask(
+                    full, options.mask_nx, options.mask_ny, options.mask_nz);
+                write_nifti(single_root /
+                                ("Bed" + std::to_string(bed.number)),
+                            masked, stem.c_str());
+                volumes.push_back(std::move(masked));
+            }
+            for (const Volume& volume : volumes) {
+                if (volume.nx != volumes[0].nx || volume.ny != volumes[0].ny ||
+                    volume.nz != volumes[0].nz ||
+                    std::abs(volume.voxel_mm - volumes[0].voxel_mm) > 1e-6) {
+                    fail("single-bed output geometries are inconsistent at " + stem);
                 }
             }
+            const int actual_step_layers = static_cast<int>(
+                std::llround(options.bed_step_mm / volumes[0].voxel_mm));
+            if (volumes.size() > 1 && volumes[0].nz < actual_step_layers) {
+                fail("multi-bed mask Nz must be at least the bed-step in reconstructed voxel units");
+            }
+            std::vector<double> gains = fit_gains(
+                volumes, actual_step_layers,
+                volumes[0].voxel_mm, options.gain_roi_diameter_mm);
+            Volume stitched = stitch_volumes(volumes, gains,
+                                             options.bed_step_mm);
+            write_nifti(stitch_dir, stitched, stem.c_str());
+            const VolumeDiagnostics unfiltered_diagnostics =
+                diagnose_volume(stitched);
+            if (options.stitch_filter == "smooth" ||
+                options.stitch_filter == "both") {
+                Volume smoothed = smooth_stitched_volume(
+                    stitched, options.stitch_smooth_fwhm_mm,
+                    options.stitch_smooth_sigmas);
+                const VolumeDiagnostics smoothed_diagnostics =
+                    diagnose_volume(smoothed);
+                print_stitch_filter_diagnostics(
+                    "smooth", unfiltered_diagnostics, smoothed_diagnostics);
+                const fs::path smooth_dir = options.out /
+                    ("stitched_smooth_fwhm" + decimal_path_token(
+                        options.stitch_smooth_fwhm_mm));
+                write_nifti(smooth_dir, smoothed, stem.c_str());
+            }
+            if (stitch_uses_butterworth) {
+                for (const auto& variant : options.stitch_butter_variants) {
+                    Volume filtered = butterworth_stitched_volume(
+                        stitched, variant.first, variant.second);
+                    const VolumeDiagnostics filtered_diagnostics =
+                        diagnose_volume(filtered);
+                    const std::string label =
+                        "butterworth_fc" + decimal_path_token(variant.first) +
+                        "_o" + std::to_string(variant.second);
+                    print_stitch_filter_diagnostics(
+                        label.c_str(), unfiltered_diagnostics,
+                        filtered_diagnostics);
+                    const fs::path butter_dir = options.out /
+                        ("stitched_butter_fc" + decimal_path_token(variant.first) +
+                         "cpcm_o" + std::to_string(variant.second));
+                    write_nifti(butter_dir, filtered, stem.c_str());
+                }
+            }
+            report_gains = std::move(gains);
+            report_output = std::move(stitched);
+            report_mask_layers = volumes[0].nz;
+            report_step_layers = actual_step_layers;
+            std::printf("[bedmerge] saved cropped and stitched %s\n", stem.c_str());
         }
         if (!options.keep_raw) {
             // 完整矩阵结果仅作为裁剪阶段的中间文件，默认不作为正式输出保留。
@@ -5128,52 +8796,9 @@ int main(int argc, char** argv) {
                      raw_root.string() + ": " + remove_error.message());
             }
         }
-        for (const Volume& volume : volumes) {
-            if (volume.nx != volumes[0].nx || volume.ny != volumes[0].ny ||
-                volume.nz != volumes[0].nz || std::abs(volume.voxel_mm - volumes[0].voxel_mm) > 1e-6) {
-                fail("single-bed output geometries are inconsistent");
-            }
-        }
-        const int actual_step_layers = static_cast<int>(std::llround(options.bed_step_mm / volumes[0].voxel_mm));
-        if (volumes.size() > 1 && volumes[0].nz <= actual_step_layers) {
-            fail("multi-bed mask Nz must be greater than bed-step in reconstructed voxel units");
-        }
-        const std::vector<double> gains = fit_gains(
-            volumes, actual_step_layers,
-            volumes[0].voxel_mm, options.gain_roi_diameter_mm);
-        const Volume stitched = stitch_volumes(
-            volumes, gains, options.bed_step_mm);
-        const fs::path stitch_dir = options.out / "stitched";
-        write_nifti(stitch_dir, stitched);
-        for (int iteration : saved_iterations) {
-            std::vector<Volume> iteration_volumes;
-            iteration_volumes.reserve(beds.size());
-            char stem_buffer[32] = {};
-            std::snprintf(stem_buffer, sizeof(stem_buffer), "recon_iter%03d", iteration);
-            for (const BedInput& bed : beds) {
-                iteration_volumes.push_back(read_nifti(
-                    single_root / ("Bed" + std::to_string(bed.number)), stem_buffer));
-            }
-            for (const Volume& volume : iteration_volumes) {
-                if (volume.nx != volumes[0].nx || volume.ny != volumes[0].ny ||
-                    volume.nz != volumes[0].nz ||
-                    std::abs(volume.voxel_mm - volumes[0].voxel_mm) > 1e-6) {
-                    fail("intermediate single-bed output geometries are inconsistent");
-                }
-            }
-            const std::vector<double> iteration_gains = fit_gains(
-                iteration_volumes, actual_step_layers,
-                iteration_volumes[0].voxel_mm, options.gain_roi_diameter_mm);
-            const Volume stitched_iteration = stitch_volumes(
-                iteration_volumes, iteration_gains, options.bed_step_mm);
-            std::string stitched_stem = "recon_stitched_iter" +
-                std::string(stem_buffer + std::strlen("recon_iter"));
-            write_nifti(stitch_dir, stitched_iteration, stitched_stem.c_str());
-        }
-        write_report(options.out / "bedmerge_report.json", options, beds, gains,
-                     stitched, volumes[0].nz, actual_step_layers, saved_iterations);
-        // 所有床位均已完成后才释放驻留的系统矩阵，确保床位循环期间只加载一次。
-        g_bedmerge_matrix_cache.clear();
+        write_report(options.out / "bedmerge_report.json", options, beds,
+                     report_gains, saved_iterations, report_output,
+                     report_mask_layers, report_step_layers);
         std::printf("[bedmerge] complete: %s\n", options.out.string().c_str());
         return 0;
     } catch (const std::exception& error) {
@@ -5181,3 +8806,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+

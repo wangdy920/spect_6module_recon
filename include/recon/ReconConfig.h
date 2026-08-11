@@ -10,7 +10,6 @@
 
 namespace spect {
 
-class ISparseOps;
 
 // Import filter types into spect namespace for convenience
 using filters::PSFConf;
@@ -28,7 +27,6 @@ struct ReconOpts {
   const std::vector<double>* w_img = nullptr;
   const std::vector<double>* w_proj = nullptr;
   const std::vector<double>* b_proj = nullptr;
-  const ISparseOps* sparseOps = nullptr;
   PSFConf psf;
   bool do_post_smooth_every_iter = false;
 
@@ -76,8 +74,8 @@ inline bool should_use_threadlocal_accum(size_t nvox, int threads) {
 
 /// Check if PSF blurring is needed
 inline bool needs_psf_blur(const ReconOpts& opts, const PSFKernels* psfKernels) {
-  // Operator: apply space-invariant PSF during forward/back projection
-  if (opts.psf.mode == PSFMode::Operator)
+  // Operator/Sieve: apply space-invariant PSF during forward/back projection
+  if (opts.psf.mode != PSFMode::None)
     return (psfKernels != nullptr);
   return false;
 }

@@ -1,6 +1,6 @@
 # SPECT-recon Capability Matrix
 
-> 对齐日期：2026-07-31（收敛重构后）。以 `src/cli/ArgumentParser.cpp`、`src/pipeline/MainProgram.cpp`、compact CUDA 路径为唯一事实来源。
+> 对齐日期：2026-08-11。以 `src/cli/ArgumentParser.cpp`、`src/pipeline/MainProgram.cpp`、`src/pipeline/VolumeOutput.cpp` 和 compact CUDA 路径为唯一事实来源。
 
 ## 证据入口
 
@@ -10,7 +10,7 @@
 | compact 几何 | `src/io/CompactSymmetryMetadata.cpp`、`ReconDataLoader.cpp::applyCompactMetadataGeometry` |
 | 主流程 | `src/pipeline/MainProgram.cpp` |
 | compact CUDA | `src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp` |
-| 回归 | `tests/`、`recon_out/convergence_baseline_20260731/`（冻结金标准） |
+| 回归 | `tests/`、本地 `recon_out/prototype_sieve_castor_fwhm1p3_final_20260811/current_production_parity_metrics.json`、`reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` |
 
 ## 耐久决策
 
@@ -20,20 +20,13 @@
 | 唯一布局 | compact-symmetric；standard 布局与单文件 CSRB/MAT 矩阵入口已整体退场 |
 | 算法 | **MLEM / BSREM**；subset=1 语义（全量更新），无 `-subsets` 参数；OSEM/ADMM 退场 |
 | 公开正则 | 仅 **TV / RDP**；可选 registered CT 边权，无 CT 时 activity-only |
-| 公开 PSF | 仅 image-domain **Operator / None**；`-psf` 为 FWHM mm |
-| 稀疏 / Butterworth | 固定 **CUDA / cuFFT**；旧后端选择 CLI 拒绝 |
+| 公开 PSF | image-domain **`operator` / `sieve` / `none`**；`-psf` 为 FWHM mm；`-psfKernel adjoint|castor` 选择真伴随 Gaussian 或严格 CASToR erf/Z-norm/forward-reuse 语义；发布默认 `sieve + castor + 1.3,3` |
+| 稀疏 / 滤波 | 固定 **CUDA-first / cuFFT**；CASToR PSF 与 smooth 走 CUDA，Butterworth 固定 cuFFT；smooth/Butterworth 仅可显式作为 `in_recon` 滤波，发布默认关闭 |
 | CTAC 模型 | **`att[angle, voxel]` fused** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
-| 多床位 | 仅 **stitch**：各床独立重建（零 overlap），输出前按 `center66_cosine10`（默认）/ `sigmoid` / `direct` 拼接 + seam postprocess；joint 联合重建已退场 |
+| 多床位 | 唯一 canonical stitch：`Bed1=max physical z`、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（由 `baseNz - bedOverlap` 与 16.8 mm 机械步进校验自动确定，260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。无 stitch/profile/FOV 选择器 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
 | GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；不规划多 GPU |
-| 输出 | MHD/RAW 体数据 + 自动日志；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
-
-## 已退场入口（parser 拒绝）
-
-- 矩阵：`-indexMat` / `-weightMat` / `-loadCSR` / `-mapCSR` / `-saveCSR` / `-compactMeta` / `-matrixLayout` → `Unknown argument`
-- 算法：`-subsets`、`-alg`、`-opti admm`（报 `Unknown optimisation algorithm`）
-- 其他：`-sparseBackend`、`-conv`、`-psfProj`、`-psfMode ProjDomain|PostSmooth|DistanceDependent`、`-butterBackend`、`-prior`、`-regPower` / `-regSigma` 及 anatomical 正则细调参数
-- INI：`[SystemMatrix] matrix_layout` / `map_csr`、`[Reconstruction] subsets`、`[MultiBed] overlap_in_recon`（未知 INI 键被静默忽略）
+| 输出 | 每次重建仅保存一个无后缀 `<prefix>_it<N>.mhd/.raw` 最终体，另写自动日志与 `recon_manifest.json`；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
 
 ## 能力表
 
@@ -41,12 +34,11 @@
 |---|---|---:|---:|---|
 | compact 260601 | MLEM CUDA | 是 | **是（B1 gate）** | subset=1 全量更新 |
 | compact 260601 | BSREM + TV/RDP | 是 | 路径/parity；beta 标定未完 | 可选 CT 边权 |
-| compact 260601 | Operator PSF | 是 | 是 | XY 各向同性 |
-| compact 260601 | Butterworth | 是 | 是 | cuFFT，逐 iter |
+| compact 260601 | `operator`/`sieve` PSF | 是 | 是 | XY 各向同性 |
+| compact 260601 | Butterworth | 是 | 是 | cuFFT；仅显式 `in_recon`，与 `sieve` 互斥 |
 | compact 260601 | CTAC 单床 | 是 | 圆柱 true/auto gate | fused 默认 |
 | compact 260601 | multi-bed CTAC | 是 | 数值 parity 通过 | 每床 fused factors |
-| compact 260601 | 多床 stitch | 是 | 是 | center66_cosine10 默认 + seam postprocess |
-| compact 260601 | OSEM / ADMM | 否 | — | CLI 拒绝 |
+| compact 260601 | 多床 canonical stitch | 是 | **是（五组数据）** | 两组 EP、两组 mouse 与单床 Derenzo 的对象/数值/输出端点全部通过 |
 
 ## CTAC 边界（简）
 
@@ -58,7 +50,7 @@
 
 ## 相关文档
 
-- `RELEASE_20260721_CN.md` — 当前 release（`RELEASE_20260715_CN.md` 为上一版历史保留）
-- `USAGE_CN.md` / `CLI_CHANGES_CN.md` — CLI
+- `../reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` — 当前 `sieve + CASToR + FWHM 1.3 mm` 原型对齐与五组数据决策记录
+- `USAGE_CN.md` — CLI
 - `Format_Reader_Matrix_CN.md` — 矩阵格式说明
 - `Recon_Interface_Migration_Field_CN.md` — 现场迁移

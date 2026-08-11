@@ -289,15 +289,126 @@ void conv3d_separable_adjoint_inplace(
   f.swap(tmp);
 }
 
+std::vector<double> makeCastorErf1D(double fwhm_mm, double vox_mm,
+                                    double nb_sigmas) {
+  if (fwhm_mm <= 0.0 || vox_mm <= 0.0)
+    return {1.0};
+  const double sigma_mm = fwhm_mm / (2.0 * std::sqrt(2.0 * std::log(2.0)));
+  // CASToR round：小数部分严格大于 0.5 才进位（恰 0.5 舍去），允许半径 0。
+  const double raw = sigma_mm * nb_sigmas / vox_mm;
+  int half = static_cast<int>(std::floor(raw));
+  if ((raw - half) > 0.5)
+    ++half;
+  if (half < 0)
+    half = 0;
+  const double denom = std::sqrt(2.0) * sigma_mm;
+  std::vector<double> kernel(static_cast<size_t>(2 * half + 1));
+  double sum = 0.0;
+  for (int i = -half; i <= half; ++i) {
+    const double v = 0.5 * (std::erf((i + 0.5) * vox_mm / denom) -
+                            std::erf((i - 0.5) * vox_mm / denom));
+    kernel[static_cast<size_t>(i + half)] = v;
+    sum += v;
+  }
+  if (!(sum > 0.0) || !std::isfinite(sum))
+    sum = 1.0;
+  for (double &v : kernel)
+    v /= sum;
+  return kernel;
+}
+
+std::vector<double> makeCastorZNorm1D(const std::vector<double> &kz, int Nz) {
+  const int half = static_cast<int>(kz.size()) / 2;
+  std::vector<double> norm(static_cast<size_t>(std::max(1, Nz)), 1.0);
+  for (int z = 0; z < Nz; ++z) {
+    double sum = 0.0;
+    for (int t = -half; t <= half; ++t) {
+      const int zz = z + t;
+      if (zz >= 0 && zz < Nz)
+        sum += kz[static_cast<size_t>(t + half)];
+    }
+    norm[static_cast<size_t>(z)] =
+        (std::isfinite(sum) && sum > 1e-12) ? sum : 1.0;
+  }
+  return norm;
+}
+
+namespace {
+
+// 零扩展一维卷积（越界 tap 直接跳过，不做任何边界补偿）。
+void conv1d_axis_zero(const std::vector<double> &in, std::vector<double> &out,
+                      int Nx, int Ny, int Nz, int axis,
+                      const std::vector<double> &k, int threads) {
+  const int half = static_cast<int>(k.size()) / 2;
+  const int dims[3] = {Nx, Ny, Nz};
+  const int n = dims[axis];
+#pragma omp parallel for collapse(2) schedule(static) num_threads(threads)
+  for (int z = 0; z < Nz; ++z) {
+    for (int y = 0; y < Ny; ++y) {
+      for (int x = 0; x < Nx; ++x) {
+        double sum = 0.0;
+        for (int t = -half; t <= half; ++t) {
+          int xx = x, yy = y, zz = z;
+          if (axis == 0)
+            xx += t;
+          else if (axis == 1)
+            yy += t;
+          else
+            zz += t;
+          if (xx < 0 || xx >= Nx || yy < 0 || yy >= Ny || zz < 0 || zz >= Nz)
+            continue;
+          const size_t src = static_cast<size_t>(zz) * Nx * Ny +
+                             static_cast<size_t>(yy) * Nx +
+                             static_cast<size_t>(xx);
+          sum += in[src] * k[static_cast<size_t>(t + half)];
+        }
+        out[static_cast<size_t>(z) * Nx * Ny + static_cast<size_t>(y) * Nx +
+            static_cast<size_t>(x)] = sum;
+      }
+    }
+  }
+}
+
+} // namespace
+
+void conv3d_castor_forward_inplace(std::vector<double> &f, int Nx, int Ny,
+                                   int Nz, const std::vector<double> &kx,
+                                   const std::vector<double> &ky,
+                                   const std::vector<double> &kz,
+                                   int threads) {
+  const size_t total = static_cast<size_t>(Nx) * Ny * Nz;
+  if (f.size() != total)
+    throw std::invalid_argument("CASToR convolution input size mismatch");
+  std::vector<double> tmp(total, 0.0);
+  std::vector<double> tmp2(total, 0.0);
+  conv1d_axis_zero(f, tmp, Nx, Ny, Nz, 0, kx, threads);
+  conv1d_axis_zero(tmp, tmp2, Nx, Ny, Nz, 1, ky, threads);
+  conv1d_axis_zero(tmp2, tmp, Nx, Ny, Nz, 2, kz, threads);
+  const std::vector<double> znorm = makeCastorZNorm1D(kz, Nz);
+  const size_t plane = static_cast<size_t>(Nx) * Ny;
+  for (int z = 0; z < Nz; ++z) {
+    const double d = znorm[static_cast<size_t>(z)];
+    const size_t base = static_cast<size_t>(z) * plane;
+    for (size_t i = 0; i < plane; ++i)
+      f[base + i] = tmp[base + i] / d;
+  }
+}
+
 PSFKernels make_psf_kernels(const PSFConf &psf) {
   PSFKernels kernels;
   const double fwhm_x = (psf.fwhm_x > 0.0) ? psf.fwhm_x : psf.fwhm_mm;
   const double fwhm_y = (psf.fwhm_y > 0.0) ? psf.fwhm_y : psf.fwhm_mm;
   const double fwhm_z =
       psf.z_blur ? ((psf.fwhm_z > 0.0) ? psf.fwhm_z : psf.fwhm_mm) : 0.0;
-  kernels.kx = makeGaussian1D(fwhm_x, psf.vox_x, psf.min_sigmas);
-  kernels.ky = makeGaussian1D(fwhm_y, psf.vox_y, psf.min_sigmas);
-  kernels.kz = makeGaussian1D(fwhm_z, psf.vox_z, psf.min_sigmas);
+  if (psf.kernel == PSFKernel::Castor) {
+    kernels.kx = makeCastorErf1D(fwhm_x, psf.vox_x, psf.min_sigmas);
+    kernels.ky = makeCastorErf1D(fwhm_y, psf.vox_y, psf.min_sigmas);
+    kernels.kz = makeCastorErf1D(fwhm_z, psf.vox_z, psf.min_sigmas);
+  } else {
+    kernels.kx = makeGaussian1D(fwhm_x, psf.vox_x, psf.min_sigmas);
+    kernels.ky = makeGaussian1D(fwhm_y, psf.vox_y, psf.min_sigmas);
+    kernels.kz = makeGaussian1D(fwhm_z, psf.vox_z, psf.min_sigmas);
+  }
   return kernels;
 }
 
@@ -377,6 +488,13 @@ void apply_butterworth_inplace_cufft(std::vector<double> &, int, int, int,
                                      Spacing3, const ButterworthConf &, int) {
   throw std::runtime_error(
       "Butterworth cuFFT backend was requested but is not compiled in this build.");
+}
+
+void apply_butterworth_output_cufft(std::vector<double> &, int, int, int,
+                                    Spacing3, double, int) {
+  throw std::runtime_error(
+      "Output Butterworth cuFFT backend was requested but is not compiled in "
+      "this build.");
 }
 #endif
 

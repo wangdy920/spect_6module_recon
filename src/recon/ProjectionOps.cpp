@@ -2,26 +2,19 @@
 
 #include "filters/cuda/VolumeOpsCUDA.h"
 #include "filters/Convolution.h"
-#include "sparse/ISparseOps.h"
+#include "recon/BedOffsets.h"
 
-#include <atomic>
 #include <algorithm>
 #include <cmath>
-#include <iostream>
+#include <stdexcept>
 #include <string>
-#include <utility>
 
 namespace spect {
 
 namespace {
 
-std::atomic<bool> g_cudaPsfDisabled{false};
-std::atomic<unsigned long long> g_cudaPsfAnomalyCount{0};
-
-bool preferCudaVolumeOps(const ReconOpts &opts) {
-  return !g_cudaPsfDisabled.load(std::memory_order_relaxed) && opts.sparseOps &&
-         opts.sparseOps->backend() == BackendType::CUDA &&
-         cuda::isCudaVolumeOpsAvailable();
+bool preferCudaVolumeOps(const ReconOpts &) {
+  return cuda::isCudaVolumeOpsAvailable();
 }
 
 struct VolumeStats {
@@ -51,15 +44,6 @@ bool hasFiniteNonZeroSignal(const VolumeStats &stats) {
 
 bool isFiniteAllZero(const VolumeStats &stats) {
   return stats.count > 0 && stats.finite == stats.count && stats.maxAbs == 0.0;
-}
-
-void markCudaPsfAnomaly(const std::string &reason) {
-  g_cudaPsfDisabled.store(true, std::memory_order_relaxed);
-  const auto occurrence =
-      g_cudaPsfAnomalyCount.fetch_add(1, std::memory_order_relaxed) + 1;
-  std::cerr << "[WARN] CUDA PSF anomaly #" << occurrence << ": " << reason
-            << "; restoring input and using CPU PSF for the remainder of this "
-               "process.\n";
 }
 
 bool inspectCudaPsfOutput(const VolumeStats &input, const VolumeStats &output,
@@ -102,10 +86,38 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
                      const ReconOpts &opts, const PSFKernels *psfKernels,
                      int threads, bool adjoint) {
   const bool useCuda = preferCudaVolumeOps(opts);
-  if (opts.psf.mode == PSFMode::Operator && psfKernels) {
+  if (opts.psf.mode != PSFMode::None && psfKernels) {
+    if (opts.psf.kernel == filters::PSFKernel::Castor) {
+      // CASToR 严格对齐：反向复用正向卷积器（C=D_z^-1*K 再施一次）。
+      // CUDA path uses zero padding plus z-boundary normalization.
+      (void)adjoint;
+      if (useCuda) {
+        const VolumeStats inputStats = computeVolumeStats(volume);
+        bool applied = false;
+        try {
+          applied = cuda::applyCastorConv3DInplaceCUDA(
+              volume, Nx, Ny, Nz, psfKernels->kx, psfKernels->ky,
+              psfKernels->kz);
+        } catch (const std::exception &ex) {
+          throw std::runtime_error(std::string("CUDA CASToR PSF failed: ") +
+                                   ex.what());
+        }
+        if (!applied)
+          throw std::runtime_error(
+              "CUDA CASToR PSF operation reported unavailable");
+        const VolumeStats outputStats = computeVolumeStats(volume);
+        std::string reason;
+        if (!inspectCudaPsfOutput(inputStats, outputStats, reason))
+          throw std::runtime_error("CUDA CASToR PSF anomaly: " + reason);
+        return;
+      }
+      filters::conv3d_castor_forward_inplace(volume, Nx, Ny, Nz,
+                                             psfKernels->kx, psfKernels->ky,
+                                             psfKernels->kz, threads);
+      return;
+    }
     if (useCuda) {
-      std::vector<double> original = volume;
-      const VolumeStats inputStats = computeVolumeStats(original);
+      const VolumeStats inputStats = computeVolumeStats(volume);
       bool applied = false;
       try {
         applied = adjoint
@@ -116,21 +128,16 @@ void applyPsfInplace(std::vector<double> &volume, int Nx, int Ny, int Nz,
                             volume, Nx, Ny, Nz, psfKernels->kx,
                             psfKernels->ky, psfKernels->kz);
       } catch (const std::exception &ex) {
-        volume = std::move(original);
-        markCudaPsfAnomaly(std::string("CUDA volume operation failed: ") +
-                           ex.what());
+        throw std::runtime_error(std::string("CUDA PSF operation failed: ") +
+                                 ex.what());
       }
-      if (applied) {
-        const VolumeStats outputStats = computeVolumeStats(volume);
-        std::string reason;
-        if (inspectCudaPsfOutput(inputStats, outputStats, reason))
-          return;
-        volume = std::move(original);
-        markCudaPsfAnomaly(reason);
-      } else if (!g_cudaPsfDisabled.load(std::memory_order_relaxed)) {
-        volume = std::move(original);
-        markCudaPsfAnomaly("CUDA PSF operation reported unavailable");
-      }
+      if (!applied)
+        throw std::runtime_error("CUDA PSF operation reported unavailable");
+      const VolumeStats outputStats = computeVolumeStats(volume);
+      std::string reason;
+      if (!inspectCudaPsfOutput(inputStats, outputStats, reason))
+        throw std::runtime_error("CUDA PSF anomaly: " + reason);
+      return;
     }
     if (adjoint) {
       filters::conv3d_separable_adjoint_inplace(
@@ -158,6 +165,33 @@ void apply_psf_backward(std::vector<double> &numer, int Nx, int Ny, int Nz,
                         const ReconOpts &opts, const PSFKernels *psfKernels,
                         int threads) {
   applyPsfInplace(numer, Nx, Ny, Nz, opts, psfKernels, threads, true);
+}
+
+std::vector<double> build_sieve_save_volume(
+    const std::vector<double> &image, int Nx, int Ny, int baseNz, int bedCount,
+    const std::vector<int> &bedZStarts, bool bedVirtualZFlip,
+    const ReconOpts &opts, const PSFKernels *psfKernels, int threads) {
+  if (bedCount <= 1) {
+    // Single bed: one convolution of a copy of the global state.
+    std::vector<double> saveVolume;
+    apply_psf_forward(image, saveVolume, Nx, Ny, baseNz, opts, psfKernels,
+                      threads);
+    return saveVolume;
+  }
+  std::vector<double> saveVolume(image.size(), 0.0);
+  for (int bed = 0; bed < bedCount; ++bed) {
+    std::vector<double> localImage =
+        spect::app::extractBedVolumeFromGlobal(image, Nx, Ny, baseNz,
+                                               bedZStarts[static_cast<size_t>(bed)],
+                                               bedVirtualZFlip);
+    std::vector<double> localBlurred;
+    apply_psf_forward(localImage, localBlurred, Nx, Ny, baseNz, opts,
+                      psfKernels, threads);
+    spect::app::accumulateBedVolumeToGlobal(
+        saveVolume, localBlurred, Nx, Ny, baseNz,
+        bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
+  }
+  return saveVolume;
 }
 
 } // namespace spect

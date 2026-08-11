@@ -173,10 +173,3 @@ inline std::vector<uint8_t> makeMaskFromThreshold(
 
 } // namespace core
 } // namespace spect
-
-// Backward compatibility - expose in global namespace
-using spect::core::idx3;
-using spect::core::makeCylMask_mm;
-using spect::core::applyMaskInplace;
-using spect::core::makeSphereMask_mm;
-using spect::core::makeMaskFromThreshold;

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -19,6 +20,84 @@ CropSettings sanitizeCropSettings(int cropStart, int cropEnd) {
   return crop;
 }
 
+CanonicalOutputGeometry computeCanonicalOutputGeometry(
+    int baseNz, const std::vector<int>& outputBedOverlaps,
+    double voxelSizeZmm, double bedStepMm) {
+  if (bedStepMm <= 0.0)
+    bedStepMm = spect::core::sixmodule::kMultiBedStepMm;
+  constexpr int kBlendMargin =
+      spect::core::sixmodule::kDefaultBlendMarginLayers;
+  const double kTolMm = 1e-4;
+
+  if (outputBedOverlaps.empty())
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: outputBedOverlaps is empty");
+  if (baseNz <= 0)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: baseNz must be positive");
+  if (voxelSizeZmm <= 0.0)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: voxelSizeZmm must be positive");
+
+  // Expected step in layers: round the physical scanner step to the nearest
+  // integer number of voxels (prototype uses llround(bed_step_mm/voxel_mm)).
+  const int expectedStepLayers =
+      static_cast<int>(std::llround(bedStepMm / voxelSizeZmm));
+  if (expectedStepLayers <= 0)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: bed step " +
+        std::to_string(bedStepMm) + " mm is smaller than one voxel (" +
+        std::to_string(voxelSizeZmm) + " mm).");
+
+  const int stepLayers = baseNz - outputBedOverlaps[0];
+  if (stepLayers <= 0)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: bed_overlap must be less than baseNz; "
+        "got step=" + std::to_string(stepLayers) + " from baseNz=" +
+        std::to_string(baseNz) + " and overlap=" +
+        std::to_string(outputBedOverlaps[0]));
+  if (stepLayers >= baseNz)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: bed_overlap must be positive; "
+        "effective step=" + std::to_string(stepLayers) +
+        " is not < baseNz=" + std::to_string(baseNz));
+
+  for (size_t i = 1; i < outputBedOverlaps.size(); ++i) {
+    if (baseNz - outputBedOverlaps[i] != stepLayers)
+      throw std::invalid_argument(
+          "computeCanonicalOutputGeometry: every bed_overlap must produce "
+          "the same bed step. Joint 0 gives step=" +
+          std::to_string(stepLayers) + ", joint " + std::to_string(i) +
+          " gives step=" +
+          std::to_string(baseNz - outputBedOverlaps[i]) + ".");
+  }
+
+  // The overlap-derived step must match the configured scanner step within
+  // half-layer quantization (a non-integer layer ratio rounds to the nearest
+  // layer) plus a small absolute tolerance.
+  const double stepMm = stepLayers * voxelSizeZmm;
+  const double layerQuantTol = 0.5 * voxelSizeZmm + kTolMm;
+  if (stepLayers != expectedStepLayers ||
+      std::abs(stepMm - bedStepMm) > layerQuantTol)
+    throw std::invalid_argument(
+        "computeCanonicalOutputGeometry: effective bed step " +
+        std::to_string(stepMm) + " mm (" + std::to_string(stepLayers) +
+        " layers at voxel_z=" + std::to_string(voxelSizeZmm) +
+        " mm) deviates from the scanner bed step " +
+        std::to_string(bedStepMm) + " mm. Set -bedStepMm / [MultiBed] "
+        "bed_step_mm to the actual scanner step, or pass bed_overlap = "
+        "baseNz - round(bed_step_mm / voxel_z).");
+
+  const int cropLayers =
+      std::min(stepLayers + kBlendMargin, baseNz);
+
+  CanonicalOutputGeometry geom;
+  geom.stepLayers = stepLayers;
+  geom.cropLayers = cropLayers;
+  geom.blendOverlap = cropLayers - stepLayers;
+  return geom;
+}
+
 bool isCropSettingsValid(int nz, const CropSettings &crop) {
   return crop.start >= 0 && crop.end >= 0 && crop.start < nz && crop.end < nz && (crop.start + crop.end) < nz;
 }
@@ -27,7 +106,7 @@ namespace {
 
 bool shouldFlipZPerBed(const OutputTransform *transform) {
   return transform && transform->flipZPerBed && transform->baseNz > 0 &&
-         !transform->bedZStarts.empty();
+                  !transform->bedZStarts.empty();
 }
 
 bool shouldFlipZWholeOutput(const OutputTransform *transform) {
@@ -38,7 +117,7 @@ bool shouldFlipXWholeOutput(const OutputTransform *transform) {
   return transform && transform->flipXWholeOutput;
 }
 
-bool shouldHardCutOutputOverlap(const OutputTransform *transform) {
+bool shouldStitchCanonicalOutput(const OutputTransform *transform) {
   return transform && transform->baseNz > 0 &&
          transform->bedZStarts.size() > 1;
 }
@@ -50,6 +129,370 @@ void validateBedZFlipTransform(const OutputTransform &transform, int nz) {
           "prepareOutputVolume: invalid per-bed Z flip transform");
     }
   }
+}
+
+std::vector<double> centerCropVolume(const std::vector<double> &source,
+                                     int &nx, int &ny, int &nz,
+                                     int requestedNx, int requestedNy,
+                                     int requestedNz) {
+  const int targetNx = requestedNx > 0 ? requestedNx : nx;
+  const int targetNy = requestedNy > 0 ? requestedNy : ny;
+  const int targetNz = requestedNz > 0 ? requestedNz : nz;
+  if (targetNx > nx || targetNy > ny || targetNz > nz || targetNx <= 0 ||
+      targetNy <= 0 || targetNz <= 0) {
+    throw std::invalid_argument(
+        "Fixed 6module output mask exceeds reconstructed geometry.");
+  }
+  if (targetNx == nx && targetNy == ny && targetNz == nz)
+    return source;
+
+  const int x0 = (nx - targetNx) / 2;
+  const int y0 = (ny - targetNy) / 2;
+  const int z0 = (nz - targetNz) / 2;
+  const size_t sourcePlane = static_cast<size_t>(nx) * ny;
+  const size_t targetPlane = static_cast<size_t>(targetNx) * targetNy;
+  std::vector<double> cropped(
+      targetPlane * static_cast<size_t>(targetNz), 0.0);
+  for (int z = 0; z < targetNz; ++z) {
+    for (int y = 0; y < targetNy; ++y) {
+      const size_t sourceOffset =
+          static_cast<size_t>(z + z0) * sourcePlane +
+          static_cast<size_t>(y + y0) * nx + x0;
+      const size_t targetOffset =
+          static_cast<size_t>(z) * targetPlane +
+          static_cast<size_t>(y) * targetNx;
+      std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(sourceOffset),
+                  targetNx,
+                  cropped.begin() + static_cast<std::ptrdiff_t>(targetOffset));
+    }
+  }
+  nx = targetNx;
+  ny = targetNy;
+  nz = targetNz;
+  return cropped;
+}
+
+std::vector<uint8_t> centerCropVolume(const std::vector<uint8_t> &source,
+                                      int &nx, int &ny, int &nz,
+                                      int requestedNx, int requestedNy,
+                                      int requestedNz) {
+  const int targetNx = requestedNx > 0 ? requestedNx : nx;
+  const int targetNy = requestedNy > 0 ? requestedNy : ny;
+  const int targetNz = requestedNz > 0 ? requestedNz : nz;
+  if (targetNx > nx || targetNy > ny || targetNz > nz || targetNx <= 0 ||
+      targetNy <= 0 || targetNz <= 0) {
+    throw std::invalid_argument(
+        "Fixed 6module output mask exceeds reconstructed geometry.");
+  }
+  if (targetNx == nx && targetNy == ny && targetNz == nz)
+    return source;
+
+  const int x0 = (nx - targetNx) / 2;
+  const int y0 = (ny - targetNy) / 2;
+  const int z0 = (nz - targetNz) / 2;
+  const size_t sourcePlane = static_cast<size_t>(nx) * ny;
+  const size_t targetPlane = static_cast<size_t>(targetNx) * targetNy;
+  std::vector<uint8_t> cropped(
+      targetPlane * static_cast<size_t>(targetNz), 0);
+  for (int z = 0; z < targetNz; ++z) {
+    for (int y = 0; y < targetNy; ++y) {
+      const size_t sourceOffset =
+          static_cast<size_t>(z + z0) * sourcePlane +
+          static_cast<size_t>(y + y0) * nx + x0;
+      const size_t targetOffset =
+          static_cast<size_t>(z) * targetPlane +
+          static_cast<size_t>(y) * targetNx;
+      std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(sourceOffset),
+                  targetNx,
+                  cropped.begin() + static_cast<std::ptrdiff_t>(targetOffset));
+    }
+  }
+  nx = targetNx;
+  ny = targetNy;
+  nz = targetNz;
+  return cropped;
+}
+
+std::vector<int> outputBedStarts(const OutputTransform &transform) {
+  const size_t beds = transform.bedZStarts.size();
+  if (transform.outputBedOverlaps.size() + 1 != beds)
+    throw std::invalid_argument(
+        "prepareOutputVolume: output overlap count does not match beds");
+  std::vector<int> starts(beds, 0);
+  for (size_t bed = 0; bed < beds; ++bed) {
+    const int expectedStart = static_cast<int>(bed) * transform.baseNz;
+    if (transform.bedZStarts[bed] != expectedStart)
+      throw std::invalid_argument(
+          "prepareOutputVolume: output stitching requires non-overlapping reconstruction beds");
+    if (bed > 0) {
+      const int overlap = transform.outputBedOverlaps[bed - 1];
+      if (overlap < 0 || overlap >= transform.baseNz)
+        throw std::invalid_argument(
+            "prepareOutputVolume: invalid output overlap");
+      starts[bed] = starts[bed - 1] + transform.baseNz - overlap;
+    }
+  }
+  return starts;
+}
+
+double center66CosineFadeIn(int overlapIndex, int blendOverlap) {
+  constexpr double pi = 3.14159265358979323846;
+  const double phase = static_cast<double>(overlapIndex) /
+                       static_cast<double>(blendOverlap - 1);
+  const double sine = std::sin(0.5 * pi * phase);
+  return sine * sine;
+}
+
+void validateCenter66CosineTransform(const OutputTransform &transform, int nz) {
+  validateBedZFlipTransform(transform, nz);
+  const auto& geom = transform.canonicalGeom;
+  if (transform.baseNz < geom.cropLayers)
+    throw std::invalid_argument(
+        "prepareOutputVolume: canonical stitch requires baseNz >= " +
+        std::to_string(geom.cropLayers));
+  const std::vector<int> starts = outputBedStarts(transform);
+  for (size_t bed = 1; bed < starts.size(); ++bed) {
+    if (starts[bed] - starts[bed - 1] != geom.stepLayers)
+      throw std::invalid_argument(
+          "prepareOutputVolume: canonical stitch requires a " +
+          std::to_string(geom.stepLayers) + "-layer bed step");
+  }
+}
+
+double percentile99(std::vector<double> values) {
+  if (values.empty())
+    return 0.0;
+  const size_t index = static_cast<size_t>(
+      0.99 * static_cast<double>(values.size() - 1));
+  std::nth_element(values.begin(),
+                   values.begin() + static_cast<std::ptrdiff_t>(index),
+                   values.end());
+  return values[index];
+}
+
+double median(std::vector<double> values) {
+  if (values.empty())
+    throw std::runtime_error("center66 gain fit received an empty sample");
+  const size_t middle = values.size() / 2;
+  std::nth_element(values.begin(),
+                   values.begin() + static_cast<std::ptrdiff_t>(middle),
+                   values.end());
+  double result = values[middle];
+  if ((values.size() & 1u) == 0u) {
+    std::nth_element(
+        values.begin(),
+        values.begin() + static_cast<std::ptrdiff_t>(middle - 1),
+        values.end());
+    result = 0.5 * (result + values[middle - 1]);
+  }
+  return result;
+}
+
+double center66PairLogRatio(const std::vector<double> &source, int nx, int ny,
+                            const OutputTransform &transform, int cropStart,
+                            size_t lowBed, size_t highBed,
+                            double voxelSizeXmm, double voxelSizeYmm,
+                            size_t &sampleCount) {
+  const auto& geom = transform.canonicalGeom;
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  const double radius =
+      0.5 * spect::core::sixmodule::kMultiBedGainRoiDiameterMm;
+  const double radiusSquared = radius * radius;
+  const int lowStart = transform.bedZStarts[lowBed] + cropStart +
+      (transform.reverseLocalZInReconStorage ? 0 : geom.stepLayers);
+  const int highStart = transform.bedZStarts[highBed] + cropStart +
+      (transform.reverseLocalZInReconStorage ? geom.stepLayers : 0);
+  const int cropNx = transform.centerCropNx > 0 ? transform.centerCropNx : nx;
+  const int cropNy = transform.centerCropNy > 0 ? transform.centerCropNy : ny;
+  if (cropNx > nx || cropNy > ny)
+    throw std::invalid_argument(
+        "center66 gain fit XY crop exceeds reconstruction geometry");
+  const int cropX0 = (nx - cropNx) / 2;
+  const int cropY0 = (ny - cropNy) / 2;
+
+  std::vector<double> joint;
+  joint.reserve(plane * static_cast<size_t>(geom.blendOverlap));
+  for (int z = 0; z < geom.blendOverlap; ++z) {
+    for (int y = 0; y < ny; ++y) {
+      const double yy =
+          (static_cast<double>(y) - 0.5 * static_cast<double>(ny - 1)) *
+          voxelSizeYmm;
+      for (int x = 0; x < nx; ++x) {
+        const double xx =
+            (static_cast<double>(x) - 0.5 * static_cast<double>(nx - 1)) *
+            voxelSizeXmm;
+        if (xx * xx + yy * yy > radiusSquared)
+          continue;
+        const size_t xy = static_cast<size_t>(y) * nx + x;
+        const double low =
+            source[static_cast<size_t>(lowStart + z) * plane + xy];
+        const double high =
+            source[static_cast<size_t>(highStart + z) * plane + xy];
+        if (std::isfinite(low) && std::isfinite(high) &&
+            std::max(low, high) > 0.0) {
+          joint.push_back(std::max(low, high));
+        }
+      }
+    }
+  }
+  if (joint.empty())
+    throw std::runtime_error(
+        "center66 gain fit found no positive signal in an adjacent overlap");
+
+  const double threshold = 0.10 * percentile99(joint);
+  std::vector<double> ratios;
+  ratios.reserve(joint.size());
+  for (int z = 0; z < geom.blendOverlap; ++z) {
+    for (int y = 0; y < ny; ++y) {
+      const double yy =
+          (static_cast<double>(y) - 0.5 * static_cast<double>(ny - 1)) *
+          voxelSizeYmm;
+      for (int x = 0; x < nx; ++x) {
+        const double xx =
+            (static_cast<double>(x) - 0.5 * static_cast<double>(nx - 1)) *
+            voxelSizeXmm;
+        if (xx * xx + yy * yy > radiusSquared)
+          continue;
+        const size_t xy = static_cast<size_t>(y) * nx + x;
+        const double low =
+            source[static_cast<size_t>(lowStart + z) * plane + xy];
+        const double high =
+            source[static_cast<size_t>(highStart + z) * plane + xy];
+        if (low > threshold && high > threshold && std::isfinite(low) &&
+            std::isfinite(high)) {
+          ratios.push_back(std::log(low) - std::log(high));
+        }
+      }
+    }
+  }
+
+  if (ratios.size() < 100) {
+    ratios.clear();
+    for (int z = 0; z < geom.blendOverlap; ++z) {
+      for (int y = cropY0; y < cropY0 + cropNy; ++y) {
+        for (int x = cropX0; x < cropX0 + cropNx; ++x) {
+          const size_t xy = static_cast<size_t>(y) * nx + x;
+          const double low =
+              source[static_cast<size_t>(lowStart + z) * plane + xy];
+          const double high =
+              source[static_cast<size_t>(highStart + z) * plane + xy];
+          if (low > 0.0 && high > 0.0 && std::isfinite(low) &&
+              std::isfinite(high)) {
+            ratios.push_back(std::log(low) - std::log(high));
+          }
+        }
+      }
+    }
+  }
+  if (ratios.empty())
+    throw std::runtime_error(
+        "center66 gain fit found no common positive overlap voxels");
+
+  double center = median(ratios);
+  std::vector<double> deviations(ratios.size());
+  for (size_t i = 0; i < ratios.size(); ++i)
+    deviations[i] = std::abs(ratios[i] - center);
+  const double mad = median(deviations);
+  if (mad > 0.0) {
+    const double limit = 3.5 * 1.4826 * mad;
+    std::vector<double> filtered;
+    filtered.reserve(ratios.size());
+    for (double ratio : ratios) {
+      if (std::abs(ratio - center) <= limit)
+        filtered.push_back(ratio);
+    }
+    if (!filtered.empty())
+      center = median(filtered);
+    sampleCount = filtered.size();
+  } else {
+    sampleCount = ratios.size();
+  }
+  return center;
+}
+
+std::vector<double> center66CosineBlendOutputOverlap(
+    const std::vector<double> &source, int nx, int ny, int nz,
+    const OutputTransform &transform, double voxelSizeXmm,
+    double voxelSizeYmm) {
+  validateCenter66CosineTransform(transform, nz);
+  const auto& geom = transform.canonicalGeom;
+  const std::vector<int> starts = outputBedStarts(transform);
+  const int cropStart = (transform.baseNz - geom.cropLayers) / 2;
+  const std::vector<double> gains = fitCenter66BedGains(
+      source, nx, ny, transform, cropStart, voxelSizeXmm, voxelSizeYmm);
+  const int outputNz = starts.back() + geom.cropLayers;
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
+  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
+  for (size_t bed = 0; bed < starts.size(); ++bed) {
+    for (int localZ = 0; localZ < geom.cropLayers; ++localZ) {
+      double weight = 1.0;
+      if (bed > 0 && localZ < geom.blendOverlap) {
+        const double fade = center66CosineFadeIn(
+            localZ, geom.blendOverlap);
+        weight *= transform.reverseLocalZInReconStorage ? 1.0 - fade : fade;
+      }
+      if (bed + 1 < starts.size() && localZ >= geom.stepLayers) {
+        const double fade = center66CosineFadeIn(
+            localZ - geom.stepLayers, geom.blendOverlap);
+        weight *= transform.reverseLocalZInReconStorage ? fade : 1.0 - fade;
+      }
+      const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
+      const int dstZ = starts[bed] + localZ;
+      const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
+      const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
+      for (size_t xy = 0; xy < plane; ++xy)
+        out[dstOffset + xy] +=
+            weight * gains[bed] * source[srcOffset + xy];
+      weights[static_cast<size_t>(dstZ)] += weight;
+    }
+  }
+  for (int z = 0; z < outputNz; ++z) {
+    const double weight = weights[static_cast<size_t>(z)];
+    if (weight <= 0.0)
+      continue;
+    const size_t offset = static_cast<size_t>(z) * plane;
+    for (size_t xy = 0; xy < plane; ++xy)
+      out[offset + xy] /= weight;
+  }
+  return out;
+}
+
+std::vector<uint8_t> center66BlendOutputMask(
+    const std::vector<uint8_t> &source, int nx, int ny, int nz,
+    const OutputTransform &transform) {
+  validateCenter66CosineTransform(transform, nz);
+  const auto& geom = transform.canonicalGeom;
+  const std::vector<int> starts = outputBedStarts(transform);
+  const int cropStart = (transform.baseNz - geom.cropLayers) / 2;
+  const int outputNz = starts.back() + geom.cropLayers;
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  std::vector<uint8_t> out(static_cast<size_t>(outputNz) * plane, 0);
+  for (size_t bed = 0; bed < starts.size(); ++bed) {
+    for (int localZ = 0; localZ < geom.cropLayers; ++localZ) {
+      const size_t srcOffset = static_cast<size_t>(
+          transform.bedZStarts[bed] + cropStart + localZ) * plane;
+      const size_t dstOffset =
+          static_cast<size_t>(starts[bed] + localZ) * plane;
+      for (size_t xy = 0; xy < plane; ++xy)
+        out[dstOffset + xy] =
+            std::max(out[dstOffset + xy], source[srcOffset + xy]);
+    }
+  }
+  return out;
+}
+
+OutputTransform center66PostprocessTransform(
+    const OutputTransform &transform) {
+  const auto& geom = transform.canonicalGeom;
+  OutputTransform adjusted = transform;
+  adjusted.baseNz = geom.cropLayers;
+  for (size_t bed = 0; bed < adjusted.bedZStarts.size(); ++bed)
+    adjusted.bedZStarts[bed] =
+        static_cast<int>(bed) * geom.cropLayers;
+  adjusted.outputBedOverlaps.assign(
+      adjusted.bedZStarts.size() - 1, geom.blendOverlap);
+  return adjusted;
 }
 
 std::vector<double> flipDoubleZPerBed(const std::vector<double> &source, int nx,
@@ -76,246 +519,6 @@ std::vector<double> flipDoubleZPerBed(const std::vector<double> &source, int nx,
       out[i] /= static_cast<double>(hits[i]);
     } else if (hits[i] == 0) {
       out[i] = source[i];
-    }
-  }
-  return out;
-}
-
-template <typename T>
-std::vector<T> hardCutOutputOverlap(const std::vector<T> &source, int nx,
-                                    int ny, int nz,
-                                    const OutputTransform &transform) {
-  validateBedZFlipTransform(transform, nz);
-  const size_t beds = transform.bedZStarts.size();
-  if (transform.outputBedOverlaps.size() + 1 != beds)
-    throw std::invalid_argument(
-        "prepareOutputVolume: output overlap count does not match beds");
-  for (size_t bed = 0; bed < beds; ++bed) {
-    const int expectedStart = static_cast<int>(bed) * transform.baseNz;
-    if (transform.bedZStarts[bed] != expectedStart)
-      throw std::invalid_argument(
-          "prepareOutputVolume: output hard-cut requires non-overlapping reconstruction beds");
-  }
-
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  size_t outputSlices = 0;
-  for (size_t bed = 0; bed < beds; ++bed) {
-    const int trimBefore = bed == 0
-                               ? 0
-                               : transform.outputBedOverlaps[bed - 1] -
-                                     transform.outputBedOverlaps[bed - 1] / 2;
-    const int trimAfter = bed + 1 == beds
-                              ? 0
-                              : transform.outputBedOverlaps[bed] / 2;
-    if (trimBefore < 0 || trimAfter < 0 ||
-        trimBefore + trimAfter >= transform.baseNz)
-      throw std::invalid_argument(
-          "prepareOutputVolume: invalid output hard-cut overlap");
-    outputSlices += static_cast<size_t>(transform.baseNz - trimBefore - trimAfter);
-  }
-
-  std::vector<T> out;
-  out.reserve(outputSlices * plane);
-  for (size_t bed = 0; bed < beds; ++bed) {
-    const int trimBefore = bed == 0
-                               ? 0
-                               : transform.outputBedOverlaps[bed - 1] -
-                                     transform.outputBedOverlaps[bed - 1] / 2;
-    const int trimAfter = bed + 1 == beds
-                              ? 0
-                              : transform.outputBedOverlaps[bed] / 2;
-    const int zBegin = transform.bedZStarts[bed] + trimBefore;
-    const int zEnd = transform.bedZStarts[bed] + transform.baseNz - trimAfter;
-    const auto first = source.begin() + static_cast<std::ptrdiff_t>(zBegin) *
-                                            static_cast<std::ptrdiff_t>(plane);
-    const auto last = source.begin() + static_cast<std::ptrdiff_t>(zEnd) *
-                                           static_cast<std::ptrdiff_t>(plane);
-    out.insert(out.end(), first, last);
-  }
-  return out;
-}
-
-std::vector<int> outputBedStarts(const OutputTransform &transform) {
-  const size_t beds = transform.bedZStarts.size();
-  if (transform.outputBedOverlaps.size() + 1 != beds)
-    throw std::invalid_argument(
-        "prepareOutputVolume: output overlap count does not match beds");
-  std::vector<int> starts(beds, 0);
-  for (size_t bed = 0; bed < beds; ++bed) {
-    const int expectedStart = static_cast<int>(bed) * transform.baseNz;
-    if (transform.bedZStarts[bed] != expectedStart)
-      throw std::invalid_argument(
-          "prepareOutputVolume: output stitching requires non-overlapping reconstruction beds");
-    if (bed > 0) {
-      const int overlap = transform.outputBedOverlaps[bed - 1];
-      if (overlap < 0 || overlap >= transform.baseNz)
-        throw std::invalid_argument(
-            "prepareOutputVolume: invalid output overlap");
-      starts[bed] = starts[bed - 1] + transform.baseNz - overlap;
-    }
-  }
-  return starts;
-}
-
-double sigmoidRamp(double t) {
-  t = std::clamp(t, 0.0, 1.0);
-  return 1.0 / (1.0 + std::exp(-12.0 * (t - 0.5)));
-}
-
-std::vector<double> sigmoidBlendOutputOverlap(
-    const std::vector<double> &source, int nx, int ny, int nz,
-    const OutputTransform &transform) {
-  validateBedZFlipTransform(transform, nz);
-  const std::vector<int> starts = outputBedStarts(transform);
-  const int outputNz = starts.back() + transform.baseNz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
-  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
-  for (size_t bed = 0; bed < starts.size(); ++bed) {
-    const int before = bed == 0 ? 0 : transform.outputBedOverlaps[bed - 1];
-    const int after = bed + 1 == starts.size()
-                          ? 0
-                          : transform.outputBedOverlaps[bed];
-    for (int localZ = 0; localZ < transform.baseNz; ++localZ) {
-      double weight = 1.0;
-      if (before > 0 && localZ < before)
-        weight *= sigmoidRamp(static_cast<double>(localZ) / before);
-      if (after > 0 && localZ >= transform.baseNz - after) {
-        const double phase = static_cast<double>(
-            localZ - (transform.baseNz - after)) / after;
-        weight *= 1.0 - sigmoidRamp(phase);
-      }
-      const int srcZ = transform.bedZStarts[bed] + localZ;
-      const int dstZ = starts[bed] + localZ;
-      const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
-      const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
-      for (size_t xy = 0; xy < plane; ++xy)
-        out[dstOffset + xy] += weight * source[srcOffset + xy];
-      weights[static_cast<size_t>(dstZ)] += weight;
-    }
-  }
-  for (int z = 0; z < outputNz; ++z) {
-    const double weight = weights[static_cast<size_t>(z)];
-    if (weight <= 0.0)
-      continue;
-    const size_t offset = static_cast<size_t>(z) * plane;
-    for (size_t xy = 0; xy < plane; ++xy)
-      out[offset + xy] /= weight;
-  }
-  return out;
-}
-
-double center66CosineFadeIn(int overlapIndex) {
-  constexpr double pi = 3.14159265358979323846;
-  const double phase = static_cast<double>(overlapIndex) /
-                       static_cast<double>(kCenter66OverlapLayers - 1);
-  const double sine = std::sin(0.5 * pi * phase);
-  return sine * sine;
-}
-
-void validateCenter66CosineTransform(const OutputTransform &transform, int nz) {
-  validateBedZFlipTransform(transform, nz);
-  if (transform.baseNz < kCenter66CropLayers)
-    throw std::invalid_argument(
-        "prepareOutputVolume: center66_cosine10 requires baseNz >= 66");
-  const std::vector<int> starts = outputBedStarts(transform);
-  for (size_t bed = 1; bed < starts.size(); ++bed) {
-    if (starts[bed] - starts[bed - 1] != kCenter66BedStepLayers)
-      throw std::invalid_argument(
-          "prepareOutputVolume: center66_cosine10 requires a 56-layer bed step");
-  }
-}
-
-std::vector<double> center66CosineBlendOutputOverlap(
-    const std::vector<double> &source, int nx, int ny, int nz,
-    const OutputTransform &transform) {
-  validateCenter66CosineTransform(transform, nz);
-  const std::vector<int> starts = outputBedStarts(transform);
-  const int cropStart = (transform.baseNz - kCenter66CropLayers) / 2;
-  const int outputNz = starts.back() + kCenter66CropLayers;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
-  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
-  for (size_t bed = 0; bed < starts.size(); ++bed) {
-    for (int localZ = 0; localZ < kCenter66CropLayers; ++localZ) {
-      double weight = 1.0;
-      if (bed > 0 && localZ < kCenter66OverlapLayers)
-        weight *= center66CosineFadeIn(localZ);
-      if (bed + 1 < starts.size() &&
-          localZ >= kCenter66BedStepLayers)
-        weight *= 1.0 -
-                  center66CosineFadeIn(localZ - kCenter66BedStepLayers);
-      const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
-      const int dstZ = starts[bed] + localZ;
-      const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
-      const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
-      for (size_t xy = 0; xy < plane; ++xy)
-        out[dstOffset + xy] += weight * source[srcOffset + xy];
-      weights[static_cast<size_t>(dstZ)] += weight;
-    }
-  }
-  for (int z = 0; z < outputNz; ++z) {
-    const double weight = weights[static_cast<size_t>(z)];
-    if (weight <= 0.0)
-      continue;
-    const size_t offset = static_cast<size_t>(z) * plane;
-    for (size_t xy = 0; xy < plane; ++xy)
-      out[offset + xy] /= weight;
-  }
-  return out;
-}
-
-std::vector<uint8_t> center66BlendOutputMask(
-    const std::vector<uint8_t> &source, int nx, int ny, int nz,
-    const OutputTransform &transform) {
-  validateCenter66CosineTransform(transform, nz);
-  const std::vector<int> starts = outputBedStarts(transform);
-  const int cropStart = (transform.baseNz - kCenter66CropLayers) / 2;
-  const int outputNz = starts.back() + kCenter66CropLayers;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<uint8_t> out(static_cast<size_t>(outputNz) * plane, 0);
-  for (size_t bed = 0; bed < starts.size(); ++bed) {
-    for (int localZ = 0; localZ < kCenter66CropLayers; ++localZ) {
-      const size_t srcOffset = static_cast<size_t>(
-          transform.bedZStarts[bed] + cropStart + localZ) * plane;
-      const size_t dstOffset =
-          static_cast<size_t>(starts[bed] + localZ) * plane;
-      for (size_t xy = 0; xy < plane; ++xy)
-        out[dstOffset + xy] =
-            std::max(out[dstOffset + xy], source[srcOffset + xy]);
-    }
-  }
-  return out;
-}
-
-OutputTransform center66PostprocessTransform(
-    const OutputTransform &transform) {
-  OutputTransform adjusted = transform;
-  adjusted.baseNz = kCenter66CropLayers;
-  for (size_t bed = 0; bed < adjusted.bedZStarts.size(); ++bed)
-    adjusted.bedZStarts[bed] =
-        static_cast<int>(bed) * kCenter66CropLayers;
-  adjusted.outputBedOverlaps.assign(
-      adjusted.bedZStarts.size() - 1, kCenter66OverlapLayers);
-  return adjusted;
-}
-
-std::vector<uint8_t> blendOutputMask(const std::vector<uint8_t> &source,
-                                     int nx, int ny, int nz,
-                                     const OutputTransform &transform) {
-  validateBedZFlipTransform(transform, nz);
-  const std::vector<int> starts = outputBedStarts(transform);
-  const int outputNz = starts.back() + transform.baseNz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<uint8_t> out(static_cast<size_t>(outputNz) * plane, 0);
-  for (size_t bed = 0; bed < starts.size(); ++bed) {
-    for (int localZ = 0; localZ < transform.baseNz; ++localZ) {
-      const size_t srcOffset = static_cast<size_t>(
-          transform.bedZStarts[bed] + localZ) * plane;
-      const size_t dstOffset = static_cast<size_t>(starts[bed] + localZ) * plane;
-      for (size_t xy = 0; xy < plane; ++xy)
-        out[dstOffset + xy] =
-            std::max(out[dstOffset + xy], source[srcOffset + xy]);
     }
   }
   return out;
@@ -398,225 +601,45 @@ std::vector<T> flipXWholeOutput(const std::vector<T> &source, int nx, int ny,
   return out;
 }
 
-std::vector<double> applyCircularFov(const std::vector<double> &source, int nx,
-                                     int ny, int nz, double radiusMm,
-                                     double voxelSizeXmm,
-                                     double voxelSizeYmm) {
-  if (voxelSizeXmm <= 0.0 || voxelSizeYmm <= 0.0)
-    throw std::invalid_argument(
-        "prepareOutputVolume: voxel size must be positive for XY FOV");
-  const size_t plane = static_cast<size_t>(nx) * ny;
-  std::vector<double> weights(plane);
-  const double centerX = 0.5 * (nx - 1);
-  const double centerY = 0.5 * (ny - 1);
-  const double taperMm = 4.0 * std::min(voxelSizeXmm, voxelSizeYmm);
-  for (int y = 0; y < ny; ++y) {
-    for (int x = 0; x < nx; ++x) {
-      const double dx = (x - centerX) * voxelSizeXmm;
-      const double dy = (y - centerY) * voxelSizeYmm;
-      weights[static_cast<size_t>(y) * nx + x] = std::clamp(
-          (radiusMm + taperMm - std::hypot(dx, dy)) / taperMm, 0.0, 1.0);
-    }
-  }
-  std::vector<double> output(source);
-  for (int z = 0; z < nz; ++z) {
-    const size_t offset = static_cast<size_t>(z) * plane;
-    for (size_t xy = 0; xy < plane; ++xy)
-      output[offset + xy] *= weights[xy];
-  }
-  return output;
-}
-
-int reflect101(int index, int size) {
-  if (size <= 1)
-    return 0;
-  while (index < 0 || index >= size) {
-    if (index < 0)
-      index = -index;
-    else
-      index = 2 * size - index - 2;
-  }
-  return index;
-}
-
-void gaussianBlurSigma1(const double *input, double *output, int ny, int nx) {
-  constexpr int radius = 3;
-  double kernel[2 * radius + 1];
-  double sum = 0.0;
-  for (int i = -radius; i <= radius; ++i) {
-    kernel[i + radius] = std::exp(-0.5 * i * i);
-    sum += kernel[i + radius];
-  }
-  for (double &weight : kernel)
-    weight /= sum;
-  std::vector<double> horizontal(static_cast<size_t>(ny) * nx, 0.0);
-  for (int y = 0; y < ny; ++y) {
-    for (int x = 0; x < nx; ++x) {
-      double value = 0.0;
-      for (int dx = -radius; dx <= radius; ++dx)
-        value += kernel[dx + radius] *
-                 input[static_cast<size_t>(y) * nx +
-                       reflect101(x + dx, nx)];
-      horizontal[static_cast<size_t>(y) * nx + x] = value;
-    }
-  }
-  for (int y = 0; y < ny; ++y) {
-    for (int x = 0; x < nx; ++x) {
-      double value = 0.0;
-      for (int dy = -radius; dy <= radius; ++dy)
-        value += kernel[dy + radius] *
-                 horizontal[static_cast<size_t>(reflect101(y + dy, ny)) * nx +
-                            x];
-      output[static_cast<size_t>(y) * nx + x] = value;
-    }
-  }
-}
-
-void keepLargest6ConnectedComponent(std::vector<uint8_t> &support,
-                                    int nz, int ny, int nx) {
-  const size_t plane = static_cast<size_t>(ny) * nx;
-  std::vector<uint8_t> visited(support.size(), 0);
-  std::vector<size_t> queue;
-  std::vector<size_t> largest;
-  for (size_t seed = 0; seed < support.size(); ++seed) {
-    if (!support[seed] || visited[seed])
-      continue;
-    queue.clear();
-    queue.push_back(seed);
-    visited[seed] = 1;
-    for (size_t head = 0; head < queue.size(); ++head) {
-      const size_t index = queue[head];
-      const int z = static_cast<int>(index / plane);
-      const size_t xy = index % plane;
-      const int y = static_cast<int>(xy / nx);
-      const int x = static_cast<int>(xy % nx);
-      const int dz[6] = {-1, 1, 0, 0, 0, 0};
-      const int dy[6] = {0, 0, -1, 1, 0, 0};
-      const int dx[6] = {0, 0, 0, 0, -1, 1};
-      for (int direction = 0; direction < 6; ++direction) {
-        const int zz = z + dz[direction];
-        const int yy = y + dy[direction];
-        const int xx = x + dx[direction];
-        if (zz < 0 || zz >= nz || yy < 0 || yy >= ny || xx < 0 || xx >= nx)
-          continue;
-        const size_t next = static_cast<size_t>(zz) * plane +
-                            static_cast<size_t>(yy) * nx + xx;
-        if (support[next] && !visited[next]) {
-          visited[next] = 1;
-          queue.push_back(next);
-        }
-      }
-    }
-    if (queue.size() > largest.size())
-      largest = queue;
-  }
-  std::fill(support.begin(), support.end(), 0);
-  for (size_t index : largest)
-    support[index] = 1;
-}
-
-double positivePercentile995(const std::vector<double> &volume) {
-  std::vector<double> positive;
-  positive.reserve(volume.size() / 8);
-  for (double value : volume)
-    if (value > 0.0)
-      positive.push_back(value);
-  if (positive.empty())
-    return 0.0;
-  std::sort(positive.begin(), positive.end());
-  const double position = 0.995 * static_cast<double>(positive.size() - 1);
-  const size_t lo = static_cast<size_t>(std::floor(position));
-  const size_t hi = static_cast<size_t>(std::ceil(position));
-  const double fraction = position - static_cast<double>(lo);
-  return positive[lo] * (1.0 - fraction) + positive[hi] * fraction;
-}
-
-std::vector<double> mouseConfidenceBlendOutputOverlap(
-    const std::vector<double> &source, int nx, int ny, int nz,
-    const OutputTransform &transform, double analysisRadiusMm,
-    double voxelSizeXmm, double voxelSizeYmm) {
-  std::vector<double> output =
-      sigmoidBlendOutputOverlap(source, nx, ny, nz, transform);
-  if (transform.mouseSeamStrength <= 0.0)
-    return output;
-  constexpr double lowFraction = 0.02;
-  constexpr double ratioGate = 3.0;
-  constexpr double boost = 2.0;
-  const std::vector<double> supportSource =
-      analysisRadiusMm > 0.0
-          ? applyCircularFov(source, nx, ny, nz, analysisRadiusMm,
-                             voxelSizeXmm, voxelSizeYmm)
-          : source;
-  const double scale = positivePercentile995(supportSource);
-  if (scale <= 0.0)
-    return output;
-  const double low = lowFraction * scale;
-  const double epsilon = std::max(low * 0.25, 1e-12);
-  const size_t plane = static_cast<size_t>(nx) * ny;
-  const std::vector<int> starts = outputBedStarts(transform);
-  for (size_t bed = 0; bed + 1 < starts.size(); ++bed) {
-    const int overlap = transform.outputBedOverlaps[bed];
-    if (overlap <= 0)
-      continue;
-    const int stride = transform.baseNz - overlap;
-    const int outputStart = starts[bed + 1];
-    std::vector<double> blurredA(static_cast<size_t>(overlap) * plane);
-    std::vector<double> blurredB(static_cast<size_t>(overlap) * plane);
-    std::vector<uint8_t> support(static_cast<size_t>(overlap) * plane, 0);
-    for (int z = 0; z < overlap; ++z) {
-      const size_t sourceA = static_cast<size_t>(
-          transform.bedZStarts[bed] + stride + z) * plane;
-      const size_t sourceB = static_cast<size_t>(
-          transform.bedZStarts[bed + 1] + z) * plane;
-      const size_t local = static_cast<size_t>(z) * plane;
-      gaussianBlurSigma1(supportSource.data() + sourceA,
-                         blurredA.data() + local, ny, nx);
-      gaussianBlurSigma1(supportSource.data() + sourceB,
-                         blurredB.data() + local, ny, nx);
-      for (size_t xy = 0; xy < plane; ++xy)
-        support[local + xy] = blurredA[local + xy] >= low &&
-                              blurredB[local + xy] >= low;
-    }
-    keepLargest6ConnectedComponent(support, overlap, ny, nx);
-    size_t changed = 0;
-    for (int z = 0; z < overlap; ++z) {
-      const double weightB = sigmoidRamp(static_cast<double>(z) / overlap);
-      const double weightA = 1.0 - weightB;
-      const size_t sourceA = static_cast<size_t>(
-          transform.bedZStarts[bed] + stride + z) * plane;
-      const size_t sourceB = static_cast<size_t>(
-          transform.bedZStarts[bed + 1] + z) * plane;
-      const size_t local = static_cast<size_t>(z) * plane;
-      const size_t target = static_cast<size_t>(outputStart + z) * plane;
-      for (size_t xy = 0; xy < plane; ++xy) {
-        if (!support[local + xy])
-          continue;
-        const double ratio = (blurredA[local + xy] + epsilon) /
-                             (blurredB[local + xy] + epsilon);
-        if (ratio < ratioGate && ratio > 1.0 / ratioGate)
-          continue;
-        const double adjustedA = weightA * (ratio >= ratioGate ? boost : 1.0);
-        const double adjustedB =
-            weightB * (ratio <= 1.0 / ratioGate ? boost : 1.0);
-        const double adaptive =
-            (adjustedA * source[sourceA + xy] +
-             adjustedB * source[sourceB + xy]) /
-            (adjustedA + adjustedB);
-        const double baseline = output[target + xy];
-        output[target + xy] =
-            baseline + transform.mouseSeamStrength * (adaptive - baseline);
-        ++changed;
-      }
-    }
-    logInfo("Mouse seam fusion: seam_z=" +
-            std::to_string(outputStart + overlap / 2) +
-            ", changed_voxels=" + std::to_string(changed));
-  }
-  return output;
+void clampNonNegativeInPlace(std::vector<double> &vol) {
+  for (double &v : vol)
+    v = std::max(0.0, v);
 }
 
 } // namespace
 
+std::vector<double> fitCenter66BedGains(
+    const std::vector<double> &source, int nx, int ny,
+    const OutputTransform &transform, int cropStart, double voxelSizeXmm,
+    double voxelSizeYmm) {
+  const size_t bedCount = transform.bedZStarts.size();
+  std::vector<double> logGains(bedCount, 0.0);
+  for (size_t lowBed = bedCount - 1; lowBed > 0; --lowBed) {
+    const size_t highBed = lowBed - 1;
+    size_t samples = 0;
+    const double ratio = center66PairLogRatio(
+        source, nx, ny, transform, cropStart, lowBed, highBed, voxelSizeXmm,
+        voxelSizeYmm, samples);
+    logGains[highBed] = logGains[lowBed] + ratio;
+    logInfo("center66 gain pair Bed" + std::to_string(lowBed + 1) + "/Bed" +
+            std::to_string(highBed + 1) + ": log_ratio=" +
+            std::to_string(ratio) + ", samples=" +
+            std::to_string(samples));
+  }
+  // Prototype behavior: always apply the full log-ratio chain anchored at
+  // Bed1 (no reliability gate).
+  std::vector<double> gains(bedCount, 1.0);
+  if (bedCount > 0) {
+    const double anchor = logGains[0];
+    for (size_t i = 0; i < bedCount; ++i)
+      gains[i] = std::exp(logGains[i] - anchor);
+    for (size_t i = 0; i < bedCount; ++i) {
+      logInfo("center66 gain Bed" + std::to_string(i + 1) + "=" +
+              std::to_string(gains[i]));
+    }
+  }
+  return gains;
+}
 
 std::vector<double> prepareOutputVolume(const std::vector<double> &source, int nx,
                                         int ny, int nz,
@@ -631,185 +654,120 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     throw std::invalid_argument("prepareOutputVolume: source size mismatch");
   if (mask && mask->size() != expected)
     throw std::invalid_argument("prepareOutputVolume: mask size mismatch");
-  if (transform && transform->center66CosineOutput &&
-      transform->mouseSeamStrength > 0.0)
-    throw std::invalid_argument(
-        "prepareOutputVolume: mouse_seam_strength is only supported by sigmoid stitching");
 
-  std::vector<double> transformedSource;
-  std::vector<uint8_t> transformedMask;
   const std::vector<double> *sourceForOutput = &source;
   const std::vector<uint8_t> *maskForOutput = mask;
+  std::vector<double> perBedFlipped;
+  std::vector<double> transformedSource;
+  std::vector<uint8_t> transformedMask;
   int transformedNz = nz;
+
   if (shouldFlipZPerBed(transform)) {
-    transformedSource = flipDoubleZPerBed(source, nx, ny, nz, *transform);
-    sourceForOutput = &transformedSource;
-    if (mask) {
-      transformedMask = flipMaskZPerBed(*mask, nx, ny, nz, *transform);
-      maskForOutput = &transformedMask;
-    }
-  }
-  std::vector<double> preStitchSource;
-  if (shouldHardCutOutputOverlap(transform) && transform->sigmoidBlendOutput &&
-      transform->objectAwareSeamPostprocess &&
-      transform->mouseSeamStrength > 0.0) {
-    preStitchSource = *sourceForOutput;
-  }
-  if (shouldHardCutOutputOverlap(transform)) {
-    if (transform->center66CosineOutput) {
-      transformedSource = center66CosineBlendOutputOverlap(
-          *sourceForOutput, nx, ny, nz, *transform);
-    } else if (transform->sigmoidBlendOutput) {
-      transformedSource = sigmoidBlendOutputOverlap(
-          *sourceForOutput, nx, ny, nz, *transform);
-    } else {
-      transformedSource = hardCutOutputOverlap(*sourceForOutput, nx, ny, nz,
-                                               *transform);
-    }
-    sourceForOutput = &transformedSource;
-    transformedNz = static_cast<int>(transformedSource.size() /
-                                     (static_cast<size_t>(nx) * ny));
+    perBedFlipped = flipDoubleZPerBed(*sourceForOutput, nx, ny, nz, *transform);
+    sourceForOutput = &perBedFlipped;
     if (maskForOutput) {
-      if (transform->center66CosineOutput) {
-        transformedMask = center66BlendOutputMask(
-            *maskForOutput, nx, ny, nz, *transform);
-      } else if (transform->sigmoidBlendOutput) {
-        transformedMask = blendOutputMask(*maskForOutput, nx, ny, nz,
-                                          *transform);
-      } else {
-        transformedMask = hardCutOutputOverlap(*maskForOutput, nx, ny, nz,
-                                               *transform);
-      }
+      transformedMask = flipMaskZPerBed(*maskForOutput, nx, ny, nz, *transform);
       maskForOutput = &transformedMask;
     }
   }
-  std::vector<double> analysisSource;
-  const std::vector<double> *analysisForPostprocess = nullptr;
-  OutputTransform frozenTransform;
-  const OutputTransform *postprocessTransform = transform;
-  if (transform && transform->center66CosineOutput) {
-    frozenTransform = center66PostprocessTransform(*transform);
-    postprocessTransform = &frozenTransform;
-  }
-  double analysisRadiusMm = 0.0;
-  std::string resolvedProfile = transform ? transform->objectProfile : "auto";
-  if (transform && transform->objectAwareSeamPostprocess) {
-    analysisRadiusMm = transform->analysisFovRadiusMm > 0.0
-                           ? transform->analysisFovRadiusMm
-                           : transform->fovRadiusMm;
-    if (analysisRadiusMm > 0.0 &&
-        (analysisRadiusMm != transform->fovRadiusMm ||
-         transform->mouseSeamStrength > 0.0)) {
-      analysisSource = applyCircularFov(*sourceForOutput, nx, ny, transformedNz,
-                                        analysisRadiusMm, voxelSizeXmm,
-                                        voxelSizeYmm);
-      analysisForPostprocess = &analysisSource;
-    }
-    if (transform->mouseSeamStrength > 0.0) {
-      const std::vector<double> &analysis =
-          analysisForPostprocess ? *analysisForPostprocess : *sourceForOutput;
-      frozenTransform = *transform;
-      if (frozenTransform.objectProfile == "auto")
-        frozenTransform.objectProfile = classifyOutputObjectProfile(
-            analysis, nx, ny, transformedNz, voxelSizeXmm, voxelSizeYmm);
-      postprocessTransform = &frozenTransform;
-      resolvedProfile = frozenTransform.objectProfile;
-      if (frozenTransform.objectProfile == "mouse") {
-        transformedSource = mouseConfidenceBlendOutputOverlap(
-            preStitchSource, nx, ny, nz, frozenTransform, analysisRadiusMm,
-            voxelSizeXmm, voxelSizeYmm);
-        sourceForOutput = &transformedSource;
-      }
+
+  std::vector<double> wholeZFlipped;
+  std::vector<uint8_t> wholeZMaskFlipped;
+  if (shouldFlipZWholeOutput(transform)) {
+    wholeZFlipped = flipDoubleZWholeOutput(*sourceForOutput, nx, ny, transformedNz);
+    sourceForOutput = &wholeZFlipped;
+    if (maskForOutput) {
+      wholeZMaskFlipped = flipMaskZWholeOutput(*maskForOutput, nx, ny, transformedNz);
+      maskForOutput = &wholeZMaskFlipped;
     }
   }
-  if (transform && transform->fovRadiusMm > 0.0) {
-    transformedSource = applyCircularFov(
-        *sourceForOutput, nx, ny, transformedNz, transform->fovRadiusMm,
+
+  std::vector<double> xFlipped;
+  std::vector<uint8_t> xMaskFlipped;
+  if (shouldFlipXWholeOutput(transform)) {
+    xFlipped = flipXWholeOutput(*sourceForOutput, nx, ny, transformedNz);
+    sourceForOutput = &xFlipped;
+    if (maskForOutput) {
+      xMaskFlipped = flipXWholeOutput(*maskForOutput, nx, ny, transformedNz);
+      maskForOutput = &xMaskFlipped;
+    }
+  }
+
+  if (shouldStitchCanonicalOutput(transform)) {
+    transformedSource = center66CosineBlendOutputOverlap(
+        *sourceForOutput, nx, ny, transformedNz, *transform,
         voxelSizeXmm, voxelSizeYmm);
     sourceForOutput = &transformedSource;
-  }
-  // A Derenzo rod lattice is recognised from the stitched output itself, so
-  // the rod passes below still run when the caller left object_profile=auto.
-  if (transform &&
-      (transform->derenzoAxialPostprocess ||
-       transform->derenzoAdhesionPostprocess) &&
-      resolvedProfile == "auto") {
-    resolvedProfile = classifyOutputObjectProfile(
-        analysisForPostprocess ? *analysisForPostprocess : *sourceForOutput, nx,
-        ny, transformedNz, voxelSizeXmm, voxelSizeYmm);
-    if (postprocessTransform == transform) {
-      frozenTransform = *transform;
-      postprocessTransform = &frozenTransform;
-    }
-    frozenTransform.objectProfile = resolvedProfile;
-  }
-  if (transform && transform->derenzoAxialPostprocess &&
-      resolvedProfile == "derenzo") {
-    if (sourceForOutput != &transformedSource)
-      transformedSource = *sourceForOutput;
-    postprocessDerenzoOutput(
-        transformedSource, nx, ny, transformedNz, voxelSizeXmm,
-        voxelSizeYmm, voxelSizeZmm, transform->derenzoAxialStrength);
-    sourceForOutput = &transformedSource;
-  }
-  if (transform && transform->derenzoAdhesionPostprocess &&
-      resolvedProfile == "derenzo") {
-    if (sourceForOutput != &transformedSource)
-      transformedSource = *sourceForOutput;
-    postprocessDerenzoAdhesion(transformedSource, nx, ny, transformedNz,
-                               voxelSizeXmm, voxelSizeYmm,
-                               transform->derenzoAdhesionInner,
-                               transform->derenzoAdhesionOuter,
-                               transform->derenzoCoreDamp);
-    sourceForOutput = &transformedSource;
-  }
-  if (transform && transform->objectAwareSeamPostprocess) {
-    if (!transform->sigmoidBlendOutput && !transform->center66CosineOutput)
-      throw std::invalid_argument(
-          "prepareOutputVolume: seam postprocess requires weighted output stitching");
-    postprocessStitchedOutput(transformedSource, nx, ny, transformedNz,
-                              *postprocessTransform, voxelSizeXmm, voxelSizeYmm,
-                              analysisForPostprocess);
-    sourceForOutput = &transformedSource;
-  }
-  if (shouldFlipZWholeOutput(transform)) {
-    transformedSource =
-        flipDoubleZWholeOutput(*sourceForOutput, nx, ny, transformedNz);
-    sourceForOutput = &transformedSource;
+    const int stitchOutputNz = static_cast<int>(transformedSource.size() /
+                                     (static_cast<size_t>(nx) * ny));
     if (maskForOutput) {
-      transformedMask =
-          flipMaskZWholeOutput(*maskForOutput, nx, ny, transformedNz);
+      transformedMask = center66BlendOutputMask(
+          *maskForOutput, nx, ny, transformedNz, *transform);
       maskForOutput = &transformedMask;
     }
+    transformedNz = stitchOutputNz;
   }
-  if (shouldFlipXWholeOutput(transform)) {
-    transformedSource = flipXWholeOutput(*sourceForOutput, nx, ny, transformedNz);
-    sourceForOutput = &transformedSource;
+
+  std::vector<double> centerCropped;
+  std::vector<uint8_t> centerCropMask;
+  int croppedNx = nx, croppedNy = ny, croppedNz = transformedNz;
+  // Volume and mask must each be cropped from the *original* dimensions:
+  // centerCropVolume updates nx/ny/nz by reference, so reusing the already
+  // updated values for the mask would skip the mask crop and misalign it.
+  if (transform && transform->centerCropNx > 0 && transform->centerCropNy > 0) {
+    int volNx = nx, volNy = ny, volNz = transformedNz;
+    centerCropped = centerCropVolume(
+        *sourceForOutput, volNx, volNy, volNz,
+        transform->centerCropNx, transform->centerCropNy, -1);
+    sourceForOutput = &centerCropped;
     if (maskForOutput) {
-      transformedMask = flipXWholeOutput(*maskForOutput, nx, ny, transformedNz);
-      maskForOutput = &transformedMask;
+      int maskNx = nx, maskNy = ny, maskNz = transformedNz;
+      centerCropMask = centerCropVolume(
+          *maskForOutput, maskNx, maskNy, maskNz,
+          transform->centerCropNx, transform->centerCropNy, -1);
+      maskForOutput = &centerCropMask;
+    }
+    croppedNx = volNx;
+    croppedNy = volNy;
+    croppedNz = volNz;
+  }
+  if (transform && transform->centerCropNz > 0) {
+    int volNx = croppedNx, volNy = croppedNy, volNz = croppedNz;
+    centerCropped = centerCropVolume(
+        *sourceForOutput, volNx, volNy, volNz,
+        -1, -1, transform->centerCropNz);
+    sourceForOutput = &centerCropped;
+    if (maskForOutput) {
+      int maskNx = croppedNx, maskNy = croppedNy, maskNz = croppedNz;
+      centerCropMask = centerCropVolume(
+          *maskForOutput, maskNx, maskNy, maskNz,
+          -1, -1, transform->centerCropNz);
+      maskForOutput = &centerCropMask;
+    }
+    croppedNx = volNx;
+    croppedNy = volNy;
+    croppedNz = volNz;
+  }
+
+  std::vector<double> out = *sourceForOutput;
+  if (crop.start > 0 || crop.end > 0) {
+    const int zTotal = croppedNz;
+    const size_t plane = static_cast<size_t>(croppedNx) * croppedNy;
+    for (int z = 0; z < crop.start && z < zTotal; ++z)
+      std::fill_n(out.begin() + static_cast<std::ptrdiff_t>(z) * plane, plane, 0.0);
+    for (int z = std::max(0, zTotal - crop.end); z < zTotal; ++z)
+      std::fill_n(out.begin() + static_cast<std::ptrdiff_t>(z) * plane, plane, 0.0);
+  }
+
+  if (maskForOutput) {
+    for (size_t i = 0; i < out.size(); ++i) {
+      if (!(*maskForOutput)[i])
+        out[i] = 0.0;
     }
   }
 
-  if (!isCropSettingsValid(transformedNz, crop) &&
-      !(crop.start == 0 && crop.end == 0))
-    throw std::invalid_argument("prepareOutputVolume: invalid crop range");
   if (outNz)
-    *outNz = transformedNz;
-
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<double> out(static_cast<size_t>(transformedNz) * plane, 0.0);
-  for (int z = 0; z < transformedNz; ++z) {
-    if (z < crop.start || z >= transformedNz - crop.end)
-      continue;
-    for (size_t xy = 0; xy < plane; ++xy) {
-      const size_t srcIdx = static_cast<size_t>(z) * plane + xy;
-      const double value = (maskForOutput && !(*maskForOutput)[srcIdx])
-                               ? 0.0
-                               : (*sourceForOutput)[srcIdx];
-      out[static_cast<size_t>(z) * plane + xy] = value;
-    }
-  }
+    *outNz = croppedNz;
   return out;
 }
 
@@ -821,10 +779,19 @@ void saveVolumeOutput(const std::vector<double> &source,
                       const CropSettings &crop, bool littleEndian,
                       const OutputTransform *transform) {
   int outNz = 0;
-  const std::vector<double> prepared = prepareOutputVolume(
+  std::vector<double> prepared = prepareOutputVolume(
       source, geometry.nx, geometry.ny, geometry.nz, mask, crop, &outNz,
       transform, geometry.vx, geometry.vy, geometry.vz);
-  io::saveMHDRAW(prepared, geometry.nx, geometry.ny, outNz, geometry.vx,
+  int outNx = geometry.nx;
+  int outNy = geometry.ny;
+  if (transform && transform->centerCropNx > 0) outNx = transform->centerCropNx;
+  if (transform && transform->centerCropNy > 0) outNy = transform->centerCropNy;
+
+  // Final saved images must be non-negative: MLEM keeps the trajectory
+  // non-negative, but float32 staging of sieve/derived copies can leave
+  // tiny negatives; clamp all saved copies uniformly.
+  clampNonNegativeInPlace(prepared);
+  io::saveMHDRAW(prepared, outNx, outNy, outNz, geometry.vx,
                  geometry.vy, geometry.vz, outputDir, outputPrefix, iteration,
                  littleEndian);
 }

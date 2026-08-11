@@ -26,23 +26,6 @@ namespace spect {
 namespace io {
 namespace test {
 
-TEST(IOTest, MultiBedCodeDefaultsMatchShippedCenter66Mode) {
-    spect::cli::ReconArgs args;
-    EXPECT_EQ(args.bedCropMethod, "center66_cosine10");
-    EXPECT_TRUE(args.bedSeamPostprocess);
-    EXPECT_EQ(args.bedObjectProfile, "auto");
-    EXPECT_TRUE(args.bedDerenzoPostprocess);
-    EXPECT_DOUBLE_EQ(args.bedDerenzoAxialStrength, 0.30);
-    EXPECT_EQ(args.bedSeamHalfWidth, 8);
-    EXPECT_TRUE(args.bedEpguanBackgroundFilter);
-    EXPECT_FALSE(args.bedEpguanWallMaxPreserve);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSeamEdgeStrength, 0.60);
-    EXPECT_EQ(args.bedEpguanSeamFeatherSlices, 4);
-    EXPECT_DOUBLE_EQ(args.bedEpguanBackgroundRetain, 0.08);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSupportThreshold, 0.06);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSupportMarginMm, 1.5);
-    EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.5);
-}
 
 TEST(IOTest, MultiBedParserSortsDfListAndBProjListByBedNumber) {
     spect::cli::ReconArgs args;
@@ -106,34 +89,15 @@ TEST(IOTest, MultiBedParserRejectsMoreThanFiveBedOverlapSlots) {
 TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();
-    argv.push_back("-zbedflip");
-    argv.push_back("0");
-    argv.push_back("-zoutflip");
-    argv.push_back("1");
-    argv.push_back("-xoutflip");
-    argv.push_back("1");
-    argv.push_back("-bedCropMethod");
-    argv.push_back("direct");
-    argv.push_back("-bedSeamPostprocess");
-    argv.push_back("0");
-    argv.push_back("-bedObjectProfile");
-    argv.push_back("zimu");
+    argv.insert(argv.end(), {"-zbedflip", "0", "-zoutflip", "1",
+                             "-xoutflip", "1"});
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);
-    EXPECT_EQ(args.bedCropMethod, "direct");
-    EXPECT_EQ(args.bedObjectProfile, "zimu");
 }
-TEST(IOTest, MultiBedParserRejectsLegacyBlendFill) {
-    spect::cli::ReconArgs args;
-    auto argv = compactBaseArgs();
-    argv.push_back("-bedCropMethod");
-    argv.push_back("blendfill");
 
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
 TEST(IOTest, MultiBedParserAcceptsCompactChunkCtac) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
@@ -155,7 +119,8 @@ TEST(IOTest, MultiBedParserAcceptsCompactChunkCtac) {
     EXPECT_EQ(args.bedCount, 2);
 }
 TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
-    const auto dir = std::filesystem::temp_directory_path() / "spect_multibed_config_tests";
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_multibed_config_tests";
     std::filesystem::create_directories(dir);
     const auto path = dir / "spect_config.ini";
 
@@ -163,27 +128,8 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         std::ofstream out(path);
         ASSERT_TRUE(out);
         out << "[MultiBed]\n";
-        out << "bed_overlap = 5\n";
-        out << "crop_method = sigmoid\n";
-        out << "seam_postprocess = 1\n";
-        out << "object_profile = epguan\n";
-        out << "derenzo_postprocess = 0\n";
-        out << "derenzo_axial_strength = 0.35\n";
-        out << "phantom_close_strength = 0.9\n";
-        out << "epguan_close_strength = 0.85\n";
-        out << "epguan_wall_max_preserve = 1\n";
-        out << "epguan_seam_edge_strength = 0.7\n";
-        out << "epguan_seam_feather_slices = 3\n";
-        out << "epguan_background_filter = 1\n";
-        out << "epguan_background_retain = 0.12\n";
-        out << "epguan_support_threshold = 0.07\n";
-        out << "epguan_support_margin_mm = 1.8\n";
-        out << "zimu_close_strength = 0.8\n";
-        out << "mouse_seam_strength = 0.5\n";
-        out << "seam_half_width = 5\n";
+        out << "bed_overlap = 164\n";
         out << "crop_end = 2,3\n";
-        out << "fov_radius_mm = 15.0\n";
-        out << "analysis_fov_radius_mm = 15.6\n";
         out << "z_bed_flip = 0\n";
         out << "z_out_flip = 1\n";
         out << "x_out_flip = 1\n";
@@ -191,40 +137,14 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
 
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
-        "SPECT_recon",
-        "-config", path.string(),
-        "-df", "proj.bin",
-        "-chunkCSRDir", "chunks",
-        "-opti", "mlem",
-        "-it", "1",
-        "-dim", "108,108,80",
-        "-vox", "0.3",
-        "-ang", "360"
-    };
+        "SPECT_recon", "-config", path.string(), "-df", "proj.bin",
+        "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
+        "-dim", "108,108,220", "-vox", "0.3", "-ang", "360"};
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.bedOverlaps, (std::vector<int>{5}));
-    EXPECT_EQ(args.bedCropMethod, "sigmoid");
-    EXPECT_TRUE(args.bedSeamPostprocess);
-    EXPECT_EQ(args.bedObjectProfile, "epguan");
-    EXPECT_FALSE(args.bedDerenzoPostprocess);
-    EXPECT_DOUBLE_EQ(args.bedDerenzoAxialStrength, 0.35);
-    EXPECT_DOUBLE_EQ(args.bedPhantomCloseStrength, 0.9);
-    EXPECT_DOUBLE_EQ(args.bedEpguanCloseStrength, 0.85);
-    EXPECT_TRUE(args.bedEpguanWallMaxPreserve);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSeamEdgeStrength, 0.7);
-    EXPECT_EQ(args.bedEpguanSeamFeatherSlices, 3);
-    EXPECT_TRUE(args.bedEpguanBackgroundFilter);
-    EXPECT_DOUBLE_EQ(args.bedEpguanBackgroundRetain, 0.12);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSupportThreshold, 0.07);
-    EXPECT_DOUBLE_EQ(args.bedEpguanSupportMarginMm, 1.8);
-    EXPECT_DOUBLE_EQ(args.bedZimuCloseStrength, 0.8);
-    EXPECT_DOUBLE_EQ(args.bedMouseSeamStrength, 0.5);
-    EXPECT_EQ(args.bedSeamHalfWidth, 5);
+    EXPECT_EQ(args.bedOverlaps, (std::vector<int>{164}));
     EXPECT_EQ(args.cropEndStart, 2);
     EXPECT_EQ(args.cropEndEnd, 3);
-    EXPECT_DOUBLE_EQ(args.fovRadiusMm, 15.0);
-    EXPECT_DOUBLE_EQ(args.analysisFovRadiusMm, 15.6);
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);
@@ -523,29 +443,7 @@ TEST(IOTest, DetZRowWeightsEchoesInDumpConf) {
               std::string::npos);
 }
 
-TEST(IOTest, DerenzoProfileAndStrengthParseFromCli) {
-    spect::cli::ReconArgs args;
-    auto argv = compactBaseArgs();
-    argv.push_back("-bedObjectProfile");
-    argv.push_back("derenzo");
-    argv.push_back("-derenzoPostprocess");
-    argv.push_back("1");
-    argv.push_back("-derenzoAxialStrength");
-    argv.push_back("0.4");
 
-    ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.bedObjectProfile, "derenzo");
-    EXPECT_TRUE(args.bedDerenzoPostprocess);
-    EXPECT_DOUBLE_EQ(args.bedDerenzoAxialStrength, 0.4);
-}
-
-TEST(IOTest, DerenzoStrengthRejectsOutOfRangeValue) {
-    spect::cli::ReconArgs args;
-    auto argv = compactBaseArgs();
-    argv.push_back("-derenzoAxialStrength");
-    argv.push_back("1.1");
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
 
 namespace {
 
@@ -639,6 +537,21 @@ TEST(IOTest, BadDetectorMaskMapsHardwareBlocksToIdentityProjectionRows) {
     EXPECT_EQ(mask[index(120, 11, 12)], 0);
     EXPECT_THROW(buildBadDetectorProjectionMask(ids, 360, 40, 40),
                  std::runtime_error);
+}
+
+TEST(IOTest, BadDetectorMaskMapsPrototypeDetector68Exactly) {
+    const auto mask = buildBadDetectorProjectionMask(
+        {badDetectorFromGlobalNumber(68)}, 360, 48, 48);
+    ASSERT_EQ(std::count(mask.begin(), mask.end(), uint8_t{1}),
+              60 * 12 * 12);
+    const auto index = [](int angle, int z, int x) {
+        return static_cast<size_t>(angle) * 48 * 48 +
+               static_cast<size_t>(z) * 48 + x;
+    };
+    EXPECT_EQ(mask[index(0, 24, 24)], 1);
+    EXPECT_EQ(mask[index(59, 35, 35)], 1);
+    EXPECT_EQ(mask[index(60, 24, 24)], 0);
+    EXPECT_EQ(mask[index(120, 36, 0)], 0);
 }
 
 TEST(IOTest, BadDetectorConfigResolvesListRelativeToGlobalConfig) {

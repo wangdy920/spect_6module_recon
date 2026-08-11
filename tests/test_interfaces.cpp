@@ -24,7 +24,6 @@
 #include "io/CompactSymmetryMetadata.h"
 #include "io/MHDWriter.h"
 #include "io/VolumeLoader.h"
-#include "sparse/ISparseOps.h"
 
 namespace spect {
 namespace test {
@@ -77,37 +76,8 @@ TEST(InterfaceTest, MHDWritersUseZeroRawHeaderSize) {
     EXPECT_EQ(inlineText.find("HeaderSize = -1"), std::string::npos);
 }
 
-// ============ 抽象接口虚函数表测试 ============
 
-// 测试纯虚接口可以被继承
-class MockSparseOps : public ISparseOps {
-public:
-    BackendType backend() const override { return BackendType::Reference; }
-};
 
-TEST(InterfaceTest, MockSparseOpsCompiles) {
-    MockSparseOps ops;
-    EXPECT_EQ(ops.backend(), BackendType::Reference);
-}
-
-} // namespace test
-} // namespace spect
-
-// ============ Sparse 后端可用性 ============
-
-#include "sparse/SparseOpsBackend.h"
-
-namespace spect {
-namespace sparse {
-namespace test {
-
-TEST(SparseOpsBackendTest, CudaAvailabilityFlag) {
-#if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
-    EXPECT_TRUE(isCudaSparseOpsAvailable());
-#else
-    EXPECT_FALSE(isCudaSparseOpsAvailable());
-#endif
-}
 
 TEST(InterfaceTest, TruncatedMhdRawThrows) {
     const auto tmpDir = std::filesystem::temp_directory_path() /
@@ -136,7 +106,6 @@ TEST(InterfaceTest, TruncatedMhdRawThrows) {
     std::filesystem::remove_all(tmpDir);
 }
 } // namespace test
-} // namespace sparse
 } // namespace spect
 
 
@@ -159,14 +128,16 @@ TEST(AppTest, ConfigParserIntegration) {
         // Verify some expected values from the config
         EXPECT_EQ(parser.getInt("Basic", "threads", 0), 16);
         EXPECT_EQ(parser.getInt("Basic", "verbosity", 0), 1);
-        EXPECT_EQ(parser.getInt("Detector", "channels", 0), 40);
+        EXPECT_EQ(parser.getString("Detector", "channels", ""), "48,48");
         EXPECT_EQ(parser.getInt("Detector", "angles", 0), 360);
-        EXPECT_EQ(parser.getString("PSF", "mode", ""), "None");
-        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.5);
-        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "min_sigmas", 0.0), 4.0);
+        EXPECT_EQ(parser.getString("PSF", "mode", ""), "sieve");
+        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.3);
+        EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "min_sigmas", 0.0), 3.0);
         EXPECT_DOUBLE_EQ(
-            parser.getDouble("Filtering", "butterworth_cutoff", 0.0), 0.35);
+            parser.getDouble("Filtering", "butterworth_cutoff", 0.0), 0.0);
         EXPECT_EQ(parser.getInt("Filtering", "butterworth_order", 0), 2);
+        EXPECT_EQ(parser.getString("Filtering", "smooth_apply_stage", ""), "none");
+
         EXPECT_EQ(parser.getString("Regularization", "type", ""), "None");
     } else {
         GTEST_SKIP() << "Config file not found: " << configPath;

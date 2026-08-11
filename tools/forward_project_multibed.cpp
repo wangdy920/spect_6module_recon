@@ -22,7 +22,6 @@
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "io/VolumeLoader.h"
-#include "sparse/SparseOpsBackend.h"
 
 #include <cstdint>
 #include <cstring>
@@ -193,7 +192,6 @@ int main(int argc, char **argv) {
 
     spect::ReconOpts opts;
     opts.threads = std::max(1, args.threads);
-    opts.sparseOps = &spect::getSparseOpsCUDA();
 
     spect::filters::PSFKernels kernels;
     const spect::filters::PSFKernels *psfPtr = nullptr;

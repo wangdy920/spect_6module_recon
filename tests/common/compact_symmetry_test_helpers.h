@@ -12,24 +12,21 @@ namespace spect {
 namespace io {
 namespace test {
 
-inline spect::io::CompactSymmetryMetadata makeToySym45ZMeta() {
+inline spect::io::CompactSymmetryMetadata makeToySym90ZMeta() {
     spect::io::CompactSymmetryMetadata meta;
     meta.Nx = 2;
     meta.Ny = 2;
     meta.Nz = 2;
     meta.totalVoxels = 8;
-    meta.fullNumAngles = 16;
+    meta.fullNumAngles = 12;
     meta.compactNumAngles = 3;
     meta.detNx = 2;
     meta.detNz = 2;
     meta.compactDetZ = 1;
     meta.compactRaysPerAngle = 2;
     meta.totalRows = 6;
-    meta.useZSym = true;
-    meta.use45Sym = true;
-    meta.symCode = 45;
-    meta.symmetryOrder = 8;
-    meta.mode = spect::io::CompactSymmetryMode::Sym45Z;
+    meta.symCode = 90;
+    meta.symmetryOrder = 4;
     return meta;
 }
 
@@ -66,7 +63,7 @@ inline std::vector<double> expandCompactToyToFullDense(
                 for (uint32_t t = compact.rowPtr[static_cast<size_t>(row)];
                      t < compact.rowPtr[static_cast<size_t>(row) + 1u]; ++t) {
                     const size_t compactCol = compact.colIdx[static_cast<size_t>(t)];
-                    const size_t fullCol = spect::io::mapSym45ZVoxelIndex(
+                    const size_t fullCol = spect::io::mapCompactVoxelIndex(
                         compactCol, meta.Nx, meta.Ny, meta.Nz, sym, zMirror);
                     full[static_cast<size_t>(fullRow) *
                              static_cast<size_t>(meta.totalVoxels) +
@@ -106,7 +103,7 @@ inline std::vector<double> compactToyDenom(
                 }
                 for (uint32_t t = compact.rowPtr[static_cast<size_t>(row)];
                      t < compact.rowPtr[static_cast<size_t>(row) + 1u]; ++t) {
-                    const size_t fullCol = spect::io::mapSym45ZVoxelIndex(
+                    const size_t fullCol = spect::io::mapCompactVoxelIndex(
                         compact.colIdx[static_cast<size_t>(t)], meta.Nx,
                         meta.Ny, meta.Nz, sym, zMirror);
                     denom[fullCol] += compact.values[static_cast<size_t>(t)];
@@ -157,7 +154,7 @@ inline std::vector<double> compactToyNumerator(
                 for (uint32_t t = compact.rowPtr[static_cast<size_t>(row)];
                      t < compact.rowPtr[static_cast<size_t>(row) + 1u]; ++t) {
                     const size_t compactCol = compact.colIdx[static_cast<size_t>(t)];
-                    const size_t fullCol = spect::io::mapSym45ZVoxelIndex(
+                    const size_t fullCol = spect::io::mapCompactVoxelIndex(
                         compactCol, meta.Nx, meta.Ny, meta.Nz, sym, zMirror);
                     yhat[static_cast<size_t>(row)] +=
                         compact.values[static_cast<size_t>(t)] * image[fullCol];
@@ -174,7 +171,7 @@ inline std::vector<double> compactToyNumerator(
                                               1e-10);
                 for (uint32_t t = compact.rowPtr[static_cast<size_t>(row)];
                      t < compact.rowPtr[static_cast<size_t>(row) + 1u]; ++t) {
-                    const size_t fullCol = spect::io::mapSym45ZVoxelIndex(
+                    const size_t fullCol = spect::io::mapCompactVoxelIndex(
                         compact.colIdx[static_cast<size_t>(t)], meta.Nx,
                         meta.Ny, meta.Nz, sym, zMirror);
                     numer[fullCol] +=
@@ -191,8 +188,8 @@ inline std::vector<double> transformedImage(const std::vector<double>& image, in
                                      bool zMirror) {
     std::vector<double> out(image.size(), 0.0);
     for (size_t idx = 0; idx < image.size(); ++idx) {
-        out[idx] = image[spect::io::mapSym45ZVoxelIndex(idx, nx, ny, nz, sym,
-                                                        zMirror)];
+        out[idx] = image[spect::io::mapCompactVoxelIndex(
+            idx, nx, ny, nz, sym, zMirror)];
     }
     return out;
 }

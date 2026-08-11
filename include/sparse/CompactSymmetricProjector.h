@@ -1,6 +1,5 @@
 #pragma once
 
-#include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 
@@ -23,30 +22,10 @@ struct CompactSymmetricStageTiming {
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
-bool computeCompactSymmetricSensitivityCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
-    CompactSymmetricStageTiming *timing = nullptr);
-
-bool runCompactSymmetricMlemNumerCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta,
-    const double *fullProjection, const double *fullBackground,
-    const double *smoothedImage, int threads, double *numer,
-    CompactSymmetricStageTiming *timing = nullptr);
-
-// Expands one final compact forward projection into the native full-angle
-// detector layout. This is diagnostic-only and does not modify reconstruction
-// state. fullExpected must contain meta.fullRows() entries.
-bool computeCompactSymmetricForwardProjectionCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta,
-    const double *smoothedImage, int threads, double *fullExpected);
 
 // attFactors (optional, CTAC): full-angle attenuation table in the unrotated
 // image frame, laid out as att[fullAngle * totalVoxels + voxel] (uint16,
-// scale 1/65535), fullNumAngles * totalVoxels entries. nullptr disables
-// attenuation (legacy behaviour).
+// scale 1/65535), fullNumAngles * totalVoxels entries. nullptr disables CTAC.
 bool computeCompactChunkSensitivityCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,

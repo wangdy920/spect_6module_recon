@@ -106,6 +106,22 @@ std::vector<int> selectActualBedOverlaps(
   return overlaps;
 }
 
+void applyFixedSixModuleRoiDefaults(ReconArgs &args, int bedCount) {
+  if (args.cylinderDimsExplicit)
+    return;
+  if (bedCount == 1) {
+    args.cylinderDiameterMM = static_cast<float>(
+        spect::core::sixmodule::kSingleBedRoiDiameterMm);
+    args.cylinderHeightMM = static_cast<float>(
+        spect::core::sixmodule::kSingleBedRoiHeightMm);
+    return;
+  }
+  args.cylinderDiameterMM = static_cast<float>(
+      spect::core::sixmodule::kMultiBedRoiDiameterMm);
+  args.cylinderHeightMM = static_cast<float>(
+      spect::core::sixmodule::kMultiBedRoiHeightMm);
+}
+
 } // namespace
 
 bool adoptReconDimsFromHint(ReconArgs &args, std::string *warningMessage) {
@@ -161,7 +177,7 @@ bool ensureReconDims(ReconArgs &args, std::string *warningMessage) {
     if (matrixInput && !args.dimExplicit) {
       throw std::runtime_error(
           "Reconstruction dimensions are required for matrix inputs. Set -dim "
-          "or use compact metadata instead of the legacy 200x200x200 default.");
+          "or provide compact metadata.");
     }
     warning << "Reconstruction dimensions were missing or invalid; using defaults: "
             << args.Nx << 'x' << args.Ny << 'x' << args.Nz;
@@ -184,6 +200,7 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     throw std::runtime_error("-dfList supports at most " +
                              std::to_string(spect::core::kMaxBeds) + " beds.");
   args.bedCount = result.bedCount;
+  applyFixedSixModuleRoiDefaults(args, result.bedCount);
 
   const int joints = std::max(0, result.bedCount - 1);
   if (joints == 0) {
@@ -215,18 +232,50 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     );
   }
 
-  if (args.bedCropMethod == "center66_cosine10") {
-    if (result.baseNz < kCenter66CropLayers)
-      throw std::runtime_error(
-          "crop_method=center66_cosine10 requires baseNz >= 66.");
-    for (int overlap : args.outputBedOverlaps) {
-      if (result.baseNz - overlap != kCenter66BedStepLayers)
-        throw std::runtime_error(
-            "crop_method=center66_cosine10 requires bed_overlap = baseNz - 56 "
-            "for every selected joint.");
+  const double voxelSizeZ =
+      args.dz > 0.0 ? args.dz : static_cast<double>(args.Vz);
+  // The bed overlap is a derived quantity: baseNz - step, where
+  // step = round(bed_step_mm / voxel_z) and bed_step_mm (CLI -bedStepMm /
+  // INI [MultiBed] bed_step_mm, default 16.8 mm) is the authoritative
+  // scanner property. When the user omits -bedOverlap the fixed table is all
+  // zeros; when it is wrong it disagrees with the derived step. In both
+  // cases we re-derive the overlap from the scanner step (non-adjacent-bed
+  // joints keep their explicit zero semantics).
+  const double stepMm =
+      args.bedStepMm > 0.0 ? args.bedStepMm
+                           : spect::core::sixmodule::kMultiBedStepMm;
+  const int expectedStep =
+      static_cast<int>(std::llround(stepMm / voxelSizeZ));
+  const int expectedOverlap = result.baseNz - expectedStep;
+  if (expectedOverlap <= 0 || expectedOverlap >= result.baseNz) {
+    throw std::runtime_error(
+        "Scanner bed step " + std::to_string(stepMm) +
+        " mm is incompatible with baseNz=" + std::to_string(result.baseNz) +
+        " at voxel_z=" + std::to_string(voxelSizeZ) +
+        " mm (derived overlap would be " + std::to_string(expectedOverlap) +
+        "). Check -bedStepMm / [MultiBed] bed_step_mm.");
+  }
+  bool overlapCorrected = false;
+  for (size_t i = 0; i < args.outputBedOverlaps.size(); ++i) {
+    if (bedNumbers[i + 1] != bedNumbers[i] + 1)
+      continue;  // non-adjacent joint keeps explicit semantics
+    if (args.outputBedOverlaps[i] != expectedOverlap) {
+      args.outputBedOverlaps[i] = expectedOverlap;
+      overlapCorrected = true;
     }
   }
+  if (overlapCorrected) {
+    result.warnings.emplace_back(
+        "bed_overlap re-derived from the scanner bed step: corrected to " +
+        std::to_string(expectedOverlap) + " (= baseNz " +
+        std::to_string(result.baseNz) + " - step " +
+        std::to_string(expectedStep) + " layers / " +
+        std::to_string(stepMm) + " mm).");
+  }
 
+  const auto canonicalGeom = computeCanonicalOutputGeometry(
+      result.baseNz, args.outputBedOverlaps, voxelSizeZ, args.bedStepMm);
+  result.canonicalGeom = canonicalGeom;
   args.bedOverlaps = std::vector<int>(static_cast<size_t>(joints), 0);
   result.totalOverlap = 0;
   for (int overlap : args.bedOverlaps)
@@ -234,8 +283,9 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
 
   args.Nz = result.baseNz * result.bedCount - result.totalOverlap;
   std::ostringstream summary;
-  summary << "Multi-bed setup: beds=" << result.bedCount << ", baseNz=" << result.baseNz
-          << ", overlapMode=output-" << args.bedCropMethod
+  summary << "Multi-bed setup: beds=" << result.bedCount
+          << ", baseNz=" << result.baseNz
+          << ", overlapMode=output-center66_cosine10"
           << ", reconOverlap=" << result.totalOverlap;
   int outputOverlap = 0;
   for (int overlap : args.outputBedOverlaps)

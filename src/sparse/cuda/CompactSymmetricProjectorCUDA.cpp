@@ -4,11 +4,11 @@
 
 #include "core/ReconLimits.h"
 #include "cuda/CudaLaunchConfig.h"
-#include "sparse/ISparseOps.h"
-#include "sparse/SparseOpsBackend.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -31,10 +31,18 @@ using Clock = std::chrono::steady_clock;
 constexpr uint64_t kCompactChunkResidentReserveBytes =
     kCompactChunkResidentDeviceReserveBytes;
 
-struct RegisteredCompactChunkKey {
-  const void *rowPtr = nullptr;
-  const void *colIdx = nullptr;
-  const void *values = nullptr;
+struct CompactChunkHostRegistrationLease {
+  uint64_t cacheBudget = 0;
+  bool residentWarmupComplete = false;
+  std::vector<void *> regions;
+
+  ~CompactChunkHostRegistrationLease() {
+    for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+      if (cudaHostUnregister(*it) != cudaSuccess) {
+        cudaGetLastError();
+      }
+    }
+  }
 };
 
 int effectiveThreads(int threads) { return threads > 0 ? threads : 1; }
@@ -47,23 +55,6 @@ void addTiming(double &target, Clock::time_point start) {
   target += elapsedSeconds(start);
 }
 
-bool compactDeviceRatioEnabled() {
-  const char *value = std::getenv("SPECT_COMPACT_DEVICE_RATIO");
-  if (value == nullptr || value[0] == '\0') {
-    return false;
-  }
-  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
-         value[0] == 't' || value[0] == 'T';
-}
-
-bool compactDeviceBackwardEnabled() {
-  const char *value = std::getenv("SPECT_COMPACT_DEVICE_BACKWARD");
-  if (value == nullptr || value[0] == '\0') {
-    return false;
-  }
-  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
-         value[0] == 't' || value[0] == 'T';
-}
 
 bool compactBranchBatchEnabled() {
   const char *value = std::getenv("SPECT_COMPACT_BRANCH_BATCH");
@@ -83,21 +74,12 @@ bool compactConcurrentBedsEnabled() {
          value[0] == 't' || value[0] == 'T';
 }
 
-bool compactQuantizedGpuEnabled() {
-  const char *value = std::getenv("SPECT_COMPACT_QUANTIZED_GPU");
-  if (value == nullptr || value[0] == '\0') {
-    return true;
-  }
-  return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' ||
-         value[0] == 't' || value[0] == 'T';
-}
 
 CompactDeviceRatioParams makeCompactDeviceRatioParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int symId, bool zMirror) {
   CompactDeviceRatioParams params;
-  params.symmetryMode =
-      meta.mode == spect::io::CompactSymmetryMode::Sym45Z ? 45 : 90;
+  params.symmetryMode = 90;
   params.compactRowBase = compactRowBase;
   params.compactRaysPerAngle = meta.compactRaysPerAngle;
   params.compactNumAngles = meta.compactNumAngles;
@@ -114,8 +96,7 @@ CompactDeviceRatioParams makeCompactDeviceRatioParams(
 CompactDeviceTransformParams makeCompactDeviceTransformParams(
     const spect::io::CompactSymmetryMetadata &meta, int symId, bool zMirror) {
   CompactDeviceTransformParams params;
-  params.symmetryMode =
-      meta.mode == spect::io::CompactSymmetryMode::Sym45Z ? 45 : 90;
+  params.symmetryMode = 90;
   params.nx = meta.Nx;
   params.ny = meta.Ny;
   params.nz = meta.Nz;
@@ -128,8 +109,7 @@ CompactAttenBakeParams makeCompactAttenBakeParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int symId, bool zMirror) {
   CompactAttenBakeParams params;
-  params.symmetryMode =
-      meta.mode == spect::io::CompactSymmetryMode::Sym45Z ? 45 : 90;
+  params.symmetryMode = 90;
   params.compactRowBase = compactRowBase;
   params.compactRaysPerAngle = meta.compactRaysPerAngle;
   params.compactNumAngles = meta.compactNumAngles;
@@ -147,11 +127,6 @@ size_t compactAttenTableCount(const spect::io::CompactSymmetryMetadata &meta) {
          static_cast<size_t>(meta.totalVoxels);
 }
 
-bool operator==(const RegisteredCompactChunkKey &lhs,
-                const RegisteredCompactChunkKey &rhs) {
-  return lhs.rowPtr == rhs.rowPtr && lhs.colIdx == rhs.colIdx &&
-         lhs.values == rhs.values;
-}
 
 uint64_t estimatedCompactChunkResidentBytes(
     const spect::io::CompactChunkCSRDirectory &chunks) {
@@ -172,106 +147,81 @@ void warmCompactChunkResidentDeviceCache(
       cacheBudget < estimatedCompactChunkResidentBytes(chunks)) {
     return;
   }
-  static std::mutex warmedMutex;
-  static const spect::io::CompactChunkCSRDirectory *lastWarmedChunks = nullptr;
-  static uint64_t lastWarmedCacheBudget = 0;
-  {
-    std::lock_guard<std::mutex> lock(warmedMutex);
-    if (lastWarmedChunks == &chunks && lastWarmedCacheBudget == cacheBudget) {
-      return;
-    }
+
+  static std::mutex warmupMutex;
+  std::lock_guard<std::mutex> lock(warmupMutex);
+  auto lease = std::static_pointer_cast<CompactChunkHostRegistrationLease>(
+      chunks.acceleratorLease());
+  if (lease && lease->cacheBudget == cacheBudget &&
+      lease->residentWarmupComplete) {
+    return;
+  }
+
+  const bool registerChunks = !lease || lease->cacheBudget != cacheBudget;
+  if (registerChunks) {
+    chunks.setAcceleratorLease({});
+    lease = std::make_shared<CompactChunkHostRegistrationLease>();
+    lease->cacheBudget = cacheBudget;
   }
 
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
-  static std::mutex registrationMutex;
-  static std::vector<RegisteredCompactChunkKey> registeredChunks;
-  static std::vector<RegisteredCompactChunkKey> failedChunks;
   loaded.reserve(chunks.chunks().size());
   views.reserve(chunks.chunks().size());
   for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
     auto chunk = chunks.loadChunk(chunkIndex);
-    const RegisteredCompactChunkKey key{chunk->rowPtr.data(),
-                                        chunk->colIdxData(),
-                                        chunk->valuesData()};
-    bool shouldAttemptRegistration = false;
-    {
-      std::lock_guard<std::mutex> lock(registrationMutex);
-      const auto alreadyRegistered =
-          std::find(registeredChunks.begin(), registeredChunks.end(), key) !=
-          registeredChunks.end();
-      const auto alreadyFailed =
-          std::find(failedChunks.begin(), failedChunks.end(), key) !=
-          failedChunks.end();
-      shouldAttemptRegistration = !alreadyRegistered && !alreadyFailed;
-    }
-    if (shouldAttemptRegistration) {
-      const size_t rowBytes = chunk->rowPtr.size() * sizeof(uint32_t);
-      const size_t colBytes = chunk->colIdxCount() * sizeof(uint32_t);
-      const size_t valBytes = chunk->valuesCount() * sizeof(float);
-      bool rowRegistered = false;
-      bool colRegistered = false;
-      bool valRegistered = false;
-      auto tryRegister = [](void *ptr, size_t bytes) {
+    if (registerChunks) {
+      std::vector<void *> registered;
+      auto tryRegister = [&registered](void *ptr, size_t bytes) {
         if (ptr == nullptr || bytes == 0) {
           return cudaSuccess;
         }
-        return cudaHostRegister(ptr, bytes, cudaHostRegisterPortable);
+        const cudaError_t status =
+            cudaHostRegister(ptr, bytes, cudaHostRegisterPortable);
+        if (status == cudaSuccess) {
+          registered.push_back(ptr);
+        } else {
+          cudaGetLastError();
+        }
+        return status;
       };
-      cudaError_t status =
-          tryRegister(const_cast<uint32_t *>(chunk->rowPtr.data()), rowBytes);
+
+      cudaError_t status = tryRegister(
+          const_cast<uint32_t *>(chunk->rowPtr.data()),
+          chunk->rowPtr.size() * sizeof(uint32_t));
       if (status == cudaSuccess) {
-        rowRegistered = true;
+        status = tryRegister(const_cast<uint32_t *>(chunk->colIdxData()),
+                             chunk->colIdxCount() * sizeof(uint32_t));
+      }
+      if (status == cudaSuccess) {
+        status = tryRegister(const_cast<float *>(chunk->valuesData()),
+                             chunk->valuesCount() * sizeof(float));
+      }
+
+      if (status == cudaSuccess) {
+        lease->regions.insert(lease->regions.end(), registered.begin(),
+                              registered.end());
       } else {
-        cudaGetLastError();
-      }
-      if (status == cudaSuccess) {
-        status =
-            tryRegister(const_cast<uint32_t *>(chunk->colIdxData()), colBytes);
-        if (status == cudaSuccess) {
-          colRegistered = true;
-        } else {
-          cudaGetLastError();
-        }
-      }
-      if (status == cudaSuccess) {
-        status = tryRegister(const_cast<float *>(chunk->valuesData()), valBytes);
-        if (status == cudaSuccess) {
-          valRegistered = true;
-        } else {
-          cudaGetLastError();
-        }
-      }
-      std::lock_guard<std::mutex> lock(registrationMutex);
-      if (status == cudaSuccess) {
-        registeredChunks.push_back(key);
-      } else {
-        std::cerr << "[WARN] cudaHostRegister failed for compact chunk "
+        std::cerr << "[NOTE] cudaHostRegister failed for compact chunk "
                   << chunk->info.path.string() << ": "
                   << cudaGetErrorString(status)
                   << "; continuing with pageable host memory.\n";
-        if (valRegistered) {
-          cudaHostUnregister(const_cast<float *>(chunk->valuesData()));
+        for (auto it = registered.rbegin(); it != registered.rend(); ++it) {
+          if (cudaHostUnregister(*it) != cudaSuccess) {
+            cudaGetLastError();
+          }
         }
-        if (colRegistered) {
-          cudaHostUnregister(const_cast<uint32_t *>(chunk->colIdxData()));
-        }
-        if (rowRegistered) {
-          cudaHostUnregister(const_cast<uint32_t *>(chunk->rowPtr.data()));
-        }
-        failedChunks.push_back(key);
       }
     }
-    if (!chunk->isQuantized()) {
-      views.push_back(chunk->view());
-    }
+    views.push_back(chunk->view());
     loaded.push_back(std::move(chunk));
   }
-  if (!views.empty() &&
-      warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes)) {
-    std::lock_guard<std::mutex> lock(warmedMutex);
-    lastWarmedChunks = &chunks;
-    lastWarmedCacheBudget = cacheBudget;
+
+  lease->residentWarmupComplete =
+      views.empty() ||
+      warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes);
+  if (registerChunks) {
+    chunks.setAcceleratorLease(lease);
   }
 }
 
@@ -319,11 +269,7 @@ void transformForwardInto(const double *input, double *output,
     const int iy = rem / nx;
     const int ix = rem - iy * nx;
     const spect::io::CompactVoxelCoord mapped =
-        (meta.mode == spect::io::CompactSymmetryMode::Sym90Z)
-            ? spect::io::mapSym90ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror)
-            : spect::io::mapSym45ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror);
+        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
     output[uidx] =
         input[static_cast<size_t>(mapped.z) * plane +
               static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
@@ -350,11 +296,7 @@ void transformForwardIntoFloat(const double *input, float *output,
     const int iy = rem / nx;
     const int ix = rem - iy * nx;
     const spect::io::CompactVoxelCoord mapped =
-        (meta.mode == spect::io::CompactSymmetryMode::Sym90Z)
-            ? spect::io::mapSym90ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror)
-            : spect::io::mapSym45ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror);
+        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
     output[uidx] = static_cast<float>(
         input[static_cast<size_t>(mapped.z) * plane +
               static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
@@ -396,11 +338,7 @@ void transformBackwardAdd(const double *rotated, std::vector<double> &accum,
     const int iy = rem / nx;
     const int ix = rem - iy * nx;
     const spect::io::CompactVoxelCoord mapped =
-        (meta.mode == spect::io::CompactSymmetryMode::Sym90Z)
-            ? spect::io::mapSym90ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror)
-            : spect::io::mapSym45ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror);
+        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
     accum[static_cast<size_t>(mapped.z) * plane +
           static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
           static_cast<size_t>(mapped.x)] += rotated[uidx];
@@ -429,11 +367,7 @@ void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
     const int iy = rem / nx;
     const int ix = rem - iy * nx;
     const spect::io::CompactVoxelCoord mapped =
-        (meta.mode == spect::io::CompactSymmetryMode::Sym90Z)
-            ? spect::io::mapSym90ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror)
-            : spect::io::mapSym45ZVoxelCoord(ix, iy, iz, nx, nz, symId,
-                                             zMirror);
+        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
     accum[static_cast<size_t>(mapped.z) * plane +
           static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
           static_cast<size_t>(mapped.x)] +=
@@ -448,46 +382,9 @@ void transformBackwardAdd(const std::vector<double> &rotated,
   transformBackwardAdd(rotated.data(), accum, meta, symId, zMirror, threads);
 }
 
-void makeUnitRatio(const spect::io::CompactSymmetryMetadata &meta, int symId,
-                   bool zMirror, std::vector<double> &ratio, int threads) {
-  ratio.resize(static_cast<size_t>(meta.totalRows));
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(meta.totalRows);
-       ++row) {
-    uint64_t fullIndex = 0;
-    ratio[static_cast<size_t>(row)] =
-        spect::io::fullProjectionIndexFromCompactRow(
-            meta, static_cast<int>(row), symId, zMirror, fullIndex)
-            ? 1.0
-            : 0.0;
-  }
-}
-
-void makeUnitRatioChunk(const spect::io::CompactSymmetryMetadata &meta,
-                        int compactRowBase, int rows, int symId,
-                        bool zMirror, std::vector<double> &ratio,
-                        int threads) {
-  ratio.resize(static_cast<size_t>(rows));
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(rows); ++row) {
-    uint64_t fullIndex = 0;
-    ratio[static_cast<size_t>(row)] =
-        spect::io::fullProjectionIndexFromCompactRow(
-            meta, compactRowBase + static_cast<int>(row), symId, zMirror,
-            fullIndex)
-            ? 1.0
-            : 0.0;
-  }
-}
-
-void makeUnitRatioChunkFloat(const spect::io::CompactSymmetryMetadata &meta,
-                             int compactRowBase, int rows, int symId,
-                             bool zMirror, std::vector<float> &ratio,
-                             int threads) {
+void makeUnitRatioChunkFloat(
+    const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
+    int rows, int symId, bool zMirror, std::vector<float> &ratio, int threads) {
   ratio.resize(static_cast<size_t>(rows));
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
@@ -500,57 +397,6 @@ void makeUnitRatioChunkFloat(const spect::io::CompactSymmetryMetadata &meta,
             fullIndex)
             ? 1.0f
             : 0.0f;
-  }
-}
-
-void makeProjectionRatio(const spect::io::CompactSymmetryMetadata &meta,
-                         const double *fullProjection,
-                         const double *fullBackground,
-                         const std::vector<double> &y, int symId,
-                         bool zMirror, std::vector<double> &ratio,
-                         int threads) {
-  ratio.resize(static_cast<size_t>(meta.totalRows));
-  constexpr double kEps = 1e-10;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(meta.totalRows);
-       ++row) {
-    uint64_t fullIndex = 0;
-    if (!spect::io::fullProjectionIndexFromCompactRow(
-            meta, static_cast<int>(row), symId, zMirror, fullIndex)) {
-      ratio[static_cast<size_t>(row)] = 0.0;
-      continue;
-    }
-    const double background = fullBackground ? fullBackground[fullIndex] : 0.0;
-    const double q = std::max(y[static_cast<size_t>(row)] + background, kEps);
-    ratio[static_cast<size_t>(row)] = fullProjection[fullIndex] / q;
-  }
-}
-
-void makeProjectionRatioChunk(const spect::io::CompactSymmetryMetadata &meta,
-                              int compactRowBase,
-                              const double *fullProjection,
-                              const double *fullBackground,
-                              const std::vector<double> &y, int symId,
-                              bool zMirror, std::vector<double> &ratio,
-                              int threads) {
-  ratio.resize(y.size());
-  constexpr double kEps = 1e-10;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(y.size()); ++row) {
-    uint64_t fullIndex = 0;
-    if (!spect::io::fullProjectionIndexFromCompactRow(
-            meta, compactRowBase + static_cast<int>(row), symId, zMirror,
-            fullIndex)) {
-      ratio[static_cast<size_t>(row)] = 0.0;
-      continue;
-    }
-    const double background = fullBackground ? fullBackground[fullIndex] : 0.0;
-    const double q = std::max(y[static_cast<size_t>(row)] + background, kEps);
-    ratio[static_cast<size_t>(row)] = fullProjection[fullIndex] / q;
   }
 }
 
@@ -618,169 +464,11 @@ void requireCompleteForwardProjectionCoverage(
   }
 }
 
-void checkInputs(const spect::io::CSRView &compactMatrix,
-                 const spect::io::CompactSymmetryMetadata &meta) {
-  if (!compactMatrix.valid()) {
-    throw std::runtime_error("compact-symmetric CUDA helper received invalid CSRView.");
-  }
-  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
-      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
-    throw std::runtime_error(
-        "compact-symmetric CUDA helper only supports SYM_45Z and SYM_90Z.");
-  }
-  if (compactMatrix.rows != meta.totalRows ||
-      compactMatrix.cols != meta.totalVoxels) {
-    throw std::runtime_error(
-        "compact-symmetric CUDA helper matrix/metadata mismatch.");
-  }
-  if (meta.Nx != meta.Ny) {
-    throw std::runtime_error("compact-symmetric CUDA helper requires Nx == Ny.");
-  }
-}
 
 } // namespace
 
-bool computeCompactSymmetricSensitivityCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
-    CompactSymmetricStageTiming *timing) {
-  checkInputs(compactMatrix, meta);
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
 
-  const auto totalStart = Clock::now();
-  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
-  std::fill(denom, denom + nvox, 0.0);
-  std::vector<double> ratio;
-  std::vector<double> bpRot(nvox, 0.0);
-  std::vector<double> accum(nvox, 0.0);
 
-  for (int sym = 0; sym < meta.xySymmetryCount(); ++sym) {
-    for (int z = 0; z < meta.zBranchCount(); ++z) {
-      const bool zMirror = z != 0;
-      auto stageStart = Clock::now();
-      makeUnitRatio(meta, sym, zMirror, ratio, threads);
-      if (timing)
-        addTiming(timing->ratioSeconds, stageStart);
-
-      std::fill(bpRot.begin(), bpRot.end(), 0.0);
-      stageStart = Clock::now();
-      ops.spmvT(compactMatrix, ratio.data(), bpRot.data(), threads);
-      if (timing)
-        addTiming(timing->backwardSeconds, stageStart);
-
-      stageStart = Clock::now();
-      transformBackwardAdd(bpRot, accum, meta, sym, zMirror, threads);
-      if (timing)
-        addTiming(timing->transformBackwardSeconds, stageStart);
-    }
-  }
-
-  std::copy(accum.begin(), accum.end(), denom);
-  if (timing) {
-    timing->sensitivitySeconds += elapsedSeconds(totalStart);
-    ++timing->sensitivityCalls;
-  }
-  return true;
-}
-
-bool runCompactSymmetricMlemNumerCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta,
-    const double *fullProjection, const double *fullBackground,
-    const double *smoothedImage, int threads, double *numer,
-    CompactSymmetricStageTiming *timing) {
-  checkInputs(compactMatrix, meta);
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
-
-  const auto totalStart = Clock::now();
-  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
-  const size_t rows = static_cast<size_t>(meta.totalRows);
-  std::fill(numer, numer + nvox, 0.0);
-
-  std::vector<double> imgRot(nvox, 0.0);
-  std::vector<double> y(rows, 0.0);
-  std::vector<double> ratio(rows, 0.0);
-  std::vector<double> bpRot(nvox, 0.0);
-  std::vector<double> accum(nvox, 0.0);
-
-  for (int sym = 0; sym < meta.xySymmetryCount(); ++sym) {
-    for (int z = 0; z < meta.zBranchCount(); ++z) {
-      const bool zMirror = z != 0;
-      auto stageStart = Clock::now();
-      transformForward(smoothedImage, imgRot, meta, sym, zMirror, threads);
-      if (timing)
-        addTiming(timing->transformForwardSeconds, stageStart);
-
-      std::fill(y.begin(), y.end(), 0.0);
-      stageStart = Clock::now();
-      ops.spmv(compactMatrix, imgRot.data(), y.data(), threads);
-      if (timing)
-        addTiming(timing->forwardSeconds, stageStart);
-
-      stageStart = Clock::now();
-      makeProjectionRatio(meta, fullProjection, fullBackground, y, sym, zMirror, ratio,
-                          threads);
-      if (timing)
-        addTiming(timing->ratioSeconds, stageStart);
-
-      std::fill(bpRot.begin(), bpRot.end(), 0.0);
-      stageStart = Clock::now();
-      ops.spmvT(compactMatrix, ratio.data(), bpRot.data(), threads);
-      if (timing)
-        addTiming(timing->backwardSeconds, stageStart);
-
-      stageStart = Clock::now();
-      transformBackwardAdd(bpRot, accum, meta, sym, zMirror, threads);
-      if (timing)
-        addTiming(timing->transformBackwardSeconds, stageStart);
-    }
-  }
-
-  std::copy(accum.begin(), accum.end(), numer);
-  if (timing) {
-    timing->numeratorSeconds += elapsedSeconds(totalStart);
-    ++timing->numeratorCalls;
-  }
-  return true;
-}
-
-bool computeCompactSymmetricForwardProjectionCUDA(
-    const spect::io::CSRView &compactMatrix,
-    const spect::io::CompactSymmetryMetadata &meta,
-    const double *smoothedImage, int threads, double *fullExpected) {
-  checkInputs(compactMatrix, meta);
-  if (smoothedImage == nullptr || fullExpected == nullptr) {
-    throw std::runtime_error(
-        "compact forward projection received null image/output data.");
-  }
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
-
-  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
-  const size_t fullRows = static_cast<size_t>(meta.fullRows());
-  std::fill(fullExpected, fullExpected + fullRows, 0.0);
-  std::vector<uint8_t> coverage(fullRows, 0);
-  std::vector<double> imgRot(nvox, 0.0);
-  std::vector<double> y(static_cast<size_t>(meta.totalRows), 0.0);
-  for (const auto &branch : enumerateCompactBranches(meta)) {
-    transformForward(smoothedImage, imgRot, meta, branch.symId,
-                     branch.zMirror, threads);
-    std::fill(y.begin(), y.end(), 0.0);
-    ops.spmv(compactMatrix, imgRot.data(), y.data(), threads);
-    scatterCompactForwardProjection(meta, 0, y, branch.symId, branch.zMirror,
-                                    fullExpected, coverage);
-  }
-  requireCompleteForwardProjectionCoverage(coverage);
-  return true;
-}
 
 bool computeCompactChunkSensitivityCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
@@ -791,19 +479,10 @@ bool computeCompactChunkSensitivityCUDA(
     throw std::runtime_error(
         "compact chunk sensitivity matrix/metadata mismatch.");
   }
-  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
-      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
-    throw std::runtime_error(
-        "compact chunk CUDA helper only supports SYM_45Z and SYM_90Z.");
-  }
   if (meta.Nx != meta.Ny) {
     throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
   }
 
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
   warmCompactChunkResidentDeviceCache(chunks);
 
   const auto totalStart = Clock::now();
@@ -814,8 +493,7 @@ bool computeCompactChunkSensitivityCUDA(
   std::vector<float> ratio;
   std::vector<float> bpRot;
   std::vector<double> accum;
-  const bool useDeviceBackward =
-      compactDeviceBackwardEnabled() && attFactors == nullptr;
+  const bool useDeviceBackward = attFactors == nullptr;
   const bool useBranchBatch =
       compactBranchBatchEnabled() && useDeviceBackward && attFactors == nullptr &&
       branches.size() > 1;
@@ -828,13 +506,9 @@ bool computeCompactChunkSensitivityCUDA(
     }
   }
 
-  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
-    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
-    const bool chunkIsQuantized =
-        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
       CompactDeviceBackwardTiming backwardTiming;
@@ -846,13 +520,9 @@ bool computeCompactChunkSensitivityCUDA(
         symIds[b] = branches[b].symId;
         zMirrors[b] = branches[b].zMirror ? 1 : 0;
       }
-      const bool ok = chunkIsQuantized
-          ? compactSensitivityBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-                qview, commonTransform, symIds.data(), zMirrors.data(),
-                static_cast<int>(branches.size()), &backwardTiming, 0, 0)
-          : compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-                view, commonTransform, symIds.data(), zMirrors.data(),
-                static_cast<int>(branches.size()), &backwardTiming, 0, 0);
+      const bool ok = compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+          view, commonTransform, symIds.data(), zMirrors.data(),
+          static_cast<int>(branches.size()), &backwardTiming, 0, 0);
       if (!ok) {
         return false;
       }
@@ -862,11 +532,6 @@ bool computeCompactChunkSensitivityCUDA(
             backwardTiming.transformBackwardSeconds;
       }
       continue;
-    }
-    if (chunkIsQuantized) {
-      throw std::runtime_error(
-          "Quantized compact chunk matrices require branch-batch mode "
-          "(SPECT_COMPACT_BRANCH_BATCH=1) for the sensitivity path.");
     }
     for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
       const auto &branch = branches[branchIndex];
@@ -944,19 +609,10 @@ bool runCompactChunkMlemNumerCUDA(
       chunks.cols() != meta.totalVoxels) {
     throw std::runtime_error("compact chunk numerator matrix/metadata mismatch.");
   }
-  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
-      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
-    throw std::runtime_error(
-        "compact chunk CUDA helper only supports SYM_45Z and SYM_90Z.");
-  }
   if (meta.Nx != meta.Ny) {
     throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
   }
 
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
   warmCompactChunkResidentDeviceCache(chunks);
 
   const auto totalStart = Clock::now();
@@ -965,28 +621,32 @@ bool runCompactChunkMlemNumerCUDA(
   const size_t chunkCount = chunks.chunks().size();
   // The fused device-ratio/device-backward kernels have no attenuation
   // semantics; CTAC forces the generic bake + spmv route.
-  const bool useDeviceBackward =
-      compactDeviceBackwardEnabled() && attFactors == nullptr;
-  const bool useDeviceRatio = compactDeviceRatioEnabled() &&
-                              fullBackground == nullptr &&
-                              attFactors == nullptr;
+  const bool useDeviceBackward = attFactors == nullptr;
+  const bool useDeviceRatio =
+      fullBackground == nullptr && attFactors == nullptr;
   const bool useBranchBatch =
       compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
       attFactors == nullptr && branches.size() > 1;
-  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
+  if (useDeviceRatio &&
+      !refreshCompactProjectionCUDA(fullProjection, fullProjectionCount)) {
+    return false;
+  }
   std::fill(numer, numer + nvox, 0.0);
 
   std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
   std::vector<float> y;
   std::vector<float> ratio;
-  std::vector<float> bpRot(nvox, 0.0f);
-  std::vector<double> accum(nvox, 0.0);
+  std::vector<float> bpRot;
+  std::vector<double> accum;
 
   if (useDeviceBackward) {
     if (!compactDeviceBackwardBeginCUDA(nvox)) {
       return false;
     }
+  } else {
+    bpRot.assign(nvox, 0.0f);
+    accum.assign(nvox, 0.0);
   }
 
   for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
@@ -1002,9 +662,6 @@ bool runCompactChunkMlemNumerCUDA(
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
-    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
-    const bool chunkIsQuantized =
-        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
       const float *imgRotBatch = rotatedImages.data();
@@ -1020,17 +677,10 @@ bool runCompactChunkMlemNumerCUDA(
         symIds[b] = branches[b].symId;
         zMirrors[b] = branches[b].zMirror ? 1 : 0;
       }
-      const bool ok = chunkIsQuantized
-          ? compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-                qview, imgRotBatch, fullProjection, fullProjectionCount,
-                commonRatio, commonTransform, symIds.data(), zMirrors.data(),
-                static_cast<int>(branches.size()), &deviceTiming,
-                &backwardTiming)
-          : compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-                view, imgRotBatch, fullProjection, fullProjectionCount,
-                commonRatio, commonTransform, symIds.data(), zMirrors.data(),
-                static_cast<int>(branches.size()), &deviceTiming,
-                &backwardTiming);
+      const bool ok = compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+          view, imgRotBatch, fullProjection, fullProjectionCount, commonRatio,
+          commonTransform, symIds.data(), zMirrors.data(),
+          static_cast<int>(branches.size()), &deviceTiming, &backwardTiming);
       if (!ok) {
         return false;
       }
@@ -1042,11 +692,6 @@ bool runCompactChunkMlemNumerCUDA(
             backwardTiming.transformBackwardSeconds;
       }
       return true;
-    }
-    if (chunkIsQuantized) {
-      throw std::runtime_error(
-          "Quantized compact chunk matrices require branch-batch mode "
-          "(SPECT_COMPACT_BRANCH_BATCH=1) for the single-bed numerator path.");
     }
     for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
       const auto &branch = branches[branchIndex];
@@ -1191,11 +836,6 @@ bool computeCompactChunkForwardProjectionCUDA(
     throw std::runtime_error(
         "compact chunk forward projection matrix/metadata mismatch.");
   }
-  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
-      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
-    throw std::runtime_error(
-        "compact chunk forward projection only supports SYM_45Z and SYM_90Z.");
-  }
   if (meta.Nx != meta.Ny) {
     throw std::runtime_error(
         "compact chunk forward projection requires Nx == Ny.");
@@ -1203,10 +843,6 @@ bool computeCompactChunkForwardProjectionCUDA(
   if (smoothedImage == nullptr || fullExpected == nullptr) {
     throw std::runtime_error(
         "compact chunk forward projection received null image/output data.");
-  }
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
   }
   warmCompactChunkResidentDeviceCache(chunks);
 
@@ -1284,20 +920,11 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     throw std::runtime_error(
         "compact chunk multi-bed numerator matrix/metadata mismatch.");
   }
-  if (meta.mode != spect::io::CompactSymmetryMode::Sym45Z &&
-      meta.mode != spect::io::CompactSymmetryMode::Sym90Z) {
-    throw std::runtime_error(
-        "compact chunk multi-bed CUDA helper only supports SYM_45Z and SYM_90Z.");
-  }
   if (meta.Nx != meta.Ny) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper requires Nx == Ny.");
   }
 
-  const ISparseOps &ops = getSparseOpsCUDA();
-  if (ops.backend() != BackendType::CUDA) {
-    return false;
-  }
   warmCompactChunkResidentDeviceCache(chunks);
 
   bool hasBackground = false;
@@ -1318,12 +945,10 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   const auto branches = enumerateCompactBranches(meta);
   const size_t branchCount = branches.size();
   const size_t chunkCount = chunks.chunks().size();
-  // The fused device-ratio path now supports CTAC. When device-ratio is
-  // enabled with CTAC, the device-backward accumulator is still required.
-  const bool useDeviceRatio =
-      compactDeviceRatioEnabled() && !hasBackground;
-  const bool useDeviceBackward =
-      compactDeviceBackwardEnabled() && (!hasAtten || useDeviceRatio);
+  // Keep the projection ratio and backward accumulator resident whenever the
+  // requested inputs are supported by the exact device path.
+  const bool useDeviceRatio = !hasBackground;
+  const bool useDeviceBackward = !hasAtten || useDeviceRatio;
   const bool useBranchBatch =
       compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
       !hasAtten && branchCount > 1;
@@ -1331,17 +956,26 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
       compactConcurrentBedsEnabled() && useDeviceRatio && useDeviceBackward &&
       !hasAtten && bedCount > 1;
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
+  if (useDeviceRatio) {
+    for (int bed = 0; bed < bedCount; ++bed) {
+      if (!refreshCompactProjectionCUDA(fullProjections[bed],
+                                        fullProjectionCount, bed)) {
+        return false;
+      }
+    }
+  }
 
   std::vector<float> rotatedImages(static_cast<size_t>(bedCount) *
                                        branchCount * nvox,
                                    0.0f);
   std::vector<std::vector<double>> accum;
+  std::vector<float> bpRot;
   if (!useDeviceBackward) {
     accum.assign(static_cast<size_t>(bedCount), std::vector<double>(nvox, 0.0));
+    bpRot.assign(nvox, 0.0f);
   }
   std::vector<float> y;
   std::vector<float> ratio;
-  std::vector<float> bpRot(nvox, 0.0f);
 
   for (int bed = 0; bed < bedCount; ++bed) {
     std::fill(numers[bed], numers[bed] + nvox, 0.0);
@@ -1363,13 +997,9 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     }
   }
 
-  const bool useQuantizedGpu = compactQuantizedGpuEnabled();
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
-    const spect::io::CSRQuantizedView qview = chunk->quantizedView();
-    const bool chunkIsQuantized =
-        useQuantizedGpu && chunk->isQuantized() && qview.valid();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     for (int bed = 0; bed < bedCount; ++bed) {
       const double *fullProjection = fullProjections[bed];
@@ -1392,17 +1022,11 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
           symIds[b] = branches[b].symId;
           zMirrors[b] = branches[b].zMirror ? 1 : 0;
         }
-        const bool ok = chunkIsQuantized
-            ? compactDeviceRatioBranchBatchQuantizedSpmvTAccumulateFloatCUDA(
-                  qview, imgRotBatch, fullProjection, fullProjectionCount,
-                  commonRatio, commonTransform, symIds.data(), zMirrors.data(),
-                  static_cast<int>(branchCount), &deviceTiming, &backwardTiming,
-                  bed, bed)
-            : compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
-                  view, imgRotBatch, fullProjection, fullProjectionCount,
-                  commonRatio, commonTransform, symIds.data(), zMirrors.data(),
-                  static_cast<int>(branchCount), &deviceTiming, &backwardTiming,
-                  bed, bed);
+        const bool ok = compactDeviceRatioBranchBatchSpmvTAccumulateFloatCUDA(
+            view, imgRotBatch, fullProjection, fullProjectionCount, commonRatio,
+            commonTransform, symIds.data(), zMirrors.data(),
+            static_cast<int>(branchCount), &deviceTiming, &backwardTiming, bed,
+            bed);
         if (!ok) {
           return false;
         }
@@ -1414,11 +1038,6 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
               backwardTiming.transformBackwardSeconds;
         }
         continue;
-      }
-      if (chunkIsQuantized) {
-        throw std::runtime_error(
-            "Quantized compact chunk matrices require branch-batch mode "
-            "(SPECT_COMPACT_BRANCH_BATCH=1) for the multi-bed numerator path.");
       }
 
       for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {

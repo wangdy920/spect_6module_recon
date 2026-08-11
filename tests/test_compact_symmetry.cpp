@@ -24,98 +24,78 @@ namespace spect {
 namespace io {
 namespace test {
 
-TEST(IOTest, CompactSymmetryMapsSixModuleFullProjectionRowsOnce) {
-    spect::io::CompactSymmetryMetadata meta;
-    meta.totalRows = 52992;
-    meta.totalVoxels = 108 * 108 * 80;
-    meta.compactNumAngles = 46;
-    meta.detNx = 48;
-    meta.compactDetZ = 24;
-    meta.compactRaysPerAngle = 48 * 24;
-    meta.fullNumAngles = 360;
-    meta.Nx = 108;
-    meta.Ny = 108;
-    meta.Nz = 80;
-    meta.detNz = 48;
-    meta.useZSym = true;
-    meta.use45Sym = true;
-    meta.symCode = 45;
-    meta.symmetryOrder = 8;
-    meta.mode = spect::io::CompactSymmetryMode::Sym45Z;
-
-    ASSERT_EQ(meta.compactRows(), 52992);
-    ASSERT_EQ(meta.fullRows(), 829440);
-    ASSERT_EQ(meta.xySymmetryCount(), 8);
-    ASSERT_EQ(meta.zBranchCount(), 2);
-
-    std::vector<unsigned char> seen(static_cast<size_t>(meta.fullRows()), 0);
-    size_t validMappings = 0;
-    size_t invalidMappings = 0;
-    size_t duplicateMappings = 0;
-    for (int sym = 0; sym < meta.xySymmetryCount(); ++sym) {
-        for (int z = 0; z < meta.zBranchCount(); ++z) {
-            const bool zMirror = z != 0;
-            for (int row = 0; row < meta.totalRows; ++row) {
-                uint64_t fullIndex = 0;
-                if (!spect::io::fullProjectionIndexFromCompactRow(
-                        meta, row, sym, zMirror, fullIndex)) {
-                    ++invalidMappings;
-                    continue;
-                }
-                ASSERT_LT(fullIndex, static_cast<uint64_t>(meta.fullRows()));
-                duplicateMappings += seen[static_cast<size_t>(fullIndex)] != 0;
-                seen[static_cast<size_t>(fullIndex)] = 1;
-                ++validMappings;
-            }
-        }
-    }
-
-    EXPECT_EQ(validMappings, static_cast<size_t>(meta.fullRows()));
-    EXPECT_EQ(invalidMappings,
-              static_cast<size_t>(meta.compactRows()) * 16u -
-                  static_cast<size_t>(meta.fullRows()));
-    EXPECT_EQ(duplicateMappings, 0u);
-    for (unsigned char value : seen) {
-        EXPECT_EQ(value, 1);
-    }
+void writeCompactMetadata(const std::filesystem::path &path, int use90,
+                          int useZ, int use45, int symCode,
+                          int symmetryOrder) {
+    std::ofstream out(path, std::ios::binary);
+    ASSERT_TRUE(out);
+    auto scalar = [&](const auto &value) {
+        out.write(reinterpret_cast<const char *>(&value), sizeof(value));
+    };
+    const int totalRows = 90 * 48 * 24;
+    const int totalVoxels = 108 * 108 * 80;
+    const int maxNnz = 1;
+    const int compactNumAngles = 90;
+    const int detNx = 48;
+    const int compactDetZ = 24;
+    const int compactRaysPerAngle = 48 * 24;
+    const int fullNumAngles = 360;
+    const int nx = 108;
+    const int ny = 108;
+    const int nz = 80;
+    const float voxelSize = 0.3f;
+    const int detNxDuplicate = 48;
+    const int detNz = 48;
+    const float pixelSize = 1.0f;
+    const float detectorY = 1.0f;
+    const float detectorThickness = 1.0f;
+    scalar(totalRows);
+    scalar(totalVoxels);
+    scalar(maxNnz);
+    scalar(compactNumAngles);
+    scalar(detNx);
+    scalar(compactDetZ);
+    scalar(compactRaysPerAngle);
+    scalar(fullNumAngles);
+    scalar(nx);
+    scalar(ny);
+    scalar(nz);
+    scalar(voxelSize);
+    scalar(detNxDuplicate);
+    scalar(detNz);
+    scalar(pixelSize);
+    scalar(detectorY);
+    scalar(detectorThickness);
+    scalar(use90);
+    scalar(useZ);
+    scalar(use45);
+    scalar(symCode);
+    scalar(symmetryOrder);
 }
-TEST(IOTest, CompactSymmetryValidationRejectsCompactProjectionRows) {
-    spect::io::CompactSymmetryMetadata meta;
-    meta.totalRows = 52992;
-    meta.totalVoxels = 108 * 108 * 80;
-    meta.compactNumAngles = 46;
-    meta.detNx = 48;
-    meta.compactDetZ = 24;
-    meta.compactRaysPerAngle = 48 * 24;
-    meta.fullNumAngles = 360;
-    meta.Nx = 108;
-    meta.Ny = 108;
-    meta.Nz = 80;
-    meta.detNz = 48;
-    meta.useZSym = true;
-    meta.use45Sym = true;
-    meta.symCode = 45;
-    meta.symmetryOrder = 8;
-    meta.mode = spect::io::CompactSymmetryMode::Sym45Z;
 
-    std::vector<uint32_t> rowPtr(static_cast<size_t>(meta.totalRows) + 1u, 0u);
-    uint32_t dummyCol = 0;
-    float dummyVal = 1.0f;
-    spect::io::CSRView view{};
-    view.rows = meta.totalRows;
-    view.cols = meta.totalVoxels;
-    view.row_ptr = rowPtr.data();
-    view.col_idx = &dummyCol;
-    view.val = &dummyVal;
-    view.nnz = 0;
+TEST(IOTest, CompactSymmetryMetadataAcceptsCanonical90ZContract) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_compact_meta_90z.bin";
+    writeCompactMetadata(path, 1, 1, 0, 90, 4);
+    ASSERT_EQ(std::filesystem::file_size(path),
+              spect::io::kCompactMetadataBytes);
 
-    EXPECT_NO_THROW(spect::io::validateCompactSymmetricInputs(
-        meta, view, static_cast<size_t>(meta.fullRows()), 48, 48, 360, 108,
-        108, 80));
-    EXPECT_THROW(spect::io::validateCompactSymmetricInputs(
-                     meta, view, static_cast<size_t>(meta.compactRows()), 48,
-                     48, 360, 108, 108, 80),
+    const auto meta = spect::io::loadCompactSymmetryMetadata(path.string());
+    EXPECT_EQ(meta.compactRows(), 90 * 48 * 24);
+    EXPECT_EQ(meta.fullRows(), 360 * 48 * 48);
+    EXPECT_EQ(meta.xySymmetryCount(), 4);
+    EXPECT_EQ(meta.zBranchCount(), 2);
+    EXPECT_STREQ(spect::io::compactSymmetryModeName(), "90z");
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, CompactSymmetryMetadataRejectsLegacy45ZContract) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_compact_meta_45z.bin";
+    writeCompactMetadata(path, 0, 1, 1, 45, 8);
+    EXPECT_THROW(spect::io::loadCompactSymmetryMetadata(path.string()),
                  std::runtime_error);
+    std::filesystem::remove(path);
 }
 TEST(IOTest, CompactSymmetryMetadataMissingFileThrows) {
     const auto path = std::filesystem::temp_directory_path() /
@@ -132,7 +112,7 @@ TEST(IOTest, CompactSymmetryMetadataRejectsTruncatedExtendedHeader) {
     const auto path = dir / "metadata_truncated.bin";
 
     {
-        std::vector<char> bytes(spect::io::kCompactMetadataExtendedV1Bytes - 8, 0);
+        std::vector<char> bytes(spect::io::kCompactMetadataBytes - 8, 0);
         std::ofstream out(path, std::ios::binary);
         ASSERT_TRUE(out);
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -149,7 +129,7 @@ TEST(IOTest, CompactSymmetryMetadataRejectsUnexpectedTrailingBytes) {
     const auto path = dir / "metadata_trailing.bin";
 
     {
-        std::vector<char> bytes(spect::io::kCompactMetadataExtendedV2Bytes + 4, 0);
+        std::vector<char> bytes(spect::io::kCompactMetadataBytes + 4, 0);
         std::ofstream out(path, std::ios::binary);
         ASSERT_TRUE(out);
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
@@ -170,7 +150,6 @@ TEST(IOTest, Real260601MetadataParsesWhenPresent) {
         spect::io::loadCompactSymmetryMetadata(metaPath.string());
     EXPECT_EQ(meta.compactRows(), 90 * 48 * 24);
     EXPECT_EQ(meta.fullRows(), 360 * 48 * 48);
-    EXPECT_EQ(meta.mode, spect::io::CompactSymmetryMode::Sym90Z);
     EXPECT_EQ(meta.symCode, 90);
     EXPECT_EQ(meta.symmetryOrder, 4);
 }
@@ -183,7 +162,6 @@ TEST(IOTest, Real260601Sym90ZCoversAllFullProjectionRowsWhenPresent) {
 
     const auto meta =
         spect::io::loadCompactSymmetryMetadata(metaPath.string());
-    ASSERT_EQ(meta.mode, spect::io::CompactSymmetryMode::Sym90Z);
 
     std::vector<unsigned char> seen(
         static_cast<size_t>(meta.fullRows()), 0);
@@ -245,11 +223,8 @@ TEST(IOTest, CompactSymmetryMapsSixModule90ZFullProjectionRowsOnce) {
     meta.Ny = 108;
     meta.Nz = 80;
     meta.detNz = 48;
-    meta.use90Sym = true;
-    meta.useZSym = true;
     meta.symCode = 90;
     meta.symmetryOrder = 4;
-    meta.mode = spect::io::CompactSymmetryMode::Sym90Z;
 
     ASSERT_EQ(meta.compactRows(), 103680);
     ASSERT_EQ(meta.fullRows(), 829440);
@@ -355,6 +330,41 @@ TEST(IOTest, CompactChunkCSRDirectoryReadsToyChunks) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(IOTest, CompactChunkCSRDirectoryRejectsNoncanonicalVersion) {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_compact_chunk_csrb_version_test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    const auto path = dir / "chunk_000.csrb";
+    std::ofstream out(path, std::ios::binary);
+    ASSERT_TRUE(out);
+    const uint32_t magic = 0x42525343u;
+    const uint32_t version = 2u;
+    const int32_t rows = 1;
+    const int32_t angleOffset = 0;
+    const int32_t angleCount = 1;
+    const uint64_t nnz = 1;
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    out.write(reinterpret_cast<const char*>(&rows), sizeof(rows));
+    out.write(reinterpret_cast<const char*>(&angleOffset), sizeof(angleOffset));
+    out.write(reinterpret_cast<const char*>(&angleCount), sizeof(angleCount));
+    out.write(reinterpret_cast<const char*>(&nnz), sizeof(nnz));
+    out.close();
+
+    spect::io::CompactSymmetryMetadata meta;
+    meta.totalRows = 1;
+    meta.totalVoxels = 1;
+    meta.compactNumAngles = 1;
+    meta.compactRaysPerAngle = 1;
+    EXPECT_THROW(spect::io::openCompactChunkCSRDirectory(
+                     dir.string(), meta, 1024 * 1024),
+                 std::runtime_error);
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST(IOTest, CompactChunkCSRSampleValidationRejectsTailOutOfRangeColIdx) {
     const auto dir = std::filesystem::temp_directory_path() /
                      "spect_compact_chunk_sample_validation";
@@ -398,25 +408,25 @@ TEST(IOTest, CompactChunkCSRSampleValidationRejectsTailOutOfRangeColIdx) {
     EXPECT_THROW((void)chunks.loadChunk(0), std::runtime_error);
     std::filesystem::remove_all(dir);
 }
-TEST(IOTest, CompactSymmetryToyMetadataAndD4MappingMatchLegacyRules) {
-    const auto meta = makeToySym45ZMeta();
-    ASSERT_EQ(meta.compactNumAngles, meta.fullNumAngles / 8 + 1);
+TEST(IOTest, CompactSymmetryToyMetadataAnd90ZMappingMatchContract) {
+    const auto meta = makeToySym90ZMeta();
+    ASSERT_EQ(meta.compactNumAngles, meta.fullNumAngles / 4);
     ASSERT_EQ(meta.detNz, 2 * meta.compactDetZ);
-    ASSERT_EQ(meta.xySymmetryCount(), 8);
+    ASSERT_EQ(meta.xySymmetryCount(), 4);
     ASSERT_EQ(meta.zBranchCount(), 2);
 
     const std::vector<spect::io::CompactVoxelCoord> expected = {
-        {0, 1, 0}, {1, 0, 0}, {2, 0, 0}, {3, 1, 0},
-        {3, 2, 0}, {2, 3, 0}, {1, 3, 0}, {0, 2, 0},
+        {0, 1, 0}, {2, 0, 0}, {3, 2, 0}, {1, 3, 0},
     };
-    for (int sym = 0; sym < 8; ++sym) {
-        const auto mapped = spect::io::mapSym45ZVoxelCoord(
+    for (int sym = 0; sym < meta.xySymmetryCount(); ++sym) {
+        const auto mapped = spect::io::mapCompactVoxelCoord(
             0, 1, 0, 4, 5, sym, false);
         EXPECT_EQ(mapped.x, expected[static_cast<size_t>(sym)].x) << sym;
         EXPECT_EQ(mapped.y, expected[static_cast<size_t>(sym)].y) << sym;
         EXPECT_EQ(mapped.z, 0) << sym;
     }
-    const auto mirrored = spect::io::mapSym45ZVoxelCoord(0, 1, 1, 4, 5, 0, true);
+    const auto mirrored =
+        spect::io::mapCompactVoxelCoord(0, 1, 1, 4, 5, 0, true);
     EXPECT_EQ(mirrored.x, 0);
     EXPECT_EQ(mirrored.y, 1);
     EXPECT_EQ(mirrored.z, 3);
@@ -424,19 +434,17 @@ TEST(IOTest, CompactSymmetryToyMetadataAndD4MappingMatchLegacyRules) {
     bool valid = false;
     EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 0, 0, valid), 0);
     EXPECT_TRUE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 1, 0, valid), 1);
+    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 1, valid), 5);
     EXPECT_TRUE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 0, valid), 0);
+    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 3, valid), 11);
+    EXPECT_TRUE(valid);
+    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 3, 0, valid), 0);
     EXPECT_FALSE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 0, 1, valid), 0);
+    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 0, 4, valid), 0);
     EXPECT_FALSE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 1, 1, valid), 3);
-    EXPECT_TRUE(valid);
-    EXPECT_EQ(spect::io::fullAngleFromCompactAngle(meta, 2, 1, valid), 2);
-    EXPECT_TRUE(valid);
 }
 TEST(IOTest, CompactSymmetryToyExpansionCoversFullProjectionOnce) {
-    const auto meta = makeToySym45ZMeta();
+    const auto meta = makeToySym90ZMeta();
     std::vector<unsigned char> seen(static_cast<size_t>(meta.fullRows()), 0);
     size_t validMappings = 0;
     size_t invalidMappings = 0;
@@ -458,15 +466,13 @@ TEST(IOTest, CompactSymmetryToyExpansionCoversFullProjectionOnce) {
         }
     }
     EXPECT_EQ(validMappings, static_cast<size_t>(meta.fullRows()));
-    EXPECT_EQ(invalidMappings,
-              static_cast<size_t>(meta.compactRows()) * 16u -
-                  static_cast<size_t>(meta.fullRows()));
+    EXPECT_EQ(invalidMappings, 0u);
     for (unsigned char value : seen) {
         EXPECT_EQ(value, 1);
     }
 }
 TEST(IOTest, CompactSymmetryToyNumeratorDenominatorMatchExplicitFull) {
-    const auto meta = makeToySym45ZMeta();
+    const auto meta = makeToySym90ZMeta();
     const auto compact = makeToyCompactCSR();
     const auto full = expandCompactToyToFullDense(meta, compact);
     const std::vector<double> image = {1.0, 1.3, 1.7, 2.1,
@@ -488,7 +494,7 @@ TEST(IOTest, CompactSymmetryToyNumeratorDenominatorMatchExplicitFull) {
     expectVectorsNear(compactNumer, fullNumer, 1e-12);
 }
 TEST(IOTest, CompactSymmetryToyMlemOneIterationMatchesExplicitFull) {
-    const auto meta = makeToySym45ZMeta();
+    const auto meta = makeToySym90ZMeta();
     const auto compact = makeToyCompactCSR();
     const auto full = expandCompactToyToFullDense(meta, compact);
     const std::vector<double> imageInit = {1.0, 1.3, 1.7, 2.1,
@@ -517,7 +523,7 @@ TEST(IOTest, CompactSymmetryToyMlemOneIterationMatchesExplicitFull) {
     }
     expectVectorsNear(imageCompact, imageFull, 1e-12);
 }
-TEST(IOTest, CompactSymmetryToyZeroPsfIsIdentityAndGaussianCommutesWithD4) {
+TEST(IOTest, CompactSymmetryToyZeroPsfIsIdentityAndGaussianCommutesWithC4) {
     const std::vector<double> image = {
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
@@ -542,7 +548,7 @@ TEST(IOTest, CompactSymmetryToyZeroPsfIsIdentityAndGaussianCommutesWithD4) {
     spect::filters::conv3d_separable_inplace(
         blurred, nx, ny, nz, xyKernel, xyKernel, zIdentity, 1);
 
-    for (int sym = 0; sym < 8; ++sym) {
+    for (int sym = 0; sym < 4; ++sym) {
         auto transformedThenBlurred =
             transformedImage(image, nx, ny, nz, sym, false);
         spect::filters::conv3d_separable_inplace(

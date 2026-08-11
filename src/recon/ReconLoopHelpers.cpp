@@ -2,7 +2,6 @@
 
 #include "filters/cuda/VolumeOpsCUDA.h"
 #include "filters/Convolution.h"
-#include "sparse/ISparseOps.h"
 #include "pipeline/RunLogger.h"
 
 #include <cstdlib>
@@ -110,11 +109,9 @@ std::string outputPrefixFromArgs(const ReconArgs &args) {
 }
 
 bool tryComputeRegGradientCUDA(const std::vector<double> &image,
-                               const ReconArgs &args, const ReconOpts &opts,
+                               const ReconArgs &args,
                                const std::vector<uint8_t> *maskForReg,
                                std::vector<double> &gradReg) {
-  if (!opts.sparseOps || opts.sparseOps->backend() != BackendType::CUDA)
-    return false;
   return cuda::computeRegGradientCUDA(image, args.Nx, args.Ny, args.Nz,
                                       args.reg, maskForReg, gradReg);
 }
@@ -122,20 +119,17 @@ bool tryComputeRegGradientCUDA(const std::vector<double> &image,
 bool tryApplySeparableConvCUDA(std::vector<double> &volume, int nx, int ny,
                                int nz, const std::vector<double> &kx,
                                const std::vector<double> &ky,
-                               const std::vector<double> &kz,
-                               const ReconOpts &opts) {
-  return opts.sparseOps && opts.sparseOps->backend() == BackendType::CUDA &&
-         cuda::isCudaVolumeOpsAvailable() &&
+                               const std::vector<double> &kz) {
+  return cuda::isCudaVolumeOpsAvailable() &&
          cuda::applySeparableConv3DInplaceCUDA(volume, nx, ny, nz, kx, ky, kz);
 }
 
 void applySeparableConvRuntime(std::vector<double> &volume, int nx, int ny,
                                int nz, const std::vector<double> &kx,
                                const std::vector<double> &ky,
-                               const std::vector<double> &kz,
-                               const ReconOpts &opts, int threads) {
+                               const std::vector<double> &kz, int threads) {
   (void)threads;
-  if (!tryApplySeparableConvCUDA(volume, nx, ny, nz, kx, ky, kz, opts)) {
+  if (!tryApplySeparableConvCUDA(volume, nx, ny, nz, kx, ky, kz)) {
     throw std::runtime_error(
         "3D separable convolution requires CUDA volume helpers.");
   }

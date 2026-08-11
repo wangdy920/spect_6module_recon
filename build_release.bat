@@ -82,6 +82,9 @@ echo [INFO] Build SPECT_recon ...
 cmake --build "%BUILD_DIR%" --config %CONFIG% --target SPECT_recon --parallel
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [INFO] Reset dev package to prevent retired files from surviving install ...
+if exist "%INSTALL_DIR%" rmdir /s /q "%INSTALL_DIR%"
+
 echo [INFO] Install to %INSTALL_DIR% ...
 cmake --install "%BUILD_DIR%" --config %CONFIG%
 if %errorlevel% neq 0 exit /b %errorlevel%

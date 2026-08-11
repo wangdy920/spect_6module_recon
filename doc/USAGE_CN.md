@@ -67,9 +67,13 @@ compact chunk 矩阵默认识别优先级：
 | `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector` 空列表 |
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
 
+`-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。需要验证床位坐标约定时必须冻结文件映射和 `-zbedflip/-zoutflip`，不能依赖列表书写顺序。
+
 无 CTAC 的 `-chunkCSRDir` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点和 PSF 口径，不匹配时不会复用。
 
 `bad_dector` 是带方括号的逐行列表，优先使用最简单的全局探测器编号 `0..95`；也兼容 `link-<3|4>-FPGA-<0..5>-dector-<0..7>` 详细格式。编号遵循采集预处理的 `spect_detector_index`：`global = ((link==4 ? 6 : 0) + FPGA)*8 + dector`。读取任一格式后都会补齐另一种标识；跨格式重复项会报错。例如：
+
+受保护原型的 detector 68（`link-4-FPGA-2-dector-4`）使用冻结投影区域 `angle 0..59, z 24..35, x 24..35`；这是原型特例，不按其他编号使用的 ENG identity 映射推导。
 
 ```text
 [
@@ -78,7 +82,7 @@ compact chunk 矩阵默认识别优先级：
 ]
 ```
 
-该列表在 BIN 加载后生成投影行 mask：每个硬件探测器对应一个 FPGA 的 60 个角度和 12x12 detector block。mask 同时将 emission/background 实测行和 sensitivity denominator 中对应行置零，并进入 denom cache identity。无需修改 ENG 预处理；若只在预处理阶段丢事件但不修改 sensitivity，会造成定量偏差。
+该列表在 BIN 加载后生成投影行 mask：除上述 detector 68 特例外，每个硬件探测器按 ENG identity 映射到一个 FPGA 的 60 个角度和 12x12 detector block。mask 同时将 emission/background 实测行和 sensitivity denominator 中对应行置零，并进入 denom cache identity。无需修改 ENG 预处理；若只在预处理阶段丢事件但不修改 sensitivity，会造成定量偏差。
 
 ---
 
@@ -154,18 +158,23 @@ TV/RDP 可选使用已配准到重建网格的 CT（或 mu-map）作为边缘权
 
 | 参数 | 说明 |
 |---|---|
-| `-psf [fwhm_mm[,N]]` | 启用 image-domain Operator Gaussian PSF；FWHM 单位 mm，默认 `1.5,4`；`N` 表示 `N*sigma` 截断 |
-| `-psfMode <None\|Operator>` | PSF 开关模式；使用 `-psf` 且未显式指定时默认 `Operator` |
-| `-smooth <sigma>` | Gaussian 平滑 sigma mm |
-| `-smoothKernel <n>` | Gaussian kernel half-width |
-| `-butter <cutoff[,order]>` | Butterworth 低通滤波，如 `0.35,2` |
-| `-butterOrder <n>` | 单独设置 Butterworth order |
+| `-psf [fwhm_mm[,N]]` | 启用 image-domain Gaussian PSF；FWHM 单位 mm；`N` 表示 `N*sigma` 截断（发布默认 `1.3,3`） |
+| `-psfKernel <adjoint\|castor>` | `adjoint`：体素中心采样 Gaussian、镜像边界、反向使用真伴随；`castor`：erf 体素积分核、零边界、仅 Z 方向边界归一化，反向严格复用正向算子。发布默认 `castor` |
+| `-psfMode <none\|operator\|sieve>` | `sieve` 的迭代轨迹与 `operator` 相同；每个保存点另对副本施加同一 `psfKernel` 正向卷积，不回写迭代状态。`sieve` 拒绝 in_recon smooth/Butterworth |
+| `-smooth <sigma>` | 迭代内 Gaussian 平滑 sigma mm；传入即隐含 `smooth_apply_stage=in_recon` |
+| `-smoothKernel <n>` | 迭代内 Gaussian kernel half-width |
+| `-butter <cutoff[,order]>` | 迭代内 Butterworth 低通（归一化截止），如 `0.35,2`；传入即隐含 `butter_apply_stage=in_recon` |
+| `-butterOrder <n>` | 单独设置迭代内 Butterworth order |
 
-Butterworth 后端固定为 CUDA/cuFFT，不再暴露后端选择参数。
+`[Filtering]` 以 `smooth_apply_stage` / `butter_apply_stage`（`none|in_recon`）控制滤波施加阶段；INI 可用正参数配合 `in_recon` 启用，CLI `-smooth` / `-butter` 会直接选择 `in_recon`（迭代内滤波，改变迭代轨迹）。已删除不执行的 `output` 配置值：**每次重建只保存单一最终体** `<fout>_it<N>.mhd/.raw`（MLEM 迭代结果 + canonical stitch + mask + 非负钳制），不生成 `_smooth` / `_butter` 派生文件。发布默认配置：`[PSF] mode=sieve, kernel=castor, fwhm=1.3, min_sigmas=3`，迭代内滤波全关。
 
-注意：`-psf` 单位为 FWHM mm（默认 `1.5,4`）。旧现场/冻结包若仍写 `-psf 0.637`，那是历史 sigma 口径，不要与当前 FWHM 混用。
+CASToR PSF、迭代内 smooth 均 CUDA 优先；Butterworth 固定 CUDA/cuFFT，不再暴露后端选择参数。
 
----
+注意：`-psf` 单位为 FWHM mm（发布默认 `1.3,3`）。旧现场/冻结包若仍写 `-psf 0.637`，那是历史 sigma 口径，不要与当前 FWHM 混用。
+
+### 原型/主线对比：canonical 输出阶段
+
+主线不再包含对象感知 seam/profile 后处理，因此无需通过配置关闭。原型等价比较固定使用同一 Bed 顺序、`z_bed_flip=1`、robust gain-fit、center66/cosine10 拼接。**最终保存体是单一无后缀主输出** `<fout>_it<N>`；与原型 `--stitch-filter` 的 Smooth/Butterworth 比较须在两侧用相同阶段与参数对主输出离线施加（离线滤波工具或原型 exact filter），不能依赖生产保存的派生文件。
 
 ## CTAC / 背景 / 掩码
 
@@ -189,45 +198,39 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 ## 多床位与输出变换
 
-多床位仅支持 **stitch**：各床按零 overlap 独立重建，最终输出前按 `crop_method` 拼接相邻床位的内部接缝。
+固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、输出 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
 
 | 参数 | 说明 |
 |---|---|
-| `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` overlap 表；`b1=Bed1-Bed2`，只传一个值时复制到所有固定槽 |
-| `[MultiBed] crop_method` / `-bedCropMethod` | `center66_cosine10`：中心 66 层、固定 stride56、overlap10 归一化 cosine 融合（默认）；`sigmoid`：完整床位 overlap 的 legacy 对照；`direct`：hard-cut 对照 |
-| `[MultiBed] seam_postprocess` / `-bedSeamPostprocess` | 请求启用接缝后处理（默认 1）；仅在多床 weighted 输出 overlap 生效时运行 |
-| `[MultiBed] fov_radius_mm` | 最终输出的圆形 XY FOV 半径（mm）；`0` 关闭。当前 0.3 mm 数据的验证候选为 `15.0`（R50），边缘固定使用 4 voxel taper |
-| `[MultiBed] analysis_fov_radius_mm` | 自动分类和轮廓支持检测使用的固定 XY FOV 半径；`0` 跟随 `fov_radius_mm` |
-| `[MultiBed] mouse_seam_strength` | 仅用于显式 `sigmoid` 控制路径的 mouse 双床共同组织置信度权重调整 `[0,1]`；默认 `0` |
-| `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | norm W2 探测器效率权重，仅作用于 compact sensitivity denominator；发布默认为空/关闭 |
-| `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加倒数 `1/c`；opt-in，默认关闭 |
-| `-detZEdgeCensor <k>` / `[MultiBed] detz_edge_censor` | compact 分子+分母每侧屏蔽 k 行探测器 Z 边缘（默认 0） |
-| `-cropEnd <top[,end]>` | 将最终输出 Z 轴首尾指定层置零，在输出翻转之后执行；不改变层数 |
-| `-zbedflip [0\|1]` | 反转 `-dfList` 的床位局部 Z（输出阶段按床翻转）。配对规则必须与矩阵和预处理方向一致；发布默认 `1` |
-| `-zoutflip [0\|1]` | 对最终整体输出再做 Z 翻转，默认 0 |
-| `-xoutflip [0\|1]` | 对最终整体输出做 X 翻转，默认 0 |
+| `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` 物理 overlap 表；**派生值** `overlap = baseNz - round(bed_step_mm / voxel_z)`（260601 为 164），可省略（自动推算）或传错（自动纠正 + warning） |
+| `-bedStepMm <mm>` / `[MultiBed] bed_step_mm` | 扫描仪机械床步进（默认 `16.8` mm，权威输入）；输出步进 `step = round(bed_step_mm / voxel_z)`，中心裁剪 `step+10` 层 |
+| `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | 可选 detZ/per-bin/full-projection 效率权重，仅作用于 compact sensitivity denominator；默认空 |
+| `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加 `1/c`；默认空 |
+| `-detZEdgeCensor <k>` / `[MultiBed] detz_edge_censor` | compact 分子+分母每侧屏蔽 k 行 detector-Z；默认 0 |
+| `-cropEnd <top[,end]>` | 整体输出翻转后将 Z 首尾指定层置零，不改变层数 |
+| `-zbedflip [0\|1]` | compact 多床映射内反转每床局部 Z；发布默认 1 |
+| `-zoutflip [0\|1]` | canonical 拼接后翻转整体输出 Z；默认 0 |
+| `-xoutflip [0\|1]` | canonical 拼接后翻转整体输出 X；默认 0 |
 
-`-dim` 表示单床位维度。默认 `center66_cosine10` 在输出时从每床取中心 66 层，最终 `Z = 66 + (bed_count - 1) * 56`；`sigmoid/direct` 控制路径仍使用 `Z = Nz * bed_count - sum(overlap)`。迭代体数据为 `Nz * bed_count`，融合只发生在保存前。完整输出顺序为：必要的每床 Z 翻转 -> 中心裁剪与基线 overlap 融合 -> 固定分析 FOV 分类/支持检测 -> 输出 FOV -> profile 后处理 -> 整体 Z/X 翻转 -> `cropEnd`。
+物理合同固定为 `Bed1=max physical z`，后续 Bed 向较小 physical Z 移动；路径含 `BedN` 时 parser 先按床号排序。不要逆序文件补偿 `z_bed_flip=1`。
 
-`-bedOverlap` 的单位是 Z 体素。默认中心方案要求每个实际接缝满足 `overlap = 单床 Nz - 56`：160 层设备床使用 104，220 层 exact-matrix 床使用 164；两者都产生 56 层物理步进、10 层输出融合区。其他 overlap 只用于显式 `sigmoid/direct` 控制并需单独验证。
+多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；`-bedOverlap` 须满足 `baseNz - bedOverlap = step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
 
-Mouse 发布默认使用 `center66_cosine10`，不附加 normalization/detZ 因子。W2 等效率校正会改变局部对比度和组织分布，在组织真实性完成资深阅图确认前仍只作为候选诊断路径。
+`crop_method`、`sigmoid`、`direct`、seam/profile 后处理、输出 FOV mask 与对象分类均已退场。Mouse/EP/Derenzo 共用相同生产输出路径，不按对象选择算法。
 
-预处理投影变体必须与矩阵入口配对（详见 `Recon_Interface_Migration_Field_CN.md`）：`-chunkCSRDir`（260601）对应 `PROJECTION_VARIANT=identity`，`-zbedflip` 保留包默认配置。
-
----
+预处理投影与矩阵必须配对（详见 `Recon_Interface_Migration_Field_CN.md`）：260601 `-chunkCSRDir` 对应 `PROJECTION_VARIANT=identity`，`-zbedflip` 保留包默认 1。
 
 ## 输出与日志
 
 | 参数 | 说明 |
 |---|---|
-| `-fout <dir/name>` | 输出路径前缀 |
+| `-fout <dir/name>` | 输出路径前缀；传入绝对路径（含盘符/UNC）时，`.log` 与 MHD/RAW 均写入该绝对目录 |
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
 | `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
 | `-v` / `--version` | 打印版本字符串并退出（形如 `20260710+ad3c1d4`） |
 
-默认输出 MHD/RAW 体数据与自动日志 `<outputName>_YYYYMMDD_HHMMSS_mmm.log`。重建开始时 INFO 日志会打印 `=== SPECT_recon <version> ===` 与完整 `Command line:`。
+默认输出 MHD/RAW 体数据与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径；INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。
 
 ---
 

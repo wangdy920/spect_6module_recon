@@ -156,10 +156,6 @@ try {
 $paramTemplate = Join-Path $repo "doc\PARAMETERS_CN.template.md"
 Copy-Item -LiteralPath $paramTemplate -Destination (Join-Path $packageRoot "PARAMETERS_CN.md") -Force
 
-$cliChanges = Join-Path $repo "doc\CLI_CHANGES_CN.md"
-if (Test-Path -LiteralPath $cliChanges) {
-    Copy-Item -LiteralPath $cliChanges -Destination (Join-Path $packageRoot "CLI_CHANGES_CN.md") -Force
-}
 
 $readmeTemplate = Join-Path $repo "doc\README_RC.template.md"
 if (Test-Path -LiteralPath $readmeTemplate) {
@@ -169,9 +165,6 @@ if (Test-Path -LiteralPath $readmeTemplate) {
 }
 
 $releaseNotesPath = Join-Path $repo "doc\RELEASE_${ReleaseDate}_CN.md"
-if (-not (Test-Path -LiteralPath $releaseNotesPath)) {
-    $releaseNotesPath = Join-Path $repo "doc\RELEASE_20260715_CN.md"
-}
 if (Test-Path -LiteralPath $releaseNotesPath) {
     Copy-Item -LiteralPath $releaseNotesPath -Destination (Join-Path $packageRoot "RELEASE_NOTES.md") -Force
 } else {
