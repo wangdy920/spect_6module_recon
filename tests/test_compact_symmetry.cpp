@@ -212,7 +212,7 @@ TEST(IOTest, Real260601ChunkDirectoryReadsWhenPresent) {
     const auto second = secondLoad.get();
     ASSERT_TRUE(first);
     ASSERT_TRUE(second);
-    EXPECT_EQ(second->info.angleOffset, 1);
+    EXPECT_EQ(second->info.angleOffset, chunks.chunks()[1].angleOffset);
     const auto view = first->view();
     EXPECT_EQ(view.rows, static_cast<int>(chunks.chunks()[0].rows));
     EXPECT_EQ(view.cols, meta.totalVoxels);
