@@ -2,7 +2,7 @@
 
 **执行区间：** 2026-08-10 至 2026-08-11
 
-**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。性能优化后，单床 50 次中位数低于 2 分钟，四床中位数为 3.16 分钟并作为当前硬件边界保留。
+**最终状态：** 通过冻结五数据集合同；当前重构路线可判定为与受保护原型输出一致。最终优化后，单床 50 次中位数为 94.998 秒，四床为 141.372 秒；前者通过 2 分钟目标，后者作为当前 16 GB/float32 CSR 路线的测量边界保留。
 **数值权威：** `6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu` 中的 `sieve + CASToR + FWHM 1.3 mm + 3σ` 路线。
 
 ## 1. 执行结论与判定合同
@@ -65,10 +65,10 @@
 6B332DAD80310B2F0E4F8723B45B2AEB6C1B5DC24A153A6F720A467D45573B0E
 ```
 
-最终从干净提交 `7ed8259d666a55c9c310d6afd7c777588b6c6862` 重编译并重置部署包。最新 Release 版本为 `20260811+7ed8259`，构建树与部署包可执行文件 SHA-256 均为：
+GPU 连续驻留与资源生命周期重构位于提交 `cbd3a27bdbf8459736bd474a71316397cb5cb757`；真实矩阵并发测试期望修正后，最终从干净提交 `6f3e950` 重编译并重置部署包。最新 Release 版本为 `20260811+6f3e950`，构建树与部署包可执行文件 SHA-256 均为：
 
 ```text
-6EC9606969260399A3AE73FF173F3BE841319D0144DEC3FA42A0FBD73E74E7F2
+B071B72ED2A1932EC2E11E7E074662B88844CB32F1036C6A08AB46E646A9ED3E
 ```
 
 权威配置为 `config/spect_config.ini`，部署副本为 `staging/SPECT_recon_rc_dev/bin/config/spect_config.ini`；两者 SHA-256 均为 `35E950A84C93BA297BF878E480ACC8F48E2E5AC9D3D0717598E3ACDF28ACFB4F`。部署 `-dumpConf` 确认 `smooth_apply_stage=output`、`butter_apply_stage=output`、Smooth `0.30 mm/3σ`、Butterworth `5 cpcm/order 8`、`output_nonnegative_clamp=true`。随后只有本报告元数据更新，不改变该 Release 包。
@@ -143,134 +143,116 @@ Derenzo 是最终最弱项，因此也是残余数值风险的上界：支撑 NC
 
 端到端 smoke 使用正式 Derenzo 投影、已认证 denominator cache、`sieve + CASToR 1.3 mm/3σ` 和一次 MLEM。进程退出码为 0；`recon_it1`、`recon_it1_smooth`、`recon_it1_butter` 均为 `100×100×72`、有限且负体素数为 0，manifest 记录独立派生、生产钳制及六文件清单。该 smoke 只验证真实保存入口，不替代上面的五组同输入数值门，也没有重跑五组 50 次 MLEM。
 
-### 4.5 50 次迭代性能收敛
 
-性能签收按共享设备口径执行：同一冻结 EP 四床输入、同一 SHA-256 矩阵副本、同一 denominator cache，基线与候选按 `A1,B1,B2,A2,A3,B3` 交错运行，各取三次中位数。边界快照中可见其他任务造成的 GPU utilization 为 0%–13%，因此不采用单次最佳值。基线是干净提交 `17bd22c` 且设置 `SPECT_COMPACT_BRANCH_BATCH=0`；候选使用默认合批路径，无性能环境变量覆盖。
+### 4.5 GPU 连续驻留与 50 次迭代性能收敛
 
-| EP 四床短 A/B | 三次耗时（秒） | 中位数（秒） | 相对基线中位数 |
+最终采纳项均在同一个 compact CUDA 数据流内：完整图像/分子统计只在 `vb>=2` 时计算；冻结投影每次重建只上传一次，分支元数据仅在变化时上传；全局图像、每床反投影累加器、分母、mask 与 MLEM 更新保持 GPU 驻留；bed gather、double→float、CASToR 前后向、bed→global 累加和更新不再往返 CPU。矩阵启动只同步装载 resident 前缀，其余 host chunk 与 device warmup 重叠；迭代结束后先释放矩阵/重建缓冲，再执行最终 sieve 保存和 cuFFT 输出滤波。
+
+共享设备上的短 A/B 使用同一 EP 四床输入、同一 SHA-256 矩阵副本、同一 denominator cache，按 `A1,B1,B2,A2,A3,B3` 交错运行，各取三次中位数。A 是上一 Release `7ed8259`，B 是最终驻留实现；两者均显式启用 branch batch，故本表只测量本轮 GPU 驻留、启动和资源生命周期增益。
+
+| EP 四床 3 次 A/B | 三次耗时（秒） | 中位数（秒） | 相对上一 Release |
 |---|---|---:|---:|
-| 逐分支基线 | 80.0837、52.4101、52.0406 | 52.4101 | — |
-| branch/bed 合批 | 58.0584、35.9559、35.9731 | **35.9731** | **-31.36%** |
+| 上一 Release | 36.4538、35.4514、35.7105 | 35.7105 | — |
+| GPU 驻留候选 | 31.1907、30.3804、31.7334 | **31.1907** | **-12.66%（1.145×）** |
 
-配对 A/B 的主输出最大 relL2 为 `9.7147e-8`，Smooth 最大为 `1.0541e-7`，Butterworth 最大为 `1.3564e-7`；均低于主输出 `1e-5` 和冻结派生体 `2e-7` 门，且全部有限、非负。用户将旧 `1e-7` 性能分支门放宽为 `1e-5` 后，本候选仍多两个数量级余量。
+三组配对的主/Smooth/Butterworth 最大 relL2 分别为 `3.7841e-8`、`4.0849e-8`、`9.3060e-8`，低于主输出 `1e-5` 与派生体 `2e-7` 门；全部输出有限且生产钳制后非负。`SPECT_COMPACT_BRANCH_BATCH=0` 仍是可调用的逐分支正确性基线，背景、CTAC、BSREM、in-recon 滤波与调试统计继续走明确的通用路径，没有静默 GPU→CPU 降级。
 
-最终 50 次运行使用默认配置、NVMe 上的冻结矩阵副本和命中 denominator cache，各重复三次并取中位数：
+最终 50 次运行使用正式配置、NVMe 冻结矩阵副本和命中 denominator cache，各重复三次并取中位数：
 
-| 数据集 | 床数 | 三次耗时（秒） | 中位数（秒） | 120 秒目标 | 与优化前单次记录的背景差值 |
-|---|---:|---|---:|---|---:|
-| Derenzo | 1 | 99.9661、104.5868、110.4908 | **104.5868** | 三次均通过 | -82.42% |
-| EPguan | 4 | 189.6690、191.7576、188.8894 | **189.6690** | 未通过 | -72.78% |
+| 数据集 | 床数 | 三次耗时（秒） | 中位数（秒） | 相对上一 Release 中位数 | 120 秒目标 |
+|---|---:|---|---:|---:|---|
+| Derenzo | 1 | 94.9981、94.8386、96.5928 | **94.9981** | **-9.17%**（104.5868→94.9981） | 三次均通过 |
+| EPguan | 4 | 142.5726、141.2369、141.3719 | **141.3719** | **-25.46%**（189.6690→141.3719） | 未通过 |
 
-优化后 Derenzo 主输出相对优化前正式体 relL2 为 `2.1353e-7`；EPguan 为 `6.8556e-7`，都低于 `1e-5`。三次重复间，Derenzo 主/Smooth/Butterworth 最大 relL2 分别为 `5.5703e-8`、`5.2646e-8`、`9.9992e-8`；EPguan 分别为 `1.1770e-7`、`1.2516e-7`、`1.5246e-7`，派生体仍通过 `2e-7` 门。
+Derenzo 相对上一 Release 的三输出最大 relL2 为 `9.8653e-8`；EPguan 为 `1.0930e-7`。EP 三次重复间主/Smooth/Butterworth最大 relL2 为 `7.8445e-8`、`8.3835e-8`、`1.2482e-7`。因此性能增益没有通过改变原型、滤波或钳制结果获得。
 
-采纳项只有五个共享数据流变化：保留两个 resident CSR chunk 并为临时 CUDA 工作预留 6 GiB；branch/bed 合并为一次 SpMM；每轮 numerator 只上传一次旋转批输入；跨 chunk 复用大块 CUDA CSR allocation；host chunk cache 默认 25 GiB。拒绝并删除的实验包括全量/分段 `cudaHostRegister`、mmap+28 GiB、并行床、SpMM alg2/alg3、256 MiB staging 和三 resident chunk streaming；最终审计同时删除并行床的环境开关、异步 API、per-bed streams/scratch buffers，以及已拒绝的 SpMM 算法覆盖解析器和环境变量。它们分别触发显存风险、不支持或持续吞吐下降，没有保留第二生产实现。
+按 250 ms 采样，EP 50 次三轮合计 1,241 个样本，包含其他任务的总显存峰值为 15,333 MiB，最少剩余 729 MiB；Derenzo 峰值为 14,478 MiB，最少剩余 1,584 MiB。由此签收的低时延部署是 64 GB 主存 + SSD/NVMe 矩阵；32 GB 可降低 host cache 运行，但本轮不承诺同一吞吐。
 
-在 RTX 4070 Ti SUPER 16 GB、64 GB 主存上，对 EP 三次迭代按 250 ms 采样 121 次：包含其他任务的总显存峰值为 15,519 MiB，最少剩余 543 MiB，运行完成。由此签收的低时延部署是 64 GB 主存 + SSD/NVMe 矩阵；32 GB 主存可降低 host cache 运行，但本轮不承诺相同吞吐。四床 2 分钟目标没有达到，当前证据支持的边界是约 3.16 分钟，而不是继续用高显存风险换取未证实的增益。
+### 4.6 性能边界实验
 
-### 4.6 日志位置回归
+最终 profile 显示，16 GB 上两个 resident CSR 块加一个 transient 块已经接近容量上限；每块约 4.04–4.07 GiB，无法再加入第三个完整 resident 块。进一步尝试均按相同数值与显存合同裁决：
 
-最终 Release 一迭代真实 smoke 的 `recon_20260811_125921_473.log` 位于目标输出目录 `recon_out/perf_120s_20260811/final_release_7ed8259_smoke_1it/`；仓库根目录及 staging 根没有新增 `recon_*.log`。该运行写出主/Smooth/Butterworth 三体积，全部有限非负；相对上一 Release smoke 的最大 relL2 为 `8.6701e-8`，相对受保护标量基线为 `1.3839e-7`。正常路径下旧的本地误写问题已不存在。若目标输出目录本身无法创建，logger 仍会打印明确警告并回退到当前工作目录；该行为是可观察的失败兜底，不应被解释为正常输出位置。
+| 候选 | 定量结果 | 判定 |
+|---|---|---|
+| 删除逐块 CUDA timing/sync | EP 20 次 69.2361 秒，对照 69.3976 秒，仅 -0.23% | 噪声级，回退 |
+| 非驻留 CSR 连续行片 + 双传输槽 | 3 次 42.0948 秒；20 次 127.0378 秒，对照 68.9701 秒，退化 84.2%；显存峰值降至 14,581 MiB | 数值最终通过，但性能失败，完整回退 |
+| FP16 matrix value | 1,800 万点抽样 value relL2 `3.6770e-4`，2,803,544 个非零权重下溢为零 | 在进入重建前已越过 `1e-5`，不实现 |
+| pinning/mmap/并行床/SpMM alg2/3/256 MiB staging/三 resident | 既有实验分别出现显存风险、不支持或持续吞吐下降 | 不重复、无残留生产分支 |
+
+因此 `141.372 s` 是现有 float32 CSR + cuSPARSE + 16 GB 路线经小范围优化后的测量边界，不是抽象硬件极限。若重新开启，唯一仍有量级潜力的方向是单独立项的 packed-index 或近无损压缩矩阵格式、GPU 解压和自定义 sparse kernel；它会改变矩阵合同，必须把当前路线保留为控制组，不能作为本轮“顺手优化”。
+
+### 4.7 日志位置回归
+
+最终 Release 一迭代真实 smoke 的 `recon_20260811_170825_516.log` 位于目标目录 `recon_out/perf_120s_20260811/final_release_6f3e950_smoke_1it/`；仓库根目录及 staging 根的 `recon_*.log` 数量均为 0。该运行在 25.628 秒内写出主/Smooth/Butterworth 三体积和 manifest，相对上一 Release 的最大 relL2 为 `8.8886e-8`。正常路径下旧的本地误写问题不存在；若目标目录无法创建，logger 仍会明确提示并回退 CWD，该行为只作为可观察失败兜底。
+
 
 ## 5. 决策、限制与停止条件
 
-### 5.1 采纳与拒绝
+### 5.1 最终采纳
 
-最终采纳的共享修复为：反向存储的增益读窗、反向存储的 cosine blend 极性、原型 detector 68 固定区域、首次 PSF 前初始 ROI 掩膜，以及防止旧 detector 合同缓存复用的 schema 更新。输出端恢复一个最小保存数据流：未滤波主输出加两个独立派生副本；同时修复 CUDA Butterworth 尺寸切换缓存。性能端只在同一 compact CUDA 数据流内采用 resident cache、branch/bed SpMM 合批、单次批输入上传和 allocation 复用；`SPECT_COMPACT_BRANCH_BATCH=0` 保留可调用的正确性/性能基线。CLI 不新增输出滤波或性能参数，物理单位与钳制策略只由 `[Filtering]` 明确配置。
+生产路线固定为单 GPU compact-v4、MLEM/BSREM、`sieve + CASToR + FWHM 1.3 mm + 3σ`，输出保存一个未滤波主体与两个从同一 prepared volume 独立派生的 Smooth/Butterworth 副本。生产 `output_nonnegative_clamp=true`；线性原型门用 `false`，通过后恢复生产值。
 
-数值候选 CASToR 低前向中性比、0.01 MLEM 更新下限、直接 `A^T w` 加权灵敏度，以及上述无持续增益的性能候选均明确拒绝并从生产源码移除。保留它们只会制造第二数值路线或不可签收的显存风险。
+性能端只采纳经中位数证明的共享改动：无效统计门控、冻结投影/元数据最小上传、两块矩阵驻留、主 MLEM 图像/累加器/更新全程 GPU 驻留、启动预载重叠和最终资源提前释放。所有失败候选的结论保留在 `recon_out/perf_120s_20260811/experiment.json`，代码均已回退。
 
 ### 5.2 已知限制
 
-- MSVC 链接仍给出已知 `LNK4098` 默认库冲突警告，但 Release 构建、链接、CTest 233/233 和五次正式运行均成功；未把警告误报为已修复。
-- 五组 50 次正式重建先于输出派生恢复；本轮没有重复执行约一小时的五组迭代，而是用冻结的同输入五组体积验证滤波算子，并用一次真实重建验证保存/manifest 接口。
-- 原型是用户指定的实现基线，不是独立临床/物理真值。本轮未做新核素、新矩阵、新采集、DICOM 临床阅片或跨 GPU 架构的外推验证。
-- Derenzo 通过但不像另外四组那样接近机器精度；若未来收紧 relL2 门，必须重新冻结合同后再定位，不能回写当前阈值。
-- 50 次 2 分钟门只在本机单床三次重复中通过；四床 EP 的中位数是 189.67 秒。没有把单床结果外推为所有床数均通过。
-- 共享 GPU 的峰值采样只剩 543 MiB，总显存余量偏紧；resident cache warmup 后若其他任务继续显著增长，仍可能触发 OOM。本轮未把这种外部并发变化隐藏为程序保证。
+- MSVC 链接仍报告既有 `LNK4098`；Release、233 项 CTest、显式五数据集滤波门和真实运行均成功，未把警告误报为已修复。
+- 五组 50 次原型等价门来自冻结正式结果；本轮 GPU 驻留改动以真实 EP/Derenzo、单元/集成测试和同输入上一 Release 对比复核，没有再次耗时重跑另外三组 50 次。
+- 原型是用户指定的实现权威，不是独立临床或物理真值；未验证新矩阵、新核素、新采集、DICOM 临床阅片或跨 GPU 性能。
+- 16 GB EP 峰值只余 729 MiB；其他任务在 resident warmup 后继续显著增长仍可能触发 OOM。
+- 单床 50 次通过 2 分钟不外推到多床；四床 EP 的三轮中位数为 141.372 秒。
+- 32 GB 主存不是同吞吐认证配置；正式低时延证据来自 64 GB + NVMe。
 
 ### 5.3 停止条件
 
-在当前五数据集与现有阈值下，数值合同项已全部通过。性能线在两个 resident chunk + branch/bed batch 停止：单床已达到目标，已试的额外并行、pinning、mmap、staging 和算法选择均无持续增益或越过显存边界。只有出现可复现的四床瓶颈定位、新硬件/矩阵、收紧的门或新的安全优化假设时，才重新开启受控实验。
+本轮在两侧触发边界后停止：无损行片传输重叠使 20 次运行退化 84.2%，而能显著降低矩阵显存的 FP16 表示在矩阵值层已达 `3.68e-4`。在不更改矩阵格式与 sparse kernel 的条件下，没有新的数据支持继续叠加开关或并行。只有单独冻结新的压缩矩阵合同、控制基线、显存门和五数据集数值门后，才重新开启该架构级路线。
+
 
 ## 6. 复现与验证清单
 
 ### 6.1 精确复现命令
 
 ```powershell
-cmake -S . -B build\Release -DSPECT_BUILD_TESTS=ON
-cmake --build build\Release --config Release --target SPECT_recon spect_tests -j 8
+.\build_release.bat
+cmake --build build\Release --config Release --target spect_tests --parallel 8
 ctest --test-dir build\Release -C Release --output-on-failure
-
-python recon_out\canonical_stitch_20260807\preflight.py `
-  --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811 `
-  --exe build\Release\bin\Release\SPECT_recon.exe
-
-python recon_out\canonical_stitch_20260807\run_all.py `
-  --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811 `
-  --exe build\Release\bin\Release\SPECT_recon.exe `
-  --denom-cache-dir recon_out\prototype_sieve_castor_fwhm1p3_final_20260811\denom_cache
-
-python recon_out\canonical_stitch_20260807\analyze_parity.py `
-  --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
-
-build\Release\bin\Release\spect_tests.exe `
-  --gtest_output=json:D:\Projects\SPECT-recon\recon_out\prototype_sieve_castor_fwhm1p3_final_20260811\spect_tests.json
 
 $env:SPECT_FILTER_PARITY_BASE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\runs).Path
 $env:SPECT_FILTER_PARITY_REFERENCE_ROOT = (Resolve-Path recon_out\canonical_stitch_20260807\prototype_filter_parity).Path
 build\Release\bin\Release\spect_tests.exe `
   --gtest_filter=OutputFilterParityTest.FrozenFiveDatasetsWhenRequested
 
-# 清理后先重建同一 SHA-256 矩阵副本和独立基线 worktree。
-New-Item -ItemType Directory -Path tmp\matrix_perf_nvme_20260811
-Copy-Item -Path F:\matrix_PSC_PIN26x28x25_SCALE2_141keV_120x120x220\* `
-  -Destination tmp\matrix_perf_nvme_20260811
-git worktree add --detach tmp\baseline_17bd22c 17bd22c8c22192dbe4ddf3fed57456e41bb81161
-Push-Location tmp\baseline_17bd22c
-.\build_release.bat
-Pop-Location
-
-# 性能 A/B：按 A1,B1,B2,A2,A3,B3 交错；每组取 elapsed_seconds 中位数。
-$env:SPECT_COMPACT_BRANCH_BATCH = '0'
+# 清理后按 input_preflight.json 的 SHA-256 从 F: 重建临时 NVMe 矩阵副本。
 recon_out\perf_120s_20260811\run_variant.ps1 `
-  -Label median_epguan3_baseline_A1 -Dataset epguan -Iterations 3 `
-  -MatrixDir D:\Projects\SPECT-recon\tmp\matrix_perf_nvme_20260811 `
-  -DenomCache D:\Projects\SPECT-recon\recon_out\perf_120s_20260811\nvme_denom\epguan.mhd `
-  -Executable D:\Projects\SPECT-recon\tmp\baseline_17bd22c\staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Verbosity 0
-Remove-Item Env:\SPECT_COMPACT_BRANCH_BATCH
-recon_out\perf_120s_20260811\run_variant.ps1 `
-  -Label median_epguan3_candidate_B1 -Dataset epguan -Iterations 3 `
-  -MatrixDir D:\Projects\SPECT-recon\tmp\matrix_perf_nvme_20260811 `
-  -DenomCache D:\Projects\SPECT-recon\recon_out\perf_120s_20260811\nvme_denom\epguan.mhd `
-  -Executable D:\Projects\SPECT-recon\staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Verbosity 0
+  -Label resident_final_candidate_B1 -Dataset epguan -Iterations 3 -BranchBatch `
+  -HostCacheBytes 25g -MatrixDir tmp\matrix_perf_nvme_20260811 `
+  -DenomCache recon_out\perf_120s_20260811\nvme_denom\epguan.mhd `
+  -Executable staging\SPECT_recon_rc_dev\bin\SPECT_recon.exe -Verbosity 0
 
-python recon_out\canonical_stitch_20260807\certify_outputs.py `
-  --out recon_out\prototype_sieve_castor_fwhm1p3_final_20260811
+python scripts\compare_recon_metrics.py `
+  --reference <previous.mhd> --candidate <current.mhd> --out-json <metrics.json>
 ```
 
-逐数据集的完整展开命令、绝对输入路径、返回码与耗时保存在 `run_record.json`；不需要从本报告手工重构床位列表。收敛清理已删除 26.1 GB 临时矩阵副本和独立基线 worktree，以上前置命令可按冻结哈希重新创建；最终中位数记录和决策 JSON 保留。
+完整 A/B 顺序、50 次命令、环境、耗时、GPU 样本和输出路径保存在各 `record.json`；采纳/拒绝总表见 `recon_out/perf_120s_20260811/experiment.json`。清理后临时矩阵和独立旧 Release 副本不保留，可从冻结源与哈希重建。
 
 ### 6.2 验证状态
 
 | 检查 | 证据 | 状态 |
 |---|---|---|
-| Release 配置与编译 | `20260811+7ed8259`；构建/部署 exe SHA-256 同为 `6EC960...E7F2`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
-| 部署配置 | 源码/部署 `spect_config.ini` SHA-256 同为 `35E950...FB4F`；部署 `-dumpConf` 逐项核对输出滤波与 clamp | 通过 |
-| 正式单元/集成测试 | CTest 233/233；外部五集门默认 skip、按冻结环境变量独立执行 1/1 通过 | 通过 |
-| detector 68 精确映射 | 新回归测试检查 60×12×12、边界及旧错误区域 | 通过 |
-| 一迭代结构门 | no-PSF `7.30e-8`；sieve `8.95e-8` | 通过 |
-| 五数据集 50 次 MLEM | 五进程退出码 0；聚合 analyzer 全门为真 | 通过 |
-| 方向/间距/有限非负 | 每组 manifest 与指标 JSON | 通过 |
-| 输出滤波同输入门 | 五组主输入/Butterworth relL2=0；Smooth 最大 1.1563017e-7；clamp-on 对应门通过 | 通过 |
-| 真实保存入口 | 一迭代 Derenzo 写出主/Smooth/Butterworth 六文件；全部有限非负；相对上一 Release/标量基线最大 relL2 `8.6701e-8`/`1.3839e-7`；manifest 一致 | 通过 |
-| 直接切片视觉 QA | 共享原型窗宽、无插值、无候选缩放 | 通过 |
-| 基础重建输出证书 | 原五组 21 个正式证据文件、90,349,475 字节 SHA-256 列表 | 通过；证书不包含本轮派生 smoke |
-| 性能短 A/B | 基线/候选各 3 次交错，中位数 52.4101 / 35.9731 秒；三类输出最大 relL2 1.3564e-7 | 通过，候选 -31.36% |
-| 受保护逐分支基线 | 删除拒绝分支后以 `SPECT_COMPACT_BRANCH_BATCH=0` 执行一迭代；相对最终合批主/Smooth/Butterworth 最大 relL2 `1.3839e-7` | 通过；基线仍可调用 |
-| 50 次性能重复 | Derenzo 3 次中位数 104.5868 秒；EP 四床 3 次中位数 189.6690 秒 | 单床通过；四床未达 120 秒 |
-| 显存采样 | EP 3 次、250 ms×121；总峰值 15,519 MiB、最少剩余 543 MiB | 通过但余量偏紧 |
-| 日志输出目录 | 最终源码 smoke 日志在目标目录；仓库/staging 根无新增日志 | 正常路径通过；目录创建失败仍有显式 CWD fallback |
-| 未验证范围 | 其余三组在优化后二次执行 50 次、32 GB 主存同吞吐、新数据、新矩阵、临床正确性、跨架构性能 | 明确未验证 |
+| 最终 Release | `20260811+6f3e950`；build/staging SHA-256 `B071B72E…A9ED3E`；`sm_86/89/120` | 通过；保留 LNK4098 标记 |
+| 部署配置 | 源码/部署 SHA-256 `35E950A8…FB4F`；output Smooth 0.30 mm/3σ、Butterworth 5 cpcm/order 8、clamp on | 通过 |
+| 正式测试 | CTest 233/233；外部五集门默认 skip；显式冻结根 1/1 | 通过 |
+| 五数据集原型主门 | 五个完整 50 次正式端点、对象/方向/有限非负门 | 通过 |
+| 输出滤波门 | 五组 Smooth 最大 `1.1563e-7`；Butterworth 同输入零差；clamp-on 门 | 通过 |
+| 短 A/B | 上一 Release/驻留候选中位数 35.7105/31.1907 秒；最大三输出 relL2 `9.3060e-8` | 通过，-12.66% |
+| Derenzo 50 | 三轮中位数 `94.9981 s`；三输出对旧版最大 `9.8653e-8` | 通过 120 s |
+| EP 四床 50 | 三轮中位数 `141.3719 s`；对旧版 -25.46%；重复最大 `1.2482e-7` | 数值/性能增益通过，120 s 未达 |
+| 显存 | EP 峰值 15,333 MiB、最低空闲 729 MiB；Derenzo峰值 14,478 MiB | 通过但接近边界 |
+| 边界实验 | 行片双缓冲 20 次 127.0378 s；FP16 value relL2 `3.677e-4` | 均拒绝并回退 |
+| 最终真实 smoke | 25.628 s，主/Smooth/Butterworth/manifest；对旧版最大 `8.8886e-8` | 通过 |
+| 日志目录 | smoke 日志在目标目录；仓库/staging 根数量 0 | 正常路径通过 |
+| 未验证 | 其余三集在驻留实现下二次 50 次、32 GB 同吞吐、新格式/新矩阵、临床正确性、跨架构性能 | 明确未验证 |
+
 
 ## References
 
