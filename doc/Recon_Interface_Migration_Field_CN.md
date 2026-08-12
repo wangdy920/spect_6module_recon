@@ -189,7 +189,7 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 1. 固定指向新 RC 的 `bin\SPECT_recon.exe`。
 2. 预处理 `projection_variant` 固定 **identity**（矩阵唯一入口为 260601 chunk）。
 3. 每例拼：`-dfList`、`-fout`、**`-opti mlem`**、**几何四件套**、**`-psf 1.3,3 -psfMode sieve -psfKernel castor`**、以及与包默认不同的覆盖（常见：`-it 20:5`）。
-4. 去掉按床循环与 `SPECT_Stitcher` 主线调用；旧 `-alg` / `-sparseBackend` / `-loadCSR` / `-subsets` **禁止再生成**（会报错）。
+4. 去掉按床循环与 `SPECT_Stitcher` 主线调用；旧 `-alg` / `-sparseBackend` / `-loadCSR` / `-subsets` 虽会被兼容忽略，仍应**停止生成**。
 5. 成功条件：存在最终迭代的 `<prefix>_itN.mhd` + `.raw`。
 6. **`z_bed_flip` 保持 1**。
 

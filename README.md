@@ -63,7 +63,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default. |
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
-| `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI args override config. |
+| `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI normally wins; `[Compatibility] recon_sections_override_cli=true` makes the global INI authoritative only for Regularization/PSF/Filtering/Postprocess. Unknown or retired CLI arguments are noted and ignored. |
 | `-vb 0/1/2` | Verbosity (0=quiet, 1=info default, 2=debug). |
 | `-v` / `--version` | `-v` prints the exact build identity and complete embedded changelog; `--version` prints only the machine-readable build identity. |
 

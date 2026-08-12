@@ -60,6 +60,7 @@ struct ReconArgs {
     bool configExplicit = false;  ///< -config was used explicitly
     bool configFound = false;     ///< Config file exists
     bool configLoaded = false;    ///< Config file loaded successfully
+    bool reconSectionsOverrideCli = false; ///< Global INI owns Reg/PSF/filter/postprocess fields
     std::string algoConfPath;     ///< Algorithm config file path (empty = auto-detect)
     bool helpRequested = false;    ///< Print usage and exit successfully
     bool versionRequested = false; ///< Print version and exit successfully

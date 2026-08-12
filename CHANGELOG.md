@@ -8,6 +8,11 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Added opt-in global-INI authority for Regularization, PSF, Filtering and
+  Postprocess fields; the shipped config enables it to protect the validated
+  prototype policy from upstream CLI overrides.
+- Unknown and retired CLI arguments are now noted and ignored while invalid
+  values for supported arguments still fail validation.
 - Added `[InputOutput] output_filters_overwrite_primary`; when enabled, the
   unsuffixed primary volume contains the selected output-stage Smooth then
   Butterworth chain while independent suffixed audit copies remain available.

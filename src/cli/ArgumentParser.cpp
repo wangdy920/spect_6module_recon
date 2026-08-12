@@ -18,6 +18,31 @@ bool isPublicRegularizer(RegType type) {
            type == RegType::RDP;
 }
 
+void restoreConfigOwnedReconSections(ReconArgs& dst, const ReconArgs& src) {
+    dst.useReg = src.useReg;
+    dst.reg = src.reg;
+    dst.regCtPath = src.regCtPath;
+
+    dst.usePSF = src.usePSF;
+    dst.psf = src.psf;
+    dst.psfModeExplicit = src.psfModeExplicit;
+
+    dst.useSmooth = src.useSmooth;
+    dst.smoothSigma = src.smoothSigma;
+    dst.smoothKernel = src.smoothKernel;
+    dst.useButter = src.useButter;
+    dst.butterCutoff = src.butterCutoff;
+    dst.butterOrder = src.butterOrder;
+    dst.smoothApplyStage = src.smoothApplyStage;
+    dst.butterApplyStage = src.butterApplyStage;
+    dst.outputSmoothFwhmMm = src.outputSmoothFwhmMm;
+    dst.outputSmoothSigmas = src.outputSmoothSigmas;
+    dst.outputButterCutoffCpcm = src.outputButterCutoffCpcm;
+    dst.outputButterOrder = src.outputButterOrder;
+    dst.outputNonnegativeClamp = src.outputNonnegativeClamp;
+    dst.outputFiltersOverwritePrimary = src.outputFiltersOverwritePrimary;
+}
+
 } // namespace
 
 std::filesystem::path ArgumentParser::executableDir(char** argv) {
@@ -203,6 +228,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     // 1. Load global config if it exists. Error-code overloads keep an
     // inaccessible optional default from aborting before CLI parsing.
     ConfigParser cfg;
+    ReconArgs globalConfigSnapshot;
+    bool haveGlobalConfigSnapshot = false;
     std::error_code configExistsError;
     const bool configExists =
         std::filesystem::exists(configPath, configExistsError);
@@ -219,6 +246,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (cfg.load(configPath)) {
             args.configLoaded = true;
             applyConfig(args, cfg);
+            globalConfigSnapshot = args;
+            haveGlobalConfigSnapshot = true;
         } else if (args.configExplicit) {
             std::cerr << "Error: Cannot load explicit config file '"
                       << configPath << "'.\n";
@@ -268,10 +297,18 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             if (args.helpRequested || args.versionRequested)
                 return ParseResult::ExitSuccess;
         } else {
-            std::cerr << "Unknown argument: " << key << "\n";
-            return ParseResult::ExitFailure;
+            std::cerr << "[NOTE] Ignoring unsupported CLI argument: " << key;
+            if (key.find('=') == std::string::npos && i + 1 < argc) {
+                const std::string next = argv[i + 1];
+                if (!next.empty() && next[0] != '-')
+                    std::cerr << " " << argv[++i];
+            }
+            std::cerr << "\n";
         }
     }
+
+    if (haveGlobalConfigSnapshot && args.reconSectionsOverrideCli)
+        restoreConfigOwnedReconSections(args, globalConfigSnapshot);
 
     // 4. Resolve matrix defaults after all config/CLI layers are known.
     std::string matrixDiscoveryError;
@@ -889,6 +926,10 @@ void ArgumentParser::registerHandlers() {
 }
 
 void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
+    a.reconSectionsOverrideCli = cfg.getBool(
+        "Compatibility", "recon_sections_override_cli",
+        a.reconSectionsOverrideCli);
+
     // Basic
     std::string dims = cfg.getString("Basic", "dimensions");
     if (!dims.empty()) {
@@ -1761,6 +1802,10 @@ bool ArgumentParser::validateArgs(const ReconArgs& args) {
 void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "# ── Merged Configuration (after all layers) ──\n\n";
 
+    std::cout << "[Compatibility]\n";
+    std::cout << "recon_sections_override_cli = "
+              << (a.reconSectionsOverrideCli ? "true" : "false") << "\n\n";
+
     std::cout << "[Basic]\n";
     std::cout << "dimensions = " << a.Nx << "," << a.Ny << "," << a.Nz << "\n";
     std::cout << "voxel_size = " << a.Vx << "," << a.Vy << "," << a.Vz << "\n";
@@ -2016,6 +2061,8 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Advanced ===\n";
     std::cout << "  -config <path>            Global config (default search: exe/config, exe, cwd/config, cwd)\n";
     std::cout << "  -dumpConf                 Print merged config and exit\n";
+    std::cout << "  Unknown/deprecated CLI arguments are noted and ignored.\n";
+    std::cout << "  INI [Compatibility] recon_sections_override_cli=true protects Regularization/PSF/Filtering/Postprocess from CLI overrides.\n";
     std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
     std::cout << "  -v                        Print version and complete changelog, then exit\n";

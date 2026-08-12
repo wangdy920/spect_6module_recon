@@ -334,13 +334,13 @@ TEST(IOTest, PublicCtacModelRejectsLegacyPerVoxel) {
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
-TEST(IOTest, PublicPriorFlagIsRejected) {
+TEST(IOTest, UnknownAndDeprecatedCliArgumentsAreIgnored) {
     auto argv = compactBaseArgs();
-    argv.push_back("-prior");
-    argv.push_back("prior.mhd");
+    argv.insert(argv.end(), {"-prior", "prior.mhd", "-subsets", "1",
+                             "spect_psf_sigma=0.637"});
 
     spect::cli::ReconArgs args;
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(parseReconArgsForTest(argv, args));
 }
 
 TEST(IOTest, CompactSymmetricParserReadsDefaultChunkCSRDirFromConfig) {

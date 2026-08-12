@@ -138,7 +138,8 @@ ParseOutcome parseWithExtra(std::vector<std::string> extra) {
   return out;
 }
 
-ParseOutcome parseWithIni(const std::string &iniBody) {
+ParseOutcome parseWithIni(const std::string &iniBody,
+                          std::vector<std::string> extra = {}) {
   const auto path = std::filesystem::temp_directory_path() /
                     "spect_sieve_stage_test.ini";
   {
@@ -150,6 +151,7 @@ ParseOutcome parseWithIni(const std::string &iniBody) {
       "SPECT_recon", "-config", path.string(), "-df", "proj.bin",
       "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
       "-dim", "108,108,80", "-vox", "0.3", "-ang", "360"};
+  storage.insert(storage.end(), extra.begin(), extra.end());
   ParseOutcome out;
   std::vector<char *> argv;
   argv.reserve(storage.size());
@@ -221,6 +223,50 @@ TEST(SieveParserTest, ButterCliImpliesInReconStage) {
   EXPECT_EQ(out.args.butterApplyStage, "in_recon");
   EXPECT_FLOAT_EQ(out.args.butterCutoff, 0.4f);
   EXPECT_EQ(out.args.butterOrder, 3);
+}
+
+TEST(SieveParserTest, ConfigCanProtectReconPolicyFromCli) {
+  const auto out = parseWithIni(
+      "[Compatibility]\nrecon_sections_override_cli = true\n"
+      "[InputOutput]\noutput_filters_overwrite_primary = true\n"
+      "[Regularization]\ntype = None\nbeta = 0\n"
+      "[PSF]\nmode = sieve\nkernel = castor\nfwhm = 1.3\n"
+      "min_sigmas = 3\n"
+      "[Filtering]\nbutterworth_cutoff = 0\n"
+      "butterworth_order = 2\nbutter_apply_stage = output\n"
+      "smooth_apply_stage = output\noutput_smooth_fwhm_mm = 0.3\n"
+      "output_smooth_sigmas = 3\noutput_butter_cutoff_cpcm = 5\n"
+      "output_butter_order = 8\noutput_nonnegative_clamp = true\n",
+      {"-psf", "1.5,4", "-psfMode", "operator", "-butter", "0.35",
+       "-reg", "TVIsotropic,0.01", "-it", "20:5"});
+
+  ASSERT_TRUE(out.ok);
+  EXPECT_TRUE(out.args.reconSectionsOverrideCli);
+  EXPECT_FALSE(out.args.useReg);
+  EXPECT_EQ(out.args.psf.mode, PSFMode::Sieve);
+  EXPECT_DOUBLE_EQ(out.args.psf.fwhm_mm, 1.3);
+  EXPECT_DOUBLE_EQ(out.args.psf.min_sigmas, 3.0);
+  EXPECT_FALSE(out.args.useButter);
+  EXPECT_FLOAT_EQ(out.args.butterCutoff, 0.0f);
+  EXPECT_EQ(out.args.butterApplyStage, "output");
+  EXPECT_TRUE(out.args.outputFiltersOverwritePrimary);
+  EXPECT_EQ(out.args.numIters, 20);
+  EXPECT_EQ(out.args.saveInterval, 5);
+}
+
+TEST(SieveParserTest, ConfigProtectionDefaultsOff) {
+  const auto out = parseWithIni(
+      "[PSF]\nmode = sieve\nfwhm = 1.3\nmin_sigmas = 3\n"
+      "[Filtering]\nbutterworth_cutoff = 0\nbutter_apply_stage = output\n",
+      {"-psf", "1.5,4", "-psfMode", "operator", "-butter", "0.35"});
+
+  ASSERT_TRUE(out.ok);
+  EXPECT_FALSE(out.args.reconSectionsOverrideCli);
+  EXPECT_EQ(out.args.psf.mode, PSFMode::Operator);
+  EXPECT_DOUBLE_EQ(out.args.psf.fwhm_mm, 1.5);
+  EXPECT_DOUBLE_EQ(out.args.psf.min_sigmas, 4.0);
+  EXPECT_TRUE(out.args.useButter);
+  EXPECT_EQ(out.args.butterApplyStage, "in_recon");
 }
 
 TEST(SieveParserTest, IniCanEnableInReconFilters) {

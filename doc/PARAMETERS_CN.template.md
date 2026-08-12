@@ -15,6 +15,9 @@ cd D:\path\to\<package_root>
 2. `.\bin\config\algo_mlem.conf`
 3. `.\bin\config\algo_bsrem.conf`
 
+发布配置默认启用 `[Compatibility] recon_sections_override_cli=true`：
+`spect_config.ini` 对 Regularization、PSF、Filtering 和 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级；算法、迭代、几何、输入输出等其他正式 CLI 参数仍按 CLI 优先。未知或已退役 CLI 参数只打印 `[NOTE]` 并忽略，已识别参数的非法取值仍会失败。
+
 只有在明确要覆盖发布包默认配置时才传：
 
 ```powershell

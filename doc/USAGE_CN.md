@@ -41,7 +41,7 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 4. 当前工作目录的 `config/spect_config.ini`
 5. 当前工作目录的 `spect_config.ini`
 
-算法默认参数会从同级 `config/algo_<name>.conf`（`algo_mlem.conf` / `algo_bsrem.conf`）加载，也可用 `-algoConf <path>` 指定。CLI 参数覆盖配置文件。
+算法默认参数会从同级 `config/algo_<name>.conf`（`algo_mlem.conf` / `algo_bsrem.conf`）加载，也可用 `-algoConf <path>` 指定。CLI 默认覆盖配置文件；当 `[Compatibility] recon_sections_override_cli=true` 时，`spect_config.ini` 仅对 Regularization、PSF、Filtering 与 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级，其他参数仍由 CLI 覆盖。未知或已退役的 CLI 参数只打印 `[NOTE]` 并忽略；已识别参数的非法取值仍会失败。
 
 compact chunk 矩阵默认识别优先级：
 
@@ -262,23 +262,22 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 ---
 
-## 已删除参数的拒绝行为
+## 已删除参数的兼容行为
 
-以下入口已退场。带专用报错的参数在 parser 阶段给出明确迁移提示；其余按 `Unknown argument: <name>` 拒绝（退出码 1）。
+以下入口已退场，parser 只打印 `[NOTE] Ignoring unsupported CLI argument` 并跳过参数及其单个值，不再中止重建。仍应从上位机删除这些字段；已识别的正式参数若取值非法，仍以退出码 1 失败。
 
 | 已删参数 | 当前行为 |
 |---|---|
-| `-indexMat` / `-weightMat` / `-loadCSR` / `-mapCSR` / `-saveCSR` / `-compactMeta` / `-matrixLayout` | `Unknown argument`（矩阵唯一入口 `-chunkCSRDir`） |
-| `-subsets` | 专用报错：compact 布局恒单 subset |
-| `-alg` | 专用报错：改用 `-opti mlem\|bsrem` |
+| `-indexMat` / `-weightMat` / `-loadCSR` / `-mapCSR` / `-saveCSR` / `-compactMeta` / `-matrixLayout` | `[NOTE]` 后忽略（矩阵唯一入口 `-chunkCSRDir`） |
+| `-subsets` | `[NOTE]` 后忽略；compact 布局恒单 subset |
+| `-alg` | `[NOTE]` 后忽略；正式入口为 `-opti mlem\|bsrem` |
 | `-opti admm` | `Unknown optimisation algorithm` |
-| `-sparseBackend` / `-spBackend` | 专用报错：稀疏后端固定 CUDA |
-| `-conv` | 专用报错：改用 image-domain `-psf` |
-| `-psfProj` | 专用报错：公开 PSF 仅 Operator |
-| `-butterBackend` / `-bwBackend` | 专用报错：Butterworth 固定 cuFFT |
-| `-prior` / `-regPower` / `-regSigma` / `-regKernel` 等 anatomical 细调 | 专用报错：公开正则仅 TV/RDP |
-| `-joe` | 专用报错：Joseph-like 平滑退场，改用 `-psf` / `-butter` / `-smooth` |
-| `-Aprune` / `-Astream` / `-ApruneMask` | 专用报错：compact chunk CSRB 在生成阶段完成剪枝，读取恒为逐 chunk 流式/mmap |
+| `-sparseBackend` / `-spBackend` | `[NOTE]` 后忽略；稀疏后端固定 CUDA |
+| `-conv` / `-psfProj` | `[NOTE]` 后忽略；公开入口为 image-domain `-psf` |
+| `-butterBackend` / `-bwBackend` | `[NOTE]` 后忽略；Butterworth 固定 cuFFT |
+| `-prior` / `-regPower` / `-regSigma` / `-regKernel` 等 anatomical 细调 | `[NOTE]` 后忽略；公开正则仅 TV/RDP |
+| `-joe` | `[NOTE]` 后忽略；Joseph-like 平滑退场 |
+| `-Aprune` / `-Astream` / `-ApruneMask` | `[NOTE]` 后忽略；compact chunk CSRB 在生成阶段完成剪枝 |
 
 INI 死键（`[SystemMatrix] matrix_layout` / `map_csr` / `prune_epsilon` / `stream_build` / `prune_mask`、`[Reconstruction] subsets` / `joseph_passes`、`[MultiBed] overlap_in_recon` 及 ADMM 相关）已从 `config/spect_config.ini` 移除；未知 INI 键被静默忽略。
 
