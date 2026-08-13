@@ -1,0 +1,52 @@
+{
+  "grid": "spectgrid after frozen+refine",
+  "midline_spine_integer_lag_vox": 0,
+  "midline_spine_subvoxel_lag_vox": 0.281,
+  "midline_spine_subvoxel_lag_mm": 0.084,
+  "wholebody_occupancy_integer_lag_vox": -1,
+  "wholebody_occupancy_subvoxel_lag_mm": -0.314,
+  "spine_thirds": {
+    "head_third": {
+      "z_band_vox": [
+        66,
+        144
+      ],
+      "lag_vox": -4,
+      "lag_subvoxel": -4.246,
+      "lag_mm": -1.274
+    },
+    "mid_spine_third": {
+      "z_band_vox": [
+        145,
+        268
+      ],
+      "lag_vox": 0,
+      "lag_subvoxel": -0.259,
+      "lag_mm": -0.078
+    },
+    "hindlimb_third": {
+      "z_band_vox": [
+        269,
+        334
+      ],
+      "lag_vox": 0,
+      "lag_subvoxel": 0.133,
+      "lag_mm": 0.04
+    }
+  },
+  "sagittal_mip_envelope": {
+    "caudal_edge_d_mm": 0.6,
+    "cranial_edge_d_mm": -2.1,
+    "note": "positive = SPECT edge is at higher z-index than CT edge",
+    "caudal_edge_d_vox": 2,
+    "cranial_edge_d_vox": -7,
+    "bone_span": [
+      67,
+      344
+    ],
+    "hot_span": [
+      69,
+      337
+    ]
+  }
+}
