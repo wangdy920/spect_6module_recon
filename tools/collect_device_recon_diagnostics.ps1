@@ -250,7 +250,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $MatrixDir "metadata.bin") -PathType
 
 $configuredDenomPath = Get-IniValue $resolvedConfig "SystemMatrix" "compact_denom_cache_path"
 $configuredDenomDir = Get-IniValue $resolvedConfig "SystemMatrix" "compact_denom_cache_dir"
-if (-not [string]::IsNullOrWhiteSpace($DenomCachePath)) {
+$denomCacheOverride = $PSBoundParameters.ContainsKey("DenomCachePath") -and
+                      -not [string]::IsNullOrWhiteSpace($DenomCachePath)
+if ($denomCacheOverride) {
     $DenomCachePath = Resolve-FromBase $DenomCachePath (Get-Location).Path
 } elseif (-not [string]::IsNullOrWhiteSpace($configuredDenomPath)) {
     $DenomCachePath = Resolve-FromBase $configuredDenomPath $exeDir
@@ -306,6 +308,7 @@ try {
     Add-Report "output_prefix_base=$resolvedOutputPrefix"
     Add-Report "report=$resolvedReport"
     Add-Report "denom_dir=$denomDir"
+    Add-Report "denom_cli_override=$denomCacheOverride"
 
     Add-Section "EXECUTABLE"
     Add-Report "path=$resolvedExe"
@@ -384,7 +387,7 @@ try {
             "-cudaDevice", $CudaDevice.ToString(),
             "-vb", "1"
         )
-        if (-not [string]::IsNullOrWhiteSpace($DenomCachePath)) {
+        if ($denomCacheOverride) {
             $reconArgs += @("-compactDenomCache", $DenomCachePath)
         }
         $displayCommand = (Quote-WindowsArgument $resolvedExe) + " " +

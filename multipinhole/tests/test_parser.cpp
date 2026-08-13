@@ -350,6 +350,39 @@ TEST(IOTest, DenomCacheConfigIsExeRelativeAndCliPathWins) {
 
     std::filesystem::remove_all(root);
 }
+
+TEST(IOTest, CliIterationsAndOutputStillOverrideProtectedConfig) {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "spect_cli_iteration_output_priority_test";
+    std::filesystem::create_directories(root);
+    const auto config = root / "spect_config.ini";
+    const auto output = root / "cli_output" / "run";
+    {
+        std::ofstream out(config);
+        ASSERT_TRUE(out);
+        out << "[Compatibility]\n";
+        out << "recon_sections_override_cli = true\n";
+        out << "[Reconstruction]\n";
+        out << "iterations = 50:10\n";
+        out << "[InputOutput]\n";
+        out << "output_dir = config_output\n";
+        out << "output_name = config_recon\n";
+    }
+
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        (root / "SPECT_recon.exe").string(), "-config", config.string(),
+        "-df", "proj.bin", "-chunkCSRDir", "chunks", "-opti", "mlem",
+        "-it", "20:5", "-fout", output.string()};
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.numIters, 20);
+    EXPECT_EQ(args.saveInterval, 5);
+    EXPECT_EQ(std::filesystem::path(args.outputDir), output.parent_path());
+    EXPECT_EQ(args.outputName, "run");
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(IOTest, ParserAcceptsCtacFactorCacheDir) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();

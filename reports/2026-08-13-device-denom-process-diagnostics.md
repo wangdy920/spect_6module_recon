@@ -35,6 +35,7 @@
 - 预占 GPU 0 mutex 后启动 exe：第二实例退出码 1，日志明确写出 `GPU 0 is already owned...`，且文件名带 `_pid58504.log`。
 - 增强后的 collector 真实 cache-hit 冒烟生成单个 88,151-byte UTF-8 报告，`all_cache_hits=True`、`all_resident_prefix_nonzero=True`；同时采到 NVMe 总线、free RAM、进程工作集峰值 `19,758,362,624` bytes 和累计读取 `19,521,592,662` bytes，可直接判断设备是否在整矩阵读入阶段发生内存/磁盘退化。
 - 重复 collector 真实 cache-hit 冒烟串行执行两次，`full_command_s=34.344/28.156`、中位数 `31.250 s`，两次 resident prefix 均为 1；本机同时存在其他 GPU 任务，因此这些秒数只验证采集合同。两次主体积 relL2 `3.3679e-8`、NCC `1.0000000000000033`，通过 `1e-5` 门。
+- 当前脚本另以无 GPU 的三次合同冒烟验证 `-Repeats 3`：实际启动 3 个串行 PID，命令分别使用 `_run1/_run2/_run3`，均携带 CLI `-it 20:5` 且均未携带 `-compactDenomCache`；注入 `3/1/2 s` 后汇总 `median_full_command_s=2.000`。报告 SHA-256 为 `5B60774CC8CBBC5A0FBA7B9F9A372F673ABC286F97D636A9D5E607ED10FF3FFB`；这是控制流证据，不是性能数据。误拼 `-Repeates` 由 PowerShell 参数绑定明确拒绝。
 - v4 便携清单以源码 config/真实 matrix 路径建立显式 cache，再以 staging config/不同 junction 路径复用：第二次明确 `denom_cache=hit`；主体积 `relative_l2=3.377098333824908e-08`、`NCC=0.9999999999999994`，且 manifest 绝对路径 identity 行数为 0。
 
 ## RTX 5060 首轮回传（诊断样本）
@@ -75,13 +76,12 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\tools\collect_device_recon_diagnostics.ps1 `
   -InputPath "D:\data\predata\20260812_nude_MDP_spect\20260812_170822\SPECT\Bed1.bin;D:\data\predata\20260812_nude_MDP_spect\20260812_170822\SPECT\Bed2.bin;D:\data\predata\20260812_nude_MDP_spect\20260812_170822\SPECT\Bed3.bin;D:\data\predata\20260812_nude_MDP_spect\20260812_170822\SPECT\Bed4.bin;D:\data\predata\20260812_nude_MDP_spect\20260812_170822\SPECT\Bed5.bin" `
   -MultiBedList -MatrixDir .\matrix\260601 `
-  -DenomCachePath .\cache\compact_denom\sampling_260601_v4.mhd `
   -OutputPrefix "D:\data\recondata\20260812_nude_MDP_spect\20260812_170822\SPECT\device_test\recon" `
   -Iterations 20:20 -Repeats 3 -SampleSeconds 5 `
   -ReportPath "D:\data\recondata\20260812_nude_MDP_spect\20260812_170822\SPECT\device_test\spect_device_diagnostics_v2.txt"
 ```
 
-更换为 220 矩阵时，仅把 `-MatrixDir` 改成 `F:\matrix_PSC_PIN26x28x25_SCALE2_141keV_120x120x220`，并换一个独立的 `-DenomCachePath` 文件名。只回传 schema 2 报告。末尾应为 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`；磁盘采样应无持续拷贝负载，再采用 `median_full_command_s`。
+诊断脚本默认使用 INI 的 `compact_denom_cache_path` / `compact_denom_cache_dir`，不会额外传 `-compactDenomCache`；只有调用者明确给出 `-DenomCachePath` 时才形成 CLI 覆盖。`-Iterations 20:20` 与逐次 `_runN` 输出前缀仍以 CLI `-it` / `-fout` 覆盖 INI 的迭代、保存间隔和输出名。更换为 220 矩阵时只把 `-MatrixDir` 改成 `F:\matrix_PSC_PIN26x28x25_SCALE2_141keV_120x120x220`；默认 auto manifest hash 会隔离不同矩阵。只回传 schema 2 报告。末尾应为 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`；磁盘采样应无持续拷贝负载，再采用 `median_full_command_s`。
 
 ## 复现命令
 
@@ -113,7 +113,7 @@ cmake --install build\Release --config Release --prefix staging\SPECT_recon_devi
 ## 验证清单
 
 - [x] fresh Release 构建与 staging 安装成功；仅保留既有 OpenMP/C4244/LNK4098 warning。
-- [x] 顶层 CTest 旧索引已修复；246 个测试：245 通过，1 个外部原型目录 parity 测试按既有条件跳过。
+- [x] 顶层 CTest 旧索引已修复；247 个测试：246 通过，1 个外部原型目录 parity 测试按既有条件跳过。
 - [x] 新增低 host-cache resident warmup 回归通过。
 - [x] Windows 同 GPU 重复实例实测被拒绝。
 - [x] 自动 denom miss→save→hit 真实矩阵链路通过，输出数值通过 `1e-5` 门。
@@ -123,6 +123,7 @@ cmake --install build\Release --config Release --prefix staging\SPECT_recon_devi
 - [x] clean Release 每次从当前 Git HEAD 重建并把 collector、CHANGELOG 与 exe 一并安装到 `staging/SPECT_recon_rc_dev`；旧的 dirty 诊断 bundle 不再是交付入口。
 - [x] RTX 5060 首轮单次诊断完成：一个 PID、resident prefix 2/6、denom miss、20 次 core `710.891 s`；因旧 collector 和同期数据拷贝，不作性能签收。
 - [x] resource-aware host cache、部分缓存重读提示、collector schema 2 与磁盘实时采样已实现并通过构建/单元检查。
+- [x] collector 三次合同冒烟确认 3 个串行启动、独立输出、正确中位数、INI cache 默认路径，以及 CLI `20:5` 迭代/保存优先级。
 - [ ] RTX 5060 上停止数据拷贝后的三次 cache-hit 中位数尚未执行。
 
-本轮首个 clean 构建检查点为 `20260813+b0226b8`，EXE SHA-256 `AC033850EA904E797379EC81C5E9A2C93001939FF9E7947338610E9F842B8244`；报告落盘后的最终 commit/EXE identity 见 continuity 最新 outcome。交付路径：`staging/SPECT_recon_rc_dev/`。开发 staging 不内置大型 matrix；设备部署继续保留固定 `bin/matrix/`，或使用 `package_rc.ps1 -IncludeMatrix` 生成独立副本。
+交付路径：`staging/SPECT_recon_rc_dev/`；最终 commit/EXE identity 由该目录内 `bin/SPECT_recon.exe --version` 和 continuity 最新 outcome 记录。开发 staging 不内置大型 matrix；设备部署继续保留固定 `bin/matrix/`，或使用 `package_rc.ps1 -IncludeMatrix` 生成独立副本。

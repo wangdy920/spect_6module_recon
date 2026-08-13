@@ -8,6 +8,9 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Device repeat diagnostics now leave denominator-cache selection to the INI
+  unless `-DenomCachePath` is explicitly requested; CLI iteration/save and
+  per-run output overrides remain authoritative.
 - Replaced the fixed 25 GiB compact host cache with a matrix-size and
   available-RAM-aware default. A 64 GB host can retain the deployed 25.81 GiB
   sampling matrix, while constrained hosts keep explicit safety headroom;

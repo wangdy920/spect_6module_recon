@@ -47,7 +47,7 @@ powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagno
   -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
 ```
 
-三个重建按顺序执行，不会并发占用 GPU；每次输出加 `_run1`…`_run3`，原生重建日志仍留在目标输出目录。只需回传一个 `spect_device_diagnostics.txt`，其末尾 `REPEAT SUMMARY` 给出 `median_full_command_s`、逐次 `denom_cache`、resident prefix，以及 `all_cache_hits`；前文同时记录 free RAM、SPECT 进程工作集/累计读写量，以及 matrix/denom/output 所在磁盘的总线和可用空间。首次运行若包含 cache miss，待其建立 cache 后原样再执行一次，以第二份报告作为稳定 cache-hit 性能证据。必要时显式传 `-MatrixDir` 或 `-DenomCachePath`；路径按调用终端的 CWD 解析。
+参数拼写是 `-Repeats 3`（不是 `-Repeates`）。三个重建按顺序执行，不会并发占用 GPU；每次输出加 `_run1`…`_run3`，原生重建日志仍留在目标输出目录。只需回传一个 `spect_device_diagnostics.txt`，其末尾 `REPEAT SUMMARY` 给出 `median_full_command_s`、逐次 `denom_cache`、resident prefix，以及 `all_cache_hits`；前文同时记录 free RAM、SPECT 进程工作集/累计读写量，以及 matrix/denom/output 所在磁盘的总线和可用空间。默认直接使用 `spect_config.ini` 的 `compact_denom_cache_path` / `compact_denom_cache_dir`，不再重复传 `-compactDenomCache`；仅隔离实验才显式使用 `-DenomCachePath`。`-Iterations N:save` 和 `-OutputPrefix` 会转换为 CLI `-it` / `-fout`，其迭代数、保存间隔和输出路径继续覆盖 INI。首次运行若包含 cache miss，待其建立 cache 后原样再执行一次，以第二份报告作为稳定 cache-hit 性能证据。必要时显式传 `-MatrixDir`；CLI 路径按调用终端的 CWD 解析。
 
 ### 设备空闲性能搜索
 
