@@ -12,6 +12,11 @@ experiment commits are intentionally omitted.
   the bed already shown before a joint stays dominant at the blend entry.
   The previous polarity invert matched a packing mismatch and produced paired
   seam jumps; it is no longer the production stitch.
+- Gain-fit overlap windows still follow reversed reconstruction storage.
+  Optional `-seamXyAlign` / `[MultiBed] seam_xy_align` remains default off.
+
+## 20260812+1a26fc5
+
 - Added opt-in global-INI authority for Regularization, PSF, Filtering and
   Postprocess fields; the shipped config enables it to protect the validated
   prototype policy from upstream CLI overrides.
