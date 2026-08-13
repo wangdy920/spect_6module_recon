@@ -414,6 +414,111 @@ double center66PairLogRatio(const std::vector<double> &source, int nx, int ny,
   return center;
 }
 
+struct SeamXyShift {
+  int dx = 0;
+  int dy = 0;
+  double ncc = 0.0;
+  int samples = 0;
+};
+
+double overlapPlaneNcc(const std::vector<double> &low,
+                       const std::vector<double> &high, int nx, int ny,
+                       int dx, int dy, double radiusSquared,
+                       double voxelSizeXmm, double voxelSizeYmm,
+                       int &samples) {
+  double sumL = 0.0;
+  double sumH = 0.0;
+  double sumLL = 0.0;
+  double sumHH = 0.0;
+  double sumLH = 0.0;
+  samples = 0;
+  for (int y = 0; y < ny; ++y) {
+    const double yy =
+        (static_cast<double>(y) - 0.5 * static_cast<double>(ny - 1)) *
+        voxelSizeYmm;
+    const int sy = y + dy;
+    if (sy < 0 || sy >= ny)
+      continue;
+    for (int x = 0; x < nx; ++x) {
+      const double xx =
+          (static_cast<double>(x) - 0.5 * static_cast<double>(nx - 1)) *
+          voxelSizeXmm;
+      if (xx * xx + yy * yy > radiusSquared)
+        continue;
+      const int sx = x + dx;
+      if (sx < 0 || sx >= nx)
+        continue;
+      const double lv = low[static_cast<size_t>(y) * nx + x];
+      const double hv = high[static_cast<size_t>(sy) * nx + sx];
+      if (!(lv > 0.0 && hv > 0.0) || !std::isfinite(lv) || !std::isfinite(hv))
+        continue;
+      sumL += lv;
+      sumH += hv;
+      sumLL += lv * lv;
+      sumHH += hv * hv;
+      sumLH += lv * hv;
+      ++samples;
+    }
+  }
+  if (samples < 32)
+    return -1.0;
+  const double n = static_cast<double>(samples);
+  const double cov = sumLH - sumL * sumH / n;
+  const double varL = sumLL - sumL * sumL / n;
+  const double varH = sumHH - sumH * sumH / n;
+  if (varL <= 0.0 || varH <= 0.0)
+    return -1.0;
+  return cov / std::sqrt(varL * varH);
+}
+
+SeamXyShift estimateOverlapXyShift(const std::vector<double> &source, int nx,
+                                   int ny, int lowStart, int highStart,
+                                   int blendOverlap, double voxelSizeXmm,
+                                   double voxelSizeYmm) {
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  std::vector<double> low(plane, 0.0);
+  std::vector<double> high(plane, 0.0);
+  for (int z = 0; z < blendOverlap; ++z) {
+    const size_t lowOff = static_cast<size_t>(lowStart + z) * plane;
+    const size_t highOff = static_cast<size_t>(highStart + z) * plane;
+    for (size_t xy = 0; xy < plane; ++xy) {
+      low[xy] += source[lowOff + xy];
+      high[xy] += source[highOff + xy];
+    }
+  }
+  const double inv = 1.0 / static_cast<double>(std::max(blendOverlap, 1));
+  for (size_t xy = 0; xy < plane; ++xy) {
+    low[xy] *= inv;
+    high[xy] *= inv;
+  }
+  const double radius =
+      0.5 * spect::core::sixmodule::kMultiBedGainRoiDiameterMm;
+  const double radiusSquared = radius * radius;
+  constexpr int kSearch = 8;
+  constexpr double kMinNcc = 0.25;
+  SeamXyShift best;
+  best.ncc = -1.0;
+  for (int dy = -kSearch; dy <= kSearch; ++dy) {
+    for (int dx = -kSearch; dx <= kSearch; ++dx) {
+      int samples = 0;
+      const double ncc = overlapPlaneNcc(
+          low, high, nx, ny, dx, dy, radiusSquared, voxelSizeXmm,
+          voxelSizeYmm, samples);
+      if (ncc > best.ncc) {
+        best.dx = dx;
+        best.dy = dy;
+        best.ncc = ncc;
+        best.samples = samples;
+      }
+    }
+  }
+  if (best.ncc < kMinNcc) {
+    best.dx = 0;
+    best.dy = 0;
+  }
+  return best;
+}
+
 std::vector<double> center66CosineBlendOutputOverlap(
     const std::vector<double> &source, int nx, int ny, int nz,
     const OutputTransform &transform, double voxelSizeXmm,
@@ -424,30 +529,82 @@ std::vector<double> center66CosineBlendOutputOverlap(
   const int cropStart = (transform.baseNz - geom.cropLayers) / 2;
   const std::vector<double> gains = fitCenter66BedGains(
       source, nx, ny, transform, cropStart, voxelSizeXmm, voxelSizeYmm);
+  const size_t bedCount = starts.size();
+  std::vector<int> sampleDx(bedCount, 0);
+  std::vector<int> sampleDy(bedCount, 0);
+  if (transform.seamXyAlign && bedCount > 1) {
+    for (size_t highBed = 0; highBed + 1 < bedCount; ++highBed) {
+      const size_t lowBed = highBed + 1;
+      const int lowStart = transform.bedZStarts[lowBed] + cropStart +
+          (transform.reverseLocalZInReconStorage ? 0 : geom.stepLayers);
+      const int highStart = transform.bedZStarts[highBed] + cropStart +
+          (transform.reverseLocalZInReconStorage ? geom.stepLayers : 0);
+      const SeamXyShift shift = estimateOverlapXyShift(
+          source, nx, ny, lowStart, highStart, geom.blendOverlap,
+          voxelSizeXmm, voxelSizeYmm);
+      const bool apply = shift.ncc >= 0.25;
+      // high[y+dy, x+dx] matches low[y,x]; sample the higher-index bed
+      // (caudal, lowBed) with the inverse so both land in Bed1's frame.
+      if (apply) {
+        sampleDx[lowBed] = sampleDx[highBed] - shift.dx;
+        sampleDy[lowBed] = sampleDy[highBed] - shift.dy;
+      } else {
+        sampleDx[lowBed] = sampleDx[highBed];
+        sampleDy[lowBed] = sampleDy[highBed];
+      }
+      logInfo("center66 seam XY Bed" + std::to_string(lowBed + 1) + "/Bed" +
+              std::to_string(highBed + 1) + ": dx=" +
+              std::to_string(shift.dx) + ", dy=" + std::to_string(shift.dy) +
+              ", ncc=" + std::to_string(shift.ncc) + ", samples=" +
+              std::to_string(shift.samples) +
+              (apply ? "" : " (below gate, no shift)"));
+    }
+  }
   const int outputNz = starts.back() + geom.cropLayers;
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
   std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
   std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
   for (size_t bed = 0; bed < starts.size(); ++bed) {
+    const int dx = sampleDx[bed];
+    const int dy = sampleDy[bed];
     for (int localZ = 0; localZ < geom.cropLayers; ++localZ) {
       double weight = 1.0;
+      // Fade along output Z, not storage Z. reverseLocalZInReconStorage
+      // only selects which overlap voxels are compared for gain; inverting
+      // these weights produced a paired bed-switch at each 10-layer joint.
       if (bed > 0 && localZ < geom.blendOverlap) {
         const double fade = center66CosineFadeIn(
             localZ, geom.blendOverlap);
-        weight *= transform.reverseLocalZInReconStorage ? 1.0 - fade : fade;
+        weight *= fade;
       }
       if (bed + 1 < starts.size() && localZ >= geom.stepLayers) {
         const double fade = center66CosineFadeIn(
             localZ - geom.stepLayers, geom.blendOverlap);
-        weight *= transform.reverseLocalZInReconStorage ? fade : 1.0 - fade;
+        weight *= 1.0 - fade;
       }
       const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
       const int dstZ = starts[bed] + localZ;
       const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
       const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
-      for (size_t xy = 0; xy < plane; ++xy)
-        out[dstOffset + xy] +=
-            weight * gains[bed] * source[srcOffset + xy];
+      const double scaled = weight * gains[bed];
+      if (dx == 0 && dy == 0) {
+        for (size_t xy = 0; xy < plane; ++xy)
+          out[dstOffset + xy] += scaled * source[srcOffset + xy];
+      } else {
+        for (int y = 0; y < ny; ++y) {
+          const int sy = y + dy;
+          if (sy < 0 || sy >= ny)
+            continue;
+          for (int x = 0; x < nx; ++x) {
+            const int sx = x + dx;
+            if (sx < 0 || sx >= nx)
+              continue;
+            out[dstOffset + static_cast<size_t>(y) * nx + x] +=
+                scaled *
+                source[srcOffset + static_cast<size_t>(sy) * nx + sx];
+          }
+        }
+      }
       weights[static_cast<size_t>(dstZ)] += weight;
     }
   }

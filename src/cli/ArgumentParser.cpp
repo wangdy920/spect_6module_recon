@@ -822,6 +822,9 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.xOutFlip);
     }, {"-xoutflip"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(i, argc, argv, a.seamXyAlign);
+    }, {"-seamXyAlign"});
 
     // --- Physics & Correction ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1205,6 +1208,7 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             a.bedStepMm = iniStepMm;
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
+        a.seamXyAlign = cfg.getBool("MultiBed", "seam_xy_align", a.seamXyAlign);
     }
 }
 
@@ -1939,7 +1943,9 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end slices zeroed\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
-    std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n\n";
+    std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n";
+    std::cout << "seam_xy_align = " << (a.seamXyAlign ? 1 : 0)
+              << "  # overlap NCC integer XY shift; 0 keeps unshifted stitch\n\n";
 
     std::cout << "[InputOutput]\n";
     std::cout << "merge_time_segments = "
@@ -2043,6 +2049,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (default 1; inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
+    std::cout << "  -seamXyAlign <0|1>        Integer XY align from overlap NCC before cosine blend (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
     std::cout << "  -ctacModel <m>            line-integral (default; angle-dependent parallel-ray Int mu ds)\n";
     std::cout << "  -ctacRotSign <1|-1>       Rotation sign matching sysmat generator --voxel-rotation-sign (default 1)\n";

@@ -49,6 +49,10 @@ struct OutputTransform {
   bool flipZWholeOutput = false;
   bool flipXWholeOutput = false;
   bool reverseLocalZInReconStorage = false;
+  /// Opt-in: integer XY translation of each bed so the 10-layer physical
+  /// overlap matches its neighbour (NCC search). Default off. Does not
+  /// change output Nz.
+  bool seamXyAlign = false;
   int centerCropNx = 0;
   int centerCropNy = 0;
   int centerCropNz = 0;

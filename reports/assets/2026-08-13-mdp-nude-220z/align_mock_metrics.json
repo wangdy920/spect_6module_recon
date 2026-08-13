@@ -1,0 +1,80 @@
+{
+  "joints": [
+    {
+      "z": 56,
+      "ridge_dx_vox": -15.063496049775914,
+      "ridge_dy_vox": -12.913663087399925,
+      "xcorr_dx_vox": 8.0,
+      "xcorr_dy_vox": -15.0,
+      "applied_dx_vox": -12.0,
+      "applied_dy_vox": -12.0,
+      "patch_center_xy": [
+        65,
+        45
+      ]
+    },
+    {
+      "z": 112,
+      "ridge_dx_vox": -9.179132349851102,
+      "ridge_dy_vox": 14.033896426387258,
+      "xcorr_dx_vox": 2.0,
+      "xcorr_dy_vox": -5.0,
+      "applied_dx_vox": -9.179132349851102,
+      "applied_dy_vox": 12.0,
+      "patch_center_xy": [
+        57,
+        68
+      ]
+    },
+    {
+      "z": 168,
+      "ridge_dx_vox": -1.1090207502888632,
+      "ridge_dy_vox": -27.6764275660433,
+      "xcorr_dx_vox": 4.0,
+      "xcorr_dy_vox": 13.0,
+      "applied_dx_vox": -1.1090207502888632,
+      "applied_dy_vox": -12.0,
+      "patch_center_xy": [
+        47,
+        74
+      ]
+    },
+    {
+      "z": 224,
+      "ridge_dx_vox": 0.4968682114303604,
+      "ridge_dy_vox": -8.022638372247698,
+      "xcorr_dx_vox": -10.0,
+      "xcorr_dy_vox": 9.0,
+      "applied_dx_vox": 0.4968682114303604,
+      "applied_dy_vox": -8.022638372247698,
+      "patch_center_xy": [
+        50,
+        59
+      ]
+    }
+  ],
+  "cumulative_dy_dx_per_bed": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      12.0,
+      12.0
+    ],
+    [
+      0.0,
+      21.179132349851102
+    ],
+    [
+      12.0,
+      22.288153100139965
+    ],
+    [
+      20.022638372247698,
+      21.791284888709605
+    ]
+  ],
+  "aligned_mhd": "D:\\Projects\\SPECT-recon\\recon_out\\20260813_mdp_nude_220z_xflip1\\recon_it20_xyalign_mock.mhd",
+  "note": "Mock on already-stitched volume; production must estimate from pre-stitch overlap."
+}

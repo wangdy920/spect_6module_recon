@@ -8,6 +8,10 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Multi-bed cosine overlap now fades along output Z under reversed storage:
+  the bed already shown before a joint stays dominant at the blend entry.
+  The previous polarity invert matched a packing mismatch and produced paired
+  seam jumps; it is no longer the production stitch.
 - Added opt-in global-INI authority for Regularization, PSF, Filtering and
   Postprocess fields; the shipped config enables it to protect the validated
   prototype policy from upstream CLI overrides.

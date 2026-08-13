@@ -1,0 +1,160 @@
+[
+  {
+    "name": "baseline",
+    "bladder": {
+      "z": 74.7211263199716,
+      "y": 32.945802311507954,
+      "x": 48.553793926888055,
+      "zmin": 62,
+      "zmax": 87,
+      "peak": 300.34047212762636,
+      "nvox": 6727
+    },
+    "nearest_joint": 56,
+    "joints": [
+      {
+        "z_joint": 56,
+        "bladder_window_xy": [
+          49,
+          33
+        ],
+        "dx_vox": 8,
+        "dy_vox": 1,
+        "ncc_unaligned": 0.39195321517227005,
+        "ncc_after_integer_shift": -0.09764663342287085,
+        "ncc_xcorr_peak": -0.07143763564706541,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 129.83128939566402,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 22.66560295201374
+      },
+      {
+        "z_joint": 112,
+        "bladder_window_xy": [
+          49,
+          33
+        ],
+        "dx_vox": -2,
+        "dy_vox": -2,
+        "ncc_unaligned": 0.7041704559174142,
+        "ncc_after_integer_shift": 0.5738304134574927,
+        "ncc_xcorr_peak": 0.5107588410532142,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 0.44325609696893464
+      },
+      {
+        "z_joint": 168,
+        "bladder_window_xy": [
+          49,
+          33
+        ],
+        "dx_vox": -3,
+        "dy_vox": 13,
+        "ncc_unaligned": 0.14372969976300737,
+        "ncc_after_integer_shift": -0.40058760141282174,
+        "ncc_xcorr_peak": -0.2300499682730552,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 2.8362420787347666
+      },
+      {
+        "z_joint": 224,
+        "bladder_window_xy": [
+          49,
+          33
+        ],
+        "dx_vox": 6,
+        "dy_vox": -17,
+        "ncc_unaligned": 0.2692181622574808,
+        "ncc_after_integer_shift": 0.09415744791583476,
+        "ncc_xcorr_peak": 0.08512406417539557,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 0.8878456937519967
+      }
+    ]
+  },
+  {
+    "name": "xyalign",
+    "bladder": {
+      "z": 74.72497466544272,
+      "y": 31.996773606003696,
+      "x": 48.55298992615292,
+      "zmin": 62,
+      "zmax": 87,
+      "peak": 300.34048401545846,
+      "nvox": 6723
+    },
+    "nearest_joint": 56,
+    "joints": [
+      {
+        "z_joint": 56,
+        "bladder_window_xy": [
+          49,
+          32
+        ],
+        "dx_vox": 8,
+        "dy_vox": 2,
+        "ncc_unaligned": 0.41948955627501483,
+        "ncc_after_integer_shift": -0.09961789176463876,
+        "ncc_xcorr_peak": -0.07889451807028244,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 129.83129505995436,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 23.429661850543656
+      },
+      {
+        "z_joint": 112,
+        "bladder_window_xy": [
+          49,
+          32
+        ],
+        "dx_vox": -4,
+        "dy_vox": -1,
+        "ncc_unaligned": 0.7086529410863804,
+        "ncc_after_integer_shift": 0.5893285337975107,
+        "ncc_xcorr_peak": 0.5717350494980704,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 0.45998535486297676
+      },
+      {
+        "z_joint": 168,
+        "bladder_window_xy": [
+          49,
+          32
+        ],
+        "dx_vox": -5,
+        "dy_vox": 12,
+        "ncc_unaligned": 0.1719728870726635,
+        "ncc_after_integer_shift": -0.4118176783889041,
+        "ncc_xcorr_peak": -0.19521198217626526,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 2.7752584021072915
+      },
+      {
+        "z_joint": 224,
+        "bladder_window_xy": [
+          49,
+          32
+        ],
+        "dx_vox": 6,
+        "dy_vox": -16,
+        "ncc_unaligned": 0.24508589627109312,
+        "ncc_after_integer_shift": -0.1146292698232924,
+        "ncc_xcorr_peak": -0.0005417718750299224,
+        "mean_hot_before": 0.0,
+        "mean_hot_after": 0.0,
+        "intensity_ratio_after_over_before": null,
+        "residual_after_shift": 0.8791300839834852
+      }
+    ]
+  }
+]

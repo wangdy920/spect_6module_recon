@@ -12,6 +12,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace spect {
@@ -196,7 +197,7 @@ TEST(VolumeOutputTest, CanonicalGainFitUsesReversedStorageOverlapEnds) {
   EXPECT_NEAR(gains[1], 0.5, 1e-12);
 }
 
-TEST(VolumeOutputTest, CanonicalStitchReversesBlendForReversedStorage) {
+TEST(VolumeOutputTest, CanonicalStitchKeepsOutputZContinuityUnderReversedStorage) {
   constexpr int baseNz = 70;
   constexpr int cropStart = 2;
   constexpr int stepLayers = 56;
@@ -216,7 +217,8 @@ TEST(VolumeOutputTest, CanonicalStitchReversesBlendForReversedStorage) {
       &transform, 0.3, 0.3);
   constexpr double pi = 3.14159265358979323846;
   const double lowWeight = std::sin(pi / 9.0) * std::sin(pi / 9.0);
-  EXPECT_NEAR(output[63], 2.0 * (1.0 - lowWeight) + 6.0 * lowWeight,
+  EXPECT_NEAR(output[40], 10.0, 1e-12);
+  EXPECT_NEAR(output[63], 2.0 * lowWeight + 6.0 * (1.0 - lowWeight),
               1e-12);
 }
 
@@ -373,6 +375,83 @@ TEST(VolumeOutputTest, ThrowsWhenSourceSizeMismatch) {
       (void)prepareOutputVolume(source, 2, 2, 2, nullptr,
                                 CropSettings{0, 0}),
       std::invalid_argument);
+}
+
+TEST(VolumeOutputTest, SeamXyAlignRemovesIntegerOverlapTranslation) {
+  constexpr int nx = 40;
+  constexpr int ny = 40;
+  constexpr int baseNz = 70;
+  constexpr int x0 = 18;
+  constexpr int y0 = 20;
+  constexpr int dxBlob = 3;
+  constexpr int dyBlob = -2;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> source(2 * baseNz * plane, 0.0);
+  auto paint = [&](int bed, int cx, int cy) {
+    const int z0 = bed * baseNz;
+    for (int z = 0; z < baseNz; ++z) {
+      for (int y = cy - 5; y <= cy + 5; ++y) {
+        for (int x = cx - 5; x <= cx + 5; ++x) {
+          const int ddx = x - cx;
+          const int ddy = y - cy;
+          source[static_cast<size_t>(z0 + z) * plane +
+                 static_cast<size_t>(y) * nx + x] =
+              100.0 - 2.0 * (ddx * ddx + ddy * ddy);
+        }
+      }
+    }
+  };
+  paint(0, x0, y0);
+  paint(1, x0 + dxBlob, y0 + dyBlob);
+
+  OutputTransform transform;
+  transform.baseNz = baseNz;
+  transform.bedZStarts = {0, baseNz};
+  transform.outputBedOverlaps = {14};
+  transform.canonicalGeom = {66, 56, 10};
+
+  const auto jumped = prepareOutputVolume(
+      source, nx, ny, 2 * baseNz, nullptr, CropSettings{0, 0}, nullptr,
+      &transform, 0.3, 0.3);
+  auto argmaxXY = [&](const std::vector<double> &vol, int z) {
+    const size_t off = static_cast<size_t>(z) * plane;
+    size_t best = 0;
+    double peak = -1.0;
+    for (size_t i = 0; i < plane; ++i) {
+      if (vol[off + i] > peak) {
+        peak = vol[off + i];
+        best = i;
+      }
+    }
+    return std::pair<int, int>{static_cast<int>(best % nx),
+                               static_cast<int>(best / nx)};
+  };
+  const auto before = argmaxXY(jumped, 40);
+  const auto after = argmaxXY(jumped, 80);
+  EXPECT_EQ(before.first, x0);
+  EXPECT_EQ(before.second, y0);
+  EXPECT_EQ(after.first, x0 + dxBlob);
+  EXPECT_EQ(after.second, y0 + dyBlob);
+
+  transform.seamXyAlign = true;
+  const auto aligned = prepareOutputVolume(
+      source, nx, ny, 2 * baseNz, nullptr, CropSettings{0, 0}, nullptr,
+      &transform, 0.3, 0.3);
+  const auto alignedBefore = argmaxXY(aligned, 40);
+  const auto alignedAfter = argmaxXY(aligned, 80);
+  EXPECT_EQ(alignedBefore.first, x0);
+  EXPECT_EQ(alignedBefore.second, y0);
+  EXPECT_EQ(alignedAfter.first, x0);
+  EXPECT_EQ(alignedAfter.second, y0);
+
+  transform.reverseLocalZInReconStorage = true;
+  const auto alignedRev = prepareOutputVolume(
+      source, nx, ny, 2 * baseNz, nullptr, CropSettings{0, 0}, nullptr,
+      &transform, 0.3, 0.3);
+  EXPECT_EQ(argmaxXY(alignedRev, 40).first, x0);
+  EXPECT_EQ(argmaxXY(alignedRev, 40).second, y0);
+  EXPECT_EQ(argmaxXY(alignedRev, 80).first, x0);
+  EXPECT_EQ(argmaxXY(alignedRev, 80).second, y0);
 }
 
 } // namespace test

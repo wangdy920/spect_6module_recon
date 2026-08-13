@@ -158,6 +158,7 @@ struct ReconArgs {
     double bedStepMm = 0.0;        ///< Scanner bed step in mm (0 = use kMultiBedStepMm default 16.8)
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
+    bool seamXyAlign = false;      ///< Align adjacent beds in XY from overlap NCC; default off
 
     // ========== Output Z-axis Cropping ==========
     // For zeroing final output edge slices after output flips (Z size unchanged)

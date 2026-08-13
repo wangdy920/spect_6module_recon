@@ -1,0 +1,212 @@
+[
+  {
+    "name": "mdp_it20_primary",
+    "shape_zyx": [
+      290,
+      100,
+      100
+    ],
+    "joints": [
+      {
+        "z_joint": 56,
+        "com_dx_vox": -13.695122270476944,
+        "com_dy_vox": -10.457628915219388,
+        "com_dx_mm": -4.108536681143083,
+        "com_dy_mm": -3.1372886745658164,
+        "xcorr_dx_vox": 12.0,
+        "xcorr_dy_vox": 17.0,
+        "xcorr_dx_mm": 3.5999999999999996,
+        "xcorr_dy_mm": 5.1,
+        "mean_intensity_ratio_after_over_before": 10.907926253007647,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 112,
+        "com_dx_vox": -11.570499418391208,
+        "com_dy_vox": 16.71151274398079,
+        "com_dx_mm": -3.471149825517362,
+        "com_dy_mm": 5.013453823194237,
+        "xcorr_dx_vox": 2.0,
+        "xcorr_dy_vox": -7.0,
+        "xcorr_dx_mm": 0.6,
+        "xcorr_dy_mm": -2.1,
+        "mean_intensity_ratio_after_over_before": 0.638652290380699,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 168,
+        "com_dx_vox": -2.0054248657785365,
+        "com_dy_vox": -27.501815354955518,
+        "com_dx_mm": -0.6016274597335609,
+        "com_dy_mm": -8.250544606486654,
+        "xcorr_dx_vox": 2.0,
+        "xcorr_dy_vox": 19.0,
+        "xcorr_dx_mm": 0.6,
+        "xcorr_dy_mm": 5.7,
+        "mean_intensity_ratio_after_over_before": 1.1701910053946598,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 224,
+        "com_dx_vox": -0.32623988308109375,
+        "com_dy_vox": -8.13290202913499,
+        "com_dx_mm": -0.09787196492432812,
+        "com_dy_mm": -2.4398706087404967,
+        "xcorr_dx_vox": 1.0,
+        "xcorr_dy_vox": 8.0,
+        "xcorr_dx_mm": 0.3,
+        "xcorr_dy_mm": 2.4,
+        "mean_intensity_ratio_after_over_before": 0.9510964914621579,
+        "n_before": 6,
+        "n_after": 6
+      }
+    ],
+    "max_abs_com_dx_vox": 13.695122270476944,
+    "max_abs_com_dy_vox": 27.501815354955518,
+    "max_abs_com_shift_mm": 8.272450779782947,
+    "max_abs_xcorr_shift_vox": 19.0
+  },
+  {
+    "name": "mdp_it20_smooth",
+    "shape_zyx": [
+      290,
+      100,
+      100
+    ],
+    "joints": [
+      {
+        "z_joint": 56,
+        "com_dx_vox": -13.540268217318925,
+        "com_dy_vox": -10.395087539625465,
+        "com_dx_mm": -4.0620804651956774,
+        "com_dy_mm": -3.1185262618876393,
+        "xcorr_dx_vox": 12.0,
+        "xcorr_dy_vox": 17.0,
+        "xcorr_dx_mm": 3.5999999999999996,
+        "xcorr_dy_mm": 5.1,
+        "mean_intensity_ratio_after_over_before": 10.998129263976313,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 112,
+        "com_dx_vox": -11.592032723185525,
+        "com_dy_vox": 16.79119445740848,
+        "com_dx_mm": -3.4776098169556575,
+        "com_dy_mm": 5.0373583372225434,
+        "xcorr_dx_vox": 2.0,
+        "xcorr_dy_vox": -7.0,
+        "xcorr_dx_mm": 0.6,
+        "xcorr_dy_mm": -2.1,
+        "mean_intensity_ratio_after_over_before": 0.639789654723966,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 168,
+        "com_dx_vox": -2.0453839918603407,
+        "com_dy_vox": -27.417284328035407,
+        "com_dx_mm": -0.6136151975581022,
+        "com_dy_mm": -8.225185298410622,
+        "xcorr_dx_vox": 2.0,
+        "xcorr_dy_vox": 19.0,
+        "xcorr_dx_mm": 0.6,
+        "xcorr_dy_mm": 5.7,
+        "mean_intensity_ratio_after_over_before": 1.17410228604746,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 224,
+        "com_dx_vox": -0.26082197722736566,
+        "com_dy_vox": -8.162726972853847,
+        "com_dx_mm": -0.0782465931682097,
+        "com_dy_mm": -2.448818091856154,
+        "xcorr_dx_vox": 1.0,
+        "xcorr_dy_vox": 8.0,
+        "xcorr_dx_mm": 0.3,
+        "xcorr_dy_mm": 2.4,
+        "mean_intensity_ratio_after_over_before": 0.9512543850509357,
+        "n_before": 6,
+        "n_after": 6
+      }
+    ],
+    "max_abs_com_dx_vox": 13.540268217318925,
+    "max_abs_com_dy_vox": 27.417284328035407,
+    "max_abs_com_shift_mm": 8.24804199818748,
+    "max_abs_xcorr_shift_vox": 19.0
+  },
+  {
+    "name": "july_mouse_it50_xflip0",
+    "shape_zyx": [
+      290,
+      100,
+      100
+    ],
+    "joints": [
+      {
+        "z_joint": 56,
+        "com_dx_vox": -0.3909890354468075,
+        "com_dy_vox": -2.884611926199213,
+        "com_dx_mm": -0.11729671063404225,
+        "com_dy_mm": -0.8653835778597638,
+        "xcorr_dx_vox": 0.0,
+        "xcorr_dy_vox": -2.0,
+        "xcorr_dx_mm": 0.0,
+        "xcorr_dy_mm": -0.6,
+        "mean_intensity_ratio_after_over_before": 1.2067121790154771,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 112,
+        "com_dx_vox": 10.034916016145626,
+        "com_dy_vox": -0.4576926263993073,
+        "com_dx_mm": 3.0104748048436876,
+        "com_dy_mm": -0.13730778791979217,
+        "xcorr_dx_vox": -2.0,
+        "xcorr_dy_vox": -1.0,
+        "xcorr_dx_mm": -0.6,
+        "xcorr_dy_mm": -0.3,
+        "mean_intensity_ratio_after_over_before": 0.4488552030936431,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 168,
+        "com_dx_vox": -2.819553857185383,
+        "com_dy_vox": 5.8863039947759646,
+        "com_dx_mm": -0.8458661571556149,
+        "com_dy_mm": 1.7658911984327894,
+        "xcorr_dx_vox": -1.0,
+        "xcorr_dy_vox": -7.0,
+        "xcorr_dx_mm": -0.3,
+        "xcorr_dy_mm": -2.1,
+        "mean_intensity_ratio_after_over_before": 0.504422552831308,
+        "n_before": 6,
+        "n_after": 6
+      },
+      {
+        "z_joint": 224,
+        "com_dx_vox": -8.280364034744615,
+        "com_dy_vox": 15.652337926057193,
+        "com_dx_mm": -2.484109210423384,
+        "com_dy_mm": 4.695701377817158,
+        "xcorr_dx_vox": 25.0,
+        "xcorr_dy_vox": 45.0,
+        "xcorr_dx_mm": 7.5,
+        "xcorr_dy_mm": 13.5,
+        "mean_intensity_ratio_after_over_before": 0.360323047994318,
+        "n_before": 6,
+        "n_after": 6
+      }
+    ],
+    "max_abs_com_dx_vox": 10.034916016145626,
+    "max_abs_com_dy_vox": 15.652337926057193,
+    "max_abs_com_shift_mm": 5.312288583929176,
+    "max_abs_xcorr_shift_vox": 45.0
+  }
+]

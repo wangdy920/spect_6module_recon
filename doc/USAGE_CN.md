@@ -1,6 +1,6 @@
 # SPECT_recon CLI 使用说明（中文）
 
-> 更新日期：2026-08-11（原型对齐与性能收敛后）
+> 更新日期：2026-08-13（多床 cosine 沿输出 Z 连续淡入）
 > 对齐来源：`src/cli/ArgumentParser.cpp` 与 `SPECT_recon.exe -help`
 
 本页记录当前可执行文件公开接受的 CLI 参数。运行时最终真相仍以当前二进制：
@@ -224,13 +224,14 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加 `1/c`；默认空 |
 | `-detZEdgeCensor <k>` / `[MultiBed] detz_edge_censor` | compact 分子+分母每侧屏蔽 k 行 detector-Z；默认 0 |
 | `-cropEnd <top[,end]>` | 整体输出翻转后将 Z 首尾指定层置零，不改变层数 |
-| `-zbedflip [0\|1]` | compact 多床映射内反转每床局部 Z；发布默认 1 |
+| `-zbedflip [0\|1]` | compact 多床映射内反转每床局部 Z；发布默认 1。增益窗跟随反向存储；融合权重沿输出 Z，入口保持上一床 |
 | `-zoutflip [0\|1]` | canonical 拼接后翻转整体输出 Z；默认 0 |
 | `-xoutflip [0\|1]` | canonical 拼接后翻转整体输出 X；默认 0 |
+| `-seamXyAlign [0\|1]` / `[MultiBed] seam_xy_align` | 重叠区 NCC 整数 XY 平移后再 cosine 融合；默认 0 |
 
 物理合同固定为 `Bed1=max physical z`，后续 Bed 向较小 physical Z 移动；路径含 `BedN` 时 parser 先按床号排序。不要逆序文件补偿 `z_bed_flip=1`。
 
-多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；`-bedOverlap` 须满足 `baseNz - bedOverlap = step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
+多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；`-bedOverlap` 须满足 `baseNz - bedOverlap = step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。cosine 沿**输出 Z** 淡入：融合入口继续用上一床，再淡入下一床；`z_bed_flip=1` 不反转这组权重。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
 
 `crop_method`、`sigmoid`、`direct`、seam/profile 后处理、输出 FOV mask 与对象分类均已退场。Mouse/EP/Derenzo 共用相同生产输出路径，不按对象选择算法。
 

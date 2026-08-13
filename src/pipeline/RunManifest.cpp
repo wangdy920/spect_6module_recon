@@ -447,6 +447,7 @@ void writeRunManifest(const RunManifestInput &input) {
                           savedGeometry.vz});
   json.boolean("z_out_flip", transform.flipZWholeOutput);
   json.boolean("x_out_flip", transform.flipXWholeOutput);
+  json.boolean("seam_xy_align", transform.seamXyAlign);
   json.string("increasing_z_index_direction",
               transform.flipZWholeOutput ? "+physical_z" : "-physical_z");
   json.integer("crop_end_start", args.cropEndStart);

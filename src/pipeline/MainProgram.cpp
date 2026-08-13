@@ -858,6 +858,7 @@ int runProgram(int argc, char **argv) {
     outputTransform.flipZPerBed = enableBedZFlip;
     outputTransform.flipZWholeOutput = args.zOutFlip;
     outputTransform.flipXWholeOutput = args.xOutFlip;
+    outputTransform.seamXyAlign = args.seamXyAlign;
     outputTransform.reverseLocalZInReconStorage =
         reverseLocalZInReconStorage;
     outputTransform.centerCropNx = spect::core::sixmodule::kOutputMaskNx;
@@ -876,6 +877,8 @@ int runProgram(int argc, char **argv) {
       logInfo("Output transform: whole-output Z flip enabled.");
     if (args.xOutFlip)
       logInfo("Output transform: whole-output X flip enabled.");
+    if (args.seamXyAlign)
+      logInfo("Output transform: seam XY overlap alignment enabled.");
     logInfo("Output transform: canonical center66_cosine10 stitch; "
             "reconstruction beds are non-overlapping.");
     CompactSymmetricReconLoopContext compactContext;
