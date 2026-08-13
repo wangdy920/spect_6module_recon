@@ -16,13 +16,22 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - **Target GPUs** (consumer GeForce RTX): Release builds include sm_86, sm_89, and sm_120; CUDA Toolkit ≥ 12.8 (prefer 13.x), matching runtime DLLs, and a CUDA 13.0+ capable driver are required.
 - **Public backends**: CUDA-only sparse ops; cuFFT Butterworth; PSF `none|operator|sieve` with `adjoint|castor` kernels; TV/RDP regularizers.
 - **Optimization algorithms**: MLEM / BSREM-II, single-subset full update. OSEM/ADMM and multi-GPU paths are removed.
-- See `doc/Capability_Matrix_CN.md`.
+- See `multipinhole/doc/Capability_Matrix_CN.md`.
+
+**Reconstruction boundaries**
+
+- **Current implementation**: [multipinhole/](multipinhole/) — production
+  multipinhole source, headers, configuration, tests, docs, and CMake targets.
+- **Future implementation**: [parallel_hole/](parallel_hole/) — deliberately
+  contains no code until a parallel-hole reconstruction and correctness check
+  are introduced.
 
 **Project Structure**
 - **Release history**: [CHANGELOG.md](CHANGELOG.md) — embedded in `SPECT_recon.exe -v` and copied to the package root; `--version` remains one-line for scripts
-- **Core Code**: [include/](include/), [src/](src/) — modular C++17 implementation
-- **Tests**: [tests/](tests/) — GoogleTest unit tests
-- **Documentation**: [doc/](doc/) — maintained usage, capability, format, and field-integration contracts
+- **Core Code**: [multipinhole/include/](multipinhole/include/), [multipinhole/src/](multipinhole/src/) — current modular C++17 implementation
+- **Tests**: [multipinhole/tests/](multipinhole/tests/) — GoogleTest unit tests
+- **Runtime configuration**: [multipinhole/config/](multipinhole/config/) — source defaults copied into the unchanged deployed `bin/config/` layout
+- **Documentation**: [multipinhole/doc/](multipinhole/doc/) — maintained usage, capability, format, and field-integration contracts
 - **Scripts**: [scripts/](scripts/) — reusable validation, QA, and packaging helpers
 - **Matrix generator & prototype (reference)**: [6module_bak_src/](6module_bak_src/) — CUDA v4 generator, bedmerge prototype, MAT→BIN tool
 
@@ -120,14 +129,14 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 ## Documentation
 
 ### Quick Links
-- **[Documentation Index](doc/README.md)** — maintained docs only
+- **[Documentation Index](multipinhole/doc/README.md)** — maintained docs only
 - **[Prototype convergence evidence](reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html)** — current algorithm/output decision record
-- **[Usage (中文)](doc/USAGE_CN.md)** — CLI reference
-- **[Capability Matrix (中文)](doc/Capability_Matrix_CN.md)** — support boundary and durable decisions
-- **[Field recon migration](doc/Recon_Interface_Migration_Field_CN.md)** — ThreeModalities → current canonical executable
-- **[CTAC / auto-mu validation](doc/CTAC_AutoMu_Validation_CN.md)** — CTAC / auto-mu cylinder debug gate
+- **[Usage (中文)](multipinhole/doc/USAGE_CN.md)** — CLI reference
+- **[Capability Matrix (中文)](multipinhole/doc/Capability_Matrix_CN.md)** — support boundary and durable decisions
+- **[Field recon migration](multipinhole/doc/Recon_Interface_Migration_Field_CN.md)** — ThreeModalities → current canonical executable
+- **[CTAC / auto-mu validation](multipinhole/doc/CTAC_AutoMu_Validation_CN.md)** — CTAC / auto-mu cylinder debug gate
 - **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout
-- **[Matrix format (中文)](doc/Format_Reader_Matrix_CN.md)** — v4 chunk CSRB spec
+- **[Matrix format (中文)](multipinhole/doc/Format_Reader_Matrix_CN.md)** — v4 chunk CSRB spec
 - **[Scripts](scripts/README.md)** — reusable validation and helper scripts
 - **[Tools](tools/README.md)** — standalone CLI tools
 

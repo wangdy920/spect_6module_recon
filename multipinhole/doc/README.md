@@ -6,7 +6,7 @@
 
 | File | Purpose |
 |---|---|
-| `../reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` | 当前 `sieve + CASToR + FWHM 1.3 mm` 原型对齐、五组数据指标与 canonical 输出决策 |
+| `../../reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` | 当前 `sieve + CASToR + FWHM 1.3 mm` 原型对齐、五组数据指标与 canonical 输出决策 |
 | `USAGE_CN.md` | 公开 CLI 与固定多床工作流 |
 | `PARAMETERS_CN.template.md` | 发布包参数说明模板 |
 | `README_RC.template.md` | 发布包 README 模板 |

@@ -2080,7 +2080,7 @@ void ArgumentParser::printUsage() {
 
     std::cout << "  Algorithm-specific defaults are loaded beside the global config or from config/algo_<name>.conf.\n";
     std::cout << "  Override any value with CLI flags. Use -dumpConf to inspect.\n";
-    std::cout << "  See: doc/USAGE_CN.md for full parameter reference.\n\n";
+    std::cout << "  See: multipinhole/doc/USAGE_CN.md for full parameter reference.\n\n";
 }
 
 } // namespace cli

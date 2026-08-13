@@ -119,7 +119,7 @@ namespace test {
 TEST(AppTest, ConfigParserIntegration) {
     // Test ConfigParser can parse the default config file
     spect::cli::ConfigParser parser;
-    std::string configPath = "config/spect_config.ini";
+    std::string configPath = "multipinhole/config/spect_config.ini";
     
     // Try to load config file (may not exist in test environment)
     if (std::filesystem::exists(configPath)) {

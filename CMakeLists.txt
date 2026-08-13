@@ -15,6 +15,7 @@ endif()
 project(SPECT_recon LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)  # 【T0.1】改为C++17，符合重构规范
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(SPECT_RECON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/multipinhole")
 
 # ---- Build identity (used by -v / start-log banner) ----
 string(TIMESTAMP SPECT_RECON_BUILD_DATE "%Y-%m-%d")
@@ -50,14 +51,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 file(READ "${SPECT_RECON_CHANGELOG_PATH}" SPECT_RECON_CHANGELOG)
 set(SPECT_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 configure_file(
-  "${CMAKE_SOURCE_DIR}/cmake/Version.h.in"
+  "${SPECT_RECON_SOURCE_DIR}/cmake/Version.h.in"
   "${SPECT_GENERATED_INCLUDE_DIR}/cli/Version.h"
   @ONLY
 )
 message(STATUS "SPECT_recon version: ${SPECT_RECON_VERSION_STRING}")
 
-include(cmake/CudaConfig.cmake)
-include(cmake/Dependencies.cmake)
-include(cmake/Targets.cmake)
-include(cmake/Install.cmake)
-include(cmake/Testing.cmake)
+add_subdirectory(multipinhole)

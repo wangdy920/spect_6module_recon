@@ -12,9 +12,9 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $repo "build\Release\bin\Release\SPECT_recon.exe"
 $matrix = "E:\Xiang_Project\SPECT\6Module\release\SPECT_6Module_260707\bin\recon\matrix\260601"
-$config = Join-Path $repo "config\spect_config.ini"
-$mlemConf = Join-Path $repo "config\algo_mlem.conf"
-$bsremConf = Join-Path $repo "config\algo_bsrem.conf"
+$config = Join-Path $repo "multipinhole\config\spect_config.ini"
+$mlemConf = Join-Path $repo "multipinhole\config\algo_mlem.conf"
+$bsremConf = Join-Path $repo "multipinhole\config\algo_bsrem.conf"
 $ctRoot = "F:\DATA\predata\SUPER_PSC_1_0\SPECT\overlap10_vs11_joint_20260713\ct_guided_v1"
 
 $contracts = @{

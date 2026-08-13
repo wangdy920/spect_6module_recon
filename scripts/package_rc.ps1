@@ -153,18 +153,18 @@ try {
     Pop-Location
 }
 
-$paramTemplate = Join-Path $repo "doc\PARAMETERS_CN.template.md"
+$paramTemplate = Join-Path $repo "multipinhole\doc\PARAMETERS_CN.template.md"
 Copy-Item -LiteralPath $paramTemplate -Destination (Join-Path $packageRoot "PARAMETERS_CN.md") -Force
 
 
-$readmeTemplate = Join-Path $repo "doc\README_RC.template.md"
+$readmeTemplate = Join-Path $repo "multipinhole\doc\README_RC.template.md"
 if (Test-Path -LiteralPath $readmeTemplate) {
     $readme = Get-Content -LiteralPath $readmeTemplate -Raw -Encoding UTF8
     $readme = $readme -replace "__PACKAGE_NAME__", $PackageName
     Set-Content -LiteralPath (Join-Path $packageRoot "README.md") -Value $readme -Encoding UTF8
 }
 
-$releaseNotesPath = Join-Path $repo "doc\RELEASE_${ReleaseDate}_CN.md"
+$releaseNotesPath = Join-Path $repo "multipinhole\doc\RELEASE_${ReleaseDate}_CN.md"
 if (Test-Path -LiteralPath $releaseNotesPath) {
     Copy-Item -LiteralPath $releaseNotesPath -Destination (Join-Path $packageRoot "RELEASE_NOTES.md") -Force
 } else {

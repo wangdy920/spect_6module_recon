@@ -82,8 +82,8 @@ if(SPECT_BUILD_TESTS)
 
   # 包含项目根目录以访问头文件
   target_include_directories(spect_tests PRIVATE 
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/include
+    ${SPECT_RECON_SOURCE_DIR}
+    ${SPECT_RECON_SOURCE_DIR}/include
   )
   
   # 设置测试输出目录

@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $exe)) {
 }
 
 $packageName = Split-Path $PackageRoot -Leaf
-$template = Join-Path $repo "doc\PARAMETERS_CN.template.md"
+$template = Join-Path $repo "multipinhole\doc\PARAMETERS_CN.template.md"
 $destDoc = Join-Path $PackageRoot "PARAMETERS_CN.md"
 if (-not (Test-Path -LiteralPath $template)) {
     throw "Missing template: $template"

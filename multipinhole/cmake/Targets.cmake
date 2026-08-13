@@ -16,7 +16,7 @@ endif()
 # ----------------------------------
 add_library(spect_interfaces INTERFACE)
 target_include_directories(spect_interfaces INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_compile_features(spect_interfaces INTERFACE cxx_std_17)
@@ -38,7 +38,7 @@ if(SPECT_BUILD_CUDA_SCAFFOLD)
     src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp
   )
   target_include_directories(spect_sparse_cuda PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
   )
   target_link_libraries(spect_sparse_cuda PUBLIC spect_interfaces)
@@ -74,7 +74,7 @@ if(SPECT_ENABLE_BUTTERWORTH_CUFFT)
   )
 endif()
 target_include_directories(spect_filters PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(spect_filters PUBLIC spect_interfaces)
@@ -100,7 +100,7 @@ add_library(spect_regularizer STATIC
   src/regularizer/Regularizers.cpp
 )
 target_include_directories(spect_regularizer PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(spect_regularizer PUBLIC spect_interfaces)
@@ -117,8 +117,8 @@ add_library(spect_cli STATIC
   src/cli/ArgumentParser.cpp
 )
 target_include_directories(spect_cli PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}>
   $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
@@ -139,8 +139,8 @@ add_library(spect_io STATIC
   src/io/CompactChunkCSR.cpp
 )
 target_include_directories(spect_io PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(spect_io PUBLIC spect_interfaces)
@@ -176,8 +176,8 @@ add_library(spect_pipeline STATIC
   src/pipeline/VolumeOutput.cpp
 )
 target_include_directories(spect_pipeline PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}>
   $<BUILD_INTERFACE:${SPECT_GENERATED_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
@@ -241,29 +241,29 @@ set_target_properties(SPECT_recon PROPERTIES
 add_custom_command(TARGET SPECT_recon POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:SPECT_recon>/config"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/config/spect_config.ini"
+          "${SPECT_RECON_SOURCE_DIR}/config/spect_config.ini"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/spect_config.ini"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/config/bad_dector"
+          "${SPECT_RECON_SOURCE_DIR}/config/bad_dector"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/bad_dector"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/config/algo_mlem.conf"
+          "${SPECT_RECON_SOURCE_DIR}/config/algo_mlem.conf"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_mlem.conf"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/config/algo_bsrem.conf"
+          "${SPECT_RECON_SOURCE_DIR}/config/algo_bsrem.conf"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_bsrem.conf"
   COMMENT "Copying runtime config files beside SPECT_recon.exe")
 
 # Bundle CUDA 12.8+/13.x redistributables so RTX 30/40/50 field machines get
 # matching runtime libraries; NVRTC JITs compute_86 / compute_89 / compute_120.
 if((SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS) OR SPECT_ENABLE_BUTTERWORTH_CUFFT)
-  include(${CMAKE_SOURCE_DIR}/cmake/CudaRedist.cmake)
+  include(${SPECT_RECON_SOURCE_DIR}/cmake/CudaRedist.cmake)
   spect_bundle_cuda_runtime_for_target(SPECT_recon)
 endif()
 
 
 add_executable(spect_forward_project
-  tools/forward_project_multibed.cpp
+  ${CMAKE_SOURCE_DIR}/tools/forward_project_multibed.cpp
 )
 target_include_directories(spect_forward_project PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include

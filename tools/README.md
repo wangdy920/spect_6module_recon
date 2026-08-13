@@ -25,5 +25,5 @@
 
 ## 相关文档
 
-- [`doc/Format_Reader_Matrix_CN.md`](../doc/Format_Reader_Matrix_CN.md) — 格式 × 读者能力矩阵
+- [`multipinhole/doc/Format_Reader_Matrix_CN.md`](../multipinhole/doc/Format_Reader_Matrix_CN.md) — 格式 × 读者能力矩阵
 - [`6module_bak_src/README.md`](../6module_bak_src/README.md) — v2/v4 系统矩阵生成端
