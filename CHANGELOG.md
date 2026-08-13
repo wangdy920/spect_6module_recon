@@ -11,6 +11,8 @@ experiment commits are intentionally omitted.
 - Split the reconstruction source tree into the current `multipinhole/`
   implementation and an explicit, not-yet-implemented `parallel_hole/`
   boundary while preserving root build commands and deployed package layout.
+- Release builds now reset the shared runtime output directory before linking,
+  preventing stale test-only DLLs from entering a clean deployment package.
 - Made automatic compact-denominator caches stable under deployment: INI cache
   paths are exe-relative, manifest-hashed variants live under
   `bin/cache/compact_denom`, and explicit `-compactDenomCache` still wins.

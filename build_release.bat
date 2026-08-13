@@ -78,6 +78,16 @@ cmake -S "%PROJECT_DIR%." -B "%BUILD_DIR%" -G "Visual Studio 18 2026" -A x64 ^
 
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+REM The Release runtime directory is shared by app-local dependency copying.
+REM Reset it so DLLs from an earlier tests-enabled build cannot enter staging.
+set "RUNTIME_DIR=%BUILD_DIR%\bin\%CONFIG%"
+echo [INFO] Reset Release runtime output ...
+if exist "%RUNTIME_DIR%" rmdir /s /q "%RUNTIME_DIR%"
+if exist "%RUNTIME_DIR%" (
+    echo [ERROR] Release runtime output is in use: %RUNTIME_DIR%
+    exit /b 1
+)
+
 echo [INFO] Build SPECT_recon ...
 cmake --build "%BUILD_DIR%" --config %CONFIG% --target SPECT_recon --parallel
 if %errorlevel% neq 0 exit /b %errorlevel%
