@@ -8,6 +8,18 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Split the reconstruction source tree into the current `multipinhole/`
+  implementation and an explicit, not-yet-implemented `parallel_hole/`
+  boundary while preserving root build commands and deployed package layout.
+- Made automatic compact-denominator caches stable under deployment: INI cache
+  paths are exe-relative, manifest-hashed variants live under
+  `bin/cache/compact_denom`, and explicit `-compactDenomCache` still wins.
+- Added a per-GPU Windows process lock so an accidental second
+  `SPECT_recon.exe` exits before loading the matrix; log names now include PID.
+- Kept GPU resident-matrix warmup enabled when a reduced host-cache budget is
+  used, while skipping background host preload that could not remain cached.
+- Added an installed PowerShell collector that records process ancestry, GPU
+  samples, config/cache identity and reconstruction logs into one text file.
 - Multi-bed cosine overlap now fades along output Z under reversed storage:
   the bed already shown before a joint stays dominant at the blend entry.
   The previous polarity invert matched a packing mismatch and produced paired

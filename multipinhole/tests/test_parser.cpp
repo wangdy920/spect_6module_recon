@@ -16,6 +16,7 @@
 
 #include "cli/StringUtils.h"
 #include "cli/ConfigParser.h"
+#include "cli/RegistrationIni.h"
 
 
 namespace spect {
@@ -86,6 +87,105 @@ TEST(CLITest, ConfigParserRejectsInvalidTypedValues) {
     EXPECT_THROW((void)cfg.getBool("Invalid", "bool", false),
                  std::invalid_argument);
     std::filesystem::remove(path);
+}
+
+std::filesystem::path frozenRegistrationIniPath() {
+    const auto fromThisFile =
+        std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "config" / "ct_spect_registration.ini";
+    if (std::filesystem::exists(fromThisFile))
+        return fromThisFile;
+    return std::filesystem::current_path() / "config" /
+           "ct_spect_registration.ini";
+}
+
+TEST(CLITest, RegistrationIniLoadsWithConfigParser) {
+    const auto path = frozenRegistrationIniPath();
+    ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
+
+    spect::cli::ConfigParser cfg;
+    ASSERT_TRUE(cfg.load(path.string()));
+    ASSERT_TRUE(cfg.hasSection("Registration"));
+    EXPECT_THROW((void)cfg.getDouble("Registration", "translation_xyz_mm", 0.0),
+                 std::invalid_argument);
+
+    spect::cli::RegistrationTransform loaded;
+    std::string error;
+    ASSERT_TRUE(spect::cli::loadRegistrationIni(path.string(), loaded, &error))
+        << error;
+    EXPECT_NEAR(loaded.translation_xyz_mm[0], -0.225, 1e-12);
+    EXPECT_NEAR(loaded.translation_xyz_mm[1], 1.6, 1e-12);
+    EXPECT_NEAR(loaded.translation_xyz_mm[2], -11.1, 1e-12);
+    EXPECT_DOUBLE_EQ(loaded.refine_limit_mm, 2.0);
+    EXPECT_DOUBLE_EQ(loaded.residual_gate_mm, 0.3);
+}
+
+TEST(CLITest, AppliedRegistrationIniUsesSameSectionAndBool) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_applied_registration.ini";
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out.good());
+        out << "; SPECT CT registration parameters. Key=value INI for ConfigParser.\n";
+        out << "[Registration]\n";
+        out << "fixed_translation_xyz_mm = -0.225,1.6,-11.1\n";
+        out << "z_bed_flip = 1\n";
+        out << "attmap_bed_order = recon_bed1_max_z\n";
+    }
+    spect::cli::ConfigParser cfg;
+    ASSERT_TRUE(cfg.load(path.string()));
+    ASSERT_TRUE(cfg.hasSection("Registration"));
+    EXPECT_TRUE(cfg.getBool("Registration", "z_bed_flip", false));
+    const auto xyz = split(
+        cfg.getString("Registration", "fixed_translation_xyz_mm"), ',');
+    ASSERT_EQ(xyz.size(), 3u);
+    EXPECT_DOUBLE_EQ(std::stod(xyz[2]), -11.1);
+    std::filesystem::remove(path);
+}
+
+std::filesystem::path repoRootFromTestParser() {
+    return std::filesystem::path(__FILE__).parent_path().parent_path();
+}
+
+TEST(CLITest, CtGuidedTestIniDiffersOnlyByCliUnlock) {
+    const auto repo = repoRootFromTestParser();
+    const auto production = repo / "config" / "spect_config.ini";
+    const auto fixture = repo / "config" / "spect_config.ct_guided.ini";
+    ASSERT_TRUE(std::filesystem::exists(production)) << production.string();
+    ASSERT_TRUE(std::filesystem::exists(fixture)) << fixture.string();
+
+    ConfigParser prod;
+    ConfigParser test;
+    ASSERT_TRUE(prod.load(production.string()));
+    ASSERT_TRUE(test.load(fixture.string()));
+    EXPECT_TRUE(prod.getBool("Compatibility", "recon_sections_override_cli",
+                             false));
+    EXPECT_FALSE(test.getBool("Compatibility", "recon_sections_override_cli",
+                              true));
+
+    const auto& prodSections = prod.getSections();
+    const auto& testSections = test.getSections();
+    ASSERT_EQ(prodSections.size(), testSections.size());
+    for (const auto& [section, keys] : prodSections) {
+        ASSERT_TRUE(test.hasSection(section)) << section;
+        for (const auto& [key, value] : keys) {
+            if (section == "Compatibility" &&
+                key == "recon_sections_override_cli")
+                continue;
+            EXPECT_EQ(test.getString(section, key), value)
+                << "[" << section << "] " << key;
+        }
+    }
+    for (const auto& [section, keys] : testSections) {
+        ASSERT_TRUE(prod.hasSection(section)) << section;
+        for (const auto& [key, value] : keys) {
+            if (section == "Compatibility" &&
+                key == "recon_sections_override_cli")
+                continue;
+            EXPECT_EQ(prod.getString(section, key), value)
+                << "[" << section << "] " << key;
+        }
+    }
 }
 
 } // namespace test
@@ -227,8 +327,39 @@ TEST(IOTest, CompactSymmetricParserAcceptsDenomCachePath) {
     argv.push_back("cache/psc_260601_global_denom.mhd");
 
     EXPECT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.compactDenomCachePath,
-              "cache/psc_260601_global_denom.mhd");
+    EXPECT_EQ(std::filesystem::path(args.compactDenomCachePath),
+              std::filesystem::absolute(
+                  "cache/psc_260601_global_denom.mhd").lexically_normal());
+}
+
+TEST(IOTest, DenomCacheConfigIsExeRelativeAndCliPathWins) {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "spect_denom_path_config_test";
+    std::filesystem::create_directories(root);
+    const auto config = root / "spect_config.ini";
+    const auto cliCache = root / "explicit.mhd";
+    {
+        std::ofstream out(config);
+        ASSERT_TRUE(out);
+        out << "[SystemMatrix]\n";
+        out << "compact_denom_cache_path = cache/from_config.mhd\n";
+        out << "compact_denom_cache_dir = cache/compact_denom\n";
+    }
+
+    spect::cli::ReconArgs args;
+    const std::vector<std::string> argv = {
+        (root / "SPECT_recon.exe").string(), "-config", config.string(),
+        "-df", "proj.bin", "-chunkCSRDir", "chunks", "-opti", "mlem",
+        "-it", "1", "-compactDenomCache", cliCache.string()};
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(std::filesystem::path(args.compactDenomCachePath), cliCache);
+    const std::filesystem::path autoDir(args.compactDenomCacheDir);
+    EXPECT_TRUE(autoDir.is_absolute());
+    EXPECT_EQ(autoDir.filename(), "compact_denom");
+    EXPECT_EQ(autoDir.parent_path().filename(), "cache");
+    EXPECT_NE(autoDir.parent_path().parent_path(), root);
+
+    std::filesystem::remove_all(root);
 }
 TEST(IOTest, ParserAcceptsCtacFactorCacheDir) {
     spect::cli::ReconArgs args;
@@ -312,6 +443,35 @@ TEST(IOTest, RegisteredCtRegularizationOptionsParse) {
     EXPECT_NE(args.regCtPath.find("registered_ct.mhd"), std::string::npos);
     EXPECT_DOUBLE_EQ(args.reg.ct_sigma, 0.025);
     EXPECT_DOUBLE_EQ(args.reg.ct_weight_floor, 0.15);
+}
+
+TEST(IOTest, CtGuidedTestIniKeepsRegCtAndCtac) {
+    const auto repo =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto fixture = repo / "config" / "spect_config.ct_guided.ini";
+    ASSERT_TRUE(std::filesystem::exists(fixture)) << fixture.string();
+
+    auto argv = compactBaseArgs();
+    for (auto& arg : argv) {
+        if (arg == "__missing_compact_test_config__.ini")
+            arg = fixture.string();
+    }
+    argv.insert(argv.end(),
+                {"-opti", "bsrem", "-reg", "TVIsotropic,0.01", "-regCT",
+                 "regct_hu_recon220.mhd", "-regCtSigma", "100", "-ctac",
+                 "-attMap", "attmap_recon220.mhd"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_FALSE(args.reconSectionsOverrideCli);
+    EXPECT_TRUE(args.useReg);
+    EXPECT_EQ(args.reg.type, spect::RegType::TVIsotropic);
+    EXPECT_NE(args.regCtPath.find("regct_hu_recon220.mhd"), std::string::npos);
+    EXPECT_DOUBLE_EQ(args.reg.ct_sigma, 100.0);
+    EXPECT_TRUE(args.doCTAC);
+    EXPECT_NE(args.attMapPath.find("attmap_recon220.mhd"), std::string::npos);
+    EXPECT_TRUE(args.zBedFlip);
+    EXPECT_EQ(args.psf.mode, spect::filters::PSFMode::Sieve);
 }
 
 TEST(IOTest, PublicPsfModeRejectsRetiredPostSmooth) {

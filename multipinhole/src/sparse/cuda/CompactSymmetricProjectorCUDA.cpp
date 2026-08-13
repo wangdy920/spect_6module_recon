@@ -125,10 +125,10 @@ uint64_t estimatedCompactChunkResidentBytes(
 void warmCompactChunkResidentDeviceCache(
     const spect::io::CompactChunkCSRDirectory &chunks) {
   const uint64_t cacheBudget = chunks.cacheBudgetBytes();
-  if (cacheBudget != std::numeric_limits<uint64_t>::max() &&
-      cacheBudget < estimatedCompactChunkResidentBytes(chunks)) {
-    return;
-  }
+  const uint64_t matrixBytes = estimatedCompactChunkResidentBytes(chunks);
+  const bool hostCacheCoversMatrix =
+      cacheBudget == std::numeric_limits<uint64_t>::max() ||
+      cacheBudget >= matrixBytes;
 
   static std::mutex warmupMutex;
   std::lock_guard<std::mutex> lock(warmupMutex);
@@ -139,6 +139,14 @@ void warmCompactChunkResidentDeviceCache(
     return;
   }
 
+  constexpr uint64_t kMiB = 1024ull * 1024ull;
+  if (cacheBudget != std::numeric_limits<uint64_t>::max() &&
+      cacheBudget < matrixBytes) {
+    std::cerr << "[NOTE] compact host cache " << (cacheBudget / kMiB)
+              << " MiB is below matrix size " << (matrixBytes / kMiB)
+              << " MiB; GPU resident warmup remains enabled.\n";
+  }
+
   chunks.setAcceleratorLease({});
   lease = std::make_shared<CompactChunkResidentCacheLease>();
   lease->cacheBudget = cacheBudget;
@@ -146,6 +154,9 @@ void warmCompactChunkResidentDeviceCache(
   size_t residentPrefixCount = 1;
   try {
     const auto memory = cuda::getMemoryInfo();
+    std::cerr << "[CompactChunkCUDA] GPU memory before resident warmup: free="
+              << (memory.free / kMiB) << " MiB, reserve="
+              << (kCompactChunkResidentReserveBytes / kMiB) << " MiB\n";
     const uint64_t available =
         memory.free > kCompactChunkResidentReserveBytes
             ? static_cast<uint64_t>(memory.free) -
@@ -160,7 +171,13 @@ void warmCompactChunkResidentDeviceCache(
       ++residentPrefixCount;
     }
     residentPrefixCount = std::max<size_t>(1, residentPrefixCount);
+  } catch (const std::exception &ex) {
+    std::cerr << "[NOTE] CUDA memory query failed before resident warmup: "
+              << ex.what() << "; trying one matrix.\n";
+    residentPrefixCount = 1;
   } catch (...) {
+    std::cerr << "[NOTE] CUDA memory query failed before resident warmup; "
+                 "trying one matrix.\n";
     residentPrefixCount = 1;
   }
   residentPrefixCount =
@@ -176,7 +193,7 @@ void warmCompactChunkResidentDeviceCache(
     loaded.push_back(std::move(chunk));
   }
 
-  if (residentPrefixCount < chunks.chunks().size()) {
+  if (residentPrefixCount < chunks.chunks().size() && hostCacheCoversMatrix) {
     const auto *chunkDirectory = &chunks;
     lease->hostPreload = std::async(
         std::launch::async, [chunkDirectory, residentPrefixCount]() {
@@ -195,10 +212,16 @@ void warmCompactChunkResidentDeviceCache(
   lease->residentWarmupComplete =
       views.empty() ||
       warmupResidentMatrixSetCUDA(views, kCompactChunkResidentReserveBytes);
+  if (!lease->residentWarmupComplete) {
+    std::cerr << "[NOTE] GPU resident matrix warmup was unavailable; "
+                 "foreground matrix transfers remain active.\n";
+  }
   std::cerr << "[CompactChunkCUDA] Startup overlap: resident prefix "
             << residentPrefixCount << " / " << chunks.chunks().size();
-  if (residentPrefixCount < chunks.chunks().size())
+  if (residentPrefixCount < chunks.chunks().size() && hostCacheCoversMatrix)
     std::cerr << ", remaining host chunks preload in background";
+  else if (residentPrefixCount < chunks.chunks().size())
+    std::cerr << ", host preload skipped (cache budget below matrix)";
   std::cerr << '\n';
   chunks.setAcceleratorLease(lease);
 }

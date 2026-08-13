@@ -186,6 +186,50 @@ int selectCudaDeviceIfRequested(const ReconArgs &args) {
 #endif
 }
 
+class GpuExecutionLease {
+public:
+  explicit GpuExecutionLease(int deviceId) {
+#ifdef _WIN32
+    const std::wstring name =
+        L"Global\\SPECT_recon_GPU_" + std::to_wstring(deviceId);
+    SetLastError(ERROR_SUCCESS);
+    mutex_ = CreateMutexW(nullptr, TRUE, name.c_str());
+    if (mutex_ == nullptr) {
+      throw std::runtime_error(
+          "Failed creating the SPECT_recon GPU process lock (Windows error " +
+          std::to_string(GetLastError()) + ").");
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+      CloseHandle(mutex_);
+      mutex_ = nullptr;
+      throw std::runtime_error(
+          "GPU " + std::to_string(deviceId) +
+          " is already owned by another SPECT_recon process. Wait for it to "
+          "finish or select another GPU with -cudaDevice.");
+    }
+#else
+    (void)deviceId;
+#endif
+  }
+
+  ~GpuExecutionLease() {
+#ifdef _WIN32
+    if (mutex_ != nullptr) {
+      ReleaseMutex(mutex_);
+      CloseHandle(mutex_);
+    }
+#endif
+  }
+
+  GpuExecutionLease(const GpuExecutionLease &) = delete;
+  GpuExecutionLease &operator=(const GpuExecutionLease &) = delete;
+
+private:
+#ifdef _WIN32
+  HANDLE mutex_ = nullptr;
+#endif
+};
+
 void appendCTACCacheFileIdentity(std::ostringstream &oss,
                                  const std::string &label,
                                  const std::filesystem::path &path) {
@@ -311,8 +355,17 @@ int runProgram(int argc, char **argv) {
   reportConfigStatus(args);
 
   int cudaDeviceId = 0;
+  std::unique_ptr<GpuExecutionLease> gpuLease;
   try {
     cudaDeviceId = selectCudaDeviceIfRequested(args);
+    gpuLease = std::make_unique<GpuExecutionLease>(cudaDeviceId);
+#ifdef _WIN32
+    logInfo("GPU process lock acquired: device=" +
+            std::to_string(cudaDeviceId) +
+            " pid=" + std::to_string(GetCurrentProcessId()));
+#else
+    logWarn("GPU process lock is unavailable on this non-Windows build.");
+#endif
   } catch (const std::exception &ex) {
     std::cerr << "Error: " << ex.what() << "\n";
     return spect::cli::kExitUserError;

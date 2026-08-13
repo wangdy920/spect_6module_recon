@@ -254,6 +254,26 @@ TEST(SieveParserTest, ConfigCanProtectReconPolicyFromCli) {
   EXPECT_EQ(out.args.saveInterval, 5);
 }
 
+TEST(SieveParserTest, ConfigProtectionDropsRegCtKeepsCtac) {
+  const auto out = parseWithIni(
+      "[Compatibility]\nrecon_sections_override_cli = true\n"
+      "[Regularization]\ntype = None\nbeta = 0\n"
+      "[PSF]\nmode = sieve\nkernel = castor\nfwhm = 1.3\n"
+      "min_sigmas = 3\n"
+      "[Filtering]\nbutterworth_cutoff = 0\n"
+      "butter_apply_stage = output\nsmooth_apply_stage = output\n",
+      {"-opti", "bsrem", "-reg", "TVIsotropic,0.01",
+       "-regCT", "regct_hu_recon220.mhd", "-regCtSigma", "50",
+       "-ctac", "-attMap", "attmap_recon220.mhd"});
+
+  ASSERT_TRUE(out.ok);
+  EXPECT_TRUE(out.args.reconSectionsOverrideCli);
+  EXPECT_FALSE(out.args.useReg);
+  EXPECT_TRUE(out.args.regCtPath.empty());
+  EXPECT_TRUE(out.args.doCTAC);
+  EXPECT_NE(out.args.attMapPath.find("attmap_recon220.mhd"), std::string::npos);
+}
+
 TEST(SieveParserTest, ConfigProtectionDefaultsOff) {
   const auto out = parseWithIni(
       "[PSF]\nmode = sieve\nfwhm = 1.3\nmin_sigmas = 3\n"

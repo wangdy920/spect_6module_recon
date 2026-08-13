@@ -1,12 +1,15 @@
 # tools/ 独立工具
 
-本目录存放独立的命令行工具源文件，编译为单独的可执行文件，**不参与** `SPECT_recon.exe` 主程序链接。它们用于离线转换、诊断、基准和后处理。
+本目录存放独立命令行工具，**不参与** `SPECT_recon.exe` 主程序链接。C++ 工具随主 CMake 构建；Python 脚本手动调用。
 
 ## 工具清单
 
 | 源文件 | 可执行名 | 用途 | 构建方式 |
 |---|---|---|---|
 | `forward_project_multibed.cpp` | `spect_forward_project.exe` | 匹配模型多床位前投影：把已知连续 phantom 经同一 compact-symmetric + PSF + 虚拟 Z 翻转链前投影为 `BedN.bin`，用于无噪 matched-model 闭环验证 | 主 CMake 构建 |
+| `collect_device_recon_diagnostics.ps1` | `bin/tools/collect_device_recon_diagnostics.ps1` | 启动单次设备重建并把进程树、GPU、配置、cache 和完整日志汇总为一个文本文件 | 随安装包复制 |
+| `prep_compact_denom_cache.py` | `python tools/prep_compact_denom_cache.py` | 按默认 `spect_config.ini` 手动预热无 CTAC 的 1–5 床 `auto_<hash>.mhd` denom cache | 终端手动调用，不编译 |
+| `search_compact_perf.py` | `python tools/search_compact_perf.py` | 设备空闲时手动搜索 host cache / mmap / 线程 / branch-batch；中位数墙钟 + 同输入 relL2 `1e-5` | 终端手动调用，不编译 |
 
 ## 用法示例
 
@@ -22,6 +25,30 @@
 ```
 
 产出的 `Bed1.bin … BedN.bin` 可直接喂给 `SPECT_recon -dfList`，形成无噪 matched-model 闭环，用于分离实现缺陷与真实数据的未建模响应。
+
+### 无 CTAC denom 预热
+
+矩阵或默认 PSF/圆柱/坏探头变更后，在仓库根目录手动跑一次（每种床数会预载矩阵，耗时；不要加 `-ctac`）：
+
+```powershell
+python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
+```
+
+脚本写入占位 `Bed1.bin`…`Bed5.bin`（几何匹配、填充 1），以 `-it 1` 调用当前 `SPECT_recon.exe` 和 `multipinhole/config/spect_config.ini`。程序按配置把 cache 写到 exe 相对的 `cache/compact_denom/auto_<hash>.mhd`。`--dry-run` 只打印命令；`--self-check` 只检查占位 BIN 与 metadata。
+
+### 设备空闲性能搜索
+
+RTX 5060 等与签收机（16 GB / 64 GB / NVMe）不同的设备，在空闲时对**现有**环境变量做一次交错重复搜索。不改重建算法，不搜索已编译的 6 GiB 显存预留。先预热 denom cache，再用真实投影：
+
+```powershell
+python tools\search_compact_perf.py `
+  --chunkCSRDir <matrix-dir> `
+  --dfList Bed1.bin;Bed2.bin;Bed3.bin;Bed4.bin;Bed5.bin `
+  --compactDenomCache <exe-dir>\cache\compact_denom\auto_<hash>.mhd `
+  --it 3 --repeats 3
+```
+
+默认套件：`baseline`（unset 环境）、`host_cache_8g/16g/32g`、`mmap_0`、`threads_8`、`branch_batch_0`。决策量是进程墙钟中位数；同输入主体积 relL2 门为 `1e-5`。必须用 `-vb 1`（脚本已固定）：`-vb 2` 会关掉 GPU 驻留 MLEM，计时无效。3 次迭代只用于排序；设备上 20 次约 10 min 时，对胜出项再跑 `--it 20 --repeats 3 --variants baseline,<winner>`。结果在 `recon_out/perf_search_<时间戳>/experiment.json` 与 `decision.md`。
 
 ## 相关文档
 

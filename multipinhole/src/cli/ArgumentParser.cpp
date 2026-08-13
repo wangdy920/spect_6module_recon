@@ -316,6 +316,28 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         std::cerr << "Error: " << matrixDiscoveryError << "\n";
         return ParseResult::ExitFailure;
     }
+    const std::filesystem::path exeDir = executableDir(argv);
+    const auto resolveExeRelative = [&exeDir](const std::string& value) {
+        const std::filesystem::path path(value);
+        return (path.is_absolute() ? path : exeDir / path).lexically_normal();
+    };
+    if (!args.compactDenomCachePath.empty()) {
+        if (args.compactDenomCachePathExplicit) {
+            std::error_code ec;
+            const auto absolute = std::filesystem::absolute(
+                args.compactDenomCachePath, ec);
+            args.compactDenomCachePath =
+                (ec ? std::filesystem::path(args.compactDenomCachePath)
+                    : absolute).lexically_normal().string();
+        } else {
+            args.compactDenomCachePath =
+                resolveExeRelative(args.compactDenomCachePath).string();
+        }
+    }
+    if (!args.compactDenomCacheDir.empty()) {
+        args.compactDenomCacheDir =
+            resolveExeRelative(args.compactDenomCacheDir).string();
+    }
 
     // 5. Normalize derived defaults, then handle -dumpConf and validation.
     normalizeArgs(args);
@@ -369,6 +391,7 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.compactDenomCachePath =
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactDenomCache");
+        a.compactDenomCachePathExplicit = true;
         return true;
     }, {"-compactDenomCache"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1040,6 +1063,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         chunkDir = cfg.getString("Matrix", "chunk_csr_dir");
     if (!chunkDir.empty())
         a.chunkCSRDir = normalizePath(chunkDir);
+    a.compactDenomCachePath = normalizePath(cfg.getString(
+        "SystemMatrix", "compact_denom_cache_path",
+        a.compactDenomCachePath));
+    a.compactDenomCacheDir = normalizePath(cfg.getString(
+        "SystemMatrix", "compact_denom_cache_dir", a.compactDenomCacheDir));
 
     // Regularization
     std::string regT = cfg.getString("Regularization", "type");
@@ -1911,8 +1939,9 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "sparse = cuda\n";
     std::cout << "butter = cufft\n\n";
 
-    std::cout << "[Matrix]\n";
-    std::cout << "compact_denom_cache = " << (a.compactDenomCachePath.empty() ? "(none)" : a.compactDenomCachePath) << "\n";
+    std::cout << "[SystemMatrix]\n";
+    std::cout << "compact_denom_cache_path = " << (a.compactDenomCachePath.empty() ? "(auto)" : a.compactDenomCachePath) << "\n";
+    std::cout << "compact_denom_cache_dir = " << (a.compactDenomCacheDir.empty() ? "recon_out/compact_denom_cache (cwd legacy)" : a.compactDenomCacheDir) << "\n";
     std::cout << "chunk_csr_dir = " << (a.chunkCSRDir.empty() ? "(none)" : a.chunkCSRDir) << "\n\n";
 
     std::cout << "[MultiBed]\n";
@@ -1980,7 +2009,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  output_filters_overwrite_primary  [InputOutput] write output Smooth->Butter chain to the unsuffixed volume\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb\n";
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
-    std::cout << "  -compactDenomCache <mhd> Reuse/save compact global denominator cache; use separate files for PSF/no-PSF/FWHM/bed variants\n";
+    std::cout << "  -compactDenomCache <mhd> Exact compact denominator cache path (overrides [SystemMatrix] cache path/dir)\n";
     std::cout << "  -ctacFactorCacheDir <dir> Directory for cached CTAC attenuation factor tables (default: recon_out/ctac_factor_cache)\n";
     std::cout << "  -attMap <path>           Attenuation map (mu, mm^-1) for attenuation correction / Chang's AC\n";
     std::cout << "  -bProj <path>            Background/scatter projection MAT/BIN\n";

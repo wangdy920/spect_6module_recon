@@ -7,6 +7,9 @@ install(TARGETS SPECT_recon
 install(FILES "${CMAKE_SOURCE_DIR}/CHANGELOG.md"
   DESTINATION ".")
 
+install(FILES "${CMAKE_SOURCE_DIR}/tools/collect_device_recon_diagnostics.ps1"
+  DESTINATION "${CMAKE_INSTALL_BINDIR}/tools")
+
 install(DIRECTORY "${SPECT_RECON_SOURCE_DIR}/config/"
   DESTINATION "${CMAKE_INSTALL_BINDIR}/config"
   FILES_MATCHING

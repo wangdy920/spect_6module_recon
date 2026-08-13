@@ -119,6 +119,8 @@ struct ReconArgs {
 
     // ========== CSR Cache ==========
     std::string compactDenomCachePath;     ///< Optional cached compact denominator MHD
+    bool compactDenomCachePathExplicit = false; ///< True if -compactDenomCache was used
+    std::string compactDenomCacheDir;      ///< Directory for auto_<manifest-hash> denominator caches
     std::string chunkCSRDir;               ///< Directory with metadata.bin + chunk_*.csrb
     bool chunkCSRDirExplicit = false;      ///< True if -chunkCSRDir was used explicitly
 

@@ -233,6 +233,35 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
   std::filesystem::remove_all(dir);
 }
 
+TEST_F(MultiBedCompactNumeratorTest,
+       LowHostCacheStillRunsGpuResidentWarmup) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_low_host_cache_resident_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1);
+
+  testing::internal::CaptureStderr();
+  const bool prepared = spect::cuda::prepareCompactChunkExecutionCUDA(chunks);
+  const std::string log = testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(prepared);
+  EXPECT_NE(log.find("host cache 0 MiB is below matrix size"),
+            std::string::npos);
+  EXPECT_NE(log.find("Resident matrix cache:"), std::string::npos);
+
+  EXPECT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
 TEST_F(MultiBedCompactNumeratorTest, ProjectionBufferMutationRefreshesCache) {
   const auto meta = makeToySym90ZMeta();
   const auto compact = makeToyCompactCSR();

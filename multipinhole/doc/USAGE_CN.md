@@ -63,7 +63,7 @@ compact chunk 矩阵默认识别优先级：
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
 | `-chunkCSRDir <dir>` | compact chunk 目录，包含 `metadata.bin + chunk_*.csrb`；**唯一矩阵入口** |
-| `-compactDenomCache <mhd>` | 复用/保存 compact global denominator cache；PSF/FWHM/床位组合需分文件 |
+| `-compactDenomCache <mhd>` | 显式复用/保存一个 compact global denominator cache，优先于 `[SystemMatrix]` 的固定路径和自动目录 |
 | `-ctacFactorCacheDir <dir>` | 复用/保存 CTAC 逐床位、逐角度衰减系数表缓存；默认 `recon_out/ctac_factor_cache` |
 | `-projectionResidual [on\|off]` | 最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
 | `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector` 空列表 |
@@ -73,7 +73,12 @@ compact chunk 矩阵默认识别优先级：
 
 多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
-无 CTAC 的 `-chunkCSRDir` 会自动使用 `recon_out/compact_denom_cache/auto_<manifest-hash>.mhd`；manifest 包含矩阵、metadata、全局维度、床位 Z 起点和 PSF 口径，不匹配时不会复用。
+无 CTAC 时，程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。manifest 包含矩阵、metadata、全局维度、床位 Z 起点、PSF 和 normfactor 口径，不匹配时不会复用；不同床位数必须分开。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
+
+```powershell
+python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
+python tools\prep_compact_denom_cache.py --help
+```
 
 `bad_dector` 是带方括号的逐行列表，优先使用最简单的全局探测器编号 `0..95`；也兼容 `link-<3|4>-FPGA-<0..5>-dector-<0..7>` 详细格式。编号遵循采集预处理的 `spect_detector_index`：`global = ((link==4 ? 6 : 0) + FPGA)*8 + dector`。读取任一格式后都会补齐另一种标识；跨格式重复项会报错。例如：
 
@@ -124,6 +129,14 @@ compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subset
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | 关闭 | 设为 `0` 才对矩阵 payload 使用 mmap；当前低时延路线不依赖 mmap |
 
 实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。32 GB 主存可降低 host cache 运行，但不承诺同等吞吐。共享 GPU 上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
+
+设备 GPU（例如 RTX 5060）与签收机不同时，空闲可手动搜索上述环境变量，不要改重建路径：
+
+```powershell
+python tools\search_compact_perf.py --chunkCSRDir <matrix> --dfList <beds> --compactDenomCache <auto_hash.mhd> --it 3 --repeats 3
+```
+
+详见 `tools/README.md`。6 GiB device reserve 与 2 个 transient slot 是编译常量，不在此搜索范围内。
 
 ### BSREM
 

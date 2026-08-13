@@ -10,6 +10,19 @@
 powershell -ExecutionPolicy Bypass -File scripts\run_260601_regression.ps1
 ```
 
+## 设备端慢重建/重复进程采集
+
+安装包内脚本位于 `bin\tools`。它只启动一个重建进程，并把完整命令、版本/hash、配置、矩阵/cache、全部同名 PID/父 PID/命令行、每 5 秒 GPU 状态和重建日志写进一个 UTF-8 文本：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 `
+  -InputPath "D:\data\case\SPECT\Bed1.bin;D:\data\case\SPECT\Bed2.bin" -MultiBedList `
+  -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 `
+  -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
+```
+
+`-MatrixDir` 默认从配置或 exe 同级唯一矩阵自动发现。若要固定 denom 文件，追加 `-DenomCachePath ".\bin\cache\compact_denom\<file>.mhd"`。重建失败时已采集内容仍保留；回传这一份 `spect_device_diagnostics.txt` 即可。
+
 相关通用比较器：
 
 | 脚本 | 用途 |

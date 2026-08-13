@@ -325,11 +325,15 @@ uint64_t fnv1a64(const std::string &text) {
   return value;
 }
 
-std::filesystem::path autoCompactDenomCachePath(const std::string &manifest) {
+std::filesystem::path autoCompactDenomCachePath(const ReconArgs &args,
+                                                const std::string &manifest) {
   std::ostringstream name;
   name << "auto_" << std::hex << fnv1a64(manifest) << ".mhd";
-  return normalizePathForCache(
-      std::filesystem::path("recon_out") / "compact_denom_cache" / name.str());
+  const std::filesystem::path dir = args.compactDenomCacheDir.empty()
+                                        ? std::filesystem::path("recon_out") /
+                                              "compact_denom_cache"
+                                        : args.compactDenomCacheDir;
+  return normalizePathForCache(dir / name.str());
 }
 
 std::string abbreviateManifestLine(const std::string &line) {
@@ -584,11 +588,23 @@ void saveCompactDenomCache(const std::filesystem::path &cacheMhdPath,
   const auto parent = cacheMhdPath.parent_path();
   if (!parent.empty())
     std::filesystem::create_directories(parent, ec);
+  if (ec)
+    throw std::runtime_error("Failed creating compact denom cache directory: " +
+                             parent.string() + ": " + ec.message());
+  const auto manifestPath = compactDenomManifestPath(cacheMhdPath);
+  ec.clear();
+  const bool manifestExists = std::filesystem::exists(manifestPath, ec);
+  if (ec)
+    throw std::runtime_error("Failed checking compact denom cache manifest: " +
+                             manifestPath.string() + ": " + ec.message());
+  if (manifestExists && !std::filesystem::remove(manifestPath, ec)) {
+    throw std::runtime_error("Failed invalidating compact denom cache manifest: " +
+                             manifestPath.string() + ": " + ec.message());
+  }
   spect::io::writeMHD(cacheMhdPath.string(), denom, geometry.nx, geometry.ny,
                       geometry.nz, static_cast<float>(geometry.vx),
                       static_cast<float>(geometry.vy),
                       static_cast<float>(geometry.vz), true);
-  const auto manifestPath = compactDenomManifestPath(cacheMhdPath);
   std::ofstream manifestOut(manifestPath, std::ios::binary);
   if (!manifestOut)
     throw std::runtime_error("Failed writing compact denom cache manifest: " +
@@ -704,9 +720,9 @@ std::vector<double> runCompactSymmetricReconstruction(
         }
         if (compactDenomCachePath.empty() && !compactHasAttenuation) {
           compactDenomCachePath =
-              autoCompactDenomCachePath(compactDenomManifest);
-          logDebug("compact denom auto-cache path: " +
-                   compactDenomCachePath.string());
+              autoCompactDenomCachePath(args, compactDenomManifest);
+          logInfo("compact denom auto-cache path: " +
+                  compactDenomCachePath.string());
         }
         bool loadedCompactDenomCache = false;
         if (!compactDenomCachePath.empty()) {
@@ -1470,6 +1486,29 @@ std::vector<double> runCompactSymmetricReconstruction(
             std::chrono::duration<double>(ProfileClock::now() -
                                           fullCommandStart)
                 .count();
+
+        std::ostringstream perfSummary;
+        perfSummary << std::fixed << std::setprecision(3)
+                    << "[PERF] denom_cache="
+                    << (compactDenomCachePath.empty()
+                            ? "disabled"
+                            : (loadedCompactDenomCache ? "hit" : "miss"))
+                    << " projection_load_s="
+                    << compactTiming.projectionLoadSeconds
+                    << " csr_open_s="
+                    << compactTiming.csrMapOrLoadSeconds
+                    << " denom_and_matrix_prepare_s="
+                    << compactTiming.compactSensitivitySeconds
+                    << " iteration_core_s="
+                    << (compactTiming.compactForwardRatioBackwardSeconds +
+                        compactTiming.mlemUpdateSeconds +
+                        compactTiming.regGradientSeconds +
+                        compactTiming.butterworthSeconds)
+                    << " load_to_iteration_done_s="
+                    << compactTiming.totalLoadToIterationDoneSeconds
+                    << " full_command_s="
+                    << compactTiming.fullCommandWallSeconds;
+        logInfo(perfSummary.str());
 
         logDebug(formatProfileEntry("projection_load",
                                    compactTiming.projectionLoadSeconds, 1));

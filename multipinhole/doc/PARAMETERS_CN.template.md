@@ -32,6 +32,8 @@ cd D:\path\to\<package_root>
 3. 否则如果 `.\bin\matrix\` 下只有一个包含 `metadata.bin` 的矩阵目录，自动使用该目录。
 4. 如果有多个矩阵目录且未指定，程序直接报错并列出候选目录。
 
+denom cache 识别规则：显式 `-compactDenomCache <mhd>` 优先（CLI 相对路径按终端 CWD 解析）；否则使用 `[SystemMatrix] compact_denom_cache_path` 的固定文件；再否则在 `compact_denom_cache_dir` 下按 manifest hash 自动选择 `auto_<hash>.mhd`。两个 INI 路径均相对 `SPECT_recon.exe` 目录解析，发布默认目录为 `.\bin\cache\compact_denom\`；不同矩阵、PSF、床位几何或 normfactor 不会误复用。
+
 ## 推荐基础 MLEM
 
 如果发布包中只有一个 `.\bin\matrix\<matrix_name>\metadata.bin`：
@@ -98,6 +100,7 @@ seam_xy_align = 0
 - `-it N[:save]`：迭代次数与保存间隔，例如 `50:5`。
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
+- `-compactDenomCache <mhd>`：显式指定一个 denom cache 文件，覆盖 INI 的固定路径和自动 hash 目录。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain PSF；发布默认 `1.3,3`、模式 `sieve`、`psfKernel=castor`。`-psfKernel adjoint` 使用采样 Gaussian + 镜像边界 + 真伴随；`-psfKernel castor` 使用 erf 体素积分核 + 零边界 + Z-only 归一化，反向复用正向。
 - 发布 `[Filtering]` 默认 `smooth_apply_stage=output`、`butter_apply_stage=output`：保留未滤波主输出，并从同一主输出独立写出 `_smooth`（CASToR 0.30 mm/3σ）与 `_butter`（5 cycles/cm、order 8）。`output_nonnegative_clamp=true` 在每个副本滤波后钳为非负；设为 `false` 仅用于原型线性旁瓣对齐。
 - `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
