@@ -2,10 +2,12 @@
 """Resample a paired CT DICOM series onto the SPECT reconstruction grid."""
 
 import argparse
+import configparser
 import json
 import re
 import sys
 import warnings
+from copy import deepcopy
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -15,6 +17,7 @@ from pydicom.dataset import FileMetaDataset
 from pydicom.uid import (
     CTImageStorage,
     ExplicitVRLittleEndian,
+    PositronEmissionTomographyImageStorage,
     SecondaryCaptureImageStorage,
     generate_uid,
 )
@@ -31,10 +34,13 @@ DEVICE_BED_STEP_MM = 16.8
 DEVICE_TARGET_SPACING_XYZ_MM = np.array([0.3, 0.3, 0.3])
 DEVICE_IMAGE_SHAPE_XY = (108, 108)
 DEVICE_PHYSICAL_BEDS = range(1, 6)
-# Frozen CT←SPECT device translation from 2026-08-13 MDP spine calibration
-# (median of three 20260729 MDP mice). Per-scan refine is a separate clamped
-# 3-DOF translation on spine+knees; do not treat this vector as landmark TRE.
-MDP_DEVICE_TRANSLATION_PATH = HERE / "ct_spect_mdp_device_translation.json"
+# Frozen CT←SPECT device translation (2026-08-13 MDP spine median).
+# INI is the load/save format; do not treat this vector as landmark TRE.
+# The reconstruction executable does not load this registration INI.
+MDP_DEVICE_REGISTRATION_INI = (
+    HERE.parent / "multipinhole" / "config" / "ct_spect_registration.ini"
+)
+REGISTRATION_SECTION = "Registration"
 # 220-layer production matrix is the same 0.3 mm / 16.8 mm bed step, centered
 # on the device 160/108 FOV: +6 voxels XY (1.8 mm) and +30 voxels Z (9 mm)
 # on each side of every bed.
@@ -69,18 +75,47 @@ def _parse_xyz(value: str) -> np.ndarray:
     return values
 
 
-def _parse_fixed_translation(value: str) -> np.ndarray:
+def _parse_fixed_translation(value: str):
     key = value.strip().lower()
     if key in ("mdp_device", "default"):
-        if not MDP_DEVICE_TRANSLATION_PATH.is_file():
-            raise argparse.ArgumentTypeError(
-                f"missing {MDP_DEVICE_TRANSLATION_PATH.name}; pass explicit x,y,z")
-        payload = json.loads(MDP_DEVICE_TRANSLATION_PATH.read_text(encoding="utf-8"))
-        values = np.asarray(payload["translation_xyz_mm"], dtype=float)
-        if values.shape != (3,) or not np.all(np.isfinite(values)):
-            raise argparse.ArgumentTypeError("mdp_device translation must be three finite values")
-        return values
+        return key
     return _parse_xyz(value)
+
+
+def _read_ini(path: Path) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    if not path.is_file():
+        raise RuntimeError(f"missing registration INI {path}")
+    if not parser.read(path, encoding="utf-8"):
+        raise RuntimeError(f"failed to read registration INI {path}")
+    return parser
+
+
+def load_frozen_translation(path: Path) -> np.ndarray:
+    cfg = _read_ini(path)
+    if not cfg.has_section(REGISTRATION_SECTION):
+        raise RuntimeError(f"{path} missing [{REGISTRATION_SECTION}]")
+    values = _parse_xyz(cfg.get(REGISTRATION_SECTION, "translation_xyz_mm"))
+    if values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise RuntimeError(
+            f"{path} [Registration] translation_xyz_mm must be three finite values")
+    return values
+
+
+def _xyz_ini(values) -> str:
+    return ",".join(f"{float(v):.6g}" for v in np.asarray(values, dtype=float).reshape(3))
+
+
+def write_registration_ini(path: Path, fields: dict[str, str]) -> None:
+    lines = [
+        "; SPECT CT registration parameters. Key=value INI for ConfigParser.",
+        "; xyz triples are comma-separated with no spaces (C++ split like voxel_size).",
+        f"[{REGISTRATION_SECTION}]",
+    ]
+    for key, value in fields.items():
+        lines.append(f"{key} = {value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _fixed_bed_origins(bed1_origin: np.ndarray, normal: np.ndarray,
@@ -629,10 +664,19 @@ def fusion_rgb_volume(ct_hu: np.ndarray, activity: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(fused * 255.0), 0, 255).astype(np.uint8)
 
 
+_PET_ONLY_TAGS = (
+    "Units", "DecayCorrection", "CountsSource", "DoseCalibrationFactor",
+    "FrameReferenceTime", "ImageIndex", "ImagesInAcquisition", "NumberOfFrames",
+    "NumberOfTimeSlices", "RadiopharmaceuticalInformationSequence",
+    "ReconstructionMethod", "SUVType", "SeriesType", "AcquisitionDateTime",
+    "AcquisitionNumber", "CorrectedImage",
+)
+
+
 def _copy_geometry_dataset(template, sop_class, series_uid: str, instance_uid: str,
                            series_number: int, instance_number: int,
                            series_description: str):
-    ds = template.copy()
+    ds = deepcopy(template)
     ds.file_meta = FileMetaDataset()
     ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     ds.file_meta.MediaStorageSOPClassUID = sop_class
@@ -647,6 +691,12 @@ def _copy_geometry_dataset(template, sop_class, series_uid: str, instance_uid: s
     ds.is_little_endian = True
     ds.is_implicit_VR = False
     return ds
+
+
+def _drop_tags(ds, names) -> None:
+    for name in names:
+        if name in ds:
+            delattr(ds, name)
 
 
 def _dicom_ds(value: float) -> str:
@@ -704,35 +754,40 @@ def write_aligned_dicom_overlay(out_dir: Path, templates: list, ct_hu: np.ndarra
     spect_series = generate_uid()
     fusion_series = generate_uid()
     fusion = fusion_rgb_volume(ct_hu, spect_activity)
-    ct_hu16 = np.clip(np.rint(ct_hu), -32768, 32767).astype(np.int16)
-    spect_u16, spect_slope, spect_intercept = _scale_activity_uint16(spect_activity)
+    # Device CT is unsigned stored = HU + 1000. SPECT on this scanner is
+    # Modality=PT / PET SOP Class so BIViewer fusion accepts PET/CT.
+    ct_stored = np.clip(np.rint(ct_hu + 1000.0), 0, 65535).astype(np.uint16)
+    spect_sop = str(getattr(
+        templates[0], "SOPClassUID", PositronEmissionTomographyImageStorage))
+    spect_modality = str(getattr(templates[0], "Modality", "PT") or "PT")
+    spect_desc = str(getattr(templates[0], "SeriesDescription", None) or "SPECT Reconstruction")
 
     for z, template in enumerate(templates):
         instance = z + 1
         name = f"image_{z:04d}.dcm"
         ct_ds = _copy_geometry_dataset(
-            template, CTImageStorage, ct_series, generate_uid(), 101, instance,
-            "CT registered to SPECT DICOM grid")
+            template, CTImageStorage, ct_series, generate_uid(), 101, instance, "CT")
         ct_ds.StudyInstanceUID = study_uid
         ct_ds.FrameOfReferenceUID = frame_uid
         ct_ds.Modality = "CT"
-        ct_ds.ImageType = ["DERIVED", "SECONDARY", "AXIAL"]
+        ct_ds.ImageType = ["DERIVED", "PRIMARY", "AXIAL"]
+        ct_ds.Manufacturer = "BAY IMAGIMG"
         ct_ds.WindowCenter = "300"
         ct_ds.WindowWidth = "1500"
         ct_ds.RescaleType = "HU"
-        _save_mono_slice(ct_ds, ct_hu16[z], ct_dir / name, True, 1.0, 0.0)
+        _drop_tags(ct_ds, _PET_ONLY_TAGS + ("ManufacturerModelName",))
+        _save_mono_slice(ct_ds, ct_stored[z], ct_dir / name, False, 1.0, -1000.0)
 
         spect_ds = _copy_geometry_dataset(
-            template, str(template.SOPClassUID), spect_series, generate_uid(),
-            102, instance, "SPECT activity (registration reference)")
+            template, spect_sop, spect_series, generate_uid(), 102, instance, spect_desc)
         spect_ds.StudyInstanceUID = study_uid
         spect_ds.FrameOfReferenceUID = frame_uid
-        _save_mono_slice(
-            spect_ds, spect_u16[z], spect_dir / name, False, spect_slope, spect_intercept)
+        spect_ds.Modality = spect_modality
+        spect_ds.save_as(spect_dir / name, write_like_original=False)
 
         fusion_ds = _copy_geometry_dataset(
             template, SecondaryCaptureImageStorage, fusion_series, generate_uid(),
-            103, instance, "CT gray + SPECT hot overlay")
+            103, instance, "overlay RGB")
         fusion_ds.StudyInstanceUID = study_uid
         fusion_ds.FrameOfReferenceUID = frame_uid
         fusion_ds.Modality = "OT"
@@ -745,25 +800,25 @@ def write_aligned_dicom_overlay(out_dir: Path, templates: list, ct_hu: np.ndarra
         fusion_ds.BitsStored = 8
         fusion_ds.HighBit = 7
         fusion_ds.PixelRepresentation = 0
-        fusion_ds.ImageType = ["DERIVED", "SECONDARY", "AXIAL"]
-        for tag in ("RescaleSlope", "RescaleIntercept", "RescaleType", "WindowCenter",
-                    "WindowWidth", "PixelPaddingValue"):
-            if tag in fusion_ds:
-                delattr(fusion_ds, tag)
+        fusion_ds.ImageType = ["DERIVED", "SECONDARY"]
+        _drop_tags(fusion_ds, _PET_ONLY_TAGS + (
+            "RescaleSlope", "RescaleIntercept", "RescaleType", "WindowCenter",
+            "WindowWidth", "PixelPaddingValue"))
         fusion_ds.PixelData = np.ascontiguousarray(fusion[z]).tobytes()
         fusion_ds.save_as(fusion_dir / name, write_like_original=False)
 
     readme = out_dir / "README.txt"
     readme.write_text(
-        "Aligned CT/SPECT DICOM for overlay review.\n"
-        "ct/     registered CT HU on the SPECT DICOM grid\n"
-        "spect/  SPECT activity, same grid / FoR / IPP as ct/\n"
-        "fusion/ RGB overlay (SPECT hot only where CT HU > -900)\n"
+        "Device fusion viewer (PET/CT, PET/MR, SPECT/CT) needs one CT series\n"
+        "and one PT/NM series. Import only ct/ and spect/. Do not import fusion/\n"
+        "(RGB OT) and do not import the parent folder as a whole.\n"
         "\n"
-        "Load ct/ and spect/ together in a fusion viewer. They share\n"
-        "FrameOfReferenceUID and ImagePositionPatient; the rigid shift is\n"
-        "already in the CT voxels. Do not apply spect_start_backward_mm again.\n"
-        "Head-end CT without SPECT is FOV coverage, not a leftover Z pose error.\n",
+        "ct/     registered CT (Modality=CT), HU stored as unsigned + intercept -1000\n"
+        "spect/  SPECT copied as Modality=PT (device original tagging)\n"
+        "fusion/ RGB overlay for generic viewers; not for BIViewer fusion\n"
+        "\n"
+        "Both series share FrameOfReferenceUID and ImagePositionPatient.\n"
+        "The rigid shift is in the CT voxels. Head-end CT without SPECT is FOV.\n",
         encoding="utf-8",
     )
     return {
@@ -783,19 +838,6 @@ def write_aligned_dicom_overlay(out_dir: Path, templates: list, ct_hu: np.ndarra
         "registration_in": "ct_voxels",
         "readme": str(readme),
     }
-
-
-def _scale_activity_uint16(activity: np.ndarray) -> tuple[np.ndarray, float, float]:
-    finite = activity[np.isfinite(activity)]
-    if finite.size == 0:
-        return np.zeros(activity.shape, dtype=np.uint16), 1.0, 0.0
-    lo = float(np.min(finite))
-    hi = float(np.max(finite))
-    if hi <= lo:
-        return np.zeros(activity.shape, dtype=np.uint16), 1.0, lo
-    slope = (hi - lo) / 65535.0
-    stored = np.clip(np.rint((activity - lo) / slope), 0, 65535).astype(np.uint16)
-    return stored, slope, lo
 
 
 def _overlay_rgb(bone_view: np.ndarray, hot_view: np.ndarray) -> np.ndarray:
@@ -934,7 +976,10 @@ def main() -> int:
     parser.add_argument(
         "--fixed-translation-xyz", type=_parse_fixed_translation,
         help="Frozen device translation (mm) applied before per-scan refine. "
-             "Use mdp_device for the calibrated MDP spine median, or x,y,z")
+             "Use mdp_device to load multipinhole/config/ct_spect_registration.ini, or x,y,z")
+    parser.add_argument(
+        "--registration-ini", type=Path, default=MDP_DEVICE_REGISTRATION_INI,
+        help="INI with [Registration] translation_xyz_mm; also the format written next to --output")
     parser.add_argument(
         "--refine-translation-limit-mm", type=float, default=2.0,
         help="Clamp per-scan 3-DOF refine after the frozen translation; ignored without --fixed-translation-xyz")
@@ -963,6 +1008,11 @@ def main() -> int:
         help="Write CT/SPECT/fusion DICOM series on the SPECT DICOM grid "
              "(shared FoR and IPP; registration is in the CT voxels)")
     args = parser.parse_args()
+    if isinstance(args.fixed_translation_xyz, str):
+        try:
+            args.fixed_translation_xyz = load_frozen_translation(args.registration_ini)
+        except (RuntimeError, configparser.Error, argparse.ArgumentTypeError) as exc:
+            raise SystemExit(f"--fixed-translation-xyz mdp_device: {exc}") from exc
     profile = PROFILES[args.profile]
     if args.bed_nz is None:
         args.bed_nz = int(profile["bed_nz"])
@@ -1344,6 +1394,26 @@ def main() -> int:
                 f"DICOM-grid CT {spect_dicom_hu.shape}")
         manifest["aligned_dicom"] = write_aligned_dicom_overlay(
             args.aligned_dicom_dir, spect, spect_dicom_hu, spect_activity)
+    refine_xyz = np.zeros(3, dtype=float)
+    if residual_metrics is not None and residual_metrics.get("applied_translation_xyz_mm") is not None:
+        refine_xyz = np.asarray(residual_metrics["applied_translation_xyz_mm"], dtype=float)
+    frozen_xyz = (
+        np.zeros(3, dtype=float) if fixed_translation is None
+        else np.asarray(fixed_translation, dtype=float))
+    registration_ini = args.output.with_name(args.output.stem + "_registration.ini")
+    write_registration_ini(registration_ini, {
+        "profile": str(args.profile),
+        "fixed_translation_xyz_mm": _xyz_ini(frozen_xyz),
+        "refine_translation_xyz_mm": _xyz_ini(refine_xyz),
+        "total_translation_xyz_mm": _xyz_ini(frozen_xyz + refine_xyz),
+        "origin_shift_xyz_mm": _xyz_ini(origin_shift),
+        "target_origin_xyz_mm": _xyz_ini(target_origin),
+        "dicom_target_origin_xyz_mm": _xyz_ini(dicom_target_origin),
+        "attmap_bed_order": str(args.attmap_bed_order),
+        "z_bed_flip": "1" if args.z_bed_flip else "0",
+        "frozen_ini": str(args.registration_ini),
+    })
+    manifest["registration_ini"] = str(registration_ini)
     args.output.with_name(args.output.stem + "_manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8")
     return 0
@@ -1417,6 +1487,24 @@ def self_check() -> None:
         np.array([[[10.0, 10.0]]], dtype=np.float32))
     assert fused.shape == (1, 1, 2, 3)
     assert fused[0, 0, 0].sum() < fused[0, 0, 1].sum()
+    frozen = load_frozen_translation(MDP_DEVICE_REGISTRATION_INI)
+    assert np.allclose(frozen, [-0.225, 1.6, -11.1])
+    frozen_cfg = _read_ini(MDP_DEVICE_REGISTRATION_INI)
+    assert frozen_cfg.getfloat(REGISTRATION_SECTION, "refine_limit_mm") == 2.0
+    assert frozen_cfg.getfloat(REGISTRATION_SECTION, "residual_gate_mm") == 0.3
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        tmp = Path(folder) / "applied.ini"
+        write_registration_ini(tmp, {
+            "fixed_translation_xyz_mm": _xyz_ini(frozen),
+            "refine_translation_xyz_mm": "0,0,0.6",
+            "total_translation_xyz_mm": _xyz_ini(frozen + np.array([0.0, 0.0, 0.6])),
+            "z_bed_flip": "1",
+        })
+        applied = _read_ini(tmp)
+        loaded = _parse_xyz(applied.get(REGISTRATION_SECTION, "total_translation_xyz_mm"))
+        assert np.allclose(loaded, frozen + np.array([0.0, 0.0, 0.6]))
+        assert applied.get(REGISTRATION_SECTION, "z_bed_flip") == "1"
 
 
 if __name__ == "__main__":

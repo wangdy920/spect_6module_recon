@@ -11,6 +11,7 @@ install(DIRECTORY "${SPECT_RECON_SOURCE_DIR}/config/"
   DESTINATION "${CMAKE_INSTALL_BINDIR}/config"
   FILES_MATCHING
   PATTERN "*.ini"
+  PATTERN "spect_config.ct_guided.ini" EXCLUDE
   PATTERN "*.conf"
   PATTERN "bad_dector")
 

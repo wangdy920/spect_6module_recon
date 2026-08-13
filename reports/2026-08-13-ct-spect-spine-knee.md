@@ -15,7 +15,7 @@ Production path:
 
 Z of the combined vector is the spine midline xcorr (integer voxel lag × 0.3 mm). XY is the median of the spine ridge and knees that agree with the spine within 2 mm. Knees that disagree are recorded but not used for the transform.
 
-Frozen vector (`scripts/ct_spect_mdp_device_translation.json`):
+Frozen vector (`multipinhole/config/ct_spect_registration.ini`, `[Registration] translation_xyz_mm`):
 
 `(-0.225, 1.600, -11.100) mm`
 

@@ -1,0 +1,104 @@
+{
+  "decision": "undetermined",
+  "note": "Exploratory CTAC smoke at matched MLEM iteration. Not a promotion gate. 0.3 mm registration figure is diagnostic TRE-magnitude, not calibrated TRE.",
+  "output": {
+    "no_ctac": {
+      "finite": true,
+      "nonneg": true,
+      "nonzero": true,
+      "shape_zyx": [
+        290,
+        100,
+        100
+      ],
+      "sum": 1479777.1555432463,
+      "max": 14.839403548297105,
+      "p99_5": 6.5585895818532585
+    },
+    "ctac": {
+      "finite": true,
+      "nonneg": true,
+      "nonzero": true,
+      "shape_zyx": [
+        290,
+        100,
+        100
+      ],
+      "sum": 1507944.191654271,
+      "max": 15.898150516523524,
+      "p99_5": 6.731930989831093
+    },
+    "sum_ratio_ctac_to_no_ctac": 1.0190346472139478,
+    "relative_l2": 0.06513922331454608,
+    "normalized_relative_l2": 0.05263750048092156,
+    "no_ctac_blend_entry": {
+      "seam_count": 4,
+      "seam_window": 2,
+      "seam_indices_z": [
+        56,
+        112,
+        168,
+        224
+      ],
+      "seam_peaks": [
+        0.009576699489355078,
+        0.04949542500855786,
+        0.0046950219908598045,
+        0.05464891112155279
+      ],
+      "seam_peak_max": 0.05464891112155279,
+      "seam_baseline_mean": 0.0159120865124255,
+      "seam_score": 3.434427727556553
+    },
+    "ctac_blend_entry": {
+      "seam_count": 4,
+      "seam_window": 2,
+      "seam_indices_z": [
+        56,
+        112,
+        168,
+        224
+      ],
+      "seam_peaks": [
+        0.009315830416232351,
+        0.048340676683070294,
+        0.004338780733062875,
+        0.055445872165593046
+      ],
+      "seam_peak_max": 0.055445872165593046,
+      "seam_baseline_mean": 0.01642697719041885,
+      "seam_score": 3.3752936722851383
+    }
+  },
+  "denom": {
+    "no_ctac": {
+      "finite": true,
+      "nonneg": true,
+      "nonzero": true,
+      "shape_zyx": [
+        1100,
+        120,
+        120
+      ],
+      "sum": 3887968.539679734,
+      "max": 0.965570330619812,
+      "p99_5": 0.9518921506404876
+    },
+    "ctac": {
+      "finite": true,
+      "nonneg": true,
+      "nonzero": true,
+      "shape_zyx": [
+        1100,
+        120,
+        120
+      ],
+      "sum": 3734531.0652277153,
+      "max": 0.9610680341720581,
+      "p99_5": 0.9277149802446365
+    },
+    "sum_ratio_ctac_to_no_ctac": 0.9605353096646564,
+    "relative_l2": 0.048326742965243516,
+    "changed": true
+  }
+}
