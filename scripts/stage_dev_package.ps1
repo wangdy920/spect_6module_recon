@@ -4,6 +4,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ([string]::IsNullOrWhiteSpace($MatrixName) -or
+    $MatrixName -in @(".", "..") -or
+    [IO.Path]::GetFileName($MatrixName) -ne $MatrixName) {
+    throw "MatrixName must be one directory name, got: $MatrixName"
+}
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = Join-Path $repo "staging\SPECT_recon_rc_dev"
@@ -30,15 +35,35 @@ $matrixDst = Join-Path $matrixRoot $MatrixName
 if (Test-Path -LiteralPath $matrixSrc) {
     New-Item -ItemType Directory -Force -Path $matrixRoot | Out-Null
     if (Test-Path -LiteralPath $matrixDst) {
-        Remove-Item -LiteralPath $matrixDst -Force -Recurse
+        $existingMatrix = Get-Item -LiteralPath $matrixDst -Force
+        if (($existingMatrix.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # Remove only the old development junction; never recurse into its
+            # read-only source matrix.
+            [IO.Directory]::Delete($matrixDst)
+        } elseif (-not $existingMatrix.PSIsContainer) {
+            throw "Matrix package path is not a directory: $matrixDst"
+        }
     }
-    New-Item -ItemType Junction -Path $matrixDst -Target $matrixSrc | Out-Null
-    Write-Host "[stage] matrix junction: bin\matrix\$MatrixName -> test_data\6module\$MatrixName"
+    if (-not (Test-Path -LiteralPath $matrixDst)) {
+        New-Item -ItemType Directory -Path $matrixDst | Out-Null
+    }
+    if (Test-Path -LiteralPath (Join-Path $matrixDst "metadata.bin")) {
+        Write-Host "[stage] keep existing package matrix: bin\matrix\$MatrixName"
+    } else {
+        $matrixLink = Join-Path $matrixDst "SOURCE_MATRIX_DIRECTORY.txt"
+        @(
+            "Development package matrix source (not copied):",
+            $matrixSrc,
+            "",
+            "Use scripts/package_rc.ps1 -IncludeMatrix for a self-contained field package."
+        ) | Set-Content -LiteralPath $matrixLink -Encoding UTF8
+        Write-Host "[stage] matrix placeholder: bin\matrix\$MatrixName (source matrix remains read-only)"
+    }
 } else {
-    Write-Host "[stage] skip matrix junction (missing $matrixSrc)"
+    Write-Host "[stage] skip matrix placeholder (missing $matrixSrc)"
 }
 
 Write-Host "[stage] package root: $PackageRoot"
 Write-Host "[stage] invoke from package root:"
 Write-Host "  cd $PackageRoot"
-Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -o recon_output -it 50:5"
+Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -chunkCSRDir `"$matrixSrc`" -o recon_output -it 50:5"

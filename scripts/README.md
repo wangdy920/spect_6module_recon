@@ -81,8 +81,8 @@ python scripts\export_recon_volume.py `
 |---|---|
 | `clean_extra_builds.ps1` | 清理冗余构建目录 |
 | `build_cuda_scaffold.ps1` | 构建 CUDA scaffold 测试目标 |
-| `stage_dev_package.ps1` | 安装开发包到 `staging/SPECT_recon_rc_dev` |
-| `package_rc.ps1` | 打包 RC、文档与校验和 |
+| `stage_dev_package.ps1` | 整理 `staging/SPECT_recon_rc_dev`；只写矩阵源提示，不创建会牵连源数据的 junction |
+| `package_rc.ps1` | 打包 RC、文档与校验和；`-IncludeMatrix` 才复制矩阵到自包含发布包 |
 | `migrate_release_layout.ps1` | 将旧目录布局迁移为 RC 布局 |
 | `validate_butter_cufft_build.bat` | 验证 cuFFT Butterworth 构建 |
 

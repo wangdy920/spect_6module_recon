@@ -116,7 +116,9 @@ New-Item -ItemType Directory -Force -Path $packageBin, $packageDocs | Out-Null
 Write-Step "copy staging bin -> $packageBin"
 Get-ChildItem -LiteralPath (Join-Path $StagingRoot "bin") -Force | ForEach-Object {
     if ($_.Name -like "gtest*.dll") { return }
-    if ($_.Name -eq "matrix" -and -not $IncludeMatrix) { return }
+    # Matrix is handled once below; never copy the development placeholder or
+    # its workstation-local source path into a frozen package.
+    if ($_.Name -eq "matrix") { return }
     if ($_.Name -eq "output") { return }
     if ($_.PSIsContainer) {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageBin $_.Name) -Recurse -Force
