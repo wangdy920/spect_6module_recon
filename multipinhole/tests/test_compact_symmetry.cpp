@@ -25,6 +25,17 @@ namespace spect {
 namespace io {
 namespace test {
 
+TEST(IOTest, CompactChunkHostCacheBudgetAdaptsToMatrixAndRam) {
+    constexpr uint64_t GiB = 1024ull * 1024ull * 1024ull;
+    const uint64_t samplingMatrix = 27716288360ull;
+    EXPECT_EQ(samplingMatrix, recommendCompactChunkHostCacheBudgetBytes(
+                                  samplingMatrix, 64ull * GiB, 48ull * GiB));
+    EXPECT_EQ(20ull * GiB, recommendCompactChunkHostCacheBudgetBytes(
+                               samplingMatrix, 32ull * GiB, 28ull * GiB));
+    EXPECT_EQ(26ull * GiB, recommendCompactChunkHostCacheBudgetBytes(
+                               40ull * GiB, 0, 0));
+}
+
 void writeCompactMetadata(const std::filesystem::path &path, int use90,
                           int useZ, int use45, int symCode,
                           int symmetryOrder) {

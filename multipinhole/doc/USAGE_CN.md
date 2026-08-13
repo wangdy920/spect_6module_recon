@@ -124,11 +124,11 @@ compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subset
 
 | 环境变量 | 发布默认 | 说明 |
 |---|---|---|
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `25g` | 主机端矩阵块缓存；覆盖当前 26.1 GB 六块矩阵 |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 覆盖资源感知的主机端矩阵缓存；仅在当前可用内存保留安全余量时完整缓存系统矩阵 |
 | `SPECT_COMPACT_BRANCH_BATCH` | 开启 | 把 symmetry branch 与床位合并为 cuSPARSE SpMM；设为 `0` 可调用受保护的逐分支性能基线 |
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | 关闭 | 设为 `0` 才对矩阵 payload 使用 mmap；当前低时延路线不依赖 mmap |
 
-实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。32 GB 主存可降低 host cache 运行，但不承诺同等吞吐。共享 GPU 上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
+实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。host cache 默认按已发现矩阵总量与启动时可用内存自动选择，至少为系统保留 8 GiB 且总内存保留不低于 25%；32 GB 主存通常只缓存部分矩阵，不承诺同等吞吐。共享 GPU 或磁盘上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
 
 设备 GPU（例如 RTX 5060）与签收机不同时，空闲可手动搜索上述环境变量，不要改重建路径：
 

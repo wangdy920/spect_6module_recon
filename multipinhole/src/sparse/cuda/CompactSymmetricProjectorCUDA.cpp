@@ -142,9 +142,21 @@ void warmCompactChunkResidentDeviceCache(
   constexpr uint64_t kMiB = 1024ull * 1024ull;
   if (cacheBudget != std::numeric_limits<uint64_t>::max() &&
       cacheBudget < matrixBytes) {
+    uint64_t cachedPrefixBytes = 0;
+    size_t cachedPrefixCount = 0;
+    for (const auto &info : chunks.chunks()) {
+      if (info.fileSizeBytes > cacheBudget - cachedPrefixBytes)
+        break;
+      cachedPrefixBytes += info.fileSizeBytes;
+      ++cachedPrefixCount;
+    }
     std::cerr << "[NOTE] compact host cache " << (cacheBudget / kMiB)
               << " MiB is below matrix size " << (matrixBytes / kMiB)
-              << " MiB; GPU resident warmup remains enabled.\n";
+              << " MiB; estimated persistent prefix " << cachedPrefixCount
+              << " / " << chunks.chunks().size() << ", up to "
+              << ((matrixBytes - cachedPrefixBytes) / kMiB)
+              << " MiB reread per matrix pass; GPU resident warmup remains "
+                 "enabled.\n";
   }
 
   chunks.setAcceleratorLease({});

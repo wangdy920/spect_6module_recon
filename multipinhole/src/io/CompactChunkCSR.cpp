@@ -36,6 +36,37 @@ constexpr uint64_t kChunkHeaderBytes = 28ull;
 
 enum class ChunkColIdxValidationMode { Off, Sample, Strict };
 
+struct SystemMemoryInfo {
+  uint64_t totalBytes = 0;
+  uint64_t availableBytes = 0;
+};
+
+SystemMemoryInfo querySystemMemoryInfo() {
+#ifdef _WIN32
+  MEMORYSTATUSEX status{};
+  status.dwLength = sizeof(status);
+  if (!GlobalMemoryStatusEx(&status))
+    return {};
+  return {static_cast<uint64_t>(status.ullTotalPhys),
+          static_cast<uint64_t>(status.ullAvailPhys)};
+#else
+#if defined(_SC_PHYS_PAGES) && defined(_SC_AVPHYS_PAGES) && \
+    defined(_SC_PAGESIZE)
+  const long totalPages = sysconf(_SC_PHYS_PAGES);
+  const long availablePages = sysconf(_SC_AVPHYS_PAGES);
+  const long pageBytes = sysconf(_SC_PAGESIZE);
+  if (totalPages <= 0 || availablePages <= 0 || pageBytes <= 0)
+    return {};
+  return {static_cast<uint64_t>(totalPages) *
+              static_cast<uint64_t>(pageBytes),
+          static_cast<uint64_t>(availablePages) *
+              static_cast<uint64_t>(pageBytes)};
+#else
+  return {};
+#endif
+#endif
+}
+
 template <typename T>
 void readExact(std::istream &in, T *dst, size_t count,
                const std::string &label) {
@@ -595,9 +626,56 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
   return loaded;
 }
 
-uint64_t defaultCompactChunkHostCacheBudgetBytes() {
-  return parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"),
-                         spect::cuda::kCompactChunkHostCacheDefaultBytes);
+uint64_t recommendCompactChunkHostCacheBudgetBytes(
+    uint64_t matrixBytes, uint64_t totalMemoryBytes,
+    uint64_t availableMemoryBytes) {
+  if (matrixBytes == 0)
+    return 0;
+  if (totalMemoryBytes == 0 || availableMemoryBytes == 0) {
+    return std::min(matrixBytes,
+                    spect::cuda::kCompactChunkHostCacheFallbackBytes);
+  }
+  const uint64_t reserve = std::max(
+      spect::cuda::kCompactChunkHostCacheMinReserveBytes,
+      totalMemoryBytes / 4);
+  const uint64_t totalCap =
+      totalMemoryBytes > reserve ? totalMemoryBytes - reserve : 0;
+  const uint64_t availableCap =
+      availableMemoryBytes > spect::cuda::kCompactChunkHostCacheMinReserveBytes
+          ? availableMemoryBytes -
+                spect::cuda::kCompactChunkHostCacheMinReserveBytes
+          : 0;
+  return std::min(matrixBytes, std::min(totalCap, availableCap));
+}
+
+CompactChunkCSRDirectory openCompactChunkCSRDirectory(
+    const std::string &directory, const CompactSymmetryMetadata &meta) {
+  const std::filesystem::path dir(directory);
+  const auto infos = discoverChunkInfos(dir);
+  uint64_t matrixBytes = 0;
+  for (const auto &info : infos) {
+    matrixBytes = info.fileSizeBytes >
+                          std::numeric_limits<uint64_t>::max() - matrixBytes
+                      ? std::numeric_limits<uint64_t>::max()
+                      : matrixBytes + info.fileSizeBytes;
+  }
+  const SystemMemoryInfo memory = querySystemMemoryInfo();
+  const uint64_t automaticBudget = recommendCompactChunkHostCacheBudgetBytes(
+      matrixBytes, memory.totalBytes, memory.availableBytes);
+  const char *overrideValue =
+      std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES");
+  const bool overridden = overrideValue != nullptr && overrideValue[0] != '\0';
+  const uint64_t cacheBudget =
+      parseByteBudget(overrideValue, automaticBudget);
+  constexpr uint64_t kMiB = 1024ull * 1024ull;
+  std::cerr << "[CompactChunkCSR] host cache "
+            << (overridden ? "override" : "auto") << ": budget="
+            << (cacheBudget / kMiB) << " MiB matrix="
+            << (matrixBytes / kMiB) << " MiB system_total="
+            << (memory.totalBytes / kMiB) << " MiB system_available="
+            << (memory.availableBytes / kMiB) << " MiB\n";
+  // ponytail: six 28-byte headers are rescanned to keep one validation path.
+  return openCompactChunkCSRDirectory(directory, meta, cacheBudget);
 }
 
 CompactChunkCSRDirectory openCompactChunkCSRDirectory(

@@ -145,7 +145,7 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `25g` | Host-side chunk cache budget; `25g` covers the current 26.1 GB six-chunk matrix |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Override the resource-aware host matrix cache; auto keeps the whole matrix only when current RAM leaves safe headroom |
 | `SPECT_COMPACT_BRANCH_BATCH` | on | Batch symmetry branches and beds in cuSPARSE SpMM; set `0` for the protected scalar-branch performance baseline |
 | `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |

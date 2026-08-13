@@ -13,6 +13,7 @@ endif()
 # (Duplicate matio check removed)
 
 project(SPECT_recon LANGUAGES CXX)
+enable_testing()
 set(CMAKE_CXX_STANDARD 17)  # 【T0.1】改为C++17，符合重构规范
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SPECT_RECON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/multipinhole")

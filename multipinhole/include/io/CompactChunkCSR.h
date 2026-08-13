@@ -79,10 +79,15 @@ private:
   mutable std::shared_ptr<void> acceleratorLease_;
 };
 
-uint64_t defaultCompactChunkHostCacheBudgetBytes();
+CompactChunkCSRDirectory openCompactChunkCSRDirectory(
+    const std::string &directory, const CompactSymmetryMetadata &meta);
 
 CompactChunkCSRDirectory openCompactChunkCSRDirectory(
     const std::string &directory, const CompactSymmetryMetadata &meta,
-    uint64_t cacheBudgetBytes = defaultCompactChunkHostCacheBudgetBytes());
+    uint64_t cacheBudgetBytes);
+
+uint64_t recommendCompactChunkHostCacheBudgetBytes(
+    uint64_t matrixBytes, uint64_t totalMemoryBytes,
+    uint64_t availableMemoryBytes);
 
 } // namespace spect::io

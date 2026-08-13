@@ -93,6 +93,20 @@ function Get-MemorySnapshot {
     }
 }
 
+function Get-DiskActivitySnapshot {
+    try {
+        $rows = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk |
+            Where-Object Name -ne "_Total" |
+            Select-Object Name, DiskReadBytesPersec, DiskWriteBytesPersec,
+                          PercentDiskTime, CurrentDiskQueueLength)
+        if ($rows.Count -eq 0) { return "SYSTEM DISK ACTIVITY: (none)" }
+        return "SYSTEM DISK ACTIVITY:`r`n" +
+            (($rows | Format-Table -AutoSize | Out-String).TrimEnd())
+    } catch {
+        return "system disk activity query failed: $($_.Exception.Message)"
+    }
+}
+
 function Get-StorageSnapshot {
     param([string]$Path)
     try {
@@ -279,6 +293,9 @@ $runResults = @()
 Write-Host "Diagnostic report: $resolvedReport"
 try {
     Add-Report "SPECT_recon device diagnostic bundle"
+    Add-Report "collector_schema=2"
+    Add-Report "collector_path=$PSCommandPath"
+    Add-Report "collector_sha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash)"
     Add-Report "started=$(Get-Date -Format o)"
     Add-Report "host=$env:COMPUTERNAME"
     Add-Report "user=$env:USERNAME"
@@ -377,6 +394,7 @@ try {
         Add-Report "command=$displayCommand"
         Add-Report (Get-SpectProcessSnapshot)
         Add-Report (Get-MemorySnapshot)
+        Add-Report (Get-DiskActivitySnapshot)
         Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
 
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -406,6 +424,7 @@ try {
             Add-Section ("RUN $run SAMPLE " + (Get-Date -Format o))
             Add-Report (Get-SpectProcessSnapshot)
             Add-Report (Get-MemorySnapshot)
+            Add-Report (Get-DiskActivitySnapshot)
             Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
             if (-not $process.HasExited) { Start-Sleep -Seconds $SampleSeconds }
         } while (-not $process.HasExited)

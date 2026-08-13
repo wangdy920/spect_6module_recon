@@ -256,6 +256,7 @@ TEST_F(MultiBedCompactNumeratorTest,
   EXPECT_TRUE(prepared);
   EXPECT_NE(log.find("host cache 0 MiB is below matrix size"),
             std::string::npos);
+  EXPECT_NE(log.find("estimated persistent prefix 0 / 1"), std::string::npos);
   EXPECT_NE(log.find("Resident matrix cache:"), std::string::npos);
 
   EXPECT_TRUE(spect::cuda::releaseCompactExecutionCUDA());

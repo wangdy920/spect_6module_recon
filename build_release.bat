@@ -61,7 +61,7 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [INFO] Configure Release + CUDA compact backend ...
 echo [INFO] SPECT_CUDA_ARCHITECTURES=%CUDA_ARCHS%
-cmake -S "%PROJECT_DIR%." -B "%BUILD_DIR%" -G "Visual Studio 18 2026" -A x64 ^
+cmake --fresh -S "%PROJECT_DIR%." -B "%BUILD_DIR%" -G "Visual Studio 18 2026" -A x64 ^
   -DCMAKE_TOOLCHAIN_FILE="%CMAKE_TOOLCHAIN_FILE%" ^
   -DVCPKG_INSTALLED_DIR="%VCPKG_INSTALLED_DIR%" ^
   -DVCPKG_TARGET_TRIPLET=x64-windows ^

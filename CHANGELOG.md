@@ -8,6 +8,14 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Replaced the fixed 25 GiB compact host cache with a matrix-size and
+  available-RAM-aware default. A 64 GB host can retain the deployed 25.81 GiB
+  sampling matrix, while constrained hosts keep explicit safety headroom;
+  `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` remains the manual override.
+- Device diagnostics now identify collector schema 2 and sample whole-system
+  disk read/write throughput, active time and queue length alongside process I/O.
+- Release configuration now discards stale CMake indices, and top-level CTest
+  discovery follows the moved `multipinhole/` test target after repository cleanup.
 - Split the reconstruction source tree into the current `multipinhole/`
   implementation and an explicit, not-yet-implemented `parallel_hole/`
   boundary while preserving root build commands and deployed package layout.

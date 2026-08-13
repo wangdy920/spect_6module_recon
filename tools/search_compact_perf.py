@@ -3,7 +3,7 @@
 
 Drives the existing SPECT_recon.exe. Does not add a second reconstruction
 path. Default search is one-factor-at-a-time against the protected unset
-environment (host cache 25g, branch batch on, mmap off, config threads).
+environment (host cache auto, branch batch on, mmap off, config threads).
 
 Use -vb 1 (not 2): debug verbosity disables GPU-resident MLEM and would
 invalidate timings. Wall time is the process clock. Same-input primary
@@ -49,7 +49,7 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "baseline": {
         "env": {},
         "cli": [],
-        "purpose": "protected unset environment (25g host cache, batch on, mmap off)",
+        "purpose": "protected unset environment (auto host cache, batch on, mmap off)",
     },
     "host_cache_8g": {
         "env": {"SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES": "8g"},
@@ -64,7 +64,7 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "host_cache_32g": {
         "env": {"SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES": "32g"},
         "cli": [],
-        "purpose": "larger than default 25g if device RAM allows",
+        "purpose": "explicit 32g host cache if device RAM allows",
     },
     "mmap_0": {
         "env": {"SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES": "0"},
