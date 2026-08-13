@@ -7,7 +7,7 @@
 | 源文件 | 可执行名 | 用途 | 构建方式 |
 |---|---|---|---|
 | `forward_project_multibed.cpp` | `spect_forward_project.exe` | 匹配模型多床位前投影：把已知连续 phantom 经同一 compact-symmetric + PSF + 虚拟 Z 翻转链前投影为 `BedN.bin`，用于无噪 matched-model 闭环验证 | 主 CMake 构建 |
-| `collect_device_recon_diagnostics.ps1` | `bin/tools/collect_device_recon_diagnostics.ps1` | 启动单次设备重建并把进程树、GPU、配置、cache 和完整日志汇总为一个文本文件 | 随安装包复制 |
+| `collect_device_recon_diagnostics.ps1` | `bin/tools/collect_device_recon_diagnostics.ps1` | 串行启动 1–9 次设备重建，把进程树、GPU、配置、cache、逐次计时/中位数和完整日志汇总为一个文本文件 | 随安装包复制 |
 | `prep_compact_denom_cache.py` | `python tools/prep_compact_denom_cache.py` | 按默认 `spect_config.ini` 手动预热无 CTAC 的 1–5 床 `auto_<hash>.mhd` denom cache | 终端手动调用，不编译 |
 | `search_compact_perf.py` | `python tools/search_compact_perf.py` | 设备空闲时手动搜索 host cache / mmap / 线程 / branch-batch；中位数墙钟 + 同输入 relL2 `1e-5` | 终端手动调用，不编译 |
 
@@ -35,6 +35,19 @@ python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
 ```
 
 脚本写入占位 `Bed1.bin`…`Bed5.bin`（几何匹配、填充 1），以 `-it 1` 调用当前 `SPECT_recon.exe` 和 `multipinhole/config/spect_config.ini`。程序按配置把 cache 写到 exe 相对的 `cache/compact_denom/auto_<hash>.mhd`。`--dry-run` 只打印命令；`--self-check` 只检查占位 BIN 与 metadata。
+
+### 设备诊断与三次中位数
+
+从部署包根目录启动；固定部署结构下，exe、配置、唯一的 `bin/matrix/<profile>` 和 exe 相对 denom cache 会自动解析：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 `
+  -InputPath "D:\data\case\SPECT\Bed1.bin;D:\data\case\SPECT\Bed2.bin" -MultiBedList `
+  -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 -Repeats 3 `
+  -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
+```
+
+三个重建按顺序执行，不会并发占用 GPU；每次输出加 `_run1`…`_run3`，原生重建日志仍留在目标输出目录。只需回传一个 `spect_device_diagnostics.txt`，其末尾 `REPEAT SUMMARY` 给出 `median_full_command_s`、逐次 `denom_cache`、resident prefix，以及 `all_cache_hits`。首次运行若包含 cache miss，待其建立 cache 后原样再执行一次，以第二份报告作为稳定 cache-hit 性能证据。必要时显式传 `-MatrixDir` 或 `-DenomCachePath`；路径按调用终端的 CWD 解析。
 
 ### 设备空闲性能搜索
 

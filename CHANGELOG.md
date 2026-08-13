@@ -13,6 +13,10 @@ experiment commits are intentionally omitted.
   boundary while preserving root build commands and deployed package layout.
 - Release builds now reset the shared runtime output directory before linking,
   preventing stale test-only DLLs from entering a clean deployment package.
+- Device diagnostics can run up to nine reconstructions serially and record
+  per-run cache/resident state plus full-command median in the one return file.
+- Development staging no longer junctions its matrix directory to protected
+  source data; self-contained field packages still copy it with `-IncludeMatrix`.
 - Made automatic compact-denominator caches stable under deployment: INI cache
   paths are exe-relative, manifest-hashed variants live under
   `bin/cache/compact_denom`, and explicit `-compactDenomCache` still wins.

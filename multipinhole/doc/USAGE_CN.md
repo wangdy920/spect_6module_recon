@@ -138,6 +138,14 @@ python tools\search_compact_perf.py --chunkCSRDir <matrix> --dfList <beds> --com
 
 详见 `tools/README.md`。6 GiB device reserve 与 2 个 transient slot 是编译常量，不在此搜索范围内。
 
+部署后的基线采集优先使用安装包内的 collector，一条命令串行执行三次并只回传一个文本文件：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 -InputPath "<Bed1.bin;...>" -MultiBedList -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 -Repeats 3 -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
+```
+
+报告末尾必须同时满足 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`，性能采用 `median_full_command_s`。若首次含 cache miss，建立 cache 后原样重跑。
+
 ### BSREM
 
 | 参数 | 说明 |

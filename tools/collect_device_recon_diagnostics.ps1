@@ -10,6 +10,8 @@ param(
     [string]$MatrixDir = "",
     [string]$DenomCachePath = "",
     [string]$Iterations = "20:20",
+    [ValidateRange(1, 9)]
+    [int]$Repeats = 1,
     [int]$CudaDevice = 0,
     [ValidateRange(1, 60)]
     [int]$SampleSeconds = 5,
@@ -87,6 +89,40 @@ function Get-NvidiaSnapshot {
     return "GPU:`r`n$($gpu.TrimEnd())`r`nCOMPUTE APPS:`r`n$($apps.TrimEnd())"
 }
 
+function Get-Median {
+    param([double[]]$Values)
+    if ($Values.Count -eq 0) { return $null }
+    $sorted = @($Values | Sort-Object)
+    $middle = [math]::Floor($sorted.Count / 2)
+    if (($sorted.Count % 2) -eq 1) { return [double]$sorted[$middle] }
+    return ([double]$sorted[$middle - 1] + [double]$sorted[$middle]) / 2.0
+}
+
+function Get-RunMetrics {
+    param([string]$Text, [double]$MeasuredWallSeconds)
+    $perfMatches = [regex]::Matches($Text, '(?m)^.*?\[PERF\]\s+(.+)$')
+    $perf = if ($perfMatches.Count -gt 0) {
+        $perfMatches[$perfMatches.Count - 1].Groups[1].Value
+    } else { "" }
+    $cacheMatch = [regex]::Match($perf, '(?:^|\s)denom_cache=(\S+)')
+    $wallMatch = [regex]::Match($perf, '(?:^|\s)full_command_s=([0-9.eE+-]+)')
+    $residentMatch = [regex]::Match(
+        $Text, '(?m)^.*?Resident matrix cache:\s*(\d+)\s*/\s*(\d+)')
+    $overlapMatch = [regex]::Match(
+        $Text, '(?m)^.*?Startup overlap:\s*resident prefix\s*(\d+)\s*/\s*(\d+)')
+    [pscustomobject]@{
+        DenomCache = if ($cacheMatch.Success) { $cacheMatch.Groups[1].Value } else { "unknown" }
+        FullCommandSeconds = if ($wallMatch.Success) {
+            [double]::Parse($wallMatch.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+        } else { $MeasuredWallSeconds }
+        ResidentCached = if ($residentMatch.Success) { [int]$residentMatch.Groups[1].Value } else { -1 }
+        ResidentTotal = if ($residentMatch.Success) { [int]$residentMatch.Groups[2].Value } else { -1 }
+        StartupPrefix = if ($overlapMatch.Success) { [int]$overlapMatch.Groups[1].Value } else { -1 }
+        StartupTotal = if ($overlapMatch.Success) { [int]$overlapMatch.Groups[2].Value } else { -1 }
+        PerfLine = $perf
+    }
+}
+
 $sourceRoot = Split-Path -Parent $PSScriptRoot
 $installedBin = Split-Path -Parent $PSScriptRoot
 $resolvedExe = Resolve-ExistingFile -Label "SPECT_recon.exe" -Candidates @(
@@ -150,21 +186,6 @@ if (-not [string]::IsNullOrWhiteSpace($reportParent)) {
     New-Item -ItemType Directory -Force -Path $reportParent | Out-Null
 }
 
-$reconArgs = @(
-    "-config", $resolvedConfig,
-    $(if ($MultiBedList) { "-dfList" } else { "-df" }), $InputPath,
-    "-chunkCSRDir", $MatrixDir,
-    "-it", $Iterations,
-    "-fout", $resolvedOutputPrefix,
-    "-cudaDevice", $CudaDevice.ToString(),
-    "-vb", "1"
-)
-if (-not [string]::IsNullOrWhiteSpace($DenomCachePath)) {
-    $reconArgs += @("-compactDenomCache", $DenomCachePath)
-}
-$displayCommand = (Quote-WindowsArgument $resolvedExe) + " " +
-    (($reconArgs | ForEach-Object { Quote-WindowsArgument $_ }) -join " ")
-
 $utf8 = New-Object System.Text.UTF8Encoding($true)
 $script:reportWriter = New-Object System.IO.StreamWriter($resolvedReport, $false, $utf8)
 $script:reportWriter.AutoFlush = $true
@@ -180,6 +201,7 @@ function Add-Section {
 
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 $process = $null
+$runResults = @()
 Write-Host "Diagnostic report: $resolvedReport"
 try {
     Add-Report "SPECT_recon device diagnostic bundle"
@@ -189,7 +211,8 @@ try {
     Add-Report "cwd=$((Get-Location).Path)"
 
     Add-Section "COMMAND"
-    Add-Report $displayCommand
+    Add-Report "repeats=$Repeats"
+    Add-Report "output_prefix_base=$resolvedOutputPrefix"
     Add-Report "report=$resolvedReport"
     Add-Report "denom_dir=$denomDir"
 
@@ -243,64 +266,110 @@ try {
         Add-Report "cache directory does not exist yet"
     }
 
-    Add-Section "BEFORE START"
-    Add-Report (Get-SpectProcessSnapshot)
-    Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
+    for ($run = 1; $run -le $Repeats; $run++) {
+        $runOutputPrefix = if ($Repeats -eq 1) {
+            $resolvedOutputPrefix
+        } else { $resolvedOutputPrefix + "_run" + $run }
+        $reconArgs = @(
+            "-config", $resolvedConfig,
+            $(if ($MultiBedList) { "-dfList" } else { "-df" }), $InputPath,
+            "-chunkCSRDir", $MatrixDir,
+            "-it", $Iterations,
+            "-fout", $runOutputPrefix,
+            "-cudaDevice", $CudaDevice.ToString(),
+            "-vb", "1"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($DenomCachePath)) {
+            $reconArgs += @("-compactDenomCache", $DenomCachePath)
+        }
+        $displayCommand = (Quote-WindowsArgument $resolvedExe) + " " +
+            (($reconArgs | ForEach-Object { Quote-WindowsArgument $_ }) -join " ")
 
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $resolvedExe
-    $argumentListProperty = $startInfo.GetType().GetProperty("ArgumentList")
-    if ($null -ne $argumentListProperty) {
-        foreach ($argument in $reconArgs) { $startInfo.ArgumentList.Add($argument) }
-    } else {
-        $startInfo.Arguments =
-            ($reconArgs | ForEach-Object { Quote-WindowsArgument $_ }) -join " "
-    }
-    $startInfo.WorkingDirectory = (Get-Location).Path
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw "Failed starting SPECT_recon.exe" }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    Add-Report "launched_pid=$($process.Id) at $(Get-Date -Format o)"
-
-    do {
-        Add-Section ("SAMPLE " + (Get-Date -Format o))
+        Add-Section "RUN $run/$Repeats BEFORE START"
+        Add-Report "command=$displayCommand"
         Add-Report (Get-SpectProcessSnapshot)
         Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
-        if (-not $process.HasExited) { Start-Sleep -Seconds $SampleSeconds }
-    } while (-not $process.HasExited)
 
-    $process.WaitForExit()
-    $stdoutText = $stdoutTask.Result
-    $stderrText = $stderrTask.Result
-    Add-Section "PROCESS RESULT"
-    Add-Report "exit_code=$($process.ExitCode)"
-    Add-Report "finished=$(Get-Date -Format o)"
-    Add-Section "STDOUT"
-    Add-Report $stdoutText
-    Add-Section "STDERR"
-    Add-Report $stderrText
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $resolvedExe
+        $argumentListProperty = $startInfo.GetType().GetProperty("ArgumentList")
+        if ($null -ne $argumentListProperty) {
+            foreach ($argument in $reconArgs) { $startInfo.ArgumentList.Add($argument) }
+        } else {
+            $startInfo.Arguments =
+                ($reconArgs | ForEach-Object { Quote-WindowsArgument $_ }) -join " "
+        }
+        $startInfo.WorkingDirectory = (Get-Location).Path
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
 
-    $logMatch = [regex]::Match(
-        $stdoutText + "`n" + $stderrText,
-        '(?m)^.*?Logging console output to:\s*(.+\.log)\s*$')
-    if ($logMatch.Success -and
-        (Test-Path -LiteralPath $logMatch.Groups[1].Value.Trim() -PathType Leaf)) {
-        $nativeLog = $logMatch.Groups[1].Value.Trim()
-        Add-Section "NATIVE RECON LOG"
-        Add-Report "path=$nativeLog"
-        Add-Report (Get-Content -Raw -LiteralPath $nativeLog)
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        if (-not $process.Start()) { throw "Failed starting SPECT_recon.exe" }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        Add-Report "launched_pid=$($process.Id) at $(Get-Date -Format o)"
+
+        do {
+            Add-Section ("RUN $run SAMPLE " + (Get-Date -Format o))
+            Add-Report (Get-SpectProcessSnapshot)
+            Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
+            if (-not $process.HasExited) { Start-Sleep -Seconds $SampleSeconds }
+        } while (-not $process.HasExited)
+
+        $process.WaitForExit()
+        $stopwatch.Stop()
+        $stdoutText = $stdoutTask.Result
+        $stderrText = $stderrTask.Result
+        $combinedText = $stdoutText + "`n" + $stderrText
+        $metrics = Get-RunMetrics $combinedText $stopwatch.Elapsed.TotalSeconds
+        $runResult = [pscustomobject]@{
+            Run = $run
+            ExitCode = $process.ExitCode
+            MeasuredWallSeconds = $stopwatch.Elapsed.TotalSeconds
+            DenomCache = $metrics.DenomCache
+            FullCommandSeconds = $metrics.FullCommandSeconds
+            ResidentCached = $metrics.ResidentCached
+            ResidentTotal = $metrics.ResidentTotal
+            StartupPrefix = $metrics.StartupPrefix
+            StartupTotal = $metrics.StartupTotal
+        }
+        $runResults += $runResult
+
+        Add-Section "RUN $run PROCESS RESULT"
+        Add-Report ($runResult | Format-List | Out-String).TrimEnd()
+        Add-Report "perf=$($metrics.PerfLine)"
+        Add-Section "RUN $run STDOUT"
+        Add-Report $stdoutText
+        Add-Section "RUN $run STDERR"
+        Add-Report $stderrText
+
+        $logMatch = [regex]::Match(
+            $combinedText, '(?m)^.*?Logging console output to:\s*(.+\.log)\s*$')
+        if ($logMatch.Success -and
+            (Test-Path -LiteralPath $logMatch.Groups[1].Value.Trim() -PathType Leaf)) {
+            $nativeLog = $logMatch.Groups[1].Value.Trim()
+            Add-Section "RUN $run NATIVE RECON LOG"
+            Add-Report "path=$nativeLog"
+            Add-Report (Get-Content -Raw -LiteralPath $nativeLog)
+        }
+
+        $process.Dispose()
+        $process = $null
+        if ($runResult.ExitCode -ne 0) {
+            throw "SPECT_recon run $run exited with code $($runResult.ExitCode); report is complete."
+        }
     }
 
-    if ($process.ExitCode -ne 0) {
-        throw "SPECT_recon exited with code $($process.ExitCode); report is complete."
-    }
+    $fullTimes = @($runResults | ForEach-Object { [double]$_.FullCommandSeconds })
+    Add-Section "REPEAT SUMMARY"
+    Add-Report ($runResults | Format-Table -AutoSize | Out-String).TrimEnd()
+    Add-Report ("median_full_command_s={0:F3}" -f (Get-Median $fullTimes))
+    Add-Report "all_cache_hits=$(@($runResults | Where-Object DenomCache -ne 'hit').Count -eq 0)"
+    Add-Report "all_resident_prefix_nonzero=$(@($runResults | Where-Object { $_.StartupPrefix -le 0 -and $_.ResidentCached -le 0 }).Count -eq 0)"
 } catch {
     Add-Section "COLLECTOR ERROR"
     Add-Report $_.Exception.ToString()
