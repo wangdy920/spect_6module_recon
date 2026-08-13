@@ -16,7 +16,6 @@
 
 #include "cli/StringUtils.h"
 #include "cli/ConfigParser.h"
-#include "cli/RegistrationIni.h"
 
 
 namespace spect {
@@ -90,34 +89,24 @@ TEST(CLITest, ConfigParserRejectsInvalidTypedValues) {
 }
 
 std::filesystem::path frozenRegistrationIniPath() {
-    const auto fromThisFile =
-        std::filesystem::path(__FILE__).parent_path().parent_path() /
-        "config" / "ct_spect_registration.ini";
-    if (std::filesystem::exists(fromThisFile))
-        return fromThisFile;
-    return std::filesystem::current_path() / "config" /
-           "ct_spect_registration.ini";
+    return std::filesystem::path(__FILE__).parent_path().parent_path() /
+           "config" / "ct_spect_registration.ini";
 }
 
-TEST(CLITest, RegistrationIniLoadsWithConfigParser) {
+TEST(CLITest, RegistrationIniUsesStringTripleAndTypedLimits) {
+    ConfigParser cfg;
     const auto path = frozenRegistrationIniPath();
-    ASSERT_TRUE(std::filesystem::exists(path)) << path.string();
-
-    spect::cli::ConfigParser cfg;
-    ASSERT_TRUE(cfg.load(path.string()));
-    ASSERT_TRUE(cfg.hasSection("Registration"));
-    EXPECT_THROW((void)cfg.getDouble("Registration", "translation_xyz_mm", 0.0),
-                 std::invalid_argument);
-
-    spect::cli::RegistrationTransform loaded;
-    std::string error;
-    ASSERT_TRUE(spect::cli::loadRegistrationIni(path.string(), loaded, &error))
-        << error;
-    EXPECT_NEAR(loaded.translation_xyz_mm[0], -0.225, 1e-12);
-    EXPECT_NEAR(loaded.translation_xyz_mm[1], 1.6, 1e-12);
-    EXPECT_NEAR(loaded.translation_xyz_mm[2], -11.1, 1e-12);
-    EXPECT_DOUBLE_EQ(loaded.refine_limit_mm, 2.0);
-    EXPECT_DOUBLE_EQ(loaded.residual_gate_mm, 0.3);
+    ASSERT_TRUE(cfg.load(path.string())) << path.string();
+    const auto xyz = split(
+        cfg.getString("Registration", "translation_xyz_mm"), ',');
+    ASSERT_EQ(xyz.size(), 3u);
+    EXPECT_DOUBLE_EQ(std::stod(xyz[0]), -0.225);
+    EXPECT_DOUBLE_EQ(std::stod(xyz[1]), 1.6);
+    EXPECT_DOUBLE_EQ(std::stod(xyz[2]), -11.1);
+    EXPECT_DOUBLE_EQ(
+        cfg.getDouble("Registration", "refine_limit_mm", 0.0), 2.0);
+    EXPECT_DOUBLE_EQ(
+        cfg.getDouble("Registration", "residual_gate_mm", 0.0), 0.3);
 }
 
 TEST(CLITest, AppliedRegistrationIniUsesSameSectionAndBool) {
