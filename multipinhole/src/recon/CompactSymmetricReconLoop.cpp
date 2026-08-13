@@ -268,10 +268,11 @@ std::string psfInterpKey(filters::PSFInterp interp) {
   return "Unknown";
 }
 
-void appendFileIdentity(std::ostringstream &oss, const std::string &label,
-                        const std::filesystem::path &path) {
+void appendFileStatIdentity(std::ostringstream &oss, const std::string &label,
+                            const std::filesystem::path &path) {
   const auto normalized = normalizePathForCache(path);
-  oss << label << "=" << normalized.string() << '\n';
+  // Package roots are deployment details, not denominator inputs.
+  oss << label << "_name=" << normalized.filename().string() << '\n';
   std::error_code ec;
   const auto size = std::filesystem::file_size(normalized, ec);
   if (ec) {
@@ -383,10 +384,13 @@ std::string buildCompactDenomCacheManifest(
     const spect::filters::PSFKernels *psfKernels) {
   std::ostringstream oss;
   oss << std::setprecision(17);
-  oss << "cache_schema=compact_global_denom_v3_roi_pruned_psf_support\n";
+  oss << "cache_schema=compact_global_denom_v4_portable_stat_identity\n";
   oss << "matrix_layout=compact-symmetric\n";
   oss << "matrix_source_kind=chunkCSRDir\n";
-  appendFileIdentity(oss, "compact_meta", compactMetaPath);
+  oss << "matrix_profile="
+      << normalizePathForCache(compactChunks.directory()).filename().string()
+      << '\n';
+  appendFileStatIdentity(oss, "compact_meta", compactMetaPath);
   oss << "compact_mode="
       << spect::io::compactSymmetryModeName() << '\n';
   oss << "compact_dims=" << compactMeta.Nx << ',' << compactMeta.Ny << ','
@@ -398,21 +402,19 @@ std::string buildCompactDenomCacheManifest(
   oss << "compact_rows=" << compactMeta.compactRows() << '\n';
   oss << "full_rows=" << compactMeta.fullRows() << '\n';
   oss << "matrix_cols=" << compactMeta.totalVoxels << '\n';
-    oss << "chunk_dir="
-        << normalizePathForCache(compactChunks.directory()).string() << '\n';
-    oss << "chunk_count=" << compactChunks.chunks().size() << '\n';
-    oss << "chunk_total_rows=" << compactChunks.totalRows() << '\n';
-    oss << "chunk_total_nnz=" << compactChunks.totalNnz() << '\n';
-    for (size_t i = 0; i < compactChunks.chunks().size(); ++i) {
-      const auto &chunk = compactChunks.chunks()[i];
-      const std::string prefix = "chunk_" + std::to_string(i);
-      appendFileIdentity(oss, prefix, chunk.path);
-      oss << prefix << "_rows=" << chunk.rows << '\n';
-      oss << prefix << "_angle_offset=" << chunk.angleOffset << '\n';
-      oss << prefix << "_angle_count=" << chunk.angleCount << '\n';
-      oss << prefix << "_nnz=" << chunk.nnz << '\n';
-      oss << prefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
-    }
+  oss << "chunk_count=" << compactChunks.chunks().size() << '\n';
+  oss << "chunk_total_rows=" << compactChunks.totalRows() << '\n';
+  oss << "chunk_total_nnz=" << compactChunks.totalNnz() << '\n';
+  for (size_t i = 0; i < compactChunks.chunks().size(); ++i) {
+    const auto &chunk = compactChunks.chunks()[i];
+    const std::string prefix = "chunk_" + std::to_string(i);
+    appendFileStatIdentity(oss, prefix, chunk.path);
+    oss << prefix << "_rows=" << chunk.rows << '\n';
+    oss << prefix << "_angle_offset=" << chunk.angleOffset << '\n';
+    oss << prefix << "_angle_count=" << chunk.angleCount << '\n';
+    oss << prefix << "_nnz=" << chunk.nnz << '\n';
+    oss << prefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
+  }
   oss << "global_dims=" << geometry.nx << ',' << geometry.ny << ','
       << geometry.nz << '\n';
   oss << "global_spacing=" << geometry.vx << ',' << geometry.vy << ','
@@ -426,10 +428,10 @@ std::string buildCompactDenomCacheManifest(
     oss << "ctac_model=" << args.ctacModel << '\n';
     oss << "ctac_rot_sign=" << args.ctacRotSign << '\n';
     if (!args.attMapPath.empty()) {
-      appendFileIdentity(oss, "ctac_mu_map", args.attMapPath);
+      appendFileStatIdentity(oss, "ctac_mu_map", args.attMapPath);
     }
     if (!args.ctacAutoMuFrom.empty()) {
-      appendFileIdentity(oss, "ctac_auto_mu_from", args.ctacAutoMuFrom);
+      appendFileStatIdentity(oss, "ctac_auto_mu_from", args.ctacAutoMuFrom);
       oss << "ctac_auto_mu_thresh=" << args.ctacAutoMuThresh << '\n';
       oss << "ctac_auto_mu_value=" << args.ctacAutoMuValue << '\n';
       oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
@@ -444,7 +446,8 @@ std::string buildCompactDenomCacheManifest(
   // Efficiency weights likewise change the sensitivity; record the file
   // identity and value count only when active (same convention as above).
   if (!args.detZRowWeightsFile.empty()) {
-    appendFileIdentity(oss, "detz_row_weights", args.detZRowWeightsFile);
+    appendFileStatIdentity(oss, "detz_row_weights",
+                           args.detZRowWeightsFile);
     oss << "detz_row_weights_count="
         << spect::io::loadDetZRowWeights(args.detZRowWeightsFile,
                                          compactMeta.detNz, compactMeta.detNx,
@@ -453,7 +456,8 @@ std::string buildCompactDenomCacheManifest(
         << '\n';
   }
   if (!args.normFactorFile.empty()) {
-    appendFileIdentity(oss, "normalization_factor", args.normFactorFile);
+    appendFileStatIdentity(oss, "normalization_factor",
+                           args.normFactorFile);
     oss << "normalization_factor_count="
         << spect::io::loadDetZRowWeights(
                args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
@@ -467,7 +471,6 @@ std::string buildCompactDenomCacheManifest(
     const auto badDetectors =
         spect::io::loadBadDetectorList(args.badDetectorFile);
     if (!badDetectors.empty()) {
-      appendFileIdentity(oss, "bad_detector_list", args.badDetectorFile);
       oss << "bad_detector_count=" << badDetectors.size() << '\n';
       for (size_t index = 0; index < badDetectors.size(); ++index)
         oss << "bad_detector_" << index << '='

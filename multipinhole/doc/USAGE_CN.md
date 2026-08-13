@@ -73,7 +73,7 @@ compact chunk 矩阵默认识别优先级：
 
 多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
-无 CTAC 时，程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。manifest 包含矩阵、metadata、全局维度、床位 Z 起点、PSF 和 normfactor 口径，不匹配时不会复用；不同床位数必须分开。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
+无 CTAC 时，程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表和 normfactor 口径，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
 
 ```powershell
 python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
@@ -144,7 +144,7 @@ python tools\search_compact_perf.py --chunkCSRDir <matrix> --dfList <beds> --com
 powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 -InputPath "<Bed1.bin;...>" -MultiBedList -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 -Repeats 3 -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
 ```
 
-报告末尾必须同时满足 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`，性能采用 `median_full_command_s`。若首次含 cache miss，建立 cache 后原样重跑。
+报告末尾必须同时满足 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`，性能采用 `median_full_command_s`。报告也会记录 free RAM、进程累计 I/O/工作集和 matrix/output 磁盘总线；若首次含 cache miss，建立 cache 后原样重跑。
 
 ### BSREM
 

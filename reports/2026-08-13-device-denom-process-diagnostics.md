@@ -9,16 +9,16 @@
 - 支持 INI 的 exe 相对自动目录/固定文件，以及 CLI 显式文件覆盖。
 - 同一 GPU 不允许两个 `SPECT_recon.exe` 同时加载矩阵。
 - 低 host-cache 配置不能顺带关闭 GPU resident matrix warmup。
-- 设备测试将 1–9 次串行重建的进程树、GPU、配置、cache、逐次计时和重建日志汇总为一个文件；三次基线直接给出中位数。
+- 设备测试将 1–9 次串行重建的进程树/工作集/I/O、GPU、free RAM、matrix/denom/output 磁盘总线、配置、cache、逐次计时和重建日志汇总为一个文件；三次基线直接给出中位数。
 - 数值门沿用用户接受的主体积 `relative_l2 <= 1e-5`；性能采用重复运行中位数，单次本机数据不作为 RTX 5060 签收结论。
 
 ## 根因与修改
 
-1. 原自动 denom 路径是 CWD 相对的 `recon_out/compact_denom_cache`；调度器改变启动目录就会反复 miss。现默认 `[SystemMatrix] compact_denom_cache_dir=cache/compact_denom`，INI 相对 exe 解析；`compact_denom_cache_path` 可固定文件，CLI `-compactDenomCache` 仍最高优先。
+1. 原自动 denom 路径是 CWD 相对的 `recon_out/compact_denom_cache`；调度器改变启动目录就会反复 miss。现默认 `[SystemMatrix] compact_denom_cache_dir=cache/compact_denom`，INI 相对 exe 解析；`compact_denom_cache_path` 可固定文件，CLI `-compactDenomCache` 仍最高优先。进一步检查发现 v3 manifest 会嵌入 matrix/config 辅助文件的绝对路径，包根目录变化即使内容相同也会 miss/显式 mismatch；v4 改用 matrix profile、文件名/size/mtime、解析后的坏探头策略和数值参数，不再把绝对根路径作为数值 identity。
 2. 主程序没有创建第二个重建进程；两个 PID 来自外部重复启动。现用 Windows named mutex `Global\\SPECT_recon_GPU_<id>` 做每 GPU 单实例保护，第二个实例在矩阵 metadata/CSR 加载前退出。
 3. 原代码在 host cache 小于矩阵总量时直接跳过整个 GPU resident warmup。现仍预热显存可容纳的矩阵前缀，同时跳过无法保留的后台 host preload，避免无效磁盘争用。
 4. denom 写入先移除旧 manifest，再写 MHD/RAW，最后发布 manifest；中断写不会留下可被误判为有效的新缓存。
-5. INFO 日志新增 `[PERF]` 汇总；日志名加入 PID。安装包的 `bin/tools/collect_device_recon_diagnostics.ps1` 支持 `-Repeats 1..9`，每次使用独立输出前缀并在单一回传文件末尾给出 cache/resident 状态和 `median_full_command_s`。
+5. INFO 日志新增 `[PERF]` 汇总；日志名加入 PID。安装包的 `bin/tools/collect_device_recon_diagnostics.ps1` 支持 `-Repeats 1..9`，每次使用独立输出前缀并在单一回传文件末尾给出 cache/resident 状态和 `median_full_command_s`；同一文件还给出 CPU、free RAM、进程工作集/累计读写量、matrix metadata SHA-256，以及各路径的 volume/disk/bus 信息。
 6. 开发 staging 不再以 junction 指向受保护的源矩阵；只写 `SOURCE_MATRIX_DIRECTORY.txt`。自包含设备包继续由 `package_rc.ps1 -IncludeMatrix` 复制矩阵，清理 staging 不会牵连源数据。
 
 ## 本机数值与时延证据
@@ -33,8 +33,9 @@
 - prepare 单次下降 86.22%，full command 单次下降 49.47%。这两个比例受 OS cache/JIT/后台任务影响，不作为中位数性能结论。
 - miss 与 hit 的最终主体积：`relative_l2=3.304095619226407e-08`，`NCC=0.9999999999999956`，通过 `1e-5` 门。
 - 预占 GPU 0 mutex 后启动 exe：第二实例退出码 1，日志明确写出 `GPU 0 is already owned...`，且文件名带 `_pid58504.log`。
-- 诊断脚本预期失败冒烟生成单个 22,090-byte UTF-8 报告，包含 native recon log、PID/父 PID/命令行、GPU 样本、配置和 cache 清单。
+- 增强后的 collector 真实 cache-hit 冒烟生成单个 88,151-byte UTF-8 报告，`all_cache_hits=True`、`all_resident_prefix_nonzero=True`；同时采到 NVMe 总线、free RAM、进程工作集峰值 `19,758,362,624` bytes 和累计读取 `19,521,592,662` bytes，可直接判断设备是否在整矩阵读入阶段发生内存/磁盘退化。
 - 重复 collector 真实 cache-hit 冒烟串行执行两次，`full_command_s=34.344/28.156`、中位数 `31.250 s`，两次 resident prefix 均为 1；本机同时存在其他 GPU 任务，因此这些秒数只验证采集合同。两次主体积 relL2 `3.3679e-8`、NCC `1.0000000000000033`，通过 `1e-5` 门。
+- v4 便携清单以源码 config/真实 matrix 路径建立显式 cache，再以 staging config/不同 junction 路径复用：第二次明确 `denom_cache=hit`；主体积 `relative_l2=3.377098333824908e-08`、`NCC=0.9999999999999994`，且 manifest 绝对路径 identity 行数为 0。
 
 ## 设备执行
 
@@ -57,6 +58,15 @@ cmake --build build\Release --config Release --target SPECT_recon spect_tests --
 python tools\search_compact_perf.py --self-check
 python tools\prep_compact_denom_cache.py --dry-run --beds 1 --exe build\Release\bin\Release\SPECT_recon.exe --config multipinhole\config\spect_config.ini --chunkCSRDir test_data\6module\260601
 python scripts\compare_recon_metrics.py --candidate test-output\auto_cache_hit\recon_hit_it1.mhd --reference test-output\auto_cache_hit\recon_it1.mhd --out-json test-output\auto_cache_hit\miss_vs_hit.json
+$base = Join-Path (Get-Location) ("test-output\portable_denom_v4_" + (Get-Date -Format yyyyMMdd_HHmmss))
+$matrix = (Resolve-Path test_data\6module\260601).Path
+$alias = Join-Path $base matrix\260601
+New-Item -ItemType Directory -Force -Path @((Split-Path $alias), (Join-Path $base cache), (Join-Path $base source), (Join-Path $base package)) | Out-Null
+New-Item -ItemType Junction -Path $alias -Target $matrix | Out-Null
+& build\Release\bin\Release\SPECT_recon.exe -config multipinhole\config\spect_config.ini -df test_data\logo\Bed1.bin -chunkCSRDir $matrix -it 1:1 -fout (Join-Path $base source\recon) -compactDenomCache (Join-Path $base cache\portable.mhd)
+& build\Release\bin\Release\SPECT_recon.exe -config staging\SPECT_recon_rc_dev\bin\config\spect_config.ini -df test_data\logo\Bed1.bin -chunkCSRDir $alias -it 1:1 -fout (Join-Path $base package\recon) -compactDenomCache (Join-Path $base cache\portable.mhd)
+python scripts\compare_recon_metrics.py --candidate (Join-Path $base package\recon_it1.mhd) --reference (Join-Path $base source\recon_it1.mhd) --out-json (Join-Path $base source_vs_package.json)
+[IO.Directory]::Delete($alias)
 powershell -ExecutionPolicy Bypass -File tools\collect_device_recon_diagnostics.ps1 -InputPath test_data\logo\Bed1.bin -OutputPrefix test-output\collector_repeat_smoke\recon -MatrixDir test_data\6module\260601 -Iterations 1:1 -Repeats 2 -SampleSeconds 1 -ReportPath test-output\collector_repeat_smoke\diagnostics.txt
 cmake --install build\Release --config Release --prefix staging\SPECT_recon_device_diag
 ```
@@ -68,6 +78,7 @@ cmake --install build\Release --config Release --prefix staging\SPECT_recon_devi
 - [x] 新增低 host-cache resident warmup 回归通过。
 - [x] Windows 同 GPU 重复实例实测被拒绝。
 - [x] 自动 denom miss→save→hit 真实矩阵链路通过，输出数值通过 `1e-5` 门。
+- [x] v4 显式 denom 经源码与 staging 两个根路径 miss→hit；清单不含绝对根路径，输出数值通过 `1e-5` 门。
 - [x] PowerShell AST、Python `py_compile`/self-check、两次真实 cache-hit 单文件 collector 冒烟通过。
 - [x] 开发 staging 的旧 matrix junction 已被无递归地替换为普通占位目录；源矩阵 6 个文件保持完整，并通过真实 miss→save 的 1 次重建打开验证。
 - [x] clean Release 每次从当前 Git HEAD 重建并把 collector、CHANGELOG 与 exe 一并安装到 `staging/SPECT_recon_rc_dev`；旧的 dirty 诊断 bundle 不再是交付入口。

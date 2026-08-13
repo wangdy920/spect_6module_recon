@@ -20,6 +20,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:storageDetailsByRoot = @{}
 
 function Resolve-ExistingFile {
     param([string[]]$Candidates, [string]$Label)
@@ -69,11 +70,84 @@ function Get-SpectProcessSnapshot {
     try {
         $rows = @(Get-CimInstance Win32_Process -Filter "Name='SPECT_recon.exe'" |
             Select-Object ProcessId, ParentProcessId, CreationDate,
+                          WorkingSetSize, PageFileUsage, ThreadCount,
+                          KernelModeTime, UserModeTime,
+                          ReadTransferCount, WriteTransferCount,
                           ExecutablePath, CommandLine)
         if ($rows.Count -eq 0) { return "(none)" }
         return ($rows | Format-List | Out-String).TrimEnd()
     } catch {
         return "process query failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-MemorySnapshot {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        return "SYSTEM MEMORY: total_kib=$($os.TotalVisibleMemorySize) " +
+            "free_kib=$($os.FreePhysicalMemory) " +
+            "pagefile_total_kib=$($os.SizeStoredInPagingFiles) " +
+            "pagefile_free_kib=$($os.FreeSpaceInPagingFiles)"
+    } catch {
+        return "system memory query failed: $($_.Exception.Message)"
+    }
+}
+
+function Get-StorageSnapshot {
+    param([string]$Path)
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        $root = [IO.Path]::GetPathRoot($fullPath).TrimEnd('\')
+        $prefix = @("path=$fullPath", "root=$root")
+        if ($script:storageDetailsByRoot.ContainsKey($root)) {
+            return (($prefix + $script:storageDetailsByRoot[$root]) -join "`r`n")
+        }
+        $details = @()
+        if ($root.StartsWith('\\')) {
+            $details += "type=network_unc"
+            $script:storageDetailsByRoot[$root] = $details
+            return (($prefix + $details) -join "`r`n")
+        }
+        $logical = Get-CimInstance Win32_LogicalDisk |
+            Where-Object DeviceID -eq $root | Select-Object -First 1
+        if ($null -ne $logical) {
+            $driveTypes = @{ 2 = "removable"; 3 = "fixed"; 4 = "network";
+                            5 = "optical"; 6 = "ramdisk" }
+            $driveType = if ($driveTypes.ContainsKey([int]$logical.DriveType)) {
+                $driveTypes[[int]$logical.DriveType]
+            } else { "unknown" }
+            $details += "volume_type=$driveType"
+            $details += "filesystem=$($logical.FileSystem)"
+            $details += "volume_size_bytes=$($logical.Size)"
+            $details += "volume_free_bytes=$($logical.FreeSpace)"
+        }
+        try {
+            $partition = Get-CimAssociatedInstance -InputObject $logical `
+                -Association Win32_LogicalDiskToPartition `
+                -ResultClassName Win32_DiskPartition | Select-Object -First 1
+            $disk = Get-CimInstance -Namespace Root/Microsoft/Windows/Storage `
+                -ClassName MSFT_Disk -Filter "Number=$($partition.DiskIndex)"
+            $busTypes = @{ 1 = "SCSI"; 2 = "ATAPI"; 3 = "ATA"; 4 = "IEEE1394";
+                           6 = "FibreChannel"; 7 = "USB"; 8 = "RAID";
+                           9 = "iSCSI"; 10 = "SAS"; 11 = "SATA"; 12 = "SD";
+                           13 = "MMC"; 15 = "Virtual"; 16 = "StorageSpaces";
+                           17 = "NVMe"; 18 = "SCM"; 19 = "UFS" }
+            $bus = if ($busTypes.ContainsKey([int]$disk.BusType)) {
+                $busTypes[[int]$disk.BusType]
+            } else { "unknown($($disk.BusType))" }
+            $health = @{ 0 = "Healthy"; 1 = "Warning"; 2 = "Unhealthy";
+                         5 = "Unknown" }
+            $details += "disk_number=$($disk.Number)"
+            $details += "disk_name=$($disk.FriendlyName)"
+            $details += "disk_bus=$bus"
+            $details += "disk_health=$(if ($health.ContainsKey([int]$disk.HealthStatus)) { $health[[int]$disk.HealthStatus] } else { $disk.HealthStatus })"
+        } catch {
+            $details += "physical_disk=unavailable ($($_.Exception.Message))"
+        }
+        $script:storageDetailsByRoot[$root] = $details
+        return (($prefix + $details) -join "`r`n")
+    } catch {
+        return "storage query failed for '$Path': $($_.Exception.Message)"
     }
 }
 
@@ -225,9 +299,14 @@ try {
     try {
         $computer = Get-CimInstance Win32_ComputerSystem
         $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = @(Get-CimInstance Win32_Processor)
         Add-Report "model=$($computer.Manufacturer) $($computer.Model)"
         Add-Report "ram_bytes=$($computer.TotalPhysicalMemory)"
+        Add-Report "ram_free_kib=$($os.FreePhysicalMemory)"
         Add-Report "os=$($os.Caption) $($os.Version) build=$($os.BuildNumber)"
+        Add-Report (($cpu | Select-Object Name, NumberOfCores,
+            NumberOfLogicalProcessors, MaxClockSpeed |
+            Format-List | Out-String).TrimEnd())
     } catch {
         Add-Report "host query failed: $($_.Exception.Message)"
     }
@@ -250,6 +329,7 @@ try {
 
     Add-Section "MATRIX AND DENOM CACHE"
     Add-Report "matrix=$MatrixDir"
+    Add-Report "metadata_sha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $MatrixDir 'metadata.bin')).Hash)"
     $matrixFiles = @(Get-ChildItem -LiteralPath $MatrixDir -File |
         Where-Object { $_.Name -eq "metadata.bin" -or $_.Extension -eq ".csrb" })
     Add-Report "matrix_bytes=$(($matrixFiles | Measure-Object Length -Sum).Sum)"
@@ -265,6 +345,14 @@ try {
     } else {
         Add-Report "cache directory does not exist yet"
     }
+
+    Add-Section "STORAGE"
+    Add-Report "MATRIX STORAGE:"
+    Add-Report (Get-StorageSnapshot $MatrixDir)
+    Add-Report "DENOM STORAGE:"
+    Add-Report (Get-StorageSnapshot $denomDir)
+    Add-Report "OUTPUT STORAGE:"
+    Add-Report (Get-StorageSnapshot $resolvedOutputPrefix)
 
     for ($run = 1; $run -le $Repeats; $run++) {
         $runOutputPrefix = if ($Repeats -eq 1) {
@@ -288,6 +376,7 @@ try {
         Add-Section "RUN $run/$Repeats BEFORE START"
         Add-Report "command=$displayCommand"
         Add-Report (Get-SpectProcessSnapshot)
+        Add-Report (Get-MemorySnapshot)
         Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
 
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -316,6 +405,7 @@ try {
         do {
             Add-Section ("RUN $run SAMPLE " + (Get-Date -Format o))
             Add-Report (Get-SpectProcessSnapshot)
+            Add-Report (Get-MemorySnapshot)
             Add-Report (Get-NvidiaSnapshot $nvidiaSmi)
             if (-not $process.HasExited) { Start-Sleep -Seconds $SampleSeconds }
         } while (-not $process.HasExited)

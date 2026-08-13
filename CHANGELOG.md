@@ -14,12 +14,16 @@ experiment commits are intentionally omitted.
 - Release builds now reset the shared runtime output directory before linking,
   preventing stale test-only DLLs from entering a clean deployment package.
 - Device diagnostics can run up to nine reconstructions serially and record
-  per-run cache/resident state plus full-command median in the one return file.
+  per-run cache/resident state plus full-command median in the one return file;
+  it also records free RAM, process I/O/workset and matrix/output disk bus type.
 - Development staging no longer junctions its matrix directory to protected
   source data; self-contained field packages still copy it with `-IncludeMatrix`.
 - Made automatic compact-denominator caches stable under deployment: INI cache
   paths are exe-relative, manifest-hashed variants live under
   `bin/cache/compact_denom`, and explicit `-compactDenomCache` still wins.
+- Compact-denominator schema v4 removes absolute source/package paths from the
+  identity while retaining matrix profile, file stats and parsed detector
+  policy, so the same fixed-profile cache survives a package-root move.
 - Added a per-GPU Windows process lock so an accidental second
   `SPECT_recon.exe` exits before loading the matrix; log names now include PID.
 - Kept GPU resident-matrix warmup enabled when a reduced host-cache budget is
