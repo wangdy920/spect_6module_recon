@@ -30,8 +30,8 @@ SCRATCH_DIRNAME = CACHE_DIRNAME / "_prep_scratch"
 MAX_BEDS = 5
 META_FMT = struct.Struct("<11if2i3f5i")
 
-CACHE_SAVED_RE = re.compile(r"compact denom cache saved:\s*(.+)$")
-CACHE_HIT_RE = re.compile(r"compact denom cache hit:\s*(.+)$")
+CACHE_SAVED_RE = re.compile(r"compact denom cache saved:\s*(.+)$", re.MULTILINE)
+CACHE_HIT_RE = re.compile(r"compact denom cache hit:\s*(.+)$", re.MULTILINE)
 CACHE_MISS_RE = re.compile(r"compact denom cache miss:")
 CTAC_RE = re.compile(r"compact CTAC:", re.IGNORECASE)
 
@@ -256,6 +256,15 @@ def cleanup_scratch(scratch_dir: Path, keep: bool) -> None:
 def self_check(args: argparse.Namespace) -> int:
     assert parse_beds("1-5") == [1, 2, 3, 4, 5]
     assert parse_beds("1,3,5") == [1, 3, 5]
+    assert interpret_log(
+        "compact denom cache miss: cache files not found\n"
+        "compact denom cache saved: C:\\cache\\auto_test.mhd\n"
+        "[ITER] 1/1 compact\n") == ("saved", "C:\\cache\\auto_test.mhd")
+    assert interpret_log(
+        "compact denom cache hit: C:\\cache\\auto_test.mhd\n"
+        "[PERF] denom_cache=hit full_command_s=1\n") == (
+            "hit", "C:\\cache\\auto_test.mhd")
+    print("self-check: denom log parser ok")
     dummy = Path(args.work_dir) / DUMMY_DIRNAME / "self_check_Bed1.bin"
     size = write_dummy_projection_bin(dummy, 4, 6, fill=1.0)
     payload = dummy.read_bytes()
