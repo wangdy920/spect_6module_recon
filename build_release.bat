@@ -2,12 +2,12 @@
 setlocal enabledelayedexpansion
 
 REM Release build for consumer GeForce RTX field GPUs.
-REM Architectures (NVRTC JIT + any device-code targets):
+REM Architectures (helper fatbins + any device-code targets):
 REM   sm_86  RTX 30-series
 REM   sm_89  RTX 40-series (4070 etc.)
 REM   sm_120 RTX 50-series (5060/5070 etc.)
 REM Requires CUDA Toolkit >= 12.8 (this host: 13.x). Bundles matching
-REM cudart/nvrtc/cusparse/nvJitLink(/cufft) DLLs next to SPECT_recon.exe.
+REM cudart/cusparse(/cufft) DLLs next to SPECT_recon.exe.
 REM Field driver floor: CUDA 13.0+ capable (NVIDIA R580+). Newer drivers OK.
 REM
 REM Directory layout (avoid ambiguous "release" search hits):
@@ -105,7 +105,7 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [INFO] Verify bundled CUDA runtime DLLs ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$bin=Join-Path '%INSTALL_DIR%' 'bin'; $need=@('cudart','cusparse','nvrtc'); $missing=@(); foreach($n in $need){ if(-not (Get-ChildItem -LiteralPath $bin -Filter ($n+'*.dll') -ErrorAction SilentlyContinue)){ $missing+=$n } }; if($missing.Count){ Write-Host ('[ERROR] missing CUDA DLLs in package: '+($missing -join ', ')); exit 1 }; Get-ChildItem -LiteralPath $bin -Filter '*.dll' | Where-Object { $_.Name -match 'cudart|cusparse|nvrtc|cufft|nvJitLink' } | ForEach-Object { Write-Host ('[INFO]   '+$_.Name) }"
+  "$bin=Join-Path '%INSTALL_DIR%' 'bin'; $need=@('cudart','cusparse','cufft'); $missing=@(); foreach($n in $need){ if(-not (Get-ChildItem -LiteralPath $bin -Filter ($n+'*.dll') -ErrorAction SilentlyContinue)){ $missing+=$n } }; if($missing.Count){ Write-Host ('[ERROR] missing CUDA DLLs in package: '+($missing -join ', ')); exit 1 }; Get-ChildItem -LiteralPath $bin -Filter '*.dll' | Where-Object { $_.Name -match 'cudart|cusparse|cufft' } | ForEach-Object { Write-Host ('[INFO]   '+$_.Name) }"
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [INFO] Done.

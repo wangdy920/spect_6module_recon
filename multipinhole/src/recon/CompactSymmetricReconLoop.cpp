@@ -1455,7 +1455,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                    << " poisson_deviance_per_bin="
                    << projectionDeviancePerBin(bedStats)
                    << " pearson_rms=" << projectionPearsonRms(bedStats);
-            logInfo(metric.str());
+            logDebug(metric.str());
           }
           residualOut.flush();
           if (!residualOut) {

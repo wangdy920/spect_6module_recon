@@ -7,10 +7,14 @@
 #include "cli/ExitCodes.h"
 #include "cli/Version.h"
 #include "core/Masks.h"
+#include "core/BedPathUtils.h"
 #include "core/ReconLimits.h"
 #include "core/SixModuleGeometry.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "cuda/CudaConfig.h"
+#if defined(SPECT_HAS_CUDA)
+#include "cuda/CudaFatbinLoader.h"
+#endif
 #include "filters/ButterworthFilter.h"
 #include "io/BadDetectorMask.h"
 #include "io/CompactChunkCSR.h"
@@ -35,6 +39,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -143,17 +148,12 @@ void reportCudaRuntimeEnvironment(int deviceId) {
             " toolkit driver floor or newer for maximum stability.");
   }
 
-  // Consumer GeForce targets for this release package.
-  const bool knownConsumerArch =
-      (info.computeMajor == 7 && info.computeMinor == 5) || // RTX 20
-      (info.computeMajor == 8 && info.computeMinor == 6) || // RTX 30
-      (info.computeMajor == 8 && info.computeMinor == 9) || // RTX 40
-      (info.computeMajor == 12 && info.computeMinor == 0);  // RTX 50
-  if (!knownConsumerArch) {
-    logWarn("GPU compute capability " + smTag +
-            " is outside the primary consumer RTX set "
-            "(sm_75/86/89/120). NVRTC will still JIT for this device if the "
-            "bundled toolkit supports it.");
+  // Frozen field/dev GPUs: helper kernels are sm_86/89/120 fatbins.
+  if (!spect::cuda::isFrozenConsumerArch(info.computeMajor, info.computeMinor)) {
+    throw std::runtime_error(
+        "GPU compute capability " + smTag +
+        " is outside the frozen field set sm_86/89/120. Helper kernels are "
+        "build-time fatbins; runtime NVRTC is disabled.");
   }
 }
 #endif
@@ -166,11 +166,11 @@ int selectCudaDeviceIfRequested(const ReconArgs &args) {
     deviceId = parseRequestedCudaDevice(args, deviceCount);
     const std::string source =
         args.cudaDeviceFromCli ? "-cudaDevice" : "SPECT_CUDA_DEVICE";
-    logInfo("CUDA device selected from " + source + ": " +
+    logDebug("CUDA device selected from " + source + ": " +
             std::to_string(deviceId) + " (device count=" +
             std::to_string(deviceCount) + ")");
   } else if (deviceCount > 1) {
-    logInfo("CUDA device defaulted to 0 (device count=" +
+    logDebug("CUDA device defaulted to 0 (device count=" +
             std::to_string(deviceCount) +
             "); override with -cudaDevice or SPECT_CUDA_DEVICE.");
   }
@@ -266,6 +266,8 @@ std::string buildCTACFactorManifest(const ReconArgs &args, int baseNx,
   oss << "dz=" << spacing.dz << '\n';
   oss << "num_angles=" << args.numAngles << '\n';
   oss << "rotation_sign=" << args.ctacRotSign << '\n';
+  oss << "map_z_layout=local_matrix_z\n";
+  oss << "z_bed_flip=" << (args.zBedFlip ? 1 : 0) << '\n';
   oss << "bed_z_start=" << bedZStart << '\n';
   oss << "ctac_auto_mu_value=" << args.ctacAutoMuValue << '\n';
   oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
@@ -277,6 +279,52 @@ std::string buildCTACFactorManifest(const ReconArgs &args, int baseNx,
     oss << "ctac_auto_mu_thresh=" << args.ctacAutoMuThresh << '\n';
   }
   return oss.str();
+}
+
+void validateInputMapContract(const std::string &path,
+                              const std::string &label,
+                              const std::string &role,
+                              const std::string &zLayout,
+                              const std::string &units,
+                              const std::vector<int> &beds) {
+  std::string extension = std::filesystem::path(path).extension().string();
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (extension != ".mhd") {
+    if (beds.size() > 1)
+      throw std::runtime_error(label +
+                               " must be a contract-tagged MHD for multi-bed reconstruction.");
+    logWarn(label + " is not MHD; map role and bed identity cannot be checked.");
+    return;
+  }
+  const auto info = spect::io::parseMHD(path);
+  if (!spect::io::validateSpectMapContract(info, role, zLayout, units, beds)) {
+    if (beds.size() > 1)
+      throw std::runtime_error(
+          label + " is missing SPECT map role/bed/layout tags; regenerate it "
+                  "with scripts/prepare_ct_mu_map.py.");
+    logWarn(label +
+            " has no SPECT map contract tags; accepting legacy single-bed input.");
+  }
+}
+
+void reverseZWithinBedBlocks(std::vector<double> &volume, int nx, int ny,
+                             int baseNz, int bedCount) {
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  const size_t bedSize = plane * static_cast<size_t>(baseNz);
+  if (volume.size() != bedSize * static_cast<size_t>(bedCount))
+    throw std::runtime_error("Cannot reverse per-bed Z: volume size mismatch.");
+  for (int bed = 0; bed < bedCount; ++bed) {
+    const size_t bedOffset = static_cast<size_t>(bed) * bedSize;
+    for (int z = 0; z < baseNz / 2; ++z) {
+      const size_t front = bedOffset + static_cast<size_t>(z) * plane;
+      const size_t back = bedOffset +
+                          static_cast<size_t>(baseNz - 1 - z) * plane;
+      std::swap_ranges(volume.begin() + static_cast<std::ptrdiff_t>(front),
+                       volume.begin() + static_cast<std::ptrdiff_t>(front + plane),
+                       volume.begin() + static_cast<std::ptrdiff_t>(back));
+    }
+  }
 }
 
 } // namespace
@@ -360,7 +408,7 @@ int runProgram(int argc, char **argv) {
     cudaDeviceId = selectCudaDeviceIfRequested(args);
     gpuLease = std::make_unique<GpuExecutionLease>(cudaDeviceId);
 #ifdef _WIN32
-    logInfo("GPU process lock acquired: device=" +
+    logDebug("GPU process lock acquired: device=" +
             std::to_string(cudaDeviceId) +
             " pid=" + std::to_string(GetCurrentProcessId()));
 #else
@@ -398,7 +446,7 @@ int runProgram(int argc, char **argv) {
               "system matrix).");
     }
     applyCompactMetadataGeometry(args, compactMeta);
-    logInfo("compact metadata geometry loaded from " + compactMetaPath +
+    logDebug("compact metadata geometry loaded from " + compactMetaPath +
             " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
             ", compactRows=" + std::to_string(compactMeta.compactRows()) +
             ", fullRows=" + std::to_string(compactMeta.fullRows()) + ")");
@@ -415,6 +463,16 @@ int runProgram(int argc, char **argv) {
     const BedSetupResult bedSetup = prepareBedSetup(args);
     for (const std::string &warning : bedSetup.warnings)
       logWarn(warning);
+    if (args.useReg && !args.regCtPath.empty())
+      validateInputMapContract(
+          args.regCtPath, "Registered CT",
+          "regularizer_reconstruction_storage", "reconstruction_storage_z",
+          "HU", bedSetup.bedNumbers);
+    if ((args.doCTAC || !std::isnan(args.maskFromAttThreshold)) &&
+        !args.attMapPath.empty())
+      validateInputMapContract(
+          args.attMapPath, "Attenuation map", "attenuation_local_matrix_z",
+          "local_matrix_z", "mm^-1", bedSetup.bedNumbers);
     logInfo(bedSetup.summary);
     printReconArgs(args, commandLine);
 
@@ -450,7 +508,7 @@ int runProgram(int argc, char **argv) {
               ? static_cast<size_t>(args.detNz) * static_cast<size_t>(args.detNx)
               : 0;
       if (configuredRays == raysPerAngle) {
-        logInfo("Projection BIN does not store detZ/detX; using configured detector shape " +
+        logDebug("Projection BIN does not store detZ/detX; using configured detector shape " +
                 std::to_string(args.detNz) + "x" + std::to_string(args.detNx) + ".");
       } else {
         if (raysPerAngle > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -470,6 +528,7 @@ int runProgram(int argc, char **argv) {
                             static_cast<size_t>(baseNz);
     const size_t globalNvox = static_cast<size_t>(args.Nx) * static_cast<size_t>(args.Ny) *
                               static_cast<size_t>(args.Nz);
+    const bool reverseLocalZInReconStorage = args.zBedFlip && bedCount > 1;
 
     logInfo("Loaded projection rays: total=" +
             std::to_string(projectionSet.data.size()) + ", per bed=" +
@@ -505,11 +564,6 @@ int runProgram(int argc, char **argv) {
       logInfo("Loading registered CT for TV/RDP weights from " + args.regCtPath);
       sharedAnatomical = loadVolumeChecked(args.regCtPath, "Registered CT",
                                           args.Nx, args.Ny, args.Nz);
-    } else if (!args.doCTAC && !args.attMapPath.empty() &&
-               (args.useReg || !std::isnan(args.maskFromAttThreshold))) {
-      logInfo("Reusing registered attenuation map for TV/RDP weights.");
-      sharedAnatomical = loadVolumeChecked(args.attMapPath, "Attenuation map",
-                                          args.Nx, args.Ny, args.Nz);
     }
 
     std::vector<uint8_t> mask;
@@ -517,12 +571,12 @@ int runProgram(int argc, char **argv) {
         maybeMakeCylindricalMask(mask, args.Nx, args.Ny, args.Nz, spacingArray, args);
 
     std::vector<double> ctacMuMap;
-    if (args.doCTAC) {
+    if (args.doCTAC || !std::isnan(args.maskFromAttThreshold)) {
       if (!args.attMapPath.empty()) {
         logInfo("Loading attenuation map from " + args.attMapPath);
         ctacMuMap = loadVolumeChecked(args.attMapPath, "Attenuation map",
                                       args.Nx, args.Ny, args.Nz);
-      } else if (!args.ctacAutoMuFrom.empty()) {
+      } else if (args.doCTAC && !args.ctacAutoMuFrom.empty()) {
         logInfo("Auto mu-map: segmenting early-iteration reconstruction " +
                 args.ctacAutoMuFrom);
         logWarn("Auto mu-map assumes activity roughly fills the attenuating "
@@ -549,16 +603,21 @@ int runProgram(int argc, char **argv) {
         saveVolumeOutput(ctacMuMap, outputGeometry, args.outputDir,
                          outputPrefixFromArgs(args) + "_automu", -1, nullptr,
                          sanitizeCropSettings(0, 0));
+        if (reverseLocalZInReconStorage) {
+          reverseZWithinBedBlocks(ctacMuMap, baseNx, baseNy, baseNz, bedCount);
+          logInfo("Auto mu-map converted from reconstruction-storage Z to "
+                  "local system-matrix Z for CTAC.");
+        }
       } else {
         throw std::runtime_error(
-            "CTAC requires -attMap <file> or -ctacAutoMu <early recon volume>.");
+            args.doCTAC
+                ? "CTAC requires -attMap <file> or -ctacAutoMu <early recon volume>."
+                : "-maskFromAtt requires -attMap <file>.");
       }
     }
     if (args.useReg) {
       if (!sharedAnatomical.empty())
         args.reg.ct_image = &sharedAnatomical;
-      else if (!args.attMapPath.empty() && !ctacMuMap.empty())
-        args.reg.ct_image = &ctacMuMap;
       if (args.reg.ct_image) {
         logInfo("TV/RDP CT weighting enabled: sigma=" +
                 std::to_string(args.reg.ct_sigma) + ", floor=" +
@@ -569,10 +628,14 @@ int runProgram(int argc, char **argv) {
     }
     if (!std::isnan(args.maskFromAttThreshold)) {
       const std::vector<double> *maskSource = nullptr;
-      if (!ctacMuMap.empty())
-        maskSource = &ctacMuMap;
-      else if (!sharedAnatomical.empty())
-        maskSource = &sharedAnatomical;
+      std::vector<double> attenuationStorageMap;
+      if (!ctacMuMap.empty()) {
+        attenuationStorageMap = ctacMuMap;
+        if (reverseLocalZInReconStorage)
+          reverseZWithinBedBlocks(attenuationStorageMap, baseNx, baseNy,
+                                  baseNz, bedCount);
+        maskSource = &attenuationStorageMap;
+      }
       if (!maskSource)
         throw std::runtime_error("-maskFromAtt requires -attMap.");
 
@@ -596,11 +659,11 @@ int runProgram(int argc, char **argv) {
     std::unique_ptr<spect::io::CompactChunkCSRDirectory> compactChunks;
 
     stageStart = ProfileClock::now();
-    logInfo("Opening compact chunk CSR directory from " + args.chunkCSRDir);
+    logDebug("Opening compact chunk CSR directory from " + args.chunkCSRDir);
     {
       auto opened =
           spect::io::openCompactChunkCSRDirectory(args.chunkCSRDir, compactMeta);
-      logInfo("Compact chunk CSR directory opened: chunks=" +
+      logDebug("Compact chunk CSR directory opened: chunks=" +
               std::to_string(opened.chunks().size()) +
               ", compactRows=" + std::to_string(opened.totalRows()) +
               ", nnz=" + std::to_string(opened.totalNnz()) +
@@ -624,7 +687,7 @@ int runProgram(int argc, char **argv) {
         baseNx, baseNy, baseNz);
     compactTiming.metadataLoadAndValidateSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
-    logInfo("compact-symmetric layout enabled via " + compactMetaPath +
+    logDebug("compact-symmetric layout enabled via " + compactMetaPath +
             " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
             ", compactRows=" + std::to_string(compactMeta.totalRows) +
             ", fullRows=" + std::to_string(compactMeta.fullRows()) +
@@ -732,15 +795,13 @@ int runProgram(int argc, char **argv) {
     const std::vector<int> bedZStarts =
         spect::app::computeBedZOffsets(bedCount, baseNz, args.bedOverlaps);
 
-    const bool reverseLocalZInReconStorage =
-        args.zBedFlip && !args.projPaths.empty() && bedCount > 1;
-    logInfo("Bed coordinate contract: Bed1 = max physical Z, bed index "
-            "increases toward -Z; configured z_bed_flip=" +
+    logDebug("Bed coordinate contract: Bed1 = min physical Z, bed index "
+            "increases toward +Z; configured z_bed_flip=" +
             std::to_string(args.zBedFlip ? 1 : 0) +
             ", effective multi-bed local Z flip=" +
             std::to_string(reverseLocalZInReconStorage ? 1 : 0) + ".");
     if (bedCount > 1) {
-      logInfo("Bed physical step policy: canonical stitch uses " +
+      logDebug("Bed physical step policy: canonical stitch uses " +
               std::to_string(bedSetup.canonicalGeom.stepLayers) +
               " layers / " +
               std::to_string(args.bedStepMm > 0.0
@@ -760,10 +821,11 @@ int runProgram(int argc, char **argv) {
       const int localLastStorageZ = reverseLocalZInReconStorage
                                         ? start
                                         : start + baseNz - 1;
-      logInfo("Bed " + std::to_string(bed + 1) + " mapping: file=\"" +
+      logDebug("Bed " + std::to_string(bedSetup.bedNumbers[static_cast<size_t>(bed)]) +
+              " mapping: file=\"" +
               bedFile + "\", physical_z_offset_mm=" +
               std::to_string(physicalZOffsetMm) +
-              " (Bed1-relative), local_z_direction=" +
+              " (first-selected-bed-relative), local_z_direction=" +
               (reverseLocalZInReconStorage ? "descending_storage_z"
                                            : "ascending_storage_z") +
               " (local z 0->" + std::to_string(baseNz - 1) +
@@ -772,7 +834,7 @@ int runProgram(int argc, char **argv) {
               "), recon_storage_z=[" + std::to_string(start) + ", " +
               std::to_string(start + baseNz) + ").");
       if (bed + 1 < bedCount)
-        physicalZOffsetMm -= bedSetup.canonicalGeom.stepLayers * spacing.dz;
+        physicalZOffsetMm += bedSetup.canonicalGeom.stepLayers * spacing.dz;
     }
 
     std::vector<std::vector<uint16_t>> dynamicAttenFactors;
@@ -855,7 +917,7 @@ int runProgram(int argc, char **argv) {
             static_cast<size_t>(bedCount)));
     }
 
-    logInfo("Sparse backend: cuda");
+    logDebug("Sparse backend: cuda");
 
     ReconOpts opts;
     opts.threads = std::max(1, args.numThreads);
@@ -925,13 +987,13 @@ int runProgram(int argc, char **argv) {
 
     outputTransformPtr = &outputTransform;
     if (enableBedZFlip)
-      logInfo("Output transform: per-bed Z flip enabled for dfList bed segments.");
+      logDebug("Output transform: per-bed Z flip enabled for dfList bed segments.");
     if (args.zOutFlip)
-      logInfo("Output transform: whole-output Z flip enabled.");
+      logDebug("Output transform: whole-output Z flip enabled.");
     if (args.xOutFlip)
-      logInfo("Output transform: whole-output X flip enabled.");
+      logDebug("Output transform: whole-output X flip enabled.");
     if (args.seamXyAlign)
-      logInfo("Output transform: seam XY overlap alignment enabled.");
+      logDebug("Output transform: seam XY overlap alignment enabled.");
     logInfo("Output transform: canonical center66_cosine10 stitch; "
             "reconstruction beds are non-overlapping.");
     CompactSymmetricReconLoopContext compactContext;

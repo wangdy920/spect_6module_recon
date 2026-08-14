@@ -8,6 +8,13 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Helper kernels (`volume_ops`, `projdomain`, `butterworth_mask`) ship as
+  build-time fatbins for sm_86/89/120. Runtime NVRTC is disabled; a GPU
+  outside that set is a hard failure.
+- Recon log files use `<outputName>_YYYYMMDD_HHMMSS_mmm.log` again (no PID).
+  Default `-vb 1` keeps version, CUDA device, iteration progress, cache
+  hit/miss and completion; fatbin loads, CSR/CUDA cache internals, per-bed
+  mapping, run-configuration dump and center66 gain traces move to `-vb 2`.
 - Device repeat diagnostics now leave denominator-cache selection to the INI
   unless `-DenomCachePath` is explicitly requested; CLI iteration/save and
   per-run output overrides remain authoritative.
@@ -36,7 +43,7 @@ experiment commits are intentionally omitted.
   identity while retaining matrix profile, file stats and parsed detector
   policy, so the same fixed-profile cache survives a package-root move.
 - Added a per-GPU Windows process lock so an accidental second
-  `SPECT_recon.exe` exits before loading the matrix; log names now include PID.
+  `SPECT_recon.exe` exits before loading the matrix.
 - Kept GPU resident-matrix warmup enabled when a reduced host-cache budget is
   used, while skipping background host preload that could not remain cached.
 - Added an installed PowerShell collector that records process ancestry, GPU

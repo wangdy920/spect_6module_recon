@@ -10,9 +10,8 @@ option(SPECT_BUNDLE_CUDA_RUNTIME
   "Copy CUDA redistributable DLLs next to SPECT_recon.exe (required for field GPUs)" ON)
 
 # Consumer GeForce RTX architectures required by every CUDA-enabled build.
-# Native CUDA targets receive all three entries. NVRTC kernels still compile
-# at runtime for the live device CC, so the package must also bundle CUDA
-# 12.8+ / 13.x NVRTC for compute_120 support.
+# Native CUDA targets and helper fatbins both receive all three entries.
+# Runtime NVRTC is disabled; a GPU outside this set is a hard failure.
 #
 #   86  — RTX 30-series (Ampere GeForce)
 #   89  — RTX 40-series (Ada, e.g. 4070)
@@ -39,8 +38,8 @@ foreach(_spect_arch IN LISTS _spect_required_cuda_architectures)
   endif()
 endforeach()
 
-# Minimum toolkit that can emit / JIT compute_120 (RTX 50-series).
-# Prefer building on CUDA 13.x hosts so redistributed NVRTC matches field drivers ~13.0.
+# Minimum toolkit that can emit sm_120 cubin (RTX 50-series).
+# Prefer building on CUDA 13.x hosts so redistributed cudart matches field drivers ~13.0.
 set(SPECT_CUDA_MIN_TOOLKIT_VERSION "12.8" CACHE STRING
   "Minimum CUDA Toolkit version required when CUDA backends are enabled")
 set(SPECT_CUDA_MIN_DRIVER_API_VERSION "13000" CACHE STRING

@@ -115,7 +115,7 @@ inline CudaEnvironmentInfo queryEnvironment(int deviceId = 0) {
  *        (minor-version compatibility floor: driver CUDA >= 13.0).
  */
 inline void ensureDriverSupportsBundledRuntime(const CudaEnvironmentInfo &info) {
-    // Bundled cudart/nvrtc from CUDA 13.x require a CUDA 13-capable driver
+    // Bundled cudart from CUDA 13.x require a CUDA 13-capable driver
     // (display driver family >= R580 per NVIDIA minor-version compatibility).
 #if defined(SPECT_CUDA_MIN_DRIVER_API_VERSION)
     constexpr int kMinDriverCudaVersion = SPECT_CUDA_MIN_DRIVER_API_VERSION;
@@ -126,8 +126,8 @@ inline void ensureDriverSupportsBundledRuntime(const CudaEnvironmentInfo &info) 
         throw std::runtime_error(
             "CUDA driver supported version is " +
             formatCudaApiVersion(info.driverVersion) +
-            ", but this SPECT_recon build bundles CUDA 13.x runtime/NVRTC "
-            "(needed for RTX 50-series sm_120). Install an NVIDIA driver with "
+            ", but this SPECT_recon build bundles CUDA 13.x runtime "
+            "(needed for RTX 50-series sm_120 fatbins). Install an NVIDIA driver with "
             "CUDA 13.x support (R580+ / CUDA 13.0+), then retry.");
     }
     if (info.driverVersion < info.runtimeVersion) {

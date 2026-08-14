@@ -1,12 +1,4 @@
-#include "sparse/cuda/SparseOpsCudaKernels.h"
-
-#include <string>
-
-namespace spect::cuda {
-
-const char *projectionDomainKernelSource() {
-  static const std::string source = std::string(R"CU(
-// NVRTC source must be self-contained; host header constants are not visible here.
+// Device-only helper kernels. Compiled with nvcc --fatbin for sm_86/89/120.
 static constexpr float kAttenUint16Scale = 65535.0f;
 
 extern "C" __device__ __forceinline__ int mirror_index(int idx, int size) {
@@ -186,7 +178,6 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
       static_cast<float>(fullProjection[fullIndex] / denom);
 }
 
-)CU") + R"CU(
 extern "C" __global__ void compact_gather_bed_double_to_float(
     const double *globalImage, unsigned long long globalCount,
     float *bedImage, int nx, int ny, int nz, int globalNz, int zStart,
@@ -499,7 +490,6 @@ extern "C" __global__ void compact_transform_backward_add_batch(
   atomicAdd(&accum[mapped], static_cast<double>(rotatedBatch[index]));
 }
 
-)CU" + R"CU(
 extern "C" __device__ __forceinline__ int compact_atten_full_angle(
     int symmetryMode, int compactRow, int compactRaysPerAngle,
     int compactNumAngles, int fullNumAngles, int symId) {
@@ -736,8 +726,3 @@ extern "C" __global__ void compact_atten_fused_spmvt(
   }
 }
 
-)CU";
-  return source.c_str();
-}
-
-} // namespace spect::cuda

@@ -4,7 +4,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 
 - **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, and Butterworth filtering.
 - **Compact-symmetric backend**: **default matrix 260601** — `-chunkCSRDir` loads `metadata.bin` + `chunk_*.csrb` (`test_data/6module/260601`, 88B/96B metadata, Sym90Z). This is the **only** matrix input path; single-file CSRB/MAT entries have been removed.
-- **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, NVRTC kernels for PSF/RDP/TV gradients. Single GPU.
+- **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, build-time fatbin helper kernels for PSF/RDP/TV on sm_86/89/120. Single GPU.
 - **6-module matrix generation reference**: `6module_bak_src/` holds the CUDA v4 system-matrix generator, the bedmerge reconstruction prototype, and the MAT→BIN projection tool.
 
 ## Project Status (Snapshot: 2026-08-11)

@@ -664,16 +664,8 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
       matrixBytes, memory.totalBytes, memory.availableBytes);
   const char *overrideValue =
       std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES");
-  const bool overridden = overrideValue != nullptr && overrideValue[0] != '\0';
   const uint64_t cacheBudget =
       parseByteBudget(overrideValue, automaticBudget);
-  constexpr uint64_t kMiB = 1024ull * 1024ull;
-  std::cerr << "[CompactChunkCSR] host cache "
-            << (overridden ? "override" : "auto") << ": budget="
-            << (cacheBudget / kMiB) << " MiB matrix="
-            << (matrixBytes / kMiB) << " MiB system_total="
-            << (memory.totalBytes / kMiB) << " MiB system_available="
-            << (memory.availableBytes / kMiB) << " MiB\n";
   // ponytail: six 28-byte headers are rescanned to keep one validation path.
   return openCompactChunkCSRDirectory(directory, meta, cacheBudget);
 }

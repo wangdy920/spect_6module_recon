@@ -4,10 +4,9 @@
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
 #include "cuda/CudaDriverHelpers.h"
+#include "cuda/CudaFatbinLoader.h"
+#include "cuda/CudaFatbinSymbols.h"
 #include "cuda/CudaLaunchConfig.h"
-#include "cuda/CudaNvrtcArch.h"
-#include "cuda/CudaNvrtcLoader.h"
-#include "sparse/cuda/SparseOpsCudaKernels.h"
 
 #include <cuda.h>
 
@@ -80,13 +79,7 @@ void ensureProjDomainKernelsLoaded() {
     return;
   }
 
-  const char *source = cuda::projectionDomainKernelSource();
-
-  const std::string arch = cuda::nvrtcGpuArchitectureOption(props);
-  const char *options[] = {arch.c_str()};
-  const std::string ptx = cuda::compileNvrtcProgramToPtx(
-      source, "projdomain_chunk_ops.cu", 1, options);
-
+  cuda::requireFrozenConsumerArch(props);
   CUcontext context = nullptr;
   SPECT_CUDRV_CHECK(cuCtxGetCurrent(&context));
   if (context == nullptr) {
@@ -112,7 +105,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
   }
 
-  cuda::loadNvrtcPtxModule(&g_projDomainKernelCache.module, ptx);
+  cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
+                           spect_fatbin_projdomain_size, "projdomain_chunk_ops");
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.ratioFunction, g_projDomainKernelCache.module,
       "compute_ratio_chunk"));

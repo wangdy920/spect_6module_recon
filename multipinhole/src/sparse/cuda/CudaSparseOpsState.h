@@ -2248,11 +2248,6 @@ public:
 
     CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
     residentMatrixSetCache_.initialized = true;
-    std::cerr << "[CompactChunkCUDA] Resident matrix cache: "
-              << residentMatrixSetCache_.numCached << " / " << matrices.size()
-              << " matrices cached (" << (usedBytes / cuda::kCudaMiB)
-              << " MiB reserve=" << (reserveBytes / cuda::kCudaMiB)
-              << " MiB)\n";
     return true;
   }
 

@@ -34,7 +34,6 @@ if(SPECT_BUILD_CUDA_SCAFFOLD)
     src/sparse/cuda/CudaChunkCache.cpp
     src/sparse/cuda/CudaCsrBuilder.cpp
     src/sparse/cuda/CudaProjKernelLauncher.cpp
-    src/sparse/cuda/SparseOpsCudaKernels.cpp
     src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp
   )
   target_include_directories(spect_sparse_cuda PUBLIC
@@ -51,7 +50,11 @@ if(SPECT_BUILD_CUDA_SCAFFOLD)
       SPECT_ENABLE_CUDA_SPARSEOPS=1
       SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL=1
     )
-    target_link_libraries(spect_sparse_cuda PUBLIC CUDA::cudart CUDA::cusparse CUDA::cuda_driver CUDA::nvrtc)
+    target_link_libraries(spect_sparse_cuda PUBLIC CUDA::cudart CUDA::cusparse CUDA::cuda_driver)
+    include(${SPECT_RECON_SOURCE_DIR}/cmake/EmbedFatbin.cmake)
+    spect_embed_cuda_fatbin(spect_sparse_cuda
+      ${SPECT_RECON_SOURCE_DIR}/src/sparse/cuda/projdomain_chunk_ops.cu
+      spect_fatbin_projdomain)
   endif()
   add_library(spect::sparse_cuda ALIAS spect_sparse_cuda)
 endif()
@@ -67,11 +70,23 @@ if(TARGET CUDA::cudart)
   target_sources(spect_filters PRIVATE
     src/filters/cuda/VolumeOpsCUDA.cpp
   )
+  if(NOT COMMAND spect_embed_cuda_fatbin)
+    include(${SPECT_RECON_SOURCE_DIR}/cmake/EmbedFatbin.cmake)
+  endif()
+  spect_embed_cuda_fatbin(spect_filters
+    ${SPECT_RECON_SOURCE_DIR}/src/filters/cuda/volume_ops_cuda.cu
+    spect_fatbin_volume_ops)
 endif()
 if(SPECT_ENABLE_BUTTERWORTH_CUFFT)
   target_sources(spect_filters PRIVATE
     src/filters/cuda/ButterworthCUDA.cpp
   )
+  if(NOT COMMAND spect_embed_cuda_fatbin)
+    include(${SPECT_RECON_SOURCE_DIR}/cmake/EmbedFatbin.cmake)
+  endif()
+  spect_embed_cuda_fatbin(spect_filters
+    ${SPECT_RECON_SOURCE_DIR}/src/filters/cuda/butterworth_mask.cu
+    spect_fatbin_butterworth)
 endif()
 target_include_directories(spect_filters PUBLIC
   $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>
@@ -79,7 +94,7 @@ target_include_directories(spect_filters PUBLIC
 )
 target_link_libraries(spect_filters PUBLIC spect_interfaces)
 if(TARGET CUDA::cudart)
-  target_link_libraries(spect_filters PUBLIC CUDA::cudart CUDA::cuda_driver CUDA::nvrtc)
+  target_link_libraries(spect_filters PUBLIC CUDA::cudart CUDA::cuda_driver)
   target_compile_definitions(spect_filters PUBLIC
     SPECT_HAS_CUDA=1
   )
@@ -255,7 +270,7 @@ add_custom_command(TARGET SPECT_recon POST_BUILD
   COMMENT "Copying runtime config files beside SPECT_recon.exe")
 
 # Bundle CUDA 12.8+/13.x redistributables so RTX 30/40/50 field machines get
-# matching runtime libraries; NVRTC JITs compute_86 / compute_89 / compute_120.
+# matching runtime libraries. Helper kernels ship as sm_86/89/120 fatbins.
 if((SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS) OR SPECT_ENABLE_BUTTERWORTH_CUFFT)
   include(${SPECT_RECON_SOURCE_DIR}/cmake/CudaRedist.cmake)
   spect_bundle_cuda_runtime_for_target(SPECT_recon)

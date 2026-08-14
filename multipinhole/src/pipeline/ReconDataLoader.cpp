@@ -295,7 +295,7 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
         oss << label << suffix << ": BIN projection, selectedAngles="
             << proj.numAngles << ", rays/angle=" << proj.raysPerAngle
             << ", records=" << projectionRecordCount;
-        logInfo(oss.str());
+        logDebug(oss.str());
       } else {
         spect::io::printMatInfo(mat, label + suffix);
       }
@@ -305,7 +305,7 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
         oss << label << suffix << ": event-list records=" << stats.recordCount
             << ", selectedAngles=" << stats.selectedAngles
             << ", detectors/angle=" << stats.detectorsPerAngle;
-        logInfo(oss.str());
+        logDebug(oss.str());
       }
     }
 

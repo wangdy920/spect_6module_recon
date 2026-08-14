@@ -552,7 +552,7 @@ std::vector<double> center66CosineBlendOutputOverlap(
         sampleDx[lowBed] = sampleDx[highBed];
         sampleDy[lowBed] = sampleDy[highBed];
       }
-      logInfo("center66 seam XY Bed" + std::to_string(lowBed + 1) + "/Bed" +
+      logDebug("center66 seam XY Bed" + std::to_string(lowBed + 1) + "/Bed" +
               std::to_string(highBed + 1) + ": dx=" +
               std::to_string(shift.dx) + ", dy=" + std::to_string(shift.dy) +
               ", ncc=" + std::to_string(shift.ncc) + ", samples=" +
@@ -782,7 +782,7 @@ std::vector<double> fitCenter66BedGains(
         source, nx, ny, transform, cropStart, lowBed, highBed, voxelSizeXmm,
         voxelSizeYmm, samples);
     logGains[highBed] = logGains[lowBed] + ratio;
-    logInfo("center66 gain pair Bed" + std::to_string(lowBed + 1) + "/Bed" +
+    logDebug("center66 gain pair Bed" + std::to_string(lowBed + 1) + "/Bed" +
             std::to_string(highBed + 1) + ": log_ratio=" +
             std::to_string(ratio) + ", samples=" +
             std::to_string(samples));
@@ -795,7 +795,7 @@ std::vector<double> fitCenter66BedGains(
     for (size_t i = 0; i < bedCount; ++i)
       gains[i] = std::exp(logGains[i] - anchor);
     for (size_t i = 0; i < bedCount; ++i) {
-      logInfo("center66 gain Bed" + std::to_string(i + 1) + "=" +
+      logDebug("center66 gain Bed" + std::to_string(i + 1) + "=" +
               std::to_string(gains[i]));
     }
   }

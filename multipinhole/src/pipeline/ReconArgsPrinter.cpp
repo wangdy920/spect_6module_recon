@@ -112,7 +112,7 @@ void printReconArgs(const ReconArgs &args, const std::string &commandLine) {
         << " ct_sigma=" << args.reg.ct_sigma
         << " ct_floor=" << args.reg.ct_weight_floor;
   }
-  logInfo(oss.str());
+  logDebug(oss.str());
 
   logDebug(std::string("Algorithm: ") + args.getAlgorithmName());
   logDebug("Dims: " + std::to_string(args.Nx) + "x" +

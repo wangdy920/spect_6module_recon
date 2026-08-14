@@ -1,6 +1,6 @@
 # Collect CUDA redistributable DLLs for Windows field packages.
-# Main recon uses NVRTC at runtime; the shipped nvrtc/cudart/cusparse must
-# come from CUDA >= 12.8 so compute_120 (RTX 50-series) JIT works.
+# Helper kernels are build-time fatbins; field packages need cudart/cusparse/cufft,
+# not the NVRTC JIT stack.
 
 function(spect_collect_cuda_runtime_dlls out_var)
   set(_dlls)
@@ -13,15 +13,9 @@ function(spect_collect_cuda_runtime_dlls out_var)
     return()
   endif()
 
-  # Keep NVRTC/JIT stack complete: nvrtc + builtins + nvJitLink (+ nvfatbin).
-  # Field packages must not rely on a system-wide CUDA Toolkit PATH entry.
   set(_patterns
     "cudart64_*.dll"
     "cusparse64_*.dll"
-    "nvrtc64_*.dll"
-    "nvrtc-builtins64_*.dll"
-    "nvJitLink_*.dll"
-    "nvfatbin_*.dll"
   )
   if(SPECT_ENABLE_BUTTERWORTH_CUFFT)
     list(APPEND _patterns "cufft64_*.dll")

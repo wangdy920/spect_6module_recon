@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cuda.h>
-#include <nvrtc.h>
 
 #if __has_include(<cufft.h>)
 #include <cufft.h>
@@ -27,15 +26,6 @@ inline void checkCuDriver(CUresult status, const char *expr, const char *file,
   }
 }
 
-inline void checkNvrtc(nvrtcResult status, const char *expr, const char *file,
-                       int line) {
-  if (status != NVRTC_SUCCESS) {
-    throw std::runtime_error(std::string("NVRTC error at ") + file + ":" +
-                             std::to_string(line) + " for " + expr + " (" +
-                             nvrtcGetErrorString(status) + ")");
-  }
-}
-
 #if defined(SPECT_CUDA_HELPERS_HAVE_CUFFT)
 inline void checkCufft(cufftResult status, const char *expr, const char *file,
                        int line) {
@@ -52,8 +42,6 @@ inline void checkCufft(cufftResult status, const char *expr, const char *file,
 
 #define SPECT_CUDRV_CHECK(call)                                               \
   ::spect::cuda::checkCuDriver((call), #call, __FILE__, __LINE__)
-#define SPECT_NVRTC_CHECK(call)                                               \
-  ::spect::cuda::checkNvrtc((call), #call, __FILE__, __LINE__)
 #if defined(SPECT_CUDA_HELPERS_HAVE_CUFFT)
 #define SPECT_CUFFT_CHECK(call)                                               \
   ::spect::cuda::checkCufft((call), #call, __FILE__, __LINE__)

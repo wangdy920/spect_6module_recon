@@ -9,14 +9,6 @@
 #include <iostream>
 #include <sstream>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace {
 
@@ -90,14 +82,6 @@ std::string timestampForFilename() {
   char out[80];
   std::snprintf(out, sizeof(out), "%s_%03d", buf, static_cast<int>(ms.count()));
   return std::string(out);
-}
-
-unsigned long processIdForFilename() {
-#ifdef _WIN32
-  return static_cast<unsigned long>(GetCurrentProcessId());
-#else
-  return static_cast<unsigned long>(getpid());
-#endif
 }
 
 } // namespace
@@ -203,8 +187,7 @@ std::filesystem::path makeDefaultLogPath(const ReconArgs &args) {
       sanitizeFilename(args.outputName.empty() ? std::string("recon")
                                                : args.outputName);
   const std::filesystem::path relative =
-      dir / (stem + "_" + timestampForFilename() + "_pid" +
-             std::to_string(processIdForFilename()) + ".log");
+      dir / (stem + "_" + timestampForFilename() + ".log");
   std::error_code absError;
   auto abs = std::filesystem::absolute(relative, absError);
   return absError ? relative : abs;

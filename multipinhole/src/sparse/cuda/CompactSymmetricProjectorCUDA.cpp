@@ -166,9 +166,6 @@ void warmCompactChunkResidentDeviceCache(
   size_t residentPrefixCount = 1;
   try {
     const auto memory = cuda::getMemoryInfo();
-    std::cerr << "[CompactChunkCUDA] GPU memory before resident warmup: free="
-              << (memory.free / kMiB) << " MiB, reserve="
-              << (kCompactChunkResidentReserveBytes / kMiB) << " MiB\n";
     const uint64_t available =
         memory.free > kCompactChunkResidentReserveBytes
             ? static_cast<uint64_t>(memory.free) -
@@ -228,13 +225,6 @@ void warmCompactChunkResidentDeviceCache(
     std::cerr << "[NOTE] GPU resident matrix warmup was unavailable; "
                  "foreground matrix transfers remain active.\n";
   }
-  std::cerr << "[CompactChunkCUDA] Startup overlap: resident prefix "
-            << residentPrefixCount << " / " << chunks.chunks().size();
-  if (residentPrefixCount < chunks.chunks().size() && hostCacheCoversMatrix)
-    std::cerr << ", remaining host chunks preload in background";
-  else if (residentPrefixCount < chunks.chunks().size())
-    std::cerr << ", host preload skipped (cache budget below matrix)";
-  std::cerr << '\n';
   chunks.setAcceleratorLease(lease);
 }
 
