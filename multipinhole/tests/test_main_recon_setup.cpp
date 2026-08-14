@@ -256,6 +256,57 @@ TEST(ReconSetupTest, PrepareBedSetupRejectsMoreThanFiveBeds) {
   EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
 }
 
+TEST(ReconSetupTest, AdoptReconDimsUsesPerBedNzFromTaggedSubsetMap) {
+  const auto path = makeTempMhdPath();
+  {
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out << "ObjectType = Image\nNDims = 3\nDimSize = 120 120 660\n"
+           "ElementSpacing = 0.3 0.3 0.3\nElementType = MET_FLOAT\n"
+           "SPECTMapRole = regularizer_reconstruction_storage\n"
+           "SPECTBedOrder = increasing_bed_number\n"
+           "SPECTBeds = 2,3,4\n"
+           "SPECTZLayout = reconstruction_storage_z\n"
+           "SPECTIntensityUnits = HU\n"
+           "ElementDataFile = dummy.raw\n";
+  }
+
+  ReconArgs args;
+  args.useReg = true;
+  args.regCtPath = path.string();
+
+  EXPECT_TRUE(adoptReconDimsFromHint(args));
+  EXPECT_EQ(args.Nx, 120);
+  EXPECT_EQ(args.Ny, 120);
+  EXPECT_EQ(args.Nz, 220);
+  std::filesystem::remove(path);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupAcceptsContinuousBedSubset) {
+  ReconArgs args;
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.dz = 0.3;
+  args.projPaths = {"Bed4.bin", "Bed2.bin", "Bed3.bin"};
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(result.bedNumbers, (std::vector<int>{2, 3, 4}));
+  EXPECT_NE(result.projectionPaths.front().find("Bed2.bin"), std::string::npos);
+  EXPECT_EQ(args.Nz, 660);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupRejectsNonContinuousBeds) {
+  ReconArgs args;
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.projPaths = {"Bed2.bin", "Bed4.bin"};
+
+  EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
+}
+
 TEST(ReconSetupTest, PrepareBedSetupCorrectsLegacyOverlapForSmallMatrixNz) {
   // Device scenario: sampling-system matrix with Nz=100 (metadata override),
   // while the deployment config still carries the 220-layer overlap 164.

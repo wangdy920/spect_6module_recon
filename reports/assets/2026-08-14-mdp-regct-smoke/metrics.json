@@ -1,0 +1,178 @@
+{
+  "contract": {
+    "control": "BSREM RDP beta=0.3 without CT weights",
+    "candidate": "same control plus regCT HU weights, sigma=100, floor=0.05",
+    "ctac": false,
+    "iterations": 20
+  },
+  "inputs": {
+    "control": "recon_out\\mdp_regct_smoke_20260814\\plain_rdp\\recon_it20.mhd",
+    "candidate": "recon_out\\mdp_regct_smoke_20260814\\ct_weighted_rdp\\recon_it20.mhd",
+    "regct": "recon_out\\ct_spect_reg_20260813\\20260729_mdp_fixedrefine\\regct_hu_recon220.mhd"
+  },
+  "metrics": {
+    "shape_zyx": [
+      290,
+      100,
+      100
+    ],
+    "mhd_dimsize_xyz": [
+      100,
+      100,
+      290
+    ],
+    "finite_nonnegative_nonzero": true,
+    "relative_l2": 0.003719980751670267,
+    "ncc": 0.9999946505150716,
+    "sum_ratio": 1.0011540969191255,
+    "max_ratio": 1.0053789322950217,
+    "ct_gradient_rule": {
+      "population": "positive CT gradients inside paired nonzero activity support",
+      "flat": "at or below P25",
+      "edge": "at or above P75",
+      "p25_hu_per_voxel": 34.05010264147794,
+      "p75_hu_per_voxel": 134.91464537995535
+    },
+    "candidate_control_gradient_ratio": {
+      "ct_flat": 1.0009704432496986,
+      "ct_edge": 1.011149898594072,
+      "edge_over_flat": 1.0101695863379594
+    },
+    "landmark_slices": {
+      "knees": {
+        "z_index": 93,
+        "relative_l2": 0.00620983624304293,
+        "ncc": 0.9999851875214423,
+        "sum_ratio": 1.0015857839323685
+      },
+      "spine": {
+        "z_index": 117,
+        "relative_l2": 0.004421383806702406,
+        "ncc": 0.9999930040170464,
+        "sum_ratio": 1.0009588913408987
+      },
+      "shoulders": {
+        "z_index": 228,
+        "relative_l2": 0.005011763786863402,
+        "ncc": 0.9999919770425849,
+        "sum_ratio": 1.0023004156063668
+      }
+    },
+    "ct_neighbor_coupling": {
+      "formula": "floor + (1-floor) * exp(-0.5 * (delta_HU / sigma)^2)",
+      "sigma_hu": 100.0,
+      "floor": 0.05,
+      "pair_population": "3-axis neighbors inside paired nonzero activity support",
+      "pair_count": 8200976,
+      "weight_percentiles_p1_p5_p25_p50_p75_p95_p99": [
+        0.05000000717597462,
+        0.48673573244981133,
+        0.9923082487761086,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "fraction_le_0p10": 0.03095582769660587,
+      "fraction_le_0p50": 0.05072566972516442,
+      "fraction_ge_0p90": 0.8830188016645824
+    },
+    "interpretation_limit": "Diagnostic 20-iteration morphology check; thresholds are distribution-based and are not calibrated adoption gates."
+  },
+  "checkpoint_trajectory": {
+    "5": {
+      "relative_l2": 0.0003694049505526214,
+      "ncc": 0.9999999109974433,
+      "sum_ratio": 0.9999718843310383,
+      "ct_flat_gradient_ratio": 0.9998800339039058,
+      "ct_edge_gradient_ratio": 1.0018321476323282,
+      "edge_over_flat": 1.0019523479439836
+    },
+    "10": {
+      "relative_l2": 0.0016371153438524354,
+      "ncc": 0.9999987310234745,
+      "sum_ratio": 1.0005480734795884,
+      "ct_flat_gradient_ratio": 1.0004149036295127,
+      "ct_edge_gradient_ratio": 1.0048554056387267,
+      "edge_over_flat": 1.0044386603929067
+    },
+    "15": {
+      "relative_l2": 0.0023545697042548033,
+      "ncc": 0.9999968053141565,
+      "sum_ratio": 0.999815782213652,
+      "ct_flat_gradient_ratio": 0.9997339724663118,
+      "ct_edge_gradient_ratio": 1.0069507540882172,
+      "edge_over_flat": 1.0072187019953938
+    },
+    "20": {
+      "relative_l2": 0.003719980751670267,
+      "ncc": 0.9999946505150716,
+      "sum_ratio": 1.0011540969191255,
+      "ct_flat_gradient_ratio": 1.0009704432496986,
+      "ct_edge_gradient_ratio": 1.011149898594072,
+      "edge_over_flat": 1.0101695863379594
+    }
+  },
+  "visualization_contract": {
+    "activity_window": "shared control P99.9: 0..12.7395906241866",
+    "difference_data_abs_p99_5_percent_of_activity_window": 0.1943529606770059,
+    "difference_data_abs_p99_95_percent_of_activity_window": 0.6790986963827543,
+    "difference_window": "fixed +/-1.0% of control P99.9",
+    "difference_window_over_activity_window": 0.01,
+    "difference_fraction_clipped_by_display_window": 0.0001613793103448276,
+    "ct_window_hu": [
+      -1000,
+      1500
+    ],
+    "overlay_alpha": "0.9*sqrt(min(abs(diff_percent)/1.0,1))",
+    "interpolation": "none; array-index matched"
+  },
+  "figures": [
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_it20_coronal.png",
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_it20_axial_landmarks.png",
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_it20_ct_overlay.png",
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_iteration_difference.png",
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_orientation_multiplanar.png",
+    "recon_out\\mdp_regct_smoke_20260814\\qa_it20\\mdp_regct_orientation_z_profiles.png"
+  ],
+  "decision": {
+    "execution": "completed",
+    "quality": "reject current run as anatomical evidence",
+    "method_quality": "undetermined until corrected-map rerun",
+    "adoption": "keep baseline",
+    "reason": "regCT used by the candidate is globally Z-reversed"
+  },
+  "orientation_diagnostic": {
+    "interpretation": "diagnostic only; compares same-modality axial profiles before cross-modality bone-tracer interpretation",
+    "output_vs_dicom_spect": {
+      "center_crop_3d_ncc_same_z": 0.9773645678812408,
+      "center_crop_3d_ncc_reversed_z": 0.15105133205253637,
+      "same_z_direction": {
+        "ncc": 0.9942995625362174,
+        "reference_start_z": 47
+      },
+      "reversed_z_direction": {
+        "ncc": 0.8186216259750873,
+        "reference_start_z": 17
+      }
+    },
+    "stitched_regct_vs_physical_ct": {
+      "center_crop_max_abs_hu_same_z": 5745.961120605469,
+      "center_crop_max_abs_hu_reversed_z": 4.547473508864641e-13,
+      "same_z_direction": {
+        "ncc": 0.7491754728217693,
+        "reference_start_z": 104
+      },
+      "reversed_z_direction": {
+        "ncc": 0.9999970727745546,
+        "reference_start_z": 77
+      }
+    },
+    "bone_tracer_profile_ncc": {
+      "regct_as_used": 0.01249554229292182,
+      "diagnostic_regct_z_flip": 0.6196053539997568
+    },
+    "display_origin": "lower; changes screen direction only, not relative array order",
+    "verdict": "registered CT is globally Z-reversed relative to reconstruction output"
+  }
+}

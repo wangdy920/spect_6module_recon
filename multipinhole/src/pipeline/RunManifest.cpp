@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "filters/PSFConfig.h"
+#include "core/BedPathUtils.h"
 #include "pipeline/RunLogger.h"
 #include "regularizer/RegConfig.h"
 
@@ -310,7 +311,7 @@ void writeRunManifest(const RunManifestInput &input) {
   for (size_t bed = 1; bed < bedZStarts.size(); ++bed) {
     const int stepLayers = transform.canonicalGeom.stepLayers;
     physicalZOffsetsMm[bed] =
-        physicalZOffsetsMm[bed - 1] - stepLayers * geometry.vz;
+        physicalZOffsetsMm[bed - 1] + stepLayers * geometry.vz;
   }
   std::ostringstream out;
   JsonWriter json(out);
@@ -344,8 +345,12 @@ void writeRunManifest(const RunManifestInput &input) {
   json.beginObject("projection");
   const std::vector<std::string> &bedFiles = args.projPaths;
   if (!bedFiles.empty()) {
-    for (size_t bed = 0; bed < bedFiles.size(); ++bed)
-      json.string(std::to_string(bed + 1), bedFiles[bed]);
+    for (size_t bed = 0; bed < bedFiles.size(); ++bed) {
+      const int bedNumber = spect::core::extractBedNumberFromPath(bedFiles[bed]);
+      json.string(std::to_string(bedNumber > 0 ? bedNumber
+                                               : static_cast<int>(bed) + 1),
+                  bedFiles[bed]);
+    }
   } else {
     json.string("1", args.projPath);
   }
@@ -360,8 +365,8 @@ void writeRunManifest(const RunManifestInput &input) {
       json.stringVector("bed" + std::to_string(bed + 1) + "_sources",
                         args.projectionSourceGroups[bed]);
   }
-  json.string("physical_z_convention", "Bed1=max_physical_z");
-  json.string("bed_number_direction", "increasing_bed_number=-Z");
+  json.string("physical_z_convention", "Bed1=min_physical_z");
+  json.string("bed_number_direction", "increasing_bed_number=+Z");
   json.boolean("z_bed_flip", args.zBedFlip);
   json.numberVector("physical_z_offsets_mm", physicalZOffsetsMm);
   json.string("local_z_direction",
@@ -415,6 +420,12 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("reg", regTypeToString(args.reg.type));
   json.number("reg_beta", args.reg.beta);
   json.boolean("ctac", args.doCTAC);
+  json.string("attenuation_map_path", args.attMapPath);
+  json.string("attenuation_map_z_layout",
+              args.attMapPath.empty() ? "" : "local_matrix_z");
+  json.string("regularizer_ct_path", args.regCtPath);
+  json.string("regularizer_ct_z_layout",
+              args.regCtPath.empty() ? "" : "reconstruction_storage_z");
   json.endObject();
 
   json.beginObject("multibed");
@@ -449,7 +460,7 @@ void writeRunManifest(const RunManifestInput &input) {
   json.boolean("x_out_flip", transform.flipXWholeOutput);
   json.boolean("seam_xy_align", transform.seamXyAlign);
   json.string("increasing_z_index_direction",
-              transform.flipZWholeOutput ? "+physical_z" : "-physical_z");
+              transform.flipZWholeOutput ? "-physical_z" : "+physical_z");
   json.integer("crop_end_start", args.cropEndStart);
   json.integer("crop_end_end", args.cropEndEnd);
   json.integer("saved_iteration", input.savedIteration);

@@ -43,7 +43,8 @@ powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagno
 | `qa_ctac_automu_cylinder.py` | auto-mu Dice、体积和 profile QA |
 | `validate_ctac_pinhole_reference.py` | validation-only pinhole-center Siddon 抽样参考 |
 | `eval_ctac_smoke.py` | CTAC / no-CTAC 配对指标 |
-| `prepare_ct_mu_map.py` | 用共用 FrameOfReference / IPP / IOP 把 CT DICOM 重采样到 SPECT 网格；`--profile device160` 对齐设备 108×108×160，`--profile recon220` 对齐主线 120×120×220。推荐 `--fixed-translation-xyz mdp_device --measure-residual --apply-residual`：从 `multipinhole/config/ct_spect_registration.ini` 加载冻结 MDP 脊柱平移后再做 ±2 mm 脊柱+膝 3 自由度细化。0.3 mm 门作用在脊柱/膝残差上，仍为暂定诊断门。写出 `<output>_registration.ini` 供后续直接加载。`--attmap-bed-order recon_bed1_max_z -z-bed-flip` 写出 SPECT_recon 的 `-attMap`。`--aligned-dicom-dir` 在 SPECT DICOM 网格上写出可叠图的 CT / SPECT / fusion 序列（同一 FoR 与 IPP，平移在 CT 体素里）。 |
+| `prepare_ct_mu_map.py` | 用共用 FrameOfReference / IPP / IOP 把 CT DICOM 重采样到 SPECT 网格；`--profile device160` 对齐设备 108×108×160，`--profile recon220` 对齐主线 120×120×220。推荐 `--fixed-translation-xyz mdp_device --measure-residual --apply-residual`：从 `multipinhole/config/ct_spect_registration.ini` 加载冻结 MDP 脊柱平移后再做 ±2 mm 脊柱+膝 3 自由度细化。脊柱 XY 使用 CT 骨脊附近 ±12 体素窗内的 SPECT 活度质心，不再用中线带独立峰值（膀胱/肋骨会污染）。`--beds` 接受任意连续 Bed1..Bed5 子集。`--attenuation-mu-output ... --z-bed-flip` 写出逐床 local-matrix-Z 的 `-attMap`；`--regct-hu-output` 独立写出 reconstruction-storage-Z 的 HU `-regCT`。两者都按递增床号写入 MHD 合同标签，整幅 `-zoutflip` 不进入地图。`--aligned-dicom-dir` 在 SPECT DICOM 网格上写出可叠图的 CT / SPECT / fusion 序列。 |
+| `refine_ct_spect_spine_rigid.py` | 在已有 SPECT 网格 MHD 上诊断脊柱逐层残差，比较独立中线峰值、CT 锚定局部 COM、以及 3-DOF/6-DOF；6-DOF 已在三例 MDP 上拒绝。生产 refine 在 `prepare_ct_mu_map.py`。 |
 | `register_ct_spect_global.py` | CT/SPECT 全局平移配准与留出验证 |
 | `refine_ct_spect_bone_centers.py` | CT/SPECT 骨中心细化 |
 | `refine_ct_spect_bone_distance.py` | CT/SPECT 骨距离细化 |

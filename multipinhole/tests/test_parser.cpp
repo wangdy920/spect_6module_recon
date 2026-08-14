@@ -119,7 +119,7 @@ TEST(CLITest, AppliedRegistrationIniUsesSameSectionAndBool) {
         out << "[Registration]\n";
         out << "fixed_translation_xyz_mm = -0.225,1.6,-11.1\n";
         out << "z_bed_flip = 1\n";
-        out << "attmap_bed_order = recon_bed1_max_z\n";
+        out << "regct_layout = reconstruction_storage_z\n";
     }
     spect::cli::ConfigParser cfg;
     ASSERT_TRUE(cfg.load(path.string()));

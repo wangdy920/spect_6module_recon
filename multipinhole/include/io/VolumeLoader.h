@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -32,6 +33,11 @@ struct VolumeInfo {
     bool isFloat = true;
     bool littleEndian = true;
     int headerOffset = 0;
+    std::string spectMapRole;
+    std::string spectBedOrder;
+    std::string spectZLayout;
+    std::string spectIntensityUnits;
+    std::vector<int> spectBeds;
 };
 
 /**
@@ -66,8 +72,68 @@ inline VolumeInfo parseMHD(const std::string &path) {
             std::filesystem::path p(path);
             info.rawPath = (p.parent_path() / raw).string();
         }
+        if (line.rfind("SPECTMapRole", 0) == 0)
+            info.spectMapRole = line.substr(line.find('=') + 1);
+        if (line.rfind("SPECTBedOrder", 0) == 0)
+            info.spectBedOrder = line.substr(line.find('=') + 1);
+        if (line.rfind("SPECTZLayout", 0) == 0)
+            info.spectZLayout = line.substr(line.find('=') + 1);
+        if (line.rfind("SPECTIntensityUnits", 0) == 0)
+            info.spectIntensityUnits = line.substr(line.find('=') + 1);
+        if (line.rfind("SPECTBeds", 0) == 0) {
+            std::string value = line.substr(line.find('=') + 1);
+            std::replace(value.begin(), value.end(), ',', ' ');
+            std::stringstream ss(value);
+            std::string token;
+            while (ss >> token) {
+                size_t consumed = 0;
+                const int bed = std::stoi(token, &consumed);
+                if (consumed != token.size())
+                    throw std::runtime_error("Invalid SPECTBeds value in " + path);
+                info.spectBeds.push_back(bed);
+            }
+        }
     }
+    auto trim = [](std::string &value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) {
+            value.clear();
+            return;
+        }
+        value.erase(0, first);
+        value.erase(value.find_last_not_of(" \t\r\n") + 1);
+    };
+    trim(info.spectMapRole);
+    trim(info.spectBedOrder);
+    trim(info.spectZLayout);
+    trim(info.spectIntensityUnits);
     return info;
+}
+
+inline bool validateSpectMapContract(const VolumeInfo &info,
+                                     const std::string &expectedRole,
+                                     const std::string &expectedZLayout,
+                                     const std::string &expectedUnits,
+                                     const std::vector<int> &expectedBeds) {
+    const bool tagged = !info.spectMapRole.empty() ||
+                        !info.spectBedOrder.empty() ||
+                        !info.spectZLayout.empty() ||
+                        !info.spectIntensityUnits.empty() ||
+                        !info.spectBeds.empty();
+    if (!tagged)
+        return false;
+    if (info.spectMapRole != expectedRole ||
+        info.spectZLayout != expectedZLayout ||
+        info.spectIntensityUnits != expectedUnits ||
+        info.spectBedOrder != "increasing_bed_number" ||
+        info.spectBeds != expectedBeds) {
+        throw std::runtime_error(
+            "SPECT map contract mismatch: expected role=" + expectedRole +
+            ", z_layout=" + expectedZLayout +
+            ", units=" + expectedUnits +
+            ", bed_order=increasing_bed_number with the exact -dfList beds.");
+    }
+    return true;
 }
 
 /**

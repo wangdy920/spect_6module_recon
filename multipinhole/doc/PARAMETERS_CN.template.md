@@ -62,9 +62,9 @@ denom cache 识别规则：显式 `-compactDenomCache <mhd>` 优先（CLI 相对
 ```
 
 固定合同：
-- 最多 5 个床位；路径含 `BedN` 时按床号排序。`Bed1` 是最大 physical-Z 床，后续床每次向较小 physical Z 移动 `16.8 mm`（扫描仪机械步进）。
+- 最多 5 个床位；路径含 `BedN` 时按床号排序，且必须是连续子集。`Bed1` 是最小 physical-Z 床，床号每增加 1 向较大 physical Z 移动 `16.8 mm`。少床不补虚拟床。
 - `-bedOverlap` 表达重建空间的重叠层数；`-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，默认 `16.8`）声明扫描仪机械步进。输出步进由 `step = round(bed_step_mm / voxel_z)` 自动确定，**overlap 是派生值**：`overlap = baseNz - step`。不传 `-bedOverlap` 时自动推算；传错时自动纠正并打印 `[NOTE]`（`bed_step_mm` 是权威输入）。220 层 0.3 mm 床位为 `overlap = 220 - 56 = 164`（16.8 mm 步进）；其他步进/几何按同一关系换算。
-- `[MultiBed] z_bed_flip=1` 是发布默认，在 compact 多床映射内反转每床局部 Z；不要通过逆序文件或 `-zbedflip 0` 二次补偿。
+- `[MultiBed] z_bed_flip=1` 是发布默认，只定义每床 local system-matrix Z 与 reconstruction-storage Z 的关系；`-attMap` 使用前者，`-regCT` 使用后者。不要通过逆序床号或整幅 Z 翻转二次补偿。
 - 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合（沿输出 Z，入口保持上一床；`z_bed_flip` 只反转存储与增益窗）。
 - 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床固定输出为 `100×100×72`，ROI `30 mm × 21.6 mm`；多床 ROI 为 `36 mm × 66 mm`。
 - `sigmoid`、`direct`、对象感知 seam/profile 修补、输出 FOV mask 和离线自动拼接均已删除。
@@ -92,7 +92,7 @@ seam_xy_align = 0
 -cropEnd top,end
 ```
 
-处理顺序为：compact 多床映射内每床 Z 方向 -> canonical gain/stitch -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。矩阵入口与预处理投影必须配对：260601 chunk 对应 `PROJECTION_VARIANT=identity`，`z_bed_flip` 保持包默认 1。
+处理顺序为：`-attMap` local-Z / `-regCT` storage-Z 输入 -> compact 每床映射 -> canonical gain/stitch -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。`z_out_flip` 只影响保存输出，不影响两类 CT 输入地图。
 
 
 ## 常用覆盖参数

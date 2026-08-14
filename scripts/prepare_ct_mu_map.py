@@ -321,6 +321,33 @@ def _parabolic_offset(profile: np.ndarray, index: int) -> float:
     return 0.0 if abs(denom) < 1e-12 else (left - right) / denom
 
 
+def _window_com(image2d: np.ndarray, x: float, y: float, half: int,
+                min_mass: float) -> tuple[float, float] | None:
+    ny, nx = image2d.shape
+    xi, yi = int(round(x)), int(round(y))
+    x0, x1 = max(0, xi - half), min(nx, xi + half + 1)
+    y0, y1 = max(0, yi - half), min(ny, yi + half + 1)
+    patch = image2d[y0:y1, x0:x1].astype(float)
+    mass = float(patch.sum())
+    if mass < min_mass:
+        return None
+    yy, xx = np.indices(patch.shape)
+    return (
+        x0 + float((patch * xx).sum() / mass),
+        y0 + float((patch * yy).sum() / mass),
+    )
+
+
+def _rolling_median(values: np.ndarray, width: int = 11) -> np.ndarray:
+    if values.size == 0:
+        return values
+    half = width // 2
+    out = np.empty_like(values, dtype=float)
+    for i in range(len(values)):
+        out[i] = float(np.median(values[max(0, i - half):min(len(values), i + half + 1)]))
+    return out
+
+
 def _slice_ridge_peak(mask2d: np.ndarray, x0: int, x1: int, min_pix: int = 4):
     """Midline ridge as X/Y profile peaks, not blob COM (ribs/bladder pull COM)."""
     band = mask2d[:, x0:x1]
@@ -345,31 +372,73 @@ def _midline_z_lag_vox(bone: np.ndarray, hot: np.ndarray) -> tuple[int, tuple[in
     return int(lags[int(np.argmax(corr))]), (x0, x1)
 
 
-def _spine_xy_median_vox(bone: np.ndarray, hot: np.ndarray, occupied: np.ndarray,
-                         caudal_low: bool, lag_z: int, x0: int, x1: int) -> dict:
+def _spine_xy_median_vox(bone: np.ndarray, hot: np.ndarray, activity: np.ndarray,
+                         occupied: np.ndarray, caudal_low: bool, lag_z: int,
+                         x0: int, x1: int, local_half_vox: int = 12) -> dict:
+    """CT bone ridge vs SPECT activity COM in a window around that ridge.
+
+    Independent midline-band peaks are not used: SPECT bladder/rib hot voxels
+    in the same X band are not spine correspondences. Valid after the frozen
+    device translation has removed the ~10 mm Z offset.
+    """
     n = len(occupied)
     if caudal_low:
         z0, z1 = occupied[int(0.22 * n)], occupied[int(0.82 * n)]
     else:
         z0, z1 = occupied[int(0.18 * n)], occupied[int(0.78 * n)]
-    dxs, dys = [], []
+    ct_raw = []
     for z in range(int(z0), int(z1) + 1):
-        zs = z - lag_z
-        if zs < 0 or zs >= hot.shape[0]:
-            continue
         ct = _slice_ridge_peak(bone[z], x0, x1, 4)
-        sp = _slice_ridge_peak(hot[zs], x0, x1, 3)
-        if ct is None or sp is None:
+        if ct is None:
             continue
-        dxs.append(ct[0] - sp[0])
-        dys.append(ct[1] - sp[1])
+        ct_raw.append((ct[0], ct[1], float(z)))
+    empty = {
+        "z_band_vox": [int(z0), int(z1)],
+        "slice_count": 0,
+        "dx_vox": 0.0,
+        "dy_vox": 0.0,
+        "dx_mad_vox": None,
+        "dy_mad_vox": None,
+        "pairing": "ct_anchored_local_com",
+        "local_half_vox": int(local_half_vox),
+        "window_edge_rejects": 0,
+    }
+    if len(ct_raw) < 20:
+        return empty
+    ct_raw = np.asarray(ct_raw, dtype=float)
+    ct_x = _rolling_median(ct_raw[:, 0])
+    ct_y = _rolling_median(ct_raw[:, 1])
+    keep = (np.abs(ct_raw[:, 0] - ct_x) <= 2.5) & (np.abs(ct_raw[:, 1] - ct_y) <= 2.5)
+    dxs, dys = [], []
+    edge_rejects = 0
+    for x_ct, y_ct, z in zip(ct_x[keep], ct_y[keep], ct_raw[keep, 2]):
+        zs = int(round(z - lag_z))
+        if zs < 0 or zs >= activity.shape[0]:
+            continue
+        sp = _window_com(activity[zs] * hot[zs], x_ct, y_ct, local_half_vox, 3.0)
+        if sp is None:
+            continue
+        if max(abs(sp[0] - x_ct), abs(sp[1] - y_ct)) >= local_half_vox - 0.5:
+            edge_rejects += 1
+            continue
+        dxs.append(x_ct - sp[0])
+        dys.append(y_ct - sp[1])
+    if len(dxs) < 20:
+        empty["window_edge_rejects"] = int(edge_rejects)
+        return empty
+    dxs = np.asarray(dxs, dtype=float)
+    dys = np.asarray(dys, dtype=float)
     return {
         "z_band_vox": [int(z0), int(z1)],
         "slice_count": int(len(dxs)),
-        "dx_vox": float(np.median(dxs)) if dxs else 0.0,
-        "dy_vox": float(np.median(dys)) if dys else 0.0,
-        "dx_mad_vox": float(np.median(np.abs(np.asarray(dxs) - np.median(dxs)))) if dxs else None,
-        "dy_mad_vox": float(np.median(np.abs(np.asarray(dys) - np.median(dys)))) if dys else None,
+        "dx_vox": float(np.median(dxs)),
+        "dy_vox": float(np.median(dys)),
+        "dx_mad_vox": float(np.median(np.abs(dxs - np.median(dxs)))),
+        "dy_mad_vox": float(np.median(np.abs(dys - np.median(dys)))),
+        "xy_within_1vox_frac": float(np.mean(np.hypot(dxs, dys) <= 1.0)),
+        "pairing": "ct_anchored_local_com",
+        "local_half_vox": int(local_half_vox),
+        "window_edge_rejects": int(edge_rejects),
     }
 
 
@@ -426,8 +495,10 @@ def spine_knee_translation_mm(hu: np.ndarray, activity: np.ndarray,
     """Translation moving SPECT onto CT from spine ridge + left/right knees.
 
     Z comes from midline occupancy xcorr (handles ~10 mm device offset).
-    XY and knees use SPECT windows shifted by that Z lag. Combined vector is
-    the median of spine and available knees. Whole-body bone/hot COM is not used.
+    Spine XY is the CT bone ridge vs SPECT activity COM in a ±12 voxel window
+    around that ridge. Independent midline-band peaks are not used. Combined
+    vector is the median of that local spine XY and available knees.
+    Whole-body bone/hot COM is diagnostic only.
     """
     bone, hot = bone_hot_masks(hu, activity, hot_frac=0.28)
     occupied = _occupied_z(bone, 20.0)
@@ -435,7 +506,8 @@ def spine_knee_translation_mm(hu: np.ndarray, activity: np.ndarray,
         raise RuntimeError("Insufficient CT bone occupancy for spine/knee landmarks")
     caudal_low = _caudal_is_low_z(bone, occupied)
     lag_z, (x0, x1) = _midline_z_lag_vox(bone, hot)
-    spine_xy = _spine_xy_median_vox(bone, hot, occupied, caudal_low, lag_z, x0, x1)
+    spine_xy = _spine_xy_median_vox(
+        bone, hot, activity, occupied, caudal_low, lag_z, x0, x1)
     if spine_xy["slice_count"] < 20:
         raise RuntimeError(
             f"Insufficient spine ridge overlap ({spine_xy['slice_count']} slices); "
@@ -623,17 +695,31 @@ def hu_to_mu(hu: np.ndarray, water_mu: float) -> np.ndarray:
     return water_mu * np.clip(1.0 + hu / 1000.0, 0.0, 3.0)
 
 
-def write_mhd(path: Path, volume: np.ndarray, spacing: tuple[float, float, float]) -> None:
+def stack_bed_blocks(volume: np.ndarray, bed_count: int, bed_nz: int,
+                     overlap: int, reverse_local_z: bool) -> np.ndarray:
+    stride = bed_nz - overlap
+    blocks = [volume[index * stride:index * stride + bed_nz]
+              for index in range(bed_count)]
+    if any(block.shape[0] != bed_nz for block in blocks):
+        raise RuntimeError("Registered CT cannot supply every reconstruction bed")
+    if reverse_local_z:
+        blocks = [block[::-1] for block in blocks]
+    return np.concatenate(blocks, axis=0)
+
+
+def write_mhd(path: Path, volume: np.ndarray, spacing: tuple[float, float, float],
+              metadata: dict[str, str] | None = None) -> None:
     raw = path.with_suffix(".raw")
     np.asarray(volume, dtype="<f4").tofile(raw)
     z, y, x = volume.shape
-    path.write_text(
+    header = (
         "ObjectType = Image\nNDims = 3\n"
         f"DimSize = {x} {y} {z}\nElementSpacing = {spacing[0]} {spacing[1]} {spacing[2]}\n"
-        "ElementType = MET_FLOAT\nElementByteOrderMSB = False\n"
-        f"ElementDataFile = {raw.name}\n",
-        encoding="ascii",
-    )
+        "ElementType = MET_FLOAT\nElementByteOrderMSB = False\n")
+    if metadata:
+        header += "".join(f"{key} = {value}\n" for key, value in metadata.items())
+    header += f"ElementDataFile = {raw.name}\n"
+    path.write_text(header, encoding="ascii")
 
 
 def _hot_colormap(t: np.ndarray) -> np.ndarray:
@@ -954,18 +1040,15 @@ def main() -> int:
         help="Optional per-bed stacked mu-map for output-overlap reconstruction")
     parser.add_argument(
         "--attenuation-mu-output", type=Path,
-        help="Optional per-bed CTAC mu-map in local system-matrix Z order")
+        help="Optional per-bed CTAC mu-map in increasing bed-number order; "
+             "each bed uses local system-matrix Z order")
     parser.add_argument(
         "--regct-hu-output", type=Path,
-        help="Optional HU volume in the same layout as --attenuation-mu-output for -regCT")
+        help="Optional HU volume for -regCT in reconstruction-storage Z order")
     parser.add_argument(
         "--z-bed-flip", action="store_true",
-        help="Reverse each CTAC bed block to match reconstruction -zbedflip 1")
-    parser.add_argument(
-        "--attmap-bed-order", choices=("ascending_patient_z", "recon_bed1_max_z"),
-        default="ascending_patient_z",
-        help="ascending_patient_z keeps historical low-Z-first stacks. "
-             "recon_bed1_max_z writes Bed1=max physical Z to match -dfList")
+        help="Reverse each -attMap bed block to match reconstruction -zbedflip 1; "
+             "does not change -regCT or whole-output orientation")
     parser.add_argument("--beds", default="1,2,3,4",
                         help="Consecutive physical bed numbers, e.g. 2,3,4")
     parser.add_argument("--bed-nz", type=int, default=None)
@@ -1031,8 +1114,6 @@ def main() -> int:
             f"overlap={profile['overlap']}; got bed_nz={args.bed_nz}, overlap={args.overlap}")
     if args.spect_reference_bed not in DEVICE_PHYSICAL_BEDS:
         raise RuntimeError("--spect-reference-bed must be in 1..5")
-    if args.regct_hu_output and not args.attenuation_mu_output:
-        raise RuntimeError("--regct-hu-output requires --attenuation-mu-output")
     if args.apply_residual and not args.measure_residual:
         raise RuntimeError("--apply-residual requires --measure-residual")
     nz = args.bed_nz + (len(beds) - 1) * (args.bed_nz - args.overlap)
@@ -1243,35 +1324,42 @@ def main() -> int:
     reconstruction_mu = None
     attenuation_mu = None
     regct_hu = None
-    if args.reconstruction_mu_output or args.attenuation_mu_output:
-        stride = args.bed_nz - args.overlap
-        blocks = [mu[index * stride:index * stride + args.bed_nz]
-                  for index in range(len(beds))]
-        hu_blocks = [target_hu[index * stride:index * stride + args.bed_nz]
-                     for index in range(len(beds))]
-        if any(block.shape[0] != args.bed_nz for block in blocks):
-            raise RuntimeError("Physical mu-map cannot supply every reconstruction bed")
-        if args.attmap_bed_order == "recon_bed1_max_z":
-            blocks = list(reversed(blocks))
-            hu_blocks = list(reversed(hu_blocks))
-        reconstruction_mu = np.concatenate(blocks, axis=0)
+    bed_metadata = {
+        "SPECTBedOrder": "increasing_bed_number",
+        "SPECTBeds": ",".join(str(bed) for bed in beds),
+    }
+    if (args.reconstruction_mu_output or args.attenuation_mu_output or
+            args.regct_hu_output):
+        reconstruction_mu = stack_bed_blocks(
+            mu, len(beds), args.bed_nz, args.overlap, False)
         if args.reconstruction_mu_output:
             args.reconstruction_mu_output.parent.mkdir(parents=True, exist_ok=True)
             write_mhd(args.reconstruction_mu_output, reconstruction_mu,
-                      tuple(target_spacing))
+                      tuple(target_spacing), bed_metadata | {
+                          "SPECTMapRole": "reconstruction_mu_storage",
+                          "SPECTZLayout": "reconstruction_storage_z",
+                          "SPECTIntensityUnits": "mm^-1",
+                      })
         if args.attenuation_mu_output:
-            attenuation_blocks = [block[::-1] if args.z_bed_flip else block
-                                  for block in blocks]
-            attenuation_mu = np.concatenate(attenuation_blocks, axis=0)
+            attenuation_mu = stack_bed_blocks(
+                mu, len(beds), args.bed_nz, args.overlap, args.z_bed_flip)
             args.attenuation_mu_output.parent.mkdir(parents=True, exist_ok=True)
             write_mhd(args.attenuation_mu_output, attenuation_mu,
-                      tuple(target_spacing))
-            if args.regct_hu_output:
-                hu_att_blocks = [block[::-1] if args.z_bed_flip else block
-                                 for block in hu_blocks]
-                regct_hu = np.concatenate(hu_att_blocks, axis=0)
-                args.regct_hu_output.parent.mkdir(parents=True, exist_ok=True)
-                write_mhd(args.regct_hu_output, regct_hu, tuple(target_spacing))
+                      tuple(target_spacing), bed_metadata | {
+                          "SPECTMapRole": "attenuation_local_matrix_z",
+                          "SPECTZLayout": "local_matrix_z",
+                          "SPECTIntensityUnits": "mm^-1",
+                      })
+        if args.regct_hu_output:
+            regct_hu = stack_bed_blocks(
+                target_hu, len(beds), args.bed_nz, args.overlap, False)
+            args.regct_hu_output.parent.mkdir(parents=True, exist_ok=True)
+            write_mhd(args.regct_hu_output, regct_hu, tuple(target_spacing),
+                      bed_metadata | {
+                          "SPECTMapRole": "regularizer_reconstruction_storage",
+                          "SPECTZLayout": "reconstruction_storage_z",
+                          "SPECTIntensityUnits": "HU",
+                      })
 
     manifest = {
         "decision": "geometry_ready_mu_calibration_provisional",
@@ -1292,6 +1380,7 @@ def main() -> int:
         "ct_shape_zyx": list(hu.shape), "target_shape_zyx": list(mu.shape),
         "beds": beds, "bed_nz": args.bed_nz, "overlap": args.overlap,
         "bed_step_mm": args.bed_step_mm,
+        "bed_number_direction": "increasing_bed_number=+patient_normal",
         "ct_origin_xyz": ct_origin.tolist(), "target_origin_xyz": target_origin.tolist(),
         "dicom_target_origin_xyz": dicom_target_origin.tolist(),
         "fixed_translation_xyz_mm": (
@@ -1325,7 +1414,8 @@ def main() -> int:
         "registration_assumption": (
             "shared FrameOfReferenceUID + ImagePosition/Orientation/PixelSpacing; "
             "fixed absolute Bed1..Bed5 device mapping; frozen device translation; "
-            "per-scan clamped 3-DOF spine+knee refine; no per-bed registration"),
+            "per-scan clamped 3-DOF spine+knee refine using CT-anchored local "
+            "SPECT COM; no rotation; no per-bed registration"),
         "mu_map": str(args.output),
     }
     if residual_metrics is not None:
@@ -1351,19 +1441,20 @@ def main() -> int:
         manifest["reconstruction_mu_map"] = str(args.reconstruction_mu_output)
         manifest["reconstruction_shape_zyx"] = list(reconstruction_mu.shape)
         manifest["reconstruction_layout"] = (
-            "per-bed blocks concatenated; overlap duplicated; "
-            f"bed_order={args.attmap_bed_order}")
+            "increasing bed-number blocks; reconstruction-storage Z; overlap duplicated")
     if args.attenuation_mu_output:
         manifest["attenuation_mu_map"] = str(args.attenuation_mu_output)
         manifest["attenuation_shape_zyx"] = list(attenuation_mu.shape)
         manifest["attenuation_layout"] = (
-            "per-bed local system-matrix Z order; overlap duplicated")
+            "increasing bed-number blocks; local system-matrix Z; overlap duplicated")
         manifest["attenuation_z_bed_flip"] = bool(args.z_bed_flip)
-        manifest["attmap_bed_order"] = args.attmap_bed_order
     if args.regct_hu_output:
         manifest["regct_hu_map"] = str(args.regct_hu_output)
+        manifest["regct_layout"] = (
+            "increasing bed-number blocks; reconstruction-storage Z; overlap duplicated")
         manifest["regct_note"] = (
-            "HU on the attenuation layout; -regCtSigma must be in HU, not mu")
+            "HU is not normalized; -regCtSigma is in HU, not mu. "
+            "Whole-output zOutFlip is never applied to input maps")
     qa_hu = None
     qa_activity = None
     if args.activity:
@@ -1409,7 +1500,10 @@ def main() -> int:
         "origin_shift_xyz_mm": _xyz_ini(origin_shift),
         "target_origin_xyz_mm": _xyz_ini(target_origin),
         "dicom_target_origin_xyz_mm": _xyz_ini(dicom_target_origin),
-        "attmap_bed_order": str(args.attmap_bed_order),
+        "beds": ",".join(str(bed) for bed in beds),
+        "bed_number_direction": "increasing_bed_number=+patient_normal",
+        "attenuation_layout": "local_matrix_z",
+        "regct_layout": "reconstruction_storage_z",
         "z_bed_flip": "1" if args.z_bed_flip else "0",
         "frozen_ini": str(args.registration_ini),
     })
@@ -1451,6 +1545,11 @@ def self_check() -> None:
     assert PROFILES["recon220"]["bed_nz"] == 220
     assert 220 + 4 * 56 == 444
     assert 220 * 5 == 1100
+    bed_ramp = np.arange(6, dtype=np.float32)[:, None, None]
+    storage_stack = stack_bed_blocks(bed_ramp, 2, 4, 2, False)
+    local_stack = stack_bed_blocks(bed_ramp, 2, 4, 2, True)
+    assert np.array_equal(storage_stack[:, 0, 0], [0, 1, 2, 3, 2, 3, 4, 5])
+    assert np.array_equal(local_stack[:, 0, 0], [3, 2, 1, 0, 5, 4, 3, 2])
     blob = np.zeros((32, 16, 16), dtype=bool)
     blob[10:14, 6:10, 6:10] = True
     moved = np.roll(blob, 4, axis=0)
@@ -1475,9 +1574,15 @@ def self_check() -> None:
     rec = spine_knee_translation_mm(hu_ph, shifted, np.array([0.3, 0.3, 0.3]))
     t = np.asarray(rec["translation_xyz_mm"])
     assert rec["landmark_count"] >= 1
+    assert rec["spine"]["pairing"] == "ct_anchored_local_com"
     assert abs(t[0] + 0.9) < 0.45
     assert abs(t[1] - 0.6) < 0.45
     assert abs(t[2] + 1.5) < 0.45
+    blob = np.zeros((40, 40))
+    blob[18:23, 10:15] = 1.0
+    com = _window_com(blob, 12.0, 20.0, 8, 1.0)
+    assert com is not None
+    assert abs(com[0] - 12.0) < 0.2 and abs(com[1] - 20.0) < 0.2
     hot = _hot_colormap(np.array([0.0, 0.375, 1.0], dtype=np.float32))
     assert np.allclose(hot[0], [0.0, 0.0, 0.0], atol=1e-6)
     assert hot[1, 0] == 1.0 and hot[1, 1] <= 1e-6

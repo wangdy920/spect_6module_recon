@@ -16,6 +16,7 @@ struct BedSetupResult {
   int bedCount = 1;
   int totalOverlap = 0;
   std::vector<std::string> projectionPaths;
+  std::vector<int> bedNumbers;
   std::vector<std::string> warnings;
   std::string summary;
   CanonicalOutputGeometry canonicalGeom;

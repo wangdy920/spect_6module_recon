@@ -11,6 +11,7 @@
 
 #include "cli/ReconArgs.h"
 #include "io/CompactSymmetryMetadata.h"
+#include "pipeline/RunLogging.h"
 #include "pipeline/RunManifest.h"
 
 namespace fs = std::filesystem;
@@ -59,6 +60,8 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   args.bsremSoftMask = true;
   args.bsremSoftMaskLambdaOut = 42.0;
   args.useReg = true;
+  args.regCtPath = "F:/maps/regct.mhd";
+  args.attMapPath = "F:/maps/attmap.mhd";
   args.reg.type = RegType::RDP;
   args.reg.beta = 0.0125;
   args.reg.delta = 0.2;
@@ -150,14 +153,14 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
             std::string::npos);
   // Path backslashes must be JSON-escaped.
   EXPECT_NE(text.find("F:\\\\matrix\\\\chunks"), std::string::npos);
-  EXPECT_NE(text.find("Bed1=max_physical_z"), std::string::npos);
+  EXPECT_NE(text.find("Bed1=min_physical_z"), std::string::npos);
   EXPECT_NE(text.find("\"merge_time_segments\": true"), std::string::npos);
   EXPECT_NE(text.find("\"time_segment_count\": 2"), std::string::npos);
   EXPECT_NE(text.find("20260810_211500/SPECT/Bed2.bin"),
             std::string::npos);
   EXPECT_NE(text.find("\"z_bed_flip\": true"), std::string::npos);
   EXPECT_NE(text.find("\"physical_z_offsets_mm\": [0.00000000000000000, "
-                      "-70.00000000000000000]"),
+                      "70.00000000000000000]"),
             std::string::npos);
   EXPECT_NE(text.find("\"local_z_direction\": "
                       "\"increasing_local_z=-storage_z\""),
@@ -182,6 +185,11 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
             std::string::npos);
   EXPECT_NE(text.find("\"regularizer_type\": \"RDP\""),
             std::string::npos);
+  EXPECT_NE(text.find("\"attenuation_map_z_layout\": \"local_matrix_z\""),
+            std::string::npos);
+  EXPECT_NE(text.find("\"regularizer_ct_z_layout\": "
+                      "\"reconstruction_storage_z\""),
+            std::string::npos);
   EXPECT_NE(text.find("\"dimensions\": [2, 2, 122]"),
             std::string::npos);
   EXPECT_NE(text.find("\"voxel_mm\": [0.31250000000000000, "
@@ -203,7 +211,7 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
             std::string::npos);
 
   EXPECT_NE(text.find("\"increasing_z_index_direction\": "
-                      "\"-physical_z\""),
+                      "\"+physical_z\""),
             std::string::npos);
   EXPECT_NE(text.find("\"nonnegative_clamp\": false"), std::string::npos);
   EXPECT_NE(text.find("\"overwrite_primary\": true"), std::string::npos);
@@ -244,6 +252,17 @@ TEST(RunManifestTest, MissingOutputDirFailsFast) {
   input.outputPrefix = "recon";
 
   EXPECT_THROW(main::writeRunManifest(input), std::runtime_error);
+}
+
+TEST(RunLoggingTest, DefaultLogNameIsTimestampWithoutPid) {
+  cli::ReconArgs args;
+  args.outputDir = "C:/tmp/spect_log_name";
+  args.outputName = "recon";
+  const auto path = main::makeDefaultLogPath(args);
+  const std::string name = path.filename().string();
+  EXPECT_TRUE(std::regex_match(
+      name, std::regex(R"(recon_\d{8}_\d{6}_\d{3}\.log)")));
+  EXPECT_EQ(name.find("_pid"), std::string::npos);
 }
 
 } // namespace test

@@ -1,6 +1,6 @@
 # SPECT-recon Capability Matrix
 
-> 对齐日期：2026-08-11。以 `src/cli/ArgumentParser.cpp`、`src/pipeline/MainProgram.cpp`、`src/pipeline/VolumeOutput.cpp` 和 compact CUDA 路径为唯一事实来源。
+> 对齐日期：2026-08-14。以 `src/cli/ArgumentParser.cpp`、`src/pipeline/MainProgram.cpp`、`src/pipeline/VolumeOutput.cpp` 和 compact CUDA 路径为唯一事实来源。
 
 ## 证据入口
 
@@ -23,7 +23,7 @@
 | 公开 PSF | image-domain **`operator` / `sieve` / `none`**；`-psf` 为 FWHM mm；`-psfKernel adjoint|castor` 选择真伴随 Gaussian 或严格 CASToR erf/Z-norm/forward-reuse 语义；发布默认 `sieve + castor + 1.3,3` |
 | 稀疏 / 滤波 | 固定 **CUDA-first / cuFFT**；CLI smooth/Butterworth 为显式 `in_recon`；发布默认在保存副本上独立施加 CASToR Smooth 0.30 mm/3σ 与 2× zero-pad Butterworth 5 cpcm/order 8 |
 | CTAC 模型 | **`att[angle, voxel]` fused** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
-| 多床位 | 唯一 canonical stitch：`Bed1=max physical z`、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（由 `baseNz - bedOverlap` 与 16.8 mm 机械步进校验自动确定，260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。无 stitch/profile/FOV 选择器 |
+| 多床位 | 唯一 canonical stitch：`Bed1=min physical z`、连续 Bed1..Bed5 子集、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。`-attMap` local-Z 与 `-regCT` storage-Z 分离，`z_out_flip` 仅作用于保存输出 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
 | GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；branch/bed 默认合批 SpMM，保留 `SPECT_COMPACT_BRANCH_BATCH=0` 性能基线；不规划多 GPU |
 | 输出 | 保存未滤波 `<prefix>_it<N>`，以及从同一主输出独立派生的 `_smooth` / `_butter` MHD/RAW；发布默认对各副本后置非负钳制，manifest 记录参数与六文件清单；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |

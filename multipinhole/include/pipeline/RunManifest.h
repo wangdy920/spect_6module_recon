@@ -28,7 +28,7 @@ struct RunManifestInput {
 };
 
 /// Writes `<outputDir>/<prefix>_manifest.json` next to the saved volumes:
-/// matrix metadata, projection bed mapping (Bed1 = max physical Z), algorithm
+/// matrix metadata, projection bed mapping (Bed1 = min physical Z), algorithm
 /// policy, multibed stitch configuration with fitted gains, and produced files.
 /// Throws std::runtime_error on I/O failure (fail fast).
 void writeRunManifest(const RunManifestInput &input);

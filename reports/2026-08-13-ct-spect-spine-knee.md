@@ -89,6 +89,8 @@ Neither refine hit the ±2 mm clamp. The 0.3 mm figure remains **diagnostic**.
 
 ## CTAC / anatomy-guided status
 
+> **2026-08-14 supersession:** the map command and layouts below are retained as historical evidence but are orientation-invalid. `recon_bed1_max_z` reversed the bed blocks and `z-bed-flip` reversed each block, producing a whole-Z reversal. Use `reports/2026-08-14-ct-map-layout-mainline-fix.md` and regenerate both maps; do not reuse these files for CTAC or anatomy guidance.
+
 `attmap_recon220.mhd` (120×120×1100, `recon_bed1_max_z`, z-bed-flip) and `regct_hu_recon220.mhd` were written for the three MDP cases under `recon_out/ct_spect_reg_20260813/*_fixedrefine/`. SPECT_recon `-attMap` / `-regCT` was **not** run. Tc99 was not used to freeze the device vector (knees/spine are not hot).
 
 ## Reproduction

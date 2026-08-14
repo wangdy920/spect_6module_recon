@@ -59,7 +59,7 @@ compact chunk 矩阵默认识别优先级：
 | `-df <path>` / `-i <path>` / `-input <path>` | 单床位投影 MAT/BIN |
 | `[InputOutput] merge_time_segments=true` | `-df` 指向一个 `案例/时间段/SPECT` 目录时，按时间顺序扫描同案例下的 `YYYYMMDD_HHMMSS/SPECT`，在内存中合并各时间段的同名 `BedN.bin`；默认关闭 |
 | `[InputOutput] output_filters_overwrite_primary=true` | 将启用的输出阶段后处理按 Smooth→Butterworth 顺序写入无后缀主输出；默认关闭 |
-| `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，最多 5 床 |
+| `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，必须是 Bed1..Bed5 的连续子集 |
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
 | `-chunkCSRDir <dir>` | compact chunk 目录，包含 `metadata.bin + chunk_*.csrb`；**唯一矩阵入口** |
@@ -67,9 +67,9 @@ compact chunk 矩阵默认识别优先级：
 | `-ctacFactorCacheDir <dir>` | 复用/保存 CTAC 逐床位、逐角度衰减系数表缓存；默认 `recon_out/ctac_factor_cache` |
 | `-projectionResidual [on\|off]` | 最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
 | `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector` 空列表 |
-| `-attMap <path>` | 衰减图，mu 单位为 `mm^-1` |
+| `-attMap <path>` | 衰减图，mu 单位为 `mm^-1`；多床 MHD 必须标记 exact beds 与 `local_matrix_z` |
 
-`-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。需要验证床位坐标约定时必须冻结文件映射和 `-zbedflip/-zoutflip`，不能依赖列表书写顺序。
+`-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。床号随 patient/physical +Z 增加，Bed1 为最小 Z。少于五床时直接传真实连续子集（如 Bed2,3,4），不补空床；地图 MHD 的 `SPECTBeds` 必须精确相同。
 
 多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
@@ -179,13 +179,13 @@ powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagno
 
 公开正则化只保留 TV/RDP。`-regBeta` 和 `-regDelta` 可作为简单覆盖；旧 anatomical/NLM/Tikhonov/MRP/LogCosh/Bowsher/PLS 入口与对应细调参数会在 parser 阶段拒绝。
 
-TV/RDP 可选使用已配准到重建网格的 CT（或 mu-map）作为边缘权重：
+TV/RDP 可选使用已配准到重建存储网格的 HU CT 作为边缘权重：
 
 ```powershell
--regCT registered_ct.mhd -regCtSigma 0.01 -regCtFloor 0.05
+-regCT registered_ct_hu.mhd -regCtSigma 100 -regCtFloor 0.05
 ```
 
-邻接体素权重为 `floor + (1-floor)*exp(-0.5*(ΔCT/sigma)^2)`。CT 边缘越强，跨边缘正则耦合越弱；`floor` 防止完全断开。显式 `-regCT` 优先，否则在已提供 `-attMap` 时复用同一配准体；两者均未提供时严格退化为 activity-only TV/RDP。`ct_sigma` 的单位必须与输入 CT 强度一致；HU CT 与 mm^-1 mu-map 不应共用同一数值标度。
+邻接体素权重为 `floor + (1-floor)*exp(-0.5*(ΔHU/sigma_HU)^2)`。HU 不需要归一化到 `[0,1]`，负值合法；只要 `regCtSigma` 使用同一 HU 单位即可。CT 边缘越强，跨边缘正则耦合越弱，`floor` 防止完全断开。解剖引导只接受显式 `-regCT`；`-attMap` 不再隐式复用，因为它使用逐床 local-matrix-Z，而 `-regCT` 使用 reconstruction-storage-Z。未给 `-regCT` 时严格退化为 activity-only TV/RDP。
 
 ---
 
@@ -245,12 +245,12 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加 `1/c`；默认空 |
 | `-detZEdgeCensor <k>` / `[MultiBed] detz_edge_censor` | compact 分子+分母每侧屏蔽 k 行 detector-Z；默认 0 |
 | `-cropEnd <top[,end]>` | 整体输出翻转后将 Z 首尾指定层置零，不改变层数 |
-| `-zbedflip [0\|1]` | compact 多床映射内反转每床局部 Z；发布默认 1。增益窗跟随反向存储；融合权重沿输出 Z，入口保持上一床 |
-| `-zoutflip [0\|1]` | canonical 拼接后翻转整体输出 Z；默认 0 |
+| `-zbedflip [0\|1]` | local system-matrix Z 与 reconstruction-storage Z 的逐床映射；发布默认 1。`-attMap` 必须使用 local-matrix-Z，`-regCT` 不应用此反转 |
+| `-zoutflip [0\|1]` | canonical 拼接后仅翻转整体保存输出 Z；默认 0，不得预先作用于 `-attMap/-regCT` |
 | `-xoutflip [0\|1]` | canonical 拼接后翻转整体输出 X；默认 0 |
 | `-seamXyAlign [0\|1]` / `[MultiBed] seam_xy_align` | 重叠区 NCC 整数 XY 平移后再 cosine 融合；默认 0 |
 
-物理合同固定为 `Bed1=max physical z`，后续 Bed 向较小 physical Z 移动；路径含 `BedN` 时 parser 先按床号排序。不要逆序文件补偿 `z_bed_flip=1`。
+物理合同固定为 `Bed1=min physical z`，后续 Bed 向较大 physical Z 移动；路径含 `BedN` 时 parser 先按床号排序并拒绝非连续床号。不要逆序文件或整幅翻转地图来补偿 `z_bed_flip=1`。
 
 多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；`-bedOverlap` 须满足 `baseNz - bedOverlap = step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。cosine 沿**输出 Z** 淡入：融合入口继续用上一床，再淡入下一床；`z_bed_flip=1` 不反转这组权重。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
 

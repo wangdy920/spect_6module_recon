@@ -105,6 +105,38 @@ TEST(InterfaceTest, TruncatedMhdRawThrows) {
                  std::runtime_error);
     std::filesystem::remove_all(tmpDir);
 }
+
+TEST(InterfaceTest, ParsesAndValidatesSpectMapContract) {
+    const auto tmpDir = std::filesystem::temp_directory_path() /
+                        "spect_mhd_map_contract_test";
+    std::filesystem::create_directories(tmpDir);
+    const auto path = tmpDir / "regct.mhd";
+    {
+        std::ofstream out(path);
+        out << "ObjectType = Image\nNDims = 3\nDimSize = 1 1 3\n"
+               "ElementSpacing = 1 1 1\nElementType = MET_FLOAT\n"
+               "SPECTMapRole = regularizer_reconstruction_storage\n"
+               "SPECTBedOrder = increasing_bed_number\n"
+               "SPECTBeds = 2,3,4\n"
+               "SPECTZLayout = reconstruction_storage_z\n"
+               "SPECTIntensityUnits = HU\n"
+               "ElementDataFile = dummy.raw\n";
+    }
+
+    const auto info = spect::io::parseMHD(path.string());
+    EXPECT_TRUE(spect::io::validateSpectMapContract(
+        info, "regularizer_reconstruction_storage",
+        "reconstruction_storage_z", "HU", {2, 3, 4}));
+    EXPECT_THROW((void)spect::io::validateSpectMapContract(
+                     info, "attenuation_local_matrix_z", "local_matrix_z", "mm^-1",
+                     {2, 3, 4}),
+                 std::runtime_error);
+    EXPECT_THROW((void)spect::io::validateSpectMapContract(
+                     info, "regularizer_reconstruction_storage",
+                     "reconstruction_storage_z", "HU", {1, 2, 3}),
+                 std::runtime_error);
+    std::filesystem::remove_all(tmpDir);
+}
 } // namespace test
 } // namespace spect
 

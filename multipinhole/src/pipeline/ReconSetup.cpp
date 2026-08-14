@@ -25,8 +25,7 @@ std::string selectReconDimHintPath(const ReconArgs &args) {
   if (args.useReg && !args.regCtPath.empty())
     return args.regCtPath;
 
-  if ((!std::isnan(args.maskFromAttThreshold) || args.useReg) &&
-      !args.attMapPath.empty())
+  if (!std::isnan(args.maskFromAttThreshold) && !args.attMapPath.empty())
     return args.attMapPath;
 
   return {};
@@ -86,22 +85,14 @@ std::vector<int> normalizeFixedBedOverlapTable(
 }
 
 std::vector<int> selectActualBedOverlaps(
-    const std::vector<int> &fixedTable, const std::vector<int> &bedNumbers,
-    std::vector<std::string> &warnings) {
+    const std::vector<int> &fixedTable, const std::vector<int> &bedNumbers) {
   std::vector<int> overlaps;
   if (bedNumbers.size() < 2)
     return overlaps;
   overlaps.reserve(bedNumbers.size() - 1);
   for (size_t idx = 0; idx + 1 < bedNumbers.size(); ++idx) {
     const int leftBed = bedNumbers[idx];
-    const int rightBed = bedNumbers[idx + 1];
-    if (rightBed == leftBed + 1) {
-      overlaps.push_back(fixedTable[static_cast<size_t>(leftBed - 1)]);
-    } else {
-      overlaps.push_back(0);
-      warnings.emplace_back(
-          "Non-adjacent beds in -dfList have no fixed bedOverlap slot. Using zero for that joint.");
-    }
+    overlaps.push_back(fixedTable[static_cast<size_t>(leftBed - 1)]);
   }
   return overlaps;
 }
@@ -135,8 +126,16 @@ bool adoptReconDimsFromHint(ReconArgs &args, std::string *warningMessage) {
   const spect::io::VolumeInfo info = readVolumeInfoForRecon(hintPath);
   if (info.Nx <= 0 || info.Ny <= 0 || info.Nz <= 0)
     throw std::runtime_error("Invalid volume dimensions in hint file: " + hintPath);
+  int hintNz = info.Nz;
+  if (!info.spectBeds.empty()) {
+    if (info.Nz % static_cast<int>(info.spectBeds.size()) != 0)
+      throw std::runtime_error(
+          "Tagged multi-bed map Nz is not divisible by its SPECTBeds count: " +
+          hintPath);
+    hintNz /= static_cast<int>(info.spectBeds.size());
+  }
 
-  if (args.Nx == info.Nx && args.Ny == info.Ny && args.Nz == info.Nz) {
+  if (args.Nx == info.Nx && args.Ny == info.Ny && args.Nz == hintNz) {
     if (warningMessage)
       warningMessage->clear();
     return false;
@@ -144,12 +143,12 @@ bool adoptReconDimsFromHint(ReconArgs &args, std::string *warningMessage) {
 
   args.Nx = info.Nx;
   args.Ny = info.Ny;
-  args.Nz = info.Nz;
+  args.Nz = hintNz;
 
   if (warningMessage) {
     std::ostringstream warning;
     warning << "Reconstruction dimensions were not explicitly set; adopting "
-            << info.Nx << 'x' << info.Ny << 'x' << info.Nz
+            << info.Nx << 'x' << info.Ny << 'x' << hintNz
             << " from " << hintPath;
     *warningMessage = warning.str();
   }
@@ -194,13 +193,21 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   result.baseNx = args.Nx;
   result.baseNy = args.Ny;
   result.baseNz = args.Nz;
-  result.projectionPaths = args.projPaths.empty() ? std::vector<std::string>{args.projPath} : args.projPaths;
+  result.projectionPaths = spect::core::sortPathsByBedOrder(
+      args.projPaths.empty() ? std::vector<std::string>{args.projPath}
+                             : args.projPaths);
   result.bedCount = std::max(1, static_cast<int>(result.projectionPaths.size()));
   if (result.bedCount > spect::core::kMaxBeds)
     throw std::runtime_error("-dfList supports at most " +
                              std::to_string(spect::core::kMaxBeds) + " beds.");
   args.bedCount = result.bedCount;
   applyFixedSixModuleRoiDefaults(args, result.bedCount);
+  result.bedNumbers = inferBedNumbers(result.projectionPaths);
+  for (size_t index = 1; index < result.bedNumbers.size(); ++index) {
+    if (result.bedNumbers[index] != result.bedNumbers[index - 1] + 1)
+      throw std::runtime_error(
+          "-dfList beds must be one continuous increasing subset of Bed1..Bed5.");
+  }
 
   const int joints = std::max(0, result.bedCount - 1);
   if (joints == 0) {
@@ -210,11 +217,10 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     return result;
   }
 
-  const std::vector<int> bedNumbers = inferBedNumbers(result.projectionPaths);
   const std::vector<int> fixedOverlapTable =
       normalizeFixedBedOverlapTable(args.bedOverlaps, result.warnings);
   args.outputBedOverlaps =
-      selectActualBedOverlaps(fixedOverlapTable, bedNumbers, result.warnings);
+      selectActualBedOverlaps(fixedOverlapTable, result.bedNumbers);
   if (static_cast<int>(args.outputBedOverlaps.size()) != joints)
     throw std::runtime_error("Internal bed overlap normalization failed.");
 
@@ -239,8 +245,7 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   // INI [MultiBed] bed_step_mm, default 16.8 mm) is the authoritative
   // scanner property. When the user omits -bedOverlap the fixed table is all
   // zeros; when it is wrong it disagrees with the derived step. In both
-  // cases we re-derive the overlap from the scanner step (non-adjacent-bed
-  // joints keep their explicit zero semantics).
+  // cases we re-derive the overlap from the scanner step.
   const double stepMm =
       args.bedStepMm > 0.0 ? args.bedStepMm
                            : spect::core::sixmodule::kMultiBedStepMm;
@@ -257,8 +262,6 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   }
   bool overlapCorrected = false;
   for (size_t i = 0; i < args.outputBedOverlaps.size(); ++i) {
-    if (bedNumbers[i + 1] != bedNumbers[i] + 1)
-      continue;  // non-adjacent joint keeps explicit semantics
     if (args.outputBedOverlaps[i] != expectedOverlap) {
       args.outputBedOverlaps[i] = expectedOverlap;
       overlapCorrected = true;

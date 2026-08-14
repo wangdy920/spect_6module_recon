@@ -1,0 +1,1251 @@
+{
+  "contract": {
+    "candidate": "CT-anchored local spine COM inliers, 3-DOF translation; 6-DOF reported as rejected comparator",
+    "baseline": "frozen device translation + 3-DOF spine/knee refine",
+    "grid": "SPECT DICOM 0.3 mm, existing *_fixedrefine spectgrid MHD",
+    "allowed": "one global rigid residual; no deformation; no per-bed",
+    "pairing": "local SPECT COM in \u00b112 voxel window around smoothed CT ridge",
+    "occupancy": "diagnostic only; cannot pass the method",
+    "legacy_independent_peaks": "reported but not used for the 6-DOF fit",
+    "ideal_target": "slice-wise spine |dx| and |dy| MAD <= 1 voxel = 0.3 mm",
+    "gate_maturity": "diagnostic"
+  },
+  "cases": [
+    {
+      "case": "mdp1",
+      "folder": "D:\\Projects\\SPECT-recon\\recon_out\\ct_spect_reg_20260813\\20260729_mdp_fixedrefine",
+      "legacy_independent_spine": {
+        "count": 100,
+        "dx_median_vox": 0.0,
+        "dy_median_vox": 1.3500000000000014,
+        "dx_mad_vox": 4.0,
+        "dy_mad_vox": 2.016666666666673,
+        "dx_p90_vox": 10.700000000000017,
+        "dy_p90_vox": 64.80000000000001,
+        "dx_within_1vox_frac": 0.29,
+        "dy_within_1vox_frac": 0.24,
+        "xy_within_1vox_frac": 0.06,
+        "dx_vs_z_slope_vox_per_vox": -0.05238429351028295,
+        "dy_vs_z_slope_vox_per_vox": -0.13391075655636744,
+        "dx_linear_span_vox": -9.272019951320082,
+        "dy_linear_span_vox": -23.70220391047704
+      },
+      "local_inliers_before": {
+        "count": 68,
+        "frac": 0.6868686868686869,
+        "xy": {
+          "count": 68,
+          "dx_median_vox": 0.7037512886785997,
+          "dy_median_vox": -2.215090596857408,
+          "dx_mad_vox": 0.5814645296097716,
+          "dy_mad_vox": 0.9152788966613556,
+          "dx_p90_vox": 1.9236904369893932,
+          "dy_p90_vox": 3.044340000938974,
+          "dx_within_1vox_frac": 0.6470588235294118,
+          "dy_within_1vox_frac": 0.14705882352941177,
+          "xy_within_1vox_frac": 0.058823529411764705,
+          "dx_vs_z_slope_vox_per_vox": -0.007490153927962877,
+          "dy_vs_z_slope_vox_per_vox": 0.0003226743449424562,
+          "dx_linear_span_vox": -1.3032867834655406,
+          "dy_linear_span_vox": 0.056145336019987384
+        }
+      },
+      "translation": {
+        "translation_mm": [
+          -0.020885865301480067,
+          -0.8516770139107265,
+          0.0
+        ],
+        "inlier_count": 68,
+        "inlier_frac": 0.6868686868686869
+      },
+      "rigid": {
+        "angles_deg": [
+          0.2956115691119023,
+          -0.10297748917235598,
+          1.4999999999995421
+        ],
+        "translation_mm": [
+          0.01436618830217855,
+          -0.8729349182637659,
+          0.0715588680716485
+        ],
+        "at_bound": 1
+      },
+      "before": {
+        "pairing": "local",
+        "pair_count": 99,
+        "ct_ridge_kept_frac": 0.6993006993006993,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 99,
+          "dx_median_vox": -0.06961955100493356,
+          "dy_median_vox": -2.838923379702422,
+          "dx_mad_vox": 1.0119135949647458,
+          "dy_mad_vox": 1.3839367515313938,
+          "dx_p90_vox": 5.996779016203393,
+          "dy_p90_vox": 3.932305193632075,
+          "dx_within_1vox_frac": 0.5151515151515151,
+          "dy_within_1vox_frac": 0.10101010101010101,
+          "xy_within_1vox_frac": 0.04040404040404041,
+          "dx_vs_z_slope_vox_per_vox": 0.0027907851656041875,
+          "dy_vs_z_slope_vox_per_vox": -0.000117920083344577,
+          "dx_linear_span_vox": 0.4939689743119412,
+          "dy_linear_span_vox": -0.02087185475199013
+        },
+        "spine_caudal_third": {
+          "count": 33,
+          "dx_median_vox": 0.7451509522079363,
+          "dy_median_vox": -1.8009686062004988,
+          "dx_mad_vox": 0.5229680035777022,
+          "dy_mad_vox": 0.8642058363120668,
+          "dx_p90_vox": 2.12952730944031,
+          "dy_p90_vox": 2.5378726987154754,
+          "dx_within_1vox_frac": 0.6666666666666666,
+          "dy_within_1vox_frac": 0.24242424242424243,
+          "xy_within_1vox_frac": 0.12121212121212122,
+          "dx_vs_z_slope_vox_per_vox": -0.058863226245212195,
+          "dy_vs_z_slope_vox_per_vox": 0.059582508060928054,
+          "dx_linear_span_vox": -2.4722555022989123,
+          "dy_linear_span_vox": 2.502465338558978
+        },
+        "spine_mid_third": {
+          "count": 33,
+          "dx_median_vox": -5.547172662739015,
+          "dy_median_vox": -4.033155160494886,
+          "dx_mad_vox": 0.9650788099913683,
+          "dy_mad_vox": 1.640307958770137,
+          "dx_p90_vox": 6.91989573326382,
+          "dy_p90_vox": 2.7132936218263466,
+          "dx_within_1vox_frac": 0.2727272727272727,
+          "dy_within_1vox_frac": 0.030303030303030304,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": 0.1039856714015867,
+          "dy_vs_z_slope_vox_per_vox": 0.04064998301137645,
+          "dx_linear_span_vox": 8.734796397733282,
+          "dy_linear_span_vox": 3.414598572955622
+        },
+        "spine_cranial_third": {
+          "count": 33,
+          "dx_median_vox": -0.447421455804367,
+          "dy_median_vox": -3.2409292450129286,
+          "dx_mad_vox": 0.5130944689577319,
+          "dy_mad_vox": 1.1909466580897288,
+          "dx_p90_vox": 1.6676088268174212,
+          "dy_p90_vox": 6.1815481384440965,
+          "dx_within_1vox_frac": 0.6060606060606061,
+          "dy_within_1vox_frac": 0.030303030303030304,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.0375255359413064,
+          "dy_vs_z_slope_vox_per_vox": 0.10848881844346446,
+          "dx_linear_span_vox": -1.8387512611240135,
+          "dy_linear_span_vox": 5.315952103729758
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              0.14177269575675452,
+              -1.26425356287317,
+              0.2926782586693662
+            ],
+            "delta_xyz_vox": [
+              0.4725756525225151,
+              -4.214178542910567,
+              0.9755941955645541
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              -0.03414312875068077,
+              -0.8988961986719601,
+              0.1706678914380518
+            ],
+            "delta_xyz_vox": [
+              -0.1138104291689359,
+              -2.9963206622398673,
+              0.5688929714601727
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -1.3065810810810823,
+            -2.3255412007382468,
+            -0.3
+          ],
+          "z_lag_vox": -1,
+          "xy_slice_count": 253,
+          "magnitude_mm": 2.6842682425141673,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        }
+      },
+      "after_translation": {
+        "pairing": "local",
+        "pair_count": 110,
+        "ct_ridge_kept_frac": 0.7671232876712328,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 110,
+          "dx_median_vox": 0.12247458488256768,
+          "dy_median_vox": 0.15176492311227463,
+          "dx_mad_vox": 0.9964335297712452,
+          "dy_mad_vox": 1.5404199097290245,
+          "dx_p90_vox": 5.867609168544346,
+          "dy_p90_vox": 3.8452869730392636,
+          "dx_within_1vox_frac": 0.5,
+          "dy_within_1vox_frac": 0.32727272727272727,
+          "xy_within_1vox_frac": 0.17272727272727273,
+          "dx_vs_z_slope_vox_per_vox": -0.0011401459050620988,
+          "dy_vs_z_slope_vox_per_vox": -0.009996955378657411,
+          "dx_linear_span_vox": -0.2052262629111778,
+          "dy_linear_span_vox": -1.799451968158334
+        },
+        "spine_caudal_third": {
+          "count": 36,
+          "dx_median_vox": 0.5871462444323292,
+          "dy_median_vox": 1.477356661136838,
+          "dx_mad_vox": 0.674335037230879,
+          "dy_mad_vox": 1.1632222036307382,
+          "dx_p90_vox": 2.6427260015356246,
+          "dy_p90_vox": 1.9786573057747958,
+          "dx_within_1vox_frac": 0.6944444444444444,
+          "dy_within_1vox_frac": 0.3611111111111111,
+          "xy_within_1vox_frac": 0.2222222222222222,
+          "dx_vs_z_slope_vox_per_vox": -0.03381700804414881,
+          "dy_vs_z_slope_vox_per_vox": 0.07181955401652171,
+          "dx_linear_span_vox": -1.3526803217659524,
+          "dy_linear_span_vox": 2.8727821606608686
+        },
+        "spine_mid_third": {
+          "count": 38,
+          "dx_median_vox": -4.657033083272047,
+          "dy_median_vox": -0.28478202360529536,
+          "dx_mad_vox": 1.6484063222349619,
+          "dy_mad_vox": 1.543634503046789,
+          "dx_p90_vox": 6.390028786334396,
+          "dy_p90_vox": 2.903155691084987,
+          "dx_within_1vox_frac": 0.2631578947368421,
+          "dy_within_1vox_frac": 0.2894736842105263,
+          "xy_within_1vox_frac": 0.13157894736842105,
+          "dx_vs_z_slope_vox_per_vox": 0.09774597356536369,
+          "dy_vs_z_slope_vox_per_vox": 0.0387991352226985,
+          "dx_linear_span_vox": 8.406153726621277,
+          "dy_linear_span_vox": 3.336725629152071
+        },
+        "spine_cranial_third": {
+          "count": 36,
+          "dx_median_vox": -0.2590870048179639,
+          "dy_median_vox": -1.173330657548,
+          "dx_mad_vox": 0.7044898470058172,
+          "dy_mad_vox": 1.0742713501836079,
+          "dx_p90_vox": 2.6065027526966382,
+          "dy_p90_vox": 4.809097885896975,
+          "dx_within_1vox_frac": 0.5555555555555556,
+          "dy_within_1vox_frac": 0.3333333333333333,
+          "xy_within_1vox_frac": 0.16666666666666666,
+          "dx_vs_z_slope_vox_per_vox": -0.06760656034012796,
+          "dy_vs_z_slope_vox_per_vox": 0.07223934696447751,
+          "dx_linear_span_vox": -3.515541137686654,
+          "dy_linear_span_vox": 3.7564460421528305
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              0.1264693083327721,
+              -0.4164135428887448,
+              0.0420293660104619
+            ],
+            "delta_xyz_vox": [
+              0.42156436110924034,
+              -1.3880451429624827,
+              0.14009788670153966
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.003789896860495645,
+              -0.01670413098052421,
+              0.013035941419087748
+            ],
+            "delta_xyz_vox": [
+              0.012632989534985484,
+              -0.055680436601747374,
+              0.04345313806362583
+            ],
+            "within_1vox": 1
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -1.2460442420299274,
+            -1.4941408176204007,
+            -0.3
+          ],
+          "z_lag_vox": -1,
+          "xy_slice_count": 253,
+          "magnitude_mm": 1.9685230595487815,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "after_rigid": {
+        "pairing": "local",
+        "pair_count": 104,
+        "ct_ridge_kept_frac": 0.7191780821917808,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 104,
+          "dx_median_vox": -0.26433649780696555,
+          "dy_median_vox": 0.480742074737627,
+          "dx_mad_vox": 1.2594535513569696,
+          "dy_mad_vox": 1.333376969385327,
+          "dx_p90_vox": 5.425182836334256,
+          "dy_p90_vox": 4.157439128378943,
+          "dx_within_1vox_frac": 0.4230769230769231,
+          "dy_within_1vox_frac": 0.34615384615384615,
+          "xy_within_1vox_frac": 0.17307692307692307,
+          "dx_vs_z_slope_vox_per_vox": 0.0022324290892472487,
+          "dy_vs_z_slope_vox_per_vox": -0.0066510315422321714,
+          "dx_linear_span_vox": 0.3884426615290213,
+          "dy_linear_span_vox": -1.1572794883483979
+        },
+        "spine_caudal_third": {
+          "count": 34,
+          "dx_median_vox": 0.4979236572140877,
+          "dy_median_vox": 1.2207938787494683,
+          "dx_mad_vox": 0.5982670012671498,
+          "dy_mad_vox": 0.8556025253516282,
+          "dx_p90_vox": 2.300160956866097,
+          "dy_p90_vox": 2.587760763600381,
+          "dx_within_1vox_frac": 0.6764705882352942,
+          "dy_within_1vox_frac": 0.4411764705882353,
+          "xy_within_1vox_frac": 0.3235294117647059,
+          "dx_vs_z_slope_vox_per_vox": -0.045443457026141894,
+          "dy_vs_z_slope_vox_per_vox": 0.07246740199980907,
+          "dx_linear_span_vox": -1.8631817380718176,
+          "dy_linear_span_vox": 2.9711634819921717
+        },
+        "spine_mid_third": {
+          "count": 36,
+          "dx_median_vox": -5.3655049717607,
+          "dy_median_vox": -1.0271871945710842,
+          "dx_mad_vox": 0.8313156865541735,
+          "dy_mad_vox": 2.0887979654663376,
+          "dx_p90_vox": 6.646491889881158,
+          "dy_p90_vox": 3.078892870045962,
+          "dx_within_1vox_frac": 0.25,
+          "dy_within_1vox_frac": 0.3055555555555556,
+          "xy_within_1vox_frac": 0.1388888888888889,
+          "dx_vs_z_slope_vox_per_vox": 0.0958840047477315,
+          "dy_vs_z_slope_vox_per_vox": 0.04763145246165507,
+          "dx_linear_span_vox": 7.958372394061715,
+          "dy_linear_span_vox": 3.953410554317371
+        },
+        "spine_cranial_third": {
+          "count": 34,
+          "dx_median_vox": -0.4432585381485481,
+          "dy_median_vox": -0.7624837658362082,
+          "dx_mad_vox": 0.9803868406343597,
+          "dy_mad_vox": 1.1513430458958531,
+          "dx_p90_vox": 1.8773153598887269,
+          "dy_p90_vox": 3.4949282039140295,
+          "dx_within_1vox_frac": 0.35294117647058826,
+          "dy_within_1vox_frac": 0.29411764705882354,
+          "xy_within_1vox_frac": 0.058823529411764705,
+          "dx_vs_z_slope_vox_per_vox": -0.065004877651625,
+          "dy_vs_z_slope_vox_per_vox": 0.035827891627680325,
+          "dx_linear_span_vox": -3.1202341272780005,
+          "dy_linear_span_vox": 1.7197387981286556
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              0.014225264320538854,
+              -0.37419526777029116,
+              -0.3843961676667959
+            ],
+            "delta_xyz_vox": [
+              0.04741754773512952,
+              -1.247317559234304,
+              -1.2813205588893197
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.11895312936946638,
+              0.029625404201479452,
+              -0.41823795742498077
+            ],
+            "delta_xyz_vox": [
+              0.3965104312315546,
+              0.09875134733826485,
+              -1.394126524749936
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": -1,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -1.417847718775817,
+            -1.4342034281007148,
+            -0.3
+          ],
+          "z_lag_vox": -1,
+          "xy_slice_count": 252,
+          "magnitude_mm": 2.0389290391805277,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "target": {
+        "voxel_mm": 0.3,
+        "ideal_abs_vox": 1.0,
+        "spine_xy_mad_within_1vox_before": 0,
+        "spine_xy_mad_within_1vox_after_translation": 0,
+        "spine_xy_mad_within_1vox_after_rigid": 0
+      },
+      "figures": [
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp1_spine_xy_vs_z.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp1_ridge_xy.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp1_axial_overlay.png"
+      ]
+    },
+    {
+      "case": "mdp2",
+      "folder": "D:\\Projects\\SPECT-recon\\recon_out\\ct_spect_reg_20260813\\20260729_mdp2_fixedrefine",
+      "legacy_independent_spine": {
+        "count": 102,
+        "dx_median_vox": 0.5227272727272734,
+        "dy_median_vox": -0.11111111111111427,
+        "dx_mad_vox": 1.4772727272727266,
+        "dy_mad_vox": 1.7944444444444514,
+        "dx_p90_vox": 7.797012987012994,
+        "dy_p90_vox": 6.268888888888896,
+        "dx_within_1vox_frac": 0.2647058823529412,
+        "dy_within_1vox_frac": 0.2549019607843137,
+        "xy_within_1vox_frac": 0.0392156862745098,
+        "dx_vs_z_slope_vox_per_vox": -0.04817329536285401,
+        "dy_vs_z_slope_vox_per_vox": -0.016519388594715224,
+        "dx_linear_span_vox": -8.141286916322327,
+        "dy_linear_span_vox": -2.791776672506873
+      },
+      "local_inliers_before": {
+        "count": 68,
+        "frac": 0.6666666666666666,
+        "xy": {
+          "count": 68,
+          "dx_median_vox": -0.8342291956874064,
+          "dy_median_vox": -2.414546319506286,
+          "dx_mad_vox": 0.6646909123775586,
+          "dy_mad_vox": 0.7372929904969538,
+          "dx_p90_vox": 2.11227412363999,
+          "dy_p90_vox": 1.5343305353746217,
+          "dx_within_1vox_frac": 0.6029411764705882,
+          "dy_within_1vox_frac": 0.08823529411764706,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.009767685042827969,
+          "dy_vs_z_slope_vox_per_vox": 0.010218059289213415,
+          "dx_linear_span_vox": -1.6507387722379268,
+          "dy_linear_span_vox": 1.7268520198770672
+        }
+      },
+      "translation": {
+        "translation_mm": [
+          -0.2710691867627538,
+          -0.9007294178518066,
+          0.0
+        ],
+        "inlier_count": 68,
+        "inlier_frac": 0.6666666666666666
+      },
+      "rigid": {
+        "angles_deg": [
+          -0.5440550792643938,
+          -0.7862370414883229,
+          -1.5
+        ],
+        "translation_mm": [
+          -0.40675921701115586,
+          -0.8351544265734621,
+          0.027886770692118368
+        ],
+        "at_bound": 1
+      },
+      "before": {
+        "pairing": "local",
+        "pair_count": 102,
+        "ct_ridge_kept_frac": 0.6,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 102,
+          "dx_median_vox": -0.9035639558758461,
+          "dy_median_vox": -3.0024313928393553,
+          "dx_mad_vox": 0.7234655897079776,
+          "dy_mad_vox": 1.125707784721783,
+          "dx_p90_vox": 2.303377259539757,
+          "dy_p90_vox": 2.3974310399109005,
+          "dx_within_1vox_frac": 0.5392156862745098,
+          "dy_within_1vox_frac": 0.0784313725490196,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.013753167284266498,
+          "dy_vs_z_slope_vox_per_vox": 0.012392047009138894,
+          "dx_linear_span_vox": -2.324285271041038,
+          "dy_linear_span_vox": 2.0942559445444733
+        },
+        "spine_caudal_third": {
+          "count": 34,
+          "dx_median_vox": -0.9089267125227884,
+          "dy_median_vox": -3.044762028791645,
+          "dx_mad_vox": 0.5230466982625863,
+          "dy_mad_vox": 0.3396832185666767,
+          "dx_p90_vox": 1.5750623304090388,
+          "dy_p90_vox": 2.2105304890893334,
+          "dx_within_1vox_frac": 0.5294117647058824,
+          "dy_within_1vox_frac": 0.0,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.03539753713042495,
+          "dy_vs_z_slope_vox_per_vox": -0.019740956320206206,
+          "dx_linear_span_vox": -2.3716349877384717,
+          "dy_linear_span_vox": -1.3226440734538158
+        },
+        "spine_mid_third": {
+          "count": 34,
+          "dx_median_vox": -0.5356391897872612,
+          "dy_median_vox": -4.217067481637308,
+          "dx_mad_vox": 0.3478706117644528,
+          "dy_mad_vox": 1.0143180765990465,
+          "dx_p90_vox": 1.1626623634615227,
+          "dy_p90_vox": 2.612272193460767,
+          "dx_within_1vox_frac": 0.7647058823529411,
+          "dy_within_1vox_frac": 0.029411764705882353,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.010744107316408005,
+          "dy_vs_z_slope_vox_per_vox": 0.023049410850919005,
+          "dx_linear_span_vox": -0.5264612585039923,
+          "dy_linear_span_vox": 1.1294211316950313
+        },
+        "spine_cranial_third": {
+          "count": 34,
+          "dx_median_vox": -2.1217520724942,
+          "dy_median_vox": -1.8308851585969208,
+          "dx_mad_vox": 1.2844654208280737,
+          "dy_mad_vox": 1.1436293494558818,
+          "dx_p90_vox": 2.4616320966788456,
+          "dy_p90_vox": 2.347318528150596,
+          "dx_within_1vox_frac": 0.3235294117647059,
+          "dy_within_1vox_frac": 0.20588235294117646,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.08967444428797196,
+          "dy_vs_z_slope_vox_per_vox": 0.042226011472487175,
+          "dx_linear_span_vox": -4.3940477701106255,
+          "dy_linear_span_vox": 2.069074562151872
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              -0.15272143651742312,
+              -0.6938811699463265,
+              0.025281683284201505
+            ],
+            "delta_xyz_vox": [
+              -0.509071455058077,
+              -2.312937233154422,
+              0.08427227761400502
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.7502395543175495,
+              -1.351701949860724,
+              0.5804605385329636
+            ],
+            "delta_xyz_vox": [
+              2.500798514391832,
+              -4.505673166202413,
+              1.9348684617765455
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.6162743574694357,
+            -1.1649220134110467,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 1.3178912629667185,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        }
+      },
+      "after_translation": {
+        "pairing": "local",
+        "pair_count": 94,
+        "ct_ridge_kept_frac": 0.5562130177514792,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 94,
+          "dx_median_vox": -0.36671970501343054,
+          "dy_median_vox": -0.16245593644941891,
+          "dx_mad_vox": 0.7055329738719642,
+          "dy_mad_vox": 0.9661510828458049,
+          "dx_p90_vox": 3.66114306040698,
+          "dy_p90_vox": 2.2752627474188416,
+          "dx_within_1vox_frac": 0.5957446808510638,
+          "dy_within_1vox_frac": 0.5425531914893617,
+          "xy_within_1vox_frac": 0.35106382978723405,
+          "dx_vs_z_slope_vox_per_vox": -0.017817041430501158,
+          "dy_vs_z_slope_vox_per_vox": 0.0018853636443735386,
+          "dx_linear_span_vox": -2.672556214575174,
+          "dy_linear_span_vox": 0.2828045466560308
+        },
+        "spine_caudal_third": {
+          "count": 31,
+          "dx_median_vox": -0.4514420711057596,
+          "dy_median_vox": -0.28606322079221513,
+          "dx_mad_vox": 0.5944958934059912,
+          "dy_mad_vox": 0.6735045805194346,
+          "dx_p90_vox": 1.6819827653628963,
+          "dy_p90_vox": 2.196359262926677,
+          "dx_within_1vox_frac": 0.5483870967741935,
+          "dy_within_1vox_frac": 0.6129032258064516,
+          "xy_within_1vox_frac": 0.3548387096774194,
+          "dx_vs_z_slope_vox_per_vox": -0.05738117194105332,
+          "dy_vs_z_slope_vox_per_vox": 0.004752544341955087,
+          "dx_linear_span_vox": -2.8116774251116126,
+          "dy_linear_span_vox": 0.23287467275579926
+        },
+        "spine_mid_third": {
+          "count": 32,
+          "dx_median_vox": 0.07886829888508728,
+          "dy_median_vox": -0.5178655418637135,
+          "dx_mad_vox": 0.39718050431604013,
+          "dy_mad_vox": 1.1090390826596774,
+          "dx_p90_vox": 1.3784007868666528,
+          "dy_p90_vox": 1.910107794845553,
+          "dx_within_1vox_frac": 0.8125,
+          "dy_within_1vox_frac": 0.4375,
+          "xy_within_1vox_frac": 0.375,
+          "dx_vs_z_slope_vox_per_vox": 0.017568907837209165,
+          "dy_vs_z_slope_vox_per_vox": -0.001653518917824357,
+          "dx_linear_span_vox": 1.0014277467209225,
+          "dy_linear_span_vox": -0.09425057831598835
+        },
+        "spine_cranial_third": {
+          "count": 31,
+          "dx_median_vox": -1.8798994248732726,
+          "dy_median_vox": 0.11550286587549152,
+          "dx_mad_vox": 2.121758573464213,
+          "dy_mad_vox": 0.8006189719336092,
+          "dx_p90_vox": 3.2572113393708833,
+          "dy_p90_vox": 2.8059674804166193,
+          "dx_within_1vox_frac": 0.41935483870967744,
+          "dy_within_1vox_frac": 0.5806451612903226,
+          "xy_within_1vox_frac": 0.3225806451612903,
+          "dx_vs_z_slope_vox_per_vox": -0.15883937607440846,
+          "dy_vs_z_slope_vox_per_vox": -0.05717136343104299,
+          "dx_linear_span_vox": -6.512414419050747,
+          "dy_linear_span_vox": -2.3440259006727624
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              0.10865321034405895,
+              0.20658204846984843,
+              0.042939712771269
+            ],
+            "delta_xyz_vox": [
+              0.3621773678135298,
+              0.6886068282328281,
+              0.14313237590423
+            ],
+            "within_1vox": 1
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              1.023313790125411,
+              -0.4588373210397627,
+              0.6054445268881309
+            ],
+            "delta_xyz_vox": [
+              3.4110459670847035,
+              -1.529457736799209,
+              2.0181484229604365
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.37544505410431445,
+            -0.2776411257567332,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 0.46695137151833893,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "after_rigid": {
+        "pairing": "local",
+        "pair_count": 108,
+        "ct_ridge_kept_frac": 0.631578947368421,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 108,
+          "dx_median_vox": -0.45719937730650173,
+          "dy_median_vox": -0.3845668161439235,
+          "dx_mad_vox": 0.7715512083257181,
+          "dy_mad_vox": 0.7632750287956327,
+          "dx_p90_vox": 3.0911307331951874,
+          "dy_p90_vox": 2.0436432084057152,
+          "dx_within_1vox_frac": 0.5833333333333334,
+          "dy_within_1vox_frac": 0.5092592592592593,
+          "xy_within_1vox_frac": 0.25925925925925924,
+          "dx_vs_z_slope_vox_per_vox": -0.010605111685946054,
+          "dy_vs_z_slope_vox_per_vox": -0.0009629759671642838,
+          "dx_linear_span_vox": -1.7604485398670449,
+          "dy_linear_span_vox": -0.15985401054927112
+        },
+        "spine_caudal_third": {
+          "count": 36,
+          "dx_median_vox": -0.8280431051083212,
+          "dy_median_vox": -0.3208383796756493,
+          "dx_mad_vox": 0.5552965973549497,
+          "dy_mad_vox": 0.37735263615796555,
+          "dx_p90_vox": 2.107143123057238,
+          "dy_p90_vox": 1.775201318609163,
+          "dx_within_1vox_frac": 0.5277777777777778,
+          "dy_within_1vox_frac": 0.6388888888888888,
+          "xy_within_1vox_frac": 0.25,
+          "dx_vs_z_slope_vox_per_vox": -0.0412311102669811,
+          "dy_vs_z_slope_vox_per_vox": -0.04860609388372586,
+          "dx_linear_span_vox": -2.061555513349055,
+          "dy_linear_span_vox": -2.430304694186293
+        },
+        "spine_mid_third": {
+          "count": 36,
+          "dx_median_vox": -0.37598540270087,
+          "dy_median_vox": -1.2924616660333612,
+          "dx_mad_vox": 0.29902299853236514,
+          "dy_mad_vox": 0.6953544759666741,
+          "dx_p90_vox": 1.4995996387187915,
+          "dy_p90_vox": 1.3607792325438055,
+          "dx_within_1vox_frac": 0.7777777777777778,
+          "dy_within_1vox_frac": 0.3611111111111111,
+          "xy_within_1vox_frac": 0.25,
+          "dx_vs_z_slope_vox_per_vox": 0.03476676481929466,
+          "dy_vs_z_slope_vox_per_vox": 0.01013527881722642,
+          "dx_linear_span_vox": 2.120772653976974,
+          "dy_linear_span_vox": 0.6182520078508116
+        },
+        "spine_cranial_third": {
+          "count": 36,
+          "dx_median_vox": -0.14209834534166532,
+          "dy_median_vox": -0.03737149618938318,
+          "dx_mad_vox": 1.5271148098745648,
+          "dy_mad_vox": 0.7430227607930853,
+          "dx_p90_vox": 4.331836481377255,
+          "dy_p90_vox": 2.3568497609769032,
+          "dx_within_1vox_frac": 0.4444444444444444,
+          "dy_within_1vox_frac": 0.5277777777777778,
+          "xy_within_1vox_frac": 0.2777777777777778,
+          "dx_vs_z_slope_vox_per_vox": -0.14080433794346903,
+          "dy_vs_z_slope_vox_per_vox": -0.04105700580540223,
+          "dx_linear_span_vox": -7.18102123511692,
+          "dy_linear_span_vox": -2.0939072960755136
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              -0.09212374588266244,
+              0.27636411269779587,
+              -0.36233981472607013
+            ],
+            "delta_xyz_vox": [
+              -0.3070791529422081,
+              0.921213708992653,
+              -1.2077993824202338
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.8778421818316815,
+              -0.30689524712358957,
+              0.9220237593851891
+            ],
+            "delta_xyz_vox": [
+              2.926140606105605,
+              -1.022984157078632,
+              3.0734125312839637
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.2111318488805761,
+            -0.16337992524720163,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 0.2669637757927311,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "target": {
+        "voxel_mm": 0.3,
+        "ideal_abs_vox": 1.0,
+        "spine_xy_mad_within_1vox_before": 0,
+        "spine_xy_mad_within_1vox_after_translation": 1,
+        "spine_xy_mad_within_1vox_after_rigid": 1
+      },
+      "figures": [
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_spine_xy_vs_z.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_ridge_xy.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_axial_overlay.png"
+      ]
+    },
+    {
+      "case": "mdp2_4h",
+      "folder": "D:\\Projects\\SPECT-recon\\recon_out\\ct_spect_reg_20260813\\20260729_mdp2_4h_fixedrefine",
+      "legacy_independent_spine": {
+        "count": 100,
+        "dx_median_vox": 0.0,
+        "dy_median_vox": -0.6246753246753229,
+        "dx_mad_vox": 1.5,
+        "dy_mad_vox": 1.7666666666666693,
+        "dx_p90_vox": 7.0,
+        "dy_p90_vox": 10.92556443556447,
+        "dx_within_1vox_frac": 0.34,
+        "dy_within_1vox_frac": 0.34,
+        "xy_within_1vox_frac": 0.08,
+        "dx_vs_z_slope_vox_per_vox": -0.03798169638762901,
+        "dy_vs_z_slope_vox_per_vox": -0.06775742839294438,
+        "dx_linear_span_vox": -6.722760260610334,
+        "dy_linear_span_vox": -11.993064825551155
+      },
+      "local_inliers_before": {
+        "count": 60,
+        "frac": 0.6,
+        "xy": {
+          "count": 60,
+          "dx_median_vox": -0.8706161532116106,
+          "dy_median_vox": -3.2689825133127286,
+          "dx_mad_vox": 0.4557742760419039,
+          "dy_mad_vox": 0.576737204084921,
+          "dx_p90_vox": 2.2143228113591498,
+          "dy_p90_vox": 2.1388041452435838,
+          "dx_within_1vox_frac": 0.5333333333333333,
+          "dy_within_1vox_frac": 0.08333333333333333,
+          "xy_within_1vox_frac": 0.06666666666666667,
+          "dx_vs_z_slope_vox_per_vox": -0.005258117219831207,
+          "dy_vs_z_slope_vox_per_vox": 0.012735402399972114,
+          "dx_linear_span_vox": -0.9306867479101236,
+          "dy_linear_span_vox": 2.254166224795064
+        }
+      },
+      "translation": {
+        "translation_mm": [
+          -0.28777649819101897,
+          -1.130073339323026,
+          0.0
+        ],
+        "inlier_count": 60,
+        "inlier_frac": 0.6
+      },
+      "rigid": {
+        "angles_deg": [
+          -0.0904588732189619,
+          -0.5230845616435101,
+          -0.43950572580064284
+        ],
+        "translation_mm": [
+          -0.3394239306132207,
+          -1.118779142175143,
+          -0.0012192365945341943
+        ],
+        "at_bound": 0
+      },
+      "before": {
+        "pairing": "local",
+        "pair_count": 100,
+        "ct_ridge_kept_frac": 0.5555555555555556,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 100,
+          "dx_median_vox": -0.9592549939700632,
+          "dy_median_vox": -3.7669111310767533,
+          "dx_mad_vox": 0.6312398242803283,
+          "dy_mad_vox": 1.0630624427524822,
+          "dx_p90_vox": 4.592664924886089,
+          "dy_p90_vox": 3.5443221229191773,
+          "dx_within_1vox_frac": 0.47,
+          "dy_within_1vox_frac": 0.06,
+          "xy_within_1vox_frac": 0.04,
+          "dx_vs_z_slope_vox_per_vox": -0.01027920480242756,
+          "dy_vs_z_slope_vox_per_vox": 0.005478656991459701,
+          "dx_linear_span_vox": -1.8194192500296782,
+          "dy_linear_span_vox": 0.9697222874883671
+        },
+        "spine_caudal_third": {
+          "count": 33,
+          "dx_median_vox": -0.9798335391352282,
+          "dy_median_vox": -3.7464093884395027,
+          "dx_mad_vox": 0.35506036332109403,
+          "dy_mad_vox": 0.3536764639657832,
+          "dx_p90_vox": 2.340173364666242,
+          "dy_p90_vox": 1.4266669940086816,
+          "dx_within_1vox_frac": 0.36363636363636365,
+          "dy_within_1vox_frac": 0.0,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": -0.037438815262922094,
+          "dy_vs_z_slope_vox_per_vox": -0.014594427012553835,
+          "dx_linear_span_vox": -2.5458394378787026,
+          "dy_linear_span_vox": -0.9924210368536608
+        },
+        "spine_mid_third": {
+          "count": 34,
+          "dx_median_vox": -0.9654606898546092,
+          "dy_median_vox": -5.188747784697725,
+          "dx_mad_vox": 0.8665069066155446,
+          "dy_mad_vox": 1.7156910588462395,
+          "dx_p90_vox": 5.153662305319322,
+          "dy_p90_vox": 2.5184349322477244,
+          "dx_within_1vox_frac": 0.5,
+          "dy_within_1vox_frac": 0.0,
+          "xy_within_1vox_frac": 0.0,
+          "dx_vs_z_slope_vox_per_vox": 0.03409775729106039,
+          "dy_vs_z_slope_vox_per_vox": -0.039926184589241596,
+          "dx_linear_span_vox": 2.1481587093368044,
+          "dy_linear_span_vox": -2.5153496291222206
+        },
+        "spine_cranial_third": {
+          "count": 33,
+          "dx_median_vox": -0.9418321295890308,
+          "dy_median_vox": -2.6049199345397867,
+          "dx_mad_vox": 0.6105436618099986,
+          "dy_mad_vox": 1.3682549589257533,
+          "dx_p90_vox": 3.0792082809887975,
+          "dy_p90_vox": 3.08689749323472,
+          "dx_within_1vox_frac": 0.5454545454545454,
+          "dy_within_1vox_frac": 0.18181818181818182,
+          "xy_within_1vox_frac": 0.12121212121212122,
+          "dx_vs_z_slope_vox_per_vox": -0.06703812187787754,
+          "dy_vs_z_slope_vox_per_vox": 0.03492749074688862,
+          "dx_linear_span_vox": -2.8826392407487345,
+          "dy_linear_span_vox": 1.5018821021162105
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              -0.09247065297138803,
+              -1.043351567727943,
+              -0.4003237041755014
+            ],
+            "delta_xyz_vox": [
+              -0.3082355099046268,
+              -3.4778385590931435,
+              -1.3344123472516713
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              -0.011107925986431155,
+              -1.2684323165368199,
+              0.5778560096757971
+            ],
+            "delta_xyz_vox": [
+              -0.03702641995477052,
+              -4.228107721789399,
+              1.9261866989193237
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.8531149853793462,
+            -1.334743692558991,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 1.5840915071752681,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        }
+      },
+      "after_translation": {
+        "pairing": "local",
+        "pair_count": 109,
+        "ct_ridge_kept_frac": 0.6055555555555555,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 109,
+          "dx_median_vox": -0.15475656008467098,
+          "dy_median_vox": 0.05950853508012699,
+          "dx_mad_vox": 0.8542326997518401,
+          "dy_mad_vox": 1.2238610726338521,
+          "dx_p90_vox": 3.4426698106299556,
+          "dy_p90_vox": 4.153819446458084,
+          "dx_within_1vox_frac": 0.5412844036697247,
+          "dy_within_1vox_frac": 0.43119266055045874,
+          "xy_within_1vox_frac": 0.25688073394495414,
+          "dx_vs_z_slope_vox_per_vox": -0.014459105910209437,
+          "dy_vs_z_slope_vox_per_vox": -0.015280463624151742,
+          "dx_linear_span_vox": -2.5592617461070706,
+          "dy_linear_span_vox": -2.7046420614748583
+        },
+        "spine_caudal_third": {
+          "count": 36,
+          "dx_median_vox": -0.04236050090453247,
+          "dy_median_vox": 0.5020247154813973,
+          "dx_mad_vox": 0.42742660086867446,
+          "dy_mad_vox": 0.46907550526351116,
+          "dx_p90_vox": 1.413763724593288,
+          "dy_p90_vox": 2.0171181397343503,
+          "dx_within_1vox_frac": 0.6944444444444444,
+          "dy_within_1vox_frac": 0.6666666666666666,
+          "xy_within_1vox_frac": 0.4166666666666667,
+          "dx_vs_z_slope_vox_per_vox": -0.022217092062462054,
+          "dy_vs_z_slope_vox_per_vox": 0.004366117651239528,
+          "dx_linear_span_vox": -1.4218938919975714,
+          "dy_linear_span_vox": 0.27943152967932977
+        },
+        "spine_mid_third": {
+          "count": 37,
+          "dx_median_vox": 0.22047310737586656,
+          "dy_median_vox": -2.0422244545866732,
+          "dx_mad_vox": 0.7892328502256589,
+          "dy_mad_vox": 2.336027322734523,
+          "dx_p90_vox": 4.505019961399917,
+          "dy_p90_vox": 5.166999549924551,
+          "dx_within_1vox_frac": 0.4864864864864865,
+          "dy_within_1vox_frac": 0.10810810810810811,
+          "xy_within_1vox_frac": 0.05405405405405406,
+          "dx_vs_z_slope_vox_per_vox": 0.01964546495488568,
+          "dy_vs_z_slope_vox_per_vox": -0.11595465671306462,
+          "dx_linear_span_vox": 1.276955222067569,
+          "dy_linear_span_vox": -7.537052686349201
+        },
+        "spine_cranial_third": {
+          "count": 36,
+          "dx_median_vox": -1.0676050932727463,
+          "dy_median_vox": -0.05505130498642785,
+          "dx_mad_vox": 0.939719250197431,
+          "dy_mad_vox": 0.9044822704007807,
+          "dx_p90_vox": 2.6511549553968727,
+          "dy_p90_vox": 3.3031987136833934,
+          "dx_within_1vox_frac": 0.4444444444444444,
+          "dy_within_1vox_frac": 0.5277777777777778,
+          "xy_within_1vox_frac": 0.3055555555555556,
+          "dx_vs_z_slope_vox_per_vox": -0.09439712734831707,
+          "dy_vs_z_slope_vox_per_vox": -0.0673784843938211,
+          "dx_linear_span_vox": -4.342267858022585,
+          "dy_linear_span_vox": -3.0994102821157705
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              0.11776232193357643,
+              0.14599071688011164,
+              -0.3803603994863053
+            ],
+            "delta_xyz_vox": [
+              0.39254107311192143,
+              0.4866357229337055,
+              -1.2678679982876844
+            ],
+            "within_1vox": 0
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.3005504411056236,
+              -0.1008458915452259,
+              0.731622041731903
+            ],
+            "delta_xyz_vox": [
+              1.0018348036854121,
+              -0.33615297181741965,
+              2.4387401391063435
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.5755551884065422,
+            -0.18111390066808503,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 0.6033788361526274,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "after_rigid": {
+        "pairing": "local",
+        "pair_count": 102,
+        "ct_ridge_kept_frac": 0.5698324022346368,
+        "window_edge_rejects": 0,
+        "spine": {
+          "count": 102,
+          "dx_median_vox": -0.6195173262632991,
+          "dy_median_vox": 0.04550486223325123,
+          "dx_mad_vox": 1.0547906758415913,
+          "dy_mad_vox": 1.2836056147978354,
+          "dx_p90_vox": 2.8565902321098697,
+          "dy_p90_vox": 4.292023622330348,
+          "dx_within_1vox_frac": 0.47058823529411764,
+          "dy_within_1vox_frac": 0.4411764705882353,
+          "xy_within_1vox_frac": 0.16666666666666666,
+          "dx_vs_z_slope_vox_per_vox": -0.007898962618640377,
+          "dy_vs_z_slope_vox_per_vox": -0.014050748189323607,
+          "dx_linear_span_vox": -1.3665205330247854,
+          "dy_linear_span_vox": -2.4307794367529842
+        },
+        "spine_caudal_third": {
+          "count": 34,
+          "dx_median_vox": -0.9566329469958816,
+          "dy_median_vox": 0.4488897962158376,
+          "dx_mad_vox": 0.3474488938396867,
+          "dy_mad_vox": 0.30696940590237887,
+          "dx_p90_vox": 1.5008322110848673,
+          "dy_p90_vox": 2.0650944921992647,
+          "dx_within_1vox_frac": 0.5294117647058824,
+          "dy_within_1vox_frac": 0.6470588235294118,
+          "xy_within_1vox_frac": 0.14705882352941177,
+          "dx_vs_z_slope_vox_per_vox": -0.0308782070040666,
+          "dy_vs_z_slope_vox_per_vox": 0.013540401496061814,
+          "dx_linear_span_vox": -2.130596283280595,
+          "dy_linear_span_vox": 0.9342877032282652
+        },
+        "spine_mid_third": {
+          "count": 34,
+          "dx_median_vox": 0.6067834385352597,
+          "dy_median_vox": -1.921537485480222,
+          "dx_mad_vox": 0.5496679467676451,
+          "dy_mad_vox": 2.375366231354434,
+          "dx_p90_vox": 4.518589899138494,
+          "dy_p90_vox": 5.904291058183589,
+          "dx_within_1vox_frac": 0.47058823529411764,
+          "dy_within_1vox_frac": 0.20588235294117646,
+          "xy_within_1vox_frac": 0.08823529411764706,
+          "dx_vs_z_slope_vox_per_vox": 0.03605203834333522,
+          "dy_vs_z_slope_vox_per_vox": -0.11657024100001116,
+          "dx_linear_span_vox": 2.1991743389434486,
+          "dy_linear_span_vox": -7.110784701000681
+        },
+        "spine_cranial_third": {
+          "count": 34,
+          "dx_median_vox": -2.2903140665111614,
+          "dy_median_vox": -0.19640534522676845,
+          "dx_mad_vox": 1.5286351278044386,
+          "dy_mad_vox": 1.1915061017359463,
+          "dx_p90_vox": 2.338150893735007,
+          "dy_p90_vox": 3.293335852632455,
+          "dx_within_1vox_frac": 0.4117647058823529,
+          "dy_within_1vox_frac": 0.47058823529411764,
+          "xy_within_1vox_frac": 0.2647058823529412,
+          "dx_vs_z_slope_vox_per_vox": -0.11587794541311552,
+          "dy_vs_z_slope_vox_per_vox": -0.11700430790036752,
+          "dx_linear_span_vox": -4.7509957619377365,
+          "dy_linear_span_vox": -4.797176623915068
+        },
+        "knees": [
+          {
+            "name": "knee_left",
+            "delta_xyz_mm": [
+              -0.15337912939807055,
+              0.1470435626629218,
+              -0.13666135926948897
+            ],
+            "delta_xyz_vox": [
+              -0.5112637646602352,
+              0.490145208876406,
+              -0.4555378642316299
+            ],
+            "within_1vox": 1
+          },
+          {
+            "name": "knee_right",
+            "delta_xyz_mm": [
+              0.14787422207664633,
+              -0.06660006550933488,
+              0.9384605306256105
+            ],
+            "delta_xyz_vox": [
+              0.4929140735888211,
+              -0.2220002183644496,
+              3.128201768752035
+            ],
+            "within_1vox": 0
+          }
+        ],
+        "lag_z_vox": 0,
+        "occupancy_diagnostic": {
+          "translation_xyz_mm": [
+            -0.5052836403747577,
+            -0.15250939638479757,
+            0.0
+          ],
+          "z_lag_vox": 0,
+          "xy_slice_count": 284,
+          "magnitude_mm": 0.5277979473397209,
+          "method": "z_occupancy_xcorr_plus_slice_xy_com"
+        },
+        "resampled_hu_finite": 1
+      },
+      "target": {
+        "voxel_mm": 0.3,
+        "ideal_abs_vox": 1.0,
+        "spine_xy_mad_within_1vox_before": 0,
+        "spine_xy_mad_within_1vox_after_translation": 0,
+        "spine_xy_mad_within_1vox_after_rigid": 0
+      },
+      "figures": [
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_4h_spine_xy_vs_z.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_4h_ridge_xy.png",
+        "D:\\Projects\\SPECT-recon\\reports\\assets\\2026-08-14-ct-spect-rigid6\\mdp2_4h_axial_overlay.png"
+      ]
+    }
+  ]
+}

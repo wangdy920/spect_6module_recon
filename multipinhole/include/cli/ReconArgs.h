@@ -112,7 +112,7 @@ struct ReconArgs {
 
     // ========== Attenuation & CT guidance ==========
     std::string attMapPath;               ///< Attenuation map file
-    std::string regCtPath;                ///< Registered CT/mu-map for TV/RDP weights
+    std::string regCtPath;                ///< Registered HU CT for TV/RDP weights
     std::string bProjPath;                ///< Background projection
     std::vector<std::string> bProjPaths;  ///< Multi-bed background
     std::string ctacFactorCacheDir;       ///< Directory for cached CTAC attenuation factor tables

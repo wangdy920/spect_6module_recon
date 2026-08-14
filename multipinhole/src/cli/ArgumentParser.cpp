@@ -2041,8 +2041,8 @@ void ArgumentParser::printUsage() {
     std::cout << "  -reg <type[,beta,delta]> TV | RDP\n";
     std::cout << "  -regBeta <beta>          Regularization weight\n";
     std::cout << "  -regDelta <delta>        Transition parameter\n\n";
-    std::cout << "  -regCT <path>            Registered CT/mu-map for TV/RDP edge weights\n";
-    std::cout << "  -regCtSigma <value>      CT edge scale (default 0.01 for mu mm^-1)\n";
+    std::cout << "  -regCT <path>            Registered HU CT for TV/RDP edge weights\n";
+    std::cout << "  -regCtSigma <value>      HU edge scale; set explicitly (e.g. 100)\n";
     std::cout << "  -regCtFloor <0..1>       Minimum CT edge weight (default 0.05)\n\n";
 
     std::cout << "=== Filtering ===\n";
