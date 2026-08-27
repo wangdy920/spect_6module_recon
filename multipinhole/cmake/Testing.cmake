@@ -19,6 +19,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_mat_reader.cpp
     tests/test_filters_golden.cpp
     tests/test_regularizers.cpp
+    tests/test_bsrem_update.cpp
     tests/common/parser_test_helpers.cpp
     tests/test_interfaces.cpp
     tests/test_matrix_io.cpp

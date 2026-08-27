@@ -11,6 +11,7 @@
 #include "io/MHDWriter.h"
 #include "io/DetZRowWeights.h"
 #include "io/VolumeLoader.h"
+#include "recon/BsremDiagnostics.h"
 #include "recon/BsremKappaMap.h"
 #include "recon/ReconLoopHelpers.h"
 #include "pipeline/RunLogger.h"
@@ -977,6 +978,21 @@ std::vector<double> runCompactSymmetricReconstruction(
             args.reg.beta > 0.0 && args.reg.type != RegType::None;
         const bool useBsremUpdate =
             args.algorithm == ReconArgs::Algorithm::BSREM;
+        // C.3: optional relative sensitivity floor. Voxels with
+        // s_j < rel * max(s) (low-support bed-edge slices) are frozen to zero
+        // instead of diverging under the multiplicative ML-family update.
+        double bsremSensFloorAbs = 0.0;
+        if (useBsremUpdate && args.bsremSensFloorRel > 0.0f) {
+          double sMax = 0.0;
+          for (double v : denom)
+            sMax = std::max(sMax, v);
+          bsremSensFloorAbs =
+              static_cast<double>(args.bsremSensFloorRel) * sMax;
+          logInfo("[BSREM] sensitivity floor: rel=" +
+                  std::to_string(args.bsremSensFloorRel) +
+                  " abs=" + std::to_string(bsremSensFloorAbs) +
+                  " (max_s=" + std::to_string(sMax) + ")");
+        }
         const std::vector<uint8_t> *maskForReg =
             (maskPtr && useRegularization && args.reg.skip_outside_mask)
                 ? maskPtr
@@ -985,7 +1001,8 @@ std::vector<double> runCompactSymmetricReconstruction(
         const bool debugStats = getVerbosity() >= 2;
         const bool residentMlemEligible =
             !debugStats && !useBsremUpdate && !prepared.butterConf.enabled &&
-            !prepared.smoothConf.enabled;
+            !prepared.smoothConf.enabled && !args.bsremMlemEquivalenceMode &&
+            !args.bsremDiagnostics;
         if (backgroundProj.empty()) {
           const size_t fullProjectionCount =
               static_cast<size_t>(compactMeta.fullRows());
@@ -1048,6 +1065,23 @@ std::vector<double> runCompactSymmetricReconstruction(
             finalManifestWritten = true;
           }
         };
+
+        std::ofstream metricsCsv;
+        if (args.bsremDiagnostics) {
+          std::error_code metricsDirError;
+          std::filesystem::create_directories(args.outputDir, metricsDirError);
+          if (metricsDirError) {
+            throw std::runtime_error(
+                "Failed creating BSREM diagnostics directory: " +
+                metricsDirError.message());
+          }
+          const auto metricsPath =
+              std::filesystem::path(args.outputDir) / "iteration_metrics.csv";
+          metricsCsv.open(metricsPath, std::ios::binary);
+          if (!metricsCsv)
+            throw std::runtime_error("Failed opening iteration_metrics.csv");
+          metricsCsv << bsremIterationMetricsCsvHeader() << '\n';
+        }
 
         for (int it = 1; it <= args.numIters; ++it) {
           logInfo("[ITER] " + std::to_string(it) + "/" +
@@ -1278,42 +1312,75 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
 
           const auto updateStart = ProfileClock::now();
-          constexpr double eps = 1e-12;
+          const bool recordDiag =
+              args.bsremDiagnostics &&
+              shouldRecordBsremDiagnostics(it, args.numIters,
+                                           args.bsremDiagInterval);
+          std::vector<double> imagePrev;
+          std::vector<double> rawSteps;
+          std::vector<double> precondSteps;
+          if (recordDiag)
+            imagePrev = image;
           if (!useBsremUpdate) {
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(opts.threads)
-#endif
-            for (ptrdiff_t j = 0; j < static_cast<ptrdiff_t>(globalNvox); ++j) {
-              const size_t idx = static_cast<size_t>(j);
-              if (maskPtr && !(*maskPtr)[idx]) {
-                image[idx] = 0.0;
-                continue;
-              }
-              const double denomEff = denom[idx];
-              if (!(denomEff > 0.0)) {
-                image[idx] = 0.0;
-                continue;
-              }
-              double value = image[idx] * (numer[idx] / std::max(denomEff, eps));
-              if (opts.nonneg && value < 0.0)
-                value = 0.0;
-              image[idx] = value;
-            }
+            applyMlemUpdate(image, numer, denom, maskPtr, opts.nonneg,
+                            opts.threads);
           } else {
             BsremUpdateParams updateParams;
             updateParams.mask = maskPtr;
-            updateParams.gradient = gradPtr;
-            updateParams.curvature = curvPtr;
-            updateParams.kappa = kappaPtr;
-            updateParams.betaScaled = bsremBeta;
-            updateParams.alpha = bsremAlpha;
+            updateParams.gradient =
+                args.bsremMlemEquivalenceMode ? nullptr : gradPtr;
+            updateParams.curvature =
+                args.bsremMlemEquivalenceMode ? nullptr : curvPtr;
+            updateParams.kappa =
+                args.bsremMlemEquivalenceMode ? nullptr : kappaPtr;
+            updateParams.betaScaled =
+                args.bsremMlemEquivalenceMode ? 0.0 : bsremBeta;
+            updateParams.alpha =
+                args.bsremMlemEquivalenceMode ? 1.0 : bsremAlpha;
+            updateParams.mlemEquivalenceMode = args.bsremMlemEquivalenceMode;
+            updateParams.clipRelativeStep = !args.bsremMlemEquivalenceMode;
+            updateParams.denomEps = args.bsremMlemEquivalenceMode ? 0.0 : 1e-12;
+            updateParams.sMin = std::max(1e-12, bsremSensFloorAbs);
             updateParams.nonneg = opts.nonneg;
             updateParams.threads = opts.threads;
+            if (recordDiag) {
+              rawSteps.assign(globalNvox, 0.0);
+              precondSteps.assign(globalNvox, 0.0);
+              updateParams.rawRelativeSteps = &rawSteps;
+              updateParams.preconditionedSteps = &precondSteps;
+            }
             applyBsremUpdate(image, numer, denom, denom, updateParams);
           }
           compactTiming.mlemUpdateSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - updateStart)
                   .count();
+
+          if (recordDiag && metricsCsv) {
+            BsremIterationInputs diagIn;
+            diagIn.image = &image;
+            diagIn.imagePrev = &imagePrev;
+            diagIn.numerator = &numer;
+            diagIn.globalDenom = &denom;
+            diagIn.gradient = args.bsremMlemEquivalenceMode ? nullptr : gradPtr;
+            diagIn.curvature =
+                args.bsremMlemEquivalenceMode ? nullptr : curvPtr;
+            diagIn.kappa = args.bsremMlemEquivalenceMode ? nullptr : kappaPtr;
+            diagIn.rawRelativeSteps =
+                rawSteps.empty() ? nullptr : &rawSteps;
+            diagIn.preconditionedSteps =
+                precondSteps.empty() ? nullptr : &precondSteps;
+            diagIn.mask = maskPtr;
+            diagIn.sMin = std::max(1e-12, bsremSensFloorAbs);
+            diagIn.alpha = args.bsremMlemEquivalenceMode ? 1.0 : bsremAlpha;
+            diagIn.beta = args.bsremMlemEquivalenceMode ? 0.0 : bsremBeta;
+            if (useRegularization && !args.bsremMlemEquivalenceMode) {
+              diagIn.regularizerRaw = spect::regularizer::compute_reg_energy_raw(
+                  image, args.Nx, args.Ny, args.Nz, args.reg, maskForReg);
+            }
+            const auto diag = computeBsremIterationMetrics(it, diagIn);
+            metricsCsv << formatBsremIterationMetricsCsv(diag) << '\n';
+            metricsCsv.flush();
+          }
 
           if (prepared.butterConf.enabled) {
             const auto butterStart = ProfileClock::now();

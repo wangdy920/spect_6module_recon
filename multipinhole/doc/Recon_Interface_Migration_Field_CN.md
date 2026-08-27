@@ -74,7 +74,7 @@ CLI 显式参数  >  algo_*.conf  >  bin/config/spect_config.ini  >  硬编码�
 | 项 | 建议 |
 |---|---|
 | 算法 | **始终传 `-opti mlem`**（切 BSREM 改为 `-opti bsrem`） |
-| 迭代 | 仅当现场要 **20** 时传 `-it 20:5`（覆盖包内 `30:5`） |
+| 迭代 | 包内 `algo_mlem.conf` 为 **`50:50`**；仅当现场要其他次数时传 `-it`（例如 `-it 20:20`） |
 | 几何 | **默认传** 四件套；省略条件见 §2.3 |
 | 多床 overlap | 与 ini 相同则不传 `-bedOverlap` |
 | 方向 | **`z_bed_flip=1` 保留**；**不要**写 `-zbedflip 0` |
@@ -205,7 +205,7 @@ DICOM 仍以 MHD 的 `DimSize` / `ElementSpacing` 为准；取**最终迭代**�
 | `-zbedflip 0` | 与 RC 默认及本迁移口径不符；**保留 1**，否则头脚方向错 |
 | PSF | 旧 `-psf 0.637` 若误当 FWHM 会偏窄；默认传 **`-psf 1.3,3 -psfMode sieve -psfKernel castor`** |
 | overlap | 仅当机械步进与包内默认不符时才覆盖 |
-| `-it` | `20` vs 包默认 `30` 会改收敛与外观 |
+| `-it` | 与包默认 `50` 次不同会改收敛与外观 |
 
 ## 8. 排查顺序
 

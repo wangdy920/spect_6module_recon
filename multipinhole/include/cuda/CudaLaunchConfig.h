@@ -40,4 +40,41 @@ constexpr uint64_t kDeviceChunkCacheReserveBytes = 2ull * 3ull * kCudaGiB;
 constexpr size_t kTransientRangeSlotCount = 2;
 constexpr int kCompactDeviceBackwardMaxAccumulators = 5;
 
+// Packed-K forward: use ~60% of L2 for ROW-packed X; leave ~40% for CSR
+// streaming. K is chosen from {1,2,4}. packed-4 also needs sorted_hint
+// (performance confidence, not correctness). Unsorted or K_mem<4 stays
+// on packed-2. Transpose is per-RHS CSR_ALG2.
+constexpr double kCompactPackedXl2BudgetFraction = 0.60;
+
+inline int compactPackedForwardKMem(int64_t nCols, int batchSize,
+                                    uint64_t l2Bytes) {
+  if (nCols <= 0 || batchSize < 2) {
+    return 1;
+  }
+  if (l2Bytes == 0) {
+    return 2;
+  }
+  const double vecBytes = 4.0 * static_cast<double>(nCols);
+  const double budget =
+      kCompactPackedXl2BudgetFraction * static_cast<double>(l2Bytes);
+  const int kRaw = static_cast<int>(budget / vecBytes);
+  if (kRaw >= 4 && batchSize >= 4) {
+    return 4;
+  }
+  if (kRaw >= 2) {
+    return 2;
+  }
+  return 1;
+}
+
+inline int compactPackedForwardTile(int kMem, bool sortedHint) {
+  if (kMem < 2) {
+    return 1;
+  }
+  if (kMem >= 4 && sortedHint) {
+    return 4;
+  }
+  return 2;
+}
+
 } // namespace spect::cuda

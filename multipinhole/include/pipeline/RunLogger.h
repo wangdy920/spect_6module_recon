@@ -11,9 +11,10 @@ int getVerbosity();
 
 /// Optional file sink for quiet runs: when verbosity suppresses console
 /// `logInfo`/`logDebug`, lines are still written here so the per-run `.log`
-/// stays a complete record.  When verbosity allows console output, the
-/// ConsoleTeeGuard already captures cout/cerr into the same file — do not
-/// also write here in that case (would duplicate).
+/// stays a complete record.  `[ITER]` progress lines always go to cout
+/// (tee'd into the same file) even at `-vb 0`.  When verbosity allows
+/// console output, the ConsoleTeeGuard already captures cout/cerr — do
+/// not also write here in that case (would duplicate).
 void setFileLogStream(std::ostream *stream);
 std::ostream *getFileLogStream();
 

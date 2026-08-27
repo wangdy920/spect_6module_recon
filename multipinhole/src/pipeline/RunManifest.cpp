@@ -397,6 +397,9 @@ void writeRunManifest(const RunManifestInput &input) {
         std::vector<double>{args.bsremKappaClipMin, args.bsremKappaClipMax});
     json.boolean("soft_mask", args.bsremSoftMask);
     json.number("soft_mask_lambda", args.bsremSoftMaskLambdaOut);
+    json.number("sens_floor_rel", args.bsremSensFloorRel);
+    json.boolean("mlem_equivalence", args.bsremMlemEquivalenceMode);
+    json.boolean("diagnostics", args.bsremDiagnostics);
     json.boolean("regularization_enabled", regularizationActive);
     json.string("regularizer_type", regTypeToString(args.reg.type));
     json.number("regularizer_beta", args.reg.beta);

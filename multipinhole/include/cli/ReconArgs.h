@@ -145,6 +145,13 @@ struct ReconArgs {
     double bsremKappaClipMax = 10.0;         ///< Upper clipping bound after kappa normalization
     bool bsremSoftMask = false;              ///< Enable soft-mask penalty boosting via kappa map
     double bsremSoftMaskLambdaOut = 100.0;   ///< Penalty boost outside support: 1+lambda*(1-M)^2
+    bool bsremMlemEquivalenceMode = false; ///< beta=0, alpha=1, no clip; host-path MLEM match
+    bool bsremDiagnostics = false;         ///< Write iteration_metrics.csv
+    int bsremDiagInterval = 5;             ///< After the first 10 iters, record every N
+    /// Freeze (zero) voxels with s_j < rel * max(s). 0 disables (default,
+    /// preserves frozen baselines). Contains the multi-bed edge-slice blowup
+    /// seen on unpenalized runs (C.3) and is a PNCG precondition.
+    float bsremSensFloorRel = 0.0f;
 
     // ========== Body Mask ==========
     float maskFromAttThreshold = std::numeric_limits<float>::quiet_NaN();

@@ -195,6 +195,7 @@ TEST(CLITest, CtGuidedTestIniDiffersOnlyByCliUnlock) {
 
 #include "cli/ArgumentParser.h"
 #include "cli/ConfigParser.h"
+#include "pipeline/RunLogger.h"
 #include "tests/common/parser_test_helpers.h"
 
 
@@ -256,6 +257,71 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
         EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), dumpArgs),
                   spect::cli::ArgumentParser::ParseResult::ExitSuccess);
     }
+}
+
+TEST(IOTest, VersionFlagWithValueIsRejectedAsVerbosity) {
+    spect::cli::ArgumentParser parser;
+    spect::cli::ReconArgs args;
+    std::vector<std::string> storage = {"SPECT_recon", "-v", "1"};
+    std::vector<char*> argv;
+    for (std::string& arg : storage)
+        argv.push_back(arg.data());
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+              spect::cli::ArgumentParser::ParseResult::ExitFailure);
+    const std::string err = testing::internal::GetCapturedStderr();
+    EXPECT_FALSE(args.versionRequested);
+    EXPECT_NE(err.find("use -vb"), std::string::npos);
+}
+
+TEST(IOTest, IterAndVerboseAliasesAreRejected) {
+    spect::cli::ArgumentParser parser;
+    {
+        spect::cli::ReconArgs args;
+        std::vector<std::string> storage = {"SPECT_recon", "-iter", "20:20"};
+        std::vector<char*> argv;
+        for (std::string& arg : storage)
+            argv.push_back(arg.data());
+        testing::internal::CaptureStderr();
+        EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+                  spect::cli::ArgumentParser::ParseResult::ExitFailure);
+        const std::string err = testing::internal::GetCapturedStderr();
+        EXPECT_NE(err.find("use -it"), std::string::npos);
+    }
+    {
+        spect::cli::ReconArgs args;
+        std::vector<std::string> storage = {"SPECT_recon", "-verbose", "1"};
+        std::vector<char*> argv;
+        for (std::string& arg : storage)
+            argv.push_back(arg.data());
+        testing::internal::CaptureStderr();
+        EXPECT_EQ(parser.parse(static_cast<int>(argv.size()), argv.data(), args),
+                  spect::cli::ArgumentParser::ParseResult::ExitFailure);
+        const std::string err = testing::internal::GetCapturedStderr();
+        EXPECT_NE(err.find("use -vb"), std::string::npos);
+    }
+}
+
+TEST(IOTest, CompactDenomCacheJoinsSplitWindowsDriveLetter) {
+    spect::cli::ReconArgs args;
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-compactDenomCache", "D:", "\\cache\\foo.mhd"});
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_NE(args.compactDenomCachePath.find("foo.mhd"), std::string::npos);
+    EXPECT_NE(args.compactDenomCachePath, std::string("D:"));
+}
+
+TEST(IOTest, IterProgressLineReachesStdoutAtQuietVerbosity) {
+    const int previous = spect::main::getVerbosity();
+    spect::main::setVerbosity(0);
+    spect::main::setFileLogStream(nullptr);
+    testing::internal::CaptureStdout();
+    spect::main::logInfo("[ITER] 1/50 compact");
+    spect::main::logInfo("Loaded configuration from x");
+    const std::string out = testing::internal::GetCapturedStdout();
+    spect::main::setVerbosity(previous);
+    EXPECT_NE(out.find("[ITER] 1/50 compact"), std::string::npos);
+    EXPECT_EQ(out.find("Loaded configuration"), std::string::npos);
 }
 
 TEST(IOTest, ExplicitMissingConfigReturnsExitFailure) {
@@ -628,6 +694,50 @@ TEST(IOTest, CompactSymmetricParserAcceptsBSREMRDP) {
     EXPECT_DOUBLE_EQ(args.reg.delta, 2.0);
     EXPECT_FLOAT_EQ(args.bsrem_alpha0, 1.0f);
     EXPECT_FLOAT_EQ(args.bsrem_gamma, 0.0f);
+}
+
+TEST(IOTest, CompactSymmetricParserAcceptsBsremSensFloor) {
+    auto argv = compactBaseArgs();
+    auto it = std::find(argv.begin(), argv.end(), "mlem");
+    ASSERT_NE(it, argv.end());
+    *it = "bsrem";
+    argv.insert(argv.end(), {"-bsrem", "1.5,0", "-bsremSensFloor", "1e-4"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_FLOAT_EQ(args.bsremSensFloorRel, 1e-4f);
+}
+
+TEST(IOTest, CompactSymmetricParserRejectsSensFloorOutOfRange) {
+    auto argv = compactBaseArgs();
+    auto it = std::find(argv.begin(), argv.end(), "mlem");
+    ASSERT_NE(it, argv.end());
+    *it = "bsrem";
+    argv.insert(argv.end(), {"-bsrem", "1.5,0", "-bsremSensFloor", "1.5"});
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, CompactSymmetricParserAcceptsBsremEquivAndDiag) {
+    auto argv = compactBaseArgs();
+    auto it = std::find(argv.begin(), argv.end(), "mlem");
+    ASSERT_NE(it, argv.end());
+    *it = "bsrem";
+    argv.insert(argv.end(),
+                {"-bsrem", "1.0,0.0", "-bsremEquiv", "on", "-bsremDiag", "on",
+                 "-bsremDiagInterval", "5"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.bsremMlemEquivalenceMode);
+    EXPECT_TRUE(args.bsremDiagnostics);
+    EXPECT_EQ(args.bsremDiagInterval, 5);
+    EXPECT_FALSE(args.useReg);
+    EXPECT_EQ(args.reg.type, spect::RegType::None);
+    EXPECT_FLOAT_EQ(args.bsrem_alpha0, 1.0f);
+    EXPECT_FLOAT_EQ(args.bsrem_gamma, 0.0f);
+    EXPECT_FALSE(args.bsremUseCurvDenom);
 }
 TEST(IOTest, CompactSymmetricParserAcceptsBSREMTV) {
     auto argv = compactBaseArgs();

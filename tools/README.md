@@ -10,6 +10,7 @@
 | `collect_device_recon_diagnostics.ps1` | `bin/tools/collect_device_recon_diagnostics.ps1` | 串行启动 1–9 次设备重建，把进程树/工作集/I/O、GPU、可用内存、磁盘总线及实时负载、cache、逐次计时/中位数和完整日志汇总为一个文本文件 | 随安装包复制 |
 | `prep_compact_denom_cache.py` | `python tools/prep_compact_denom_cache.py` | 按默认 `spect_config.ini` 手动预热无 CTAC 的 1–5 床 `auto_<hash>.mhd` denom cache | 终端手动调用，不编译 |
 | `search_compact_perf.py` | `python tools/search_compact_perf.py` | 设备空闲时手动搜索 host cache / mmap / 线程 / branch-batch；中位数墙钟 + 同输入 relL2 `1e-5` | 终端手动调用，不编译 |
+| `run_220_mlem_perf_gate.py` | `python tools/run_220_mlem_perf_gate.py` | 120×120×220 五床 MLEM 50 次：`iteration_core_s` 目标 120 s / 下限 180 s，denom hit，relL2 `1e-5` | 终端手动调用，不编译 |
 
 ## 用法示例
 

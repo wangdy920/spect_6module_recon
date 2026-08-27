@@ -41,7 +41,7 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 4. 当前工作目录的 `config/spect_config.ini`
 5. 当前工作目录的 `spect_config.ini`
 
-算法默认参数会从同级 `config/algo_<name>.conf`（`algo_mlem.conf` / `algo_bsrem.conf`）加载，也可用 `-algoConf <path>` 指定。CLI 默认覆盖配置文件；当 `[Compatibility] recon_sections_override_cli=true` 时，`spect_config.ini` 仅对 Regularization、PSF、Filtering 与 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级，其他参数仍由 CLI 覆盖。未知或已退役的 CLI 参数只打印 `[NOTE]` 并忽略；已识别参数的非法取值仍会失败。
+算法默认参数会从同级 `config/algo_<name>.conf`（`algo_mlem.conf` / `algo_bsrem.conf`）加载，也可用 `-algoConf <path>` 指定。CLI 默认覆盖配置文件；当 `[Compatibility] recon_sections_override_cli=true` 时，`spect_config.ini` 仅对 Regularization、PSF、Filtering 与 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级，其他参数仍由 CLI 覆盖。未知或已退役的 CLI 参数只打印 `[NOTE]` 并忽略；已识别参数的非法取值、以及易混淆别名 `-iter` / `-verbose` / `-v <n>` 仍会失败。
 
 compact chunk 矩阵默认识别优先级：
 
@@ -125,7 +125,7 @@ compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subset
 | 环境变量 | 发布默认 | 说明 |
 |---|---|---|
 | `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 覆盖资源感知的主机端矩阵缓存；仅在当前可用内存保留安全余量时完整缓存系统矩阵 |
-| `SPECT_COMPACT_BRANCH_BATCH` | 开启 | 把 symmetry branch 与床位合并为 cuSPARSE SpMM；设为 `0` 可调用受保护的逐分支性能基线 |
+| `SPECT_COMPACT_BRANCH_BATCH` | 开启 | 常驻 branch×bed 合批（packed-K 正向 + CSR_ALG2 转置）；设为 `0` 会关闭常驻 MLEM，不是产品 A/B |
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | 关闭 | 设为 `0` 才对矩阵 payload 使用 mmap；当前低时延路线不依赖 mmap |
 
 实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。host cache 默认按已发现矩阵总量与启动时可用内存自动选择，至少为系统保留 8 GiB 且总内存保留不低于 25%；32 GB 主存通常只缓存部分矩阵，不承诺同等吞吐。共享 GPU 或磁盘上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
@@ -155,11 +155,15 @@ powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagno
 | `-bsremCurvFreeze [on\|off]` | warmup 后冻结曲率图 |
 | `-bsremCurvWarmup <n>` | 曲率 warmup 迭代数，默认 2 |
 | `-bsremCurvEps <v>` | 曲率稳定项，默认 `1e-6` |
+| `-bsremSensFloor <rel>` | 冻结 `s < rel*max(s)` 的低灵敏度体素（置零），默认 0=关；用于抑制多床边缘切片发散 |
 | `-bsremKappa [on\|off]` | kappa 权重图 `beta_j=beta*kappa_j` |
 | `-bsremKappaEps <v>` | kappa 稳定项，默认 `1e-6` |
 | `-bsremKappaClip <min,max>` | kappa 裁剪范围，默认 `0.1,10` |
 | `-bsremSoftMask [on\|off]` | soft-mask 惩罚增强 |
 | `-bsremSoftLambda <v>` | mask 外惩罚增强，默认 100 |
+| `-bsremEquiv [on\|off]` | MLEM 退化模式：`beta=0`、`alpha=1`、关闭曲率与相对步长钳位 |
+| `-bsremDiag [on\|off]` | 写出 `iteration_metrics.csv`（目标函数、投影梯度、钳位） |
+| `-bsremDiagInterval <n>` | 第 10 轮之后的诊断间隔，默认 5 |
 
 ---
 
@@ -265,11 +269,11 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-fout <dir/name>` | 输出路径前缀；传入绝对路径（含盘符/UNC）时，`.log` 与 MHD/RAW 均写入该绝对目录 |
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
-| `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG |
-| `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件 |
+| `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG。进度行 `[ITER] n/N compact` 在 `-vb 0` 也会打到控制台 |
+| `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件。`-v <n>` 会失败（那是 verbosity，请用 `-vb`） |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
-默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际六个体文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径；INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。
+默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际六个体文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径与 `[ITER]`；其余 INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
 
 ---
 
@@ -286,7 +290,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 ## 已删除参数的兼容行为
 
-以下入口已退场，parser 只打印 `[NOTE] Ignoring unsupported CLI argument` 并跳过参数及其单个值，不再中止重建。仍应从上位机删除这些字段；已识别的正式参数若取值非法，仍以退出码 1 失败。
+以下入口已退场，parser 只打印 `[NOTE] Ignoring unsupported CLI argument` 并跳过参数及其单个值，不再中止重建。仍应从上位机删除这些字段；已识别的正式参数若取值非法，仍以退出码 1 失败。易与正式入口混淆的别名 `-iter` / `-iterations` / `-verbose` / `-verbosity` 以及 `-v <n>` 会失败，避免 silently 跑错迭代数或把版本查询当成重建成功。
 
 | 已删参数 | 当前行为 |
 |---|---|

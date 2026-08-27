@@ -3,7 +3,6 @@
 #include "pipeline/RunLogger.h"
 
 #include <chrono>
-#include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <iostream>
@@ -24,10 +23,15 @@ protected:
     const char c = static_cast<char>(ch);
     const int r1 = primary_ ? primary_->sputc(c) : ch;
     const int r2 = secondary_ ? secondary_->sputc(c) : ch;
-    // Flush the log file at line ends so a kill/crash keeps a usable tail.
-    // (ofstream unitbuf does not apply: writes go through filebuf::sputc.)
-    if (secondary_ && c == '\n')
-      secondary_->pubsync();
+    // Flush both the log file and the console/pipe at line ends so a
+    // kill/crash keeps a usable tail and a progress-bar host reading
+    // redirected stdout sees `[ITER]` immediately.
+    if (c == '\n') {
+      if (secondary_)
+        secondary_->pubsync();
+      if (primary_)
+        primary_->pubsync();
+    }
     return (r1 == EOF || r2 == EOF) ? EOF : ch;
   }
 
@@ -67,9 +71,6 @@ std::string sanitizeFilename(std::string value) {
 
 std::string timestampForFilename() {
   const auto now = std::chrono::system_clock::now();
-  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      now.time_since_epoch()) %
-                  1000;
   const std::time_t t = std::chrono::system_clock::to_time_t(now);
   std::tm tm{};
 #ifdef _WIN32
@@ -79,9 +80,7 @@ std::string timestampForFilename() {
 #endif
   char buf[64];
   std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
-  char out[80];
-  std::snprintf(out, sizeof(out), "%s_%03d", buf, static_cast<int>(ms.count()));
-  return std::string(out);
+  return std::string(buf);
 }
 
 } // namespace

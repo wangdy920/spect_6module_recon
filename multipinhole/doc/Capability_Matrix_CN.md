@@ -25,7 +25,7 @@
 | CTAC 模型 | **`att[angle, voxel]` fused** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
 | 多床位 | 唯一 canonical stitch：`Bed1=min physical z`、连续 Bed1..Bed5 子集、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。`-attMap` local-Z 与 `-regCT` storage-Z 分离，`z_out_flip` 仅作用于保存输出 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
-| GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；branch/bed 默认合批 SpMM，保留 `SPECT_COMPACT_BRANCH_BATCH=0` 性能基线；不规划多 GPU |
+| GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；branch/bed 默认合批为 packed-K 正向 + CSR_ALG2 转置；`SPECT_COMPACT_BRANCH_BATCH=0` 关闭常驻 MLEM，不是产品 A/B；不规划多 GPU |
 | 输出 | 保存未滤波 `<prefix>_it<N>`，以及从同一主输出独立派生的 `_smooth` / `_butter` MHD/RAW；发布默认对各副本后置非负钳制，manifest 记录参数与六文件清单；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
 
 ## 能力表

@@ -176,11 +176,11 @@ void osl_update_inplace(std::vector<double> &f, const std::vector<double> &q,
   }
 }
 
-double compute_reg_energy(const std::vector<double> &f, int nx, int ny, int nz,
-                          const RegConf &reg,
-                          const std::vector<uint8_t> *mask) {
+double compute_reg_energy_raw(const std::vector<double> &f, int nx, int ny,
+                              int nz, const RegConf &reg,
+                              const std::vector<uint8_t> *mask) {
   validateInputs(f, nx, ny, nz, reg, mask);
-  if (reg.type == RegType::None || reg.beta <= 0.0)
+  if (reg.type == RegType::None)
     return 0.0;
 
   const double eps = std::max(reg.delta, 1e-6);
@@ -227,7 +227,15 @@ double compute_reg_energy(const std::vector<double> &f, int nx, int ny, int nz,
       }
     }
   }
-  return reg.beta * energy;
+  return energy;
+}
+
+double compute_reg_energy(const std::vector<double> &f, int nx, int ny, int nz,
+                          const RegConf &reg,
+                          const std::vector<uint8_t> *mask) {
+  if (reg.type == RegType::None || reg.beta <= 0.0)
+    return 0.0;
+  return reg.beta * compute_reg_energy_raw(f, nx, ny, nz, reg, mask);
 }
 
 } // namespace spect::regularizer

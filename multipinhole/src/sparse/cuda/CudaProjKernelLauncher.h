@@ -83,6 +83,24 @@ void launchCompactAttenFusedBackwardKernel(
     const cuda::CompactAttenBakeParams &params,
     cudaStream_t stream = nullptr);
 
+void launchCompactPackColPairToFloat2Kernel(const float *x0, const float *x1,
+                                            float *xPair, int cols,
+                                            cudaStream_t stream = nullptr);
+
+void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *xPair,
+                                     float *y0, float *y1, int rows,
+                                     cudaStream_t stream = nullptr);
+
+void launchCompactPackColQuadToFloat4Kernel(const float *x0, const float *x1,
+                                            const float *x2, const float *x3,
+                                            float *xQuad, int cols,
+                                            cudaStream_t stream = nullptr);
+
+void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *xQuad,
+                                     float *y0, float *y1, float *y2, float *y3,
+                                     int rows, cudaStream_t stream = nullptr);
 
 } // namespace spect
 

@@ -15,6 +15,7 @@ install(DIRECTORY "${SPECT_RECON_SOURCE_DIR}/config/"
   FILES_MATCHING
   PATTERN "*.ini"
   PATTERN "spect_config.ct_guided.ini" EXCLUDE
+  PATTERN "spect_config.experiment.ini" EXCLUDE
   PATTERN "*.conf"
   PATTERN "bad_dector")
 

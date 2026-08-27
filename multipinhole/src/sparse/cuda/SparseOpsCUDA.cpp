@@ -22,6 +22,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
 #include <deque>
@@ -34,6 +35,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -73,6 +75,13 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &matrices,
     return false;
   }
   return cudaState().warmupResidentMatrixSet(matrices, reserveBytes);
+}
+
+void noteCompactCsrLocalityCUDA(bool sortedHint) {
+  if (!isCudaAvailable()) {
+    return;
+  }
+  cudaState().noteCompactCsrLocality(sortedHint);
 }
 
 bool refreshCompactProjectionCUDA(const double *projection, size_t count,
@@ -137,6 +146,22 @@ bool downloadCompactResidentImageCUDA(double *image, size_t count) {
   }
   cudaState().downloadCompactResidentImage(image, count);
   return true;
+}
+
+bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
+                                    const io::CSRView &current) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().prefetchCompactFloatMatrix(next, current);
+  return true;
+}
+
+bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &matrix) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  return cudaState().prepareCompactTransposeHost(matrix);
 }
 
 bool releaseCompactExecutionCUDA() {
@@ -324,6 +349,8 @@ CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
       g_cudaChunkStageTiming.cusparseBackwardSeconds;
   snapshot.cusparseBackwardHostSeconds =
       g_cudaChunkStageTiming.cusparseBackwardHostSeconds;
+  snapshot.transformBackwardSeconds =
+      g_cudaChunkStageTiming.transformBackwardSeconds;
   snapshot.compactMatrixUploadSeconds =
       g_cudaChunkStageTiming.compactMatrixUploadSeconds;
   snapshot.compactInputH2DSeconds =
@@ -352,6 +379,8 @@ CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
       g_cudaChunkStageTiming.cusparseBackwardCalls;
   snapshot.cusparseBackwardHostCalls =
       g_cudaChunkStageTiming.cusparseBackwardHostCalls;
+  snapshot.transformBackwardCalls =
+      g_cudaChunkStageTiming.transformBackwardCalls;
   snapshot.compactMatrixUploadCalls =
       g_cudaChunkStageTiming.compactMatrixUploadCalls;
   snapshot.compactMatrixReuseCalls =
@@ -426,6 +455,14 @@ bool finishCompactResidentMlemIterationCUDA(
 }
 
 bool downloadCompactResidentImageCUDA(double *, size_t) { return false; }
+
+bool prefetchCompactFloatMatrixCUDA(const io::CSRView &, const io::CSRView &) {
+  return false;
+}
+
+bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &) {
+  return false;
+}
 
 bool releaseCompactExecutionCUDA() { return false; }
 

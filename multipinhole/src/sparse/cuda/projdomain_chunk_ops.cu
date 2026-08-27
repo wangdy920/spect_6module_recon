@@ -726,3 +726,186 @@ extern "C" __global__ void compact_atten_fused_spmvt(
   }
 }
 
+// ROW-packed 2-RHS forward CSR. Not a revival of compact_csr_spmm_col_tile4:
+// that kernel gathered four COL-major B columns (stride = n_cols) and lost to
+// CSR_ALG2 (35.433 s vs 27.076 s). Here each 2-RHS tile is packed to float2 so
+// a sorted CSR row walks X sequentially, A is float4/int4, and reduce is
+// warp-then-block.
+extern "C" __global__ void compact_pack_colpair_to_float2(const float *x0,
+                                                          const float *x1,
+                                                          float2 *out,
+                                                          int cols) {
+  const int col = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (col < cols) {
+    out[col] = make_float2(x0[col], x1[col]);
+  }
+}
+
+extern "C" __device__ __forceinline__ float2 compact_warp_sum_float2(float2 v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    v.x += __shfl_down_sync(0xffffffffu, v.x, offset);
+    v.y += __shfl_down_sync(0xffffffffu, v.y, offset);
+  }
+  return v;
+}
+
+extern "C" __global__ void compact_csr_spmv_xpair(const float *values,
+                                                 const int *rowPtr,
+                                                 const int *colIdx,
+                                                 const float2 *xpair,
+                                                 float *y0, float *y1,
+                                                 int rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const int start = rowPtr[row];
+  const int end = rowPtr[row + 1];
+  const int tid = static_cast<int>(threadIdx.x);
+  const int stride = static_cast<int>(blockDim.x);
+  float2 sum = make_float2(0.0f, 0.0f);
+
+  const int aligned = (start + 3) & ~3;
+  for (int t = start + tid; t < aligned && t < end; t += stride) {
+    const float2 x = xpair[colIdx[t]];
+    const float a = values[t];
+    sum.x += a * x.x;
+    sum.y += a * x.y;
+  }
+  for (int t = aligned + tid * 4; t + 3 < end; t += stride * 4) {
+    const float4 a = *reinterpret_cast<const float4 *>(values + t);
+    const int4 c = *reinterpret_cast<const int4 *>(colIdx + t);
+    const float2 x0 = xpair[c.x];
+    const float2 x1 = xpair[c.y];
+    const float2 x2 = xpair[c.z];
+    const float2 x3 = xpair[c.w];
+    sum.x += a.x * x0.x + a.y * x1.x + a.z * x2.x + a.w * x3.x;
+    sum.y += a.x * x0.y + a.y * x1.y + a.z * x2.y + a.w * x3.y;
+  }
+  const int vecEnd =
+      aligned < end ? aligned + ((end - aligned) & ~3) : end;
+  for (int t = vecEnd + tid; t < end; t += stride) {
+    const float2 x = xpair[colIdx[t]];
+    const float a = values[t];
+    sum.x += a * x.x;
+    sum.y += a * x.y;
+  }
+
+  sum = compact_warp_sum_float2(sum);
+  __shared__ float2 warpSums[32];
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  if (lane == 0) {
+    warpSums[warp] = sum;
+  }
+  __syncthreads();
+  if (tid == 0) {
+    const int nwarps = stride >> 5;
+    float2 total = warpSums[0];
+    for (int w = 1; w < nwarps; ++w) {
+      total.x += warpSums[w].x;
+      total.y += warpSums[w].y;
+    }
+    y0[row] = total.x;
+    y1[row] = total.y;
+  }
+}
+
+// 4-RHS extension of compact_csr_spmv_xpair. Not a revival of
+// compact_csr_spmm_col_tile4 (COL-major stride gathers). Pack four COL
+// vectors to float4, stream A once, four accumulators, same row walk.
+extern "C" __global__ void compact_pack_colquad_to_float4(const float *x0,
+                                                          const float *x1,
+                                                          const float *x2,
+                                                          const float *x3,
+                                                          float4 *out,
+                                                          int cols) {
+  const int col = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (col < cols) {
+    out[col] = make_float4(x0[col], x1[col], x2[col], x3[col]);
+  }
+}
+
+extern "C" __device__ __forceinline__ float4 compact_warp_sum_float4(float4 v) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    v.x += __shfl_down_sync(0xffffffffu, v.x, offset);
+    v.y += __shfl_down_sync(0xffffffffu, v.y, offset);
+    v.z += __shfl_down_sync(0xffffffffu, v.z, offset);
+    v.w += __shfl_down_sync(0xffffffffu, v.w, offset);
+  }
+  return v;
+}
+
+extern "C" __global__ void compact_csr_spmv_xquad(const float *values,
+                                                 const int *rowPtr,
+                                                 const int *colIdx,
+                                                 const float4 *xquad,
+                                                 float *y0, float *y1,
+                                                 float *y2, float *y3,
+                                                 int rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const int start = rowPtr[row];
+  const int end = rowPtr[row + 1];
+  const int tid = static_cast<int>(threadIdx.x);
+  const int stride = static_cast<int>(blockDim.x);
+  float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+  const int aligned = (start + 3) & ~3;
+  for (int t = start + tid; t < aligned && t < end; t += stride) {
+    const float4 x = xquad[colIdx[t]];
+    const float a = values[t];
+    sum.x += a * x.x;
+    sum.y += a * x.y;
+    sum.z += a * x.z;
+    sum.w += a * x.w;
+  }
+  for (int t = aligned + tid * 4; t + 3 < end; t += stride * 4) {
+    const float4 a = *reinterpret_cast<const float4 *>(values + t);
+    const int4 c = *reinterpret_cast<const int4 *>(colIdx + t);
+    const float4 x0 = xquad[c.x];
+    const float4 x1 = xquad[c.y];
+    const float4 x2 = xquad[c.z];
+    const float4 x3 = xquad[c.w];
+    sum.x += a.x * x0.x + a.y * x1.x + a.z * x2.x + a.w * x3.x;
+    sum.y += a.x * x0.y + a.y * x1.y + a.z * x2.y + a.w * x3.y;
+    sum.z += a.x * x0.z + a.y * x1.z + a.z * x2.z + a.w * x3.z;
+    sum.w += a.x * x0.w + a.y * x1.w + a.z * x2.w + a.w * x3.w;
+  }
+  const int vecEnd =
+      aligned < end ? aligned + ((end - aligned) & ~3) : end;
+  for (int t = vecEnd + tid; t < end; t += stride) {
+    const float4 x = xquad[colIdx[t]];
+    const float a = values[t];
+    sum.x += a * x.x;
+    sum.y += a * x.y;
+    sum.z += a * x.z;
+    sum.w += a * x.w;
+  }
+
+  sum = compact_warp_sum_float4(sum);
+  __shared__ float4 warpSums[32];
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  if (lane == 0) {
+    warpSums[warp] = sum;
+  }
+  __syncthreads();
+  if (tid == 0) {
+    const int nwarps = stride >> 5;
+    float4 total = warpSums[0];
+    for (int w = 1; w < nwarps; ++w) {
+      total.x += warpSums[w].x;
+      total.y += warpSums[w].y;
+      total.z += warpSums[w].z;
+      total.w += warpSums[w].w;
+    }
+    y0[row] = total.x;
+    y1[row] = total.y;
+    y2[row] = total.z;
+    y3[row] = total.w;
+  }
+}
+

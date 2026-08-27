@@ -201,6 +201,118 @@ TEST_F(RegularizerTest, GradientFD_RDP) {
     EXPECT_TRUE(verifyGradientFD(RegType::RDP, 1.0, 1e-3, 1e-5));
 }
 
+TEST_F(RegularizerTest, UniformImageZeroRDPGradient) {
+    RegConf conf;
+    conf.type = RegType::RDP;
+    conf.beta = 1.0;
+    conf.delta = 0.01;
+    conf.gamma = 0.0;
+
+    std::vector<double> f(N_, 2.5);
+    auto mask = createFullMask();
+    std::vector<double> gradR(N_, 0.0);
+    compute_reg_gradient(f, Nx_, Ny_, Nz_, conf, &mask, gradR, 1);
+
+    double maxAbs = 0.0;
+    double interiorMax = 0.0;
+    for (int z = 0; z < Nz_; ++z) {
+        for (int y = 0; y < Ny_; ++y) {
+            for (int x = 0; x < Nx_; ++x) {
+                const int i = x + y * Nx_ + z * Nx_ * Ny_;
+                maxAbs = std::max(maxAbs, std::abs(gradR[i]));
+                if (x > 0 && x + 1 < Nx_ && y > 0 && y + 1 < Ny_ && z > 0 &&
+                    z + 1 < Nz_)
+                    interiorMax = std::max(interiorMax, std::abs(gradR[i]));
+            }
+        }
+    }
+    EXPECT_NEAR(interiorMax, 0.0, 1e-12);
+    EXPECT_NEAR(maxAbs, 0.0, 1e-12);
+}
+
+TEST_F(RegularizerTest, RDPDirectionalFiniteDifference) {
+    RegConf conf;
+    conf.type = RegType::RDP;
+    conf.beta = 1.0;
+    conf.delta = 0.01;
+    conf.gamma = 0.1;
+    auto f = createSmoothImage();
+    auto mask = createFullMask();
+    std::vector<double> gradR(N_, 0.0);
+    compute_reg_gradient(f, Nx_, Ny_, Nz_, conf, &mask, gradR, 1);
+
+    std::vector<double> d(N_);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    double nrm = 0.0;
+    for (int i = 0; i < N_; ++i) {
+        d[i] = dist(gen_);
+        nrm += d[i] * d[i];
+    }
+    nrm = std::sqrt(nrm);
+    for (int i = 0; i < N_; ++i)
+        d[i] /= nrm;
+
+    double dGrad = 0.0;
+    for (int i = 0; i < N_; ++i)
+        dGrad += gradR[i] * d[i];
+    const double R0 = compute_reg_energy_raw(f, Nx_, Ny_, Nz_, conf, &mask);
+
+    double bestErr = 1.0;
+    for (double h : {1e-2, 1e-3, 1e-4}) {
+        auto plus = f;
+        auto minus = f;
+        for (int i = 0; i < N_; ++i) {
+            plus[i] += h * d[i];
+            minus[i] -= h * d[i];
+        }
+        const double Rp = compute_reg_energy_raw(plus, Nx_, Ny_, Nz_, conf, &mask);
+        const double Rm = compute_reg_energy_raw(minus, Nx_, Ny_, Nz_, conf, &mask);
+        const double dFd = (Rp - Rm) / (2.0 * h);
+        const double err =
+            std::abs(dFd - dGrad) / std::max({std::abs(dFd), std::abs(dGrad), 1.0});
+        bestErr = std::min(bestErr, err);
+        (void)R0;
+    }
+    EXPECT_LT(bestErr, 1e-2);
+}
+
+TEST_F(RegularizerTest, RDPHotspotAndEdgeFiniteDifference) {
+    RegConf conf;
+    conf.type = RegType::RDP;
+    conf.beta = 1.0;
+    conf.delta = 0.01;
+    conf.gamma = 0.0;
+    auto mask = createFullMask();
+
+    auto check = [&](const std::vector<double> &f) {
+        std::vector<double> gradR(N_, 0.0);
+        compute_reg_gradient(f, Nx_, Ny_, Nz_, conf, &mask, gradR, 1);
+        const int i = Nx_ / 2 + (Ny_ / 2) * Nx_ + (Nz_ / 2) * Nx_ * Ny_;
+        const double eps = 1e-5;
+        auto fp = f;
+        auto fm = f;
+        fp[i] += eps;
+        fm[i] -= eps;
+        const double num =
+            (compute_reg_energy_raw(fp, Nx_, Ny_, Nz_, conf, &mask) -
+             compute_reg_energy_raw(fm, Nx_, Ny_, Nz_, conf, &mask)) /
+            (2.0 * eps);
+        const double den = std::max({std::abs(num), std::abs(gradR[i]), 1e-10});
+        EXPECT_LT(std::abs(num - gradR[i]) / den, 1e-2);
+    };
+
+    std::vector<double> hotspot(N_, 0.2);
+    hotspot[Nx_ / 2 + (Ny_ / 2) * Nx_ + (Nz_ / 2) * Nx_ * Ny_] = 5.0;
+    check(hotspot);
+
+    std::vector<double> edge(N_, 0.2);
+    for (int z = 0; z < Nz_; ++z)
+        for (int y = 0; y < Ny_; ++y)
+            for (int x = Nx_ / 2; x < Nx_; ++x)
+                edge[x + y * Nx_ + z * Nx_ * Ny_] = 1.5;
+    check(edge);
+}
+
 TEST_F(RegularizerTest, GradientFD_TVWithRegisteredCT) {
     std::vector<double> ct(N_, 0.0);
     for (int z = 0; z < Nz_; ++z)

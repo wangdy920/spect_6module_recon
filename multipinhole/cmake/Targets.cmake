@@ -169,6 +169,7 @@ add_library(spect::io ALIAS spect_io)
 # ----------------------------------
 add_library(spect_pipeline STATIC
   src/recon/BsremKappaMap.cpp
+  src/recon/BsremDiagnostics.cpp
   src/recon/BsremUpdate.cpp
   src/recon/CompactSymmetricReconLoop.cpp
   src/recon/ProjectionOps.cpp
@@ -219,6 +220,7 @@ if(MSVC)
   set_source_files_properties(
     src/recon/ProjectionOps.cpp
     src/recon/BsremUpdate.cpp
+    src/recon/BsremDiagnostics.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:/fp:precise>"
   )
 endif()
@@ -290,6 +292,26 @@ endif()
 set_target_properties(spect_forward_project PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
+
+# Phase B.2 microbenchmark: CSR(A) op=T vs true CSR(A^T) op=N on one real
+# compact chunk. Read-only evidence tool; not part of the reconstruction path.
+if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
+  add_executable(spect_transpose_bench
+    ${CMAKE_SOURCE_DIR}/tools/transpose_bench.cpp
+  )
+  target_include_directories(spect_transpose_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+  target_link_libraries(spect_transpose_bench PRIVATE
+    spect_io CUDA::cudart CUDA::cusparse
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(spect_transpose_bench PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  set_target_properties(spect_transpose_bench PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+  )
+endif()
 
 # ----------------------------------
 # 10) 统一链接

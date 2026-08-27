@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -34,8 +35,183 @@ constexpr uint64_t kCompactChunkResidentReserveBytes =
 struct CompactChunkResidentCacheLease {
   uint64_t cacheBudget = 0;
   bool residentWarmupComplete = false;
+  bool localityLogged = false;
+  bool sortedHint = false;
   std::future<void> hostPreload;
 };
+
+struct CompactCsrLocalitySample {
+  bool sampled = false;
+  int sampledRows = 0;
+  int sortedRows = 0;
+  bool sortedHint = false;
+  bool fullFootprint = false;
+  bool compactSpmmCandidate = false;
+  double medianSpan = 0.0;
+  double medianZfill = 0.0;
+  double p75Span = 0.0;
+  double p75Zfill = 0.0;
+};
+
+double localityPercentile(std::vector<double> values, double p) {
+  if (values.empty()) {
+    return 0.0;
+  }
+  std::sort(values.begin(), values.end());
+  const double idx = p * static_cast<double>(values.size() - 1);
+  return values[static_cast<size_t>(idx)];
+}
+
+void accumulateLocalityRows(const spect::io::CSRView &matrix, int nx, int ny,
+                            int nz, int slotBegin, int slotCount,
+                            int slotTotal, std::vector<double> *spans,
+                            std::vector<double> *zfills, int *sortedRows) {
+  const int64_t plane =
+      static_cast<int64_t>(nx) * static_cast<int64_t>(ny);
+  const int64_t nCols = matrix.cols > 0
+                            ? static_cast<int64_t>(matrix.cols)
+                            : plane * static_cast<int64_t>(nz);
+  if (nCols <= 0 || matrix.row_ptr == nullptr || matrix.col_idx == nullptr) {
+    return;
+  }
+  std::vector<uint8_t> zSeen(
+      nz > 0 ? static_cast<size_t>(nz) : static_cast<size_t>(1), 0);
+  for (int slot = slotBegin; slot < slotBegin + slotCount; ++slot) {
+    int row0 = static_cast<int>(static_cast<int64_t>(slot) * matrix.rows /
+                                slotTotal);
+    int row1 = static_cast<int>(static_cast<int64_t>(slot + 1) * matrix.rows /
+                                slotTotal);
+    if (row1 <= row0) {
+      row1 = row0 + 1;
+    }
+    if (row1 > matrix.rows) {
+      row1 = matrix.rows;
+    }
+    int row = row0;
+    while (row < row1 &&
+           matrix.row_ptr[static_cast<size_t>(row)] ==
+               matrix.row_ptr[static_cast<size_t>(row) + 1u]) {
+      ++row;
+    }
+    if (row >= row1) {
+      continue;
+    }
+    const uint32_t start = matrix.row_ptr[static_cast<size_t>(row)];
+    const uint32_t end = matrix.row_ptr[static_cast<size_t>(row) + 1u];
+    uint32_t minCol = std::numeric_limits<uint32_t>::max();
+    uint32_t maxCol = 0;
+    bool sorted = true;
+    uint32_t prev = 0;
+    std::fill(zSeen.begin(), zSeen.end(), 0);
+    int zCount = 0;
+    for (uint32_t t = start; t < end; ++t) {
+      const uint32_t col = matrix.col_idx[t];
+      if (col < minCol) {
+        minCol = col;
+      }
+      if (col > maxCol) {
+        maxCol = col;
+      }
+      if (t > start && col <= prev) {
+        sorted = false;
+      }
+      prev = col;
+      if (plane > 0 && nz > 0) {
+        const int z = static_cast<int>(static_cast<uint64_t>(col) /
+                                       static_cast<uint64_t>(plane));
+        if (z >= 0 && z < nz && zSeen[static_cast<size_t>(z)] == 0) {
+          zSeen[static_cast<size_t>(z)] = 1;
+          ++zCount;
+        }
+      }
+    }
+    spans->push_back(static_cast<double>(maxCol - minCol + 1u) /
+                     static_cast<double>(nCols));
+    zfills->push_back(nz > 0 ? static_cast<double>(zCount) /
+                                   static_cast<double>(nz)
+                             : 0.0);
+    if (sorted) {
+      ++(*sortedRows);
+    }
+  }
+}
+
+CompactCsrLocalitySample sampleCompactCsrLocality(
+    const spect::io::CSRView &matrix, int nx, int ny, int nz) {
+  CompactCsrLocalitySample sample;
+  if (!matrix.valid() || matrix.rows <= 0 || nx <= 0 || ny <= 0 || nz <= 0) {
+    return sample;
+  }
+  std::vector<double> spans;
+  std::vector<double> zfills;
+  spans.reserve(32);
+  zfills.reserve(32);
+  accumulateLocalityRows(matrix, nx, ny, nz, 0, 16, 16, &spans, &zfills,
+                         &sample.sortedRows);
+  auto classify = [&]() {
+    sample.sampled = !spans.empty();
+    sample.sampledRows = static_cast<int>(spans.size());
+    if (!sample.sampled) {
+      return;
+    }
+    sample.medianSpan = localityPercentile(spans, 0.50);
+    sample.medianZfill = localityPercentile(zfills, 0.50);
+    sample.p75Span = localityPercentile(spans, 0.75);
+    sample.p75Zfill = localityPercentile(zfills, 0.75);
+    sample.fullFootprint =
+        sample.medianSpan >= 0.80 || sample.medianZfill >= 0.80;
+    sample.compactSpmmCandidate =
+        sample.p75Span <= 0.35 && sample.p75Zfill <= 0.35;
+    sample.sortedHint =
+        static_cast<double>(sample.sortedRows) /
+            static_cast<double>(sample.sampledRows) >=
+        0.95;
+  };
+  classify();
+  if (sample.sampled && !sample.fullFootprint &&
+      !sample.compactSpmmCandidate) {
+    accumulateLocalityRows(matrix, nx, ny, nz, 16, 16, 32, &spans, &zfills,
+                           &sample.sortedRows);
+    classify();
+  }
+  return sample;
+}
+
+void applyCompactCsrLocalityHint(
+    const spect::io::CompactChunkCSRDirectory &chunks,
+    const spect::io::CompactSymmetryMetadata &meta) {
+  auto lease = std::static_pointer_cast<CompactChunkResidentCacheLease>(
+      chunks.acceleratorLease());
+  if (lease == nullptr) {
+    noteCompactCsrLocalityCUDA(false);
+    return;
+  }
+  if (!lease->localityLogged) {
+    CompactCsrLocalitySample sample;
+    if (!chunks.chunks().empty()) {
+      const auto chunk = chunks.loadChunk(0);
+      sample = sampleCompactCsrLocality(chunk->view(), meta.Nx, meta.Ny,
+                                        meta.Nz);
+    }
+    lease->sortedHint = sample.sortedHint;
+    const char *cls = "unknown";
+    if (sample.fullFootprint) {
+      cls = "full_footprint";
+    } else if (sample.compactSpmmCandidate) {
+      cls = "compact_candidate";
+    }
+    std::cerr << "[NOTE] compact CSR locality: class=" << cls
+              << " sorted_hint=" << (sample.sortedHint ? 1 : 0)
+              << " sampled=" << sample.sampledRows
+              << " span_med=" << sample.medianSpan
+              << " zfill_med=" << sample.medianZfill
+              << " span_p75=" << sample.p75Span
+              << " zfill_p75=" << sample.p75Zfill
+              << "; wide SpMM is not auto-enabled\n";
+    lease->localityLogged = true;
+  }
+  noteCompactCsrLocalityCUDA(lease->sortedHint);
+}
 
 int effectiveThreads(int threads) { return threads > 0 ? threads : 1; }
 
@@ -191,6 +367,16 @@ void warmCompactChunkResidentDeviceCache(
   }
   residentPrefixCount =
       std::min(residentPrefixCount, chunks.chunks().size());
+  // csrt experiment: device A^T half-slots need the VRAM a resident A chunk
+  // would occupy; stream all A chunks instead (uploads hide under compute).
+  const char *tSpmmEnv = std::getenv("SPECT_COMPACT_T_SPMM");
+  const bool csrtMode =
+      tSpmmEnv != nullptr && std::strncmp(tSpmmEnv, "csrt", 4) == 0;
+  if (csrtMode) {
+    std::cerr << "[NOTE] csrt: skipping GPU resident matrix warmup to budget "
+                 "device A^T slots.\n";
+    residentPrefixCount = 0;
+  }
 
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
@@ -225,6 +411,26 @@ void warmCompactChunkResidentDeviceCache(
     std::cerr << "[NOTE] GPU resident matrix warmup was unavailable; "
                  "foreground matrix transfers remain active.\n";
   }
+  // Join after the 2-chunk GPU upload so host load of the remaining chunks
+  // overlaps that H2D. Leaving this future running pushed disk I/O into
+  // iteration_core_s on the first numerator (Sampling 3-iter: 18 s vs 5 s).
+  if (lease->hostPreload.valid()) {
+    lease->hostPreload.get();
+  }
+  if (csrtMode) {
+    // Pre-derive host A^T halves for every chunk so the one-time transpose
+    // cost stays out of iteration_core_s.
+    const auto transposeStart = Clock::now();
+    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size();
+         ++chunkIndex) {
+      const auto chunk = chunks.loadChunk(chunkIndex);
+      cuda::prepareCompactTransposeHostCacheCUDA(chunk->view());
+    }
+    std::cerr << "[NOTE] csrt: host A^T prepare finished in "
+              << std::chrono::duration<double>(Clock::now() - transposeStart)
+                     .count()
+              << " s for " << chunks.chunks().size() << " chunks.\n";
+  }
   chunks.setAcceleratorLease(lease);
 }
 
@@ -232,6 +438,29 @@ struct CompactBranchDescriptor {
   int symId = 0;
   bool zMirror = false;
 };
+
+void prefetchNextCompactChunk(
+    const spect::io::CompactChunkCSRDirectory &chunks, size_t chunkIndex,
+    size_t chunkCount, bool reverseChunkOrder,
+    const spect::io::CSRView &current) {
+  if (chunkCount == 0) {
+    return;
+  }
+  size_t nextIndex = 0;
+  if (reverseChunkOrder) {
+    if (chunkIndex == 0) {
+      return;
+    }
+    nextIndex = chunkIndex - 1;
+  } else {
+    if (chunkIndex + 1 >= chunkCount) {
+      return;
+    }
+    nextIndex = chunkIndex + 1;
+  }
+  const auto next = chunks.loadChunk(nextIndex);
+  prefetchCompactFloatMatrixCUDA(next->view(), current);
+}
 
 std::vector<CompactBranchDescriptor>
 enumerateCompactBranches(const spect::io::CompactSymmetryMetadata &meta) {
@@ -653,6 +882,7 @@ bool runCompactChunkMlemNumerCUDA(
   }
 
   warmCompactChunkResidentDeviceCache(chunks);
+  applyCompactCsrLocalityHint(chunks, meta);
 
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
@@ -713,6 +943,8 @@ bool runCompactChunkMlemNumerCUDA(
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
+    prefetchNextCompactChunk(chunks, chunkIndex, chunkCount, reverseChunkOrder,
+                             view);
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
       CompactDeviceRatioTiming deviceTiming;
@@ -979,6 +1211,7 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   }
 
   warmCompactChunkResidentDeviceCache(chunks);
+  applyCompactCsrLocalityHint(chunks, meta);
 
   bool hasBackground = false;
   if (fullBackgrounds != nullptr) {
@@ -1071,6 +1304,8 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
     const spect::io::CSRView view = chunk->view();
+    prefetchNextCompactChunk(chunks, chunkIndex, chunkCount, reverseChunkOrder,
+                             view);
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
       CompactDeviceRatioTiming deviceTiming;

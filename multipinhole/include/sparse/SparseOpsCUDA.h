@@ -73,6 +73,7 @@ struct CompactAttenBakeParams {
 namespace cuda {
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
+void noteCompactCsrLocalityCUDA(bool sortedHint);
 bool refreshCompactProjectionCUDA(const double* projection, size_t count,
                                   int cacheSlot = 0);
 bool refreshCompactBranchBatchInputCUDA(const float* input, size_t count);
@@ -96,6 +97,11 @@ bool finishCompactResidentMlemIterationCUDA(
     bool requirePositiveNumerator, bool refreshStaticInputs,
     bool *imageAllZero);
 bool downloadCompactResidentImageCUDA(double *image, size_t count);
+bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
+                                    const io::CSRView &current);
+// csrt experiment (SPECT_COMPACT_T_SPMM=csrt): pre-derive host CSR(A^T)
+// halves for a chunk during matrix prepare. No-op in other modes.
+bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &matrix);
 bool releaseCompactExecutionCUDA();
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);

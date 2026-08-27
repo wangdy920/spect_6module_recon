@@ -23,6 +23,7 @@ struct CudaChunkStageTimingSnapshot {
   double transposeChunkSeconds = 0.0;
   double cusparseBackwardSeconds = 0.0;
   double cusparseBackwardHostSeconds = 0.0;
+  double transformBackwardSeconds = 0.0;
   double compactMatrixUploadSeconds = 0.0;
   double compactInputH2DSeconds = 0.0;
   double compactProjectionH2DSeconds = 0.0;
@@ -40,6 +41,7 @@ struct CudaChunkStageTimingSnapshot {
   size_t transposeChunkCalls = 0;
   size_t cusparseBackwardCalls = 0;
   size_t cusparseBackwardHostCalls = 0;
+  size_t transformBackwardCalls = 0;
   size_t compactMatrixUploadCalls = 0;
   size_t compactMatrixReuseCalls = 0;
   size_t compactInputH2DCalls = 0;

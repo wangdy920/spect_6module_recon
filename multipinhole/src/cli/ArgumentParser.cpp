@@ -18,6 +18,21 @@ bool isPublicRegularizer(RegType type) {
            type == RegType::RDP;
 }
 
+bool rejectedCliAliasError(const std::string& key, std::string& error) {
+    if (key == "-iter" || key == "-iters" || key == "-iteration" ||
+        key == "-iterations") {
+        error = "Error: '" + key +
+                "' is not supported; use -it <N[:save]>.\n";
+        return true;
+    }
+    if (key == "-verbose" || key == "-verbosity") {
+        error = "Error: '" + key +
+                "' is not supported; use -vb <0|1|2>.\n";
+        return true;
+    }
+    return false;
+}
+
 void restoreConfigOwnedReconSections(ReconArgs& dst, const ReconArgs& src) {
     dst.useReg = src.useReg;
     dst.reg = src.reg;
@@ -297,6 +312,11 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             if (args.helpRequested || args.versionRequested)
                 return ParseResult::ExitSuccess;
         } else {
+            std::string aliasError;
+            if (rejectedCliAliasError(key, aliasError)) {
+                std::cerr << aliasError;
+                return ParseResult::ExitFailure;
+            }
             std::cerr << "[NOTE] Ignoring unsupported CLI argument: " << key;
             if (key.find('=') == std::string::npos && i + 1 < argc) {
                 const std::string next = argv[i + 1];
@@ -341,6 +361,14 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
 
     // 5. Normalize derived defaults, then handle -dumpConf and validation.
     normalizeArgs(args);
+    if (args.bsremMlemEquivalenceMode) {
+        args.bsrem_alpha0 = 1.0f;
+        args.bsrem_gamma = 0.0f;
+        args.bsremUseCurvDenom = false;
+        args.useReg = false;
+        args.reg.type = RegType::None;
+        args.reg.beta = 0.0;
+    }
 
     // 6. Handle -dumpConf: print merged config and exit
     if (args.dumpConf) {
@@ -517,6 +545,11 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-bsremCurvEps"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bsremSensFloorRel = (float)std::stod(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSensFloor"));
+        return true;
+    }, {"-bsremSensFloor"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.bsremUseKappaMap);
     }, {"-bsremKappa"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -543,6 +576,19 @@ void ArgumentParser::registerHandlers() {
             ArgumentParser::getRequiredArg(i, argc, argv, "-bsremSoftLambda"));
         return true;
     }, {"-bsremSoftLambda"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(
+            i, argc, argv, a.bsremMlemEquivalenceMode);
+    }, {"-bsremEquiv"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(i, argc, argv,
+                                                  a.bsremDiagnostics);
+    }, {"-bsremDiag"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bsremDiagInterval = std::stoi(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-bsremDiagInterval"));
+        return a.bsremDiagInterval > 0;
+    }, {"-bsremDiagInterval"});
 
     // --- IO & Verbosity ---
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -584,8 +630,17 @@ void ArgumentParser::registerHandlers() {
             i, argc, argv, a.projectionResidual);
     }, {"-projectionResidual"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        (void)argc;
-        printVersion(std::string(argv[i]) == "-v");
+        const std::string flag = argv[i];
+        if (i + 1 < argc) {
+            const std::string next = argv[i + 1];
+            if (!next.empty() && next[0] != '-') {
+                std::cerr << "Error: " << flag
+                          << " prints version and exits; use -vb <0|1|2> "
+                             "for verbosity.\n";
+                return false;
+            }
+        }
+        printVersion(flag == "-v");
         a.versionRequested = true;
         return true;
     }, {"-v", "--version"});
@@ -1038,6 +1093,12 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         cfg.getBool("Reconstruction", "bsrem_soft_mask", a.bsremSoftMask);
     a.bsremSoftMaskLambdaOut = cfg.getDouble(
         "Reconstruction", "bsrem_soft_mask_lambda_out", a.bsremSoftMaskLambdaOut);
+    a.bsremMlemEquivalenceMode = cfg.getBool(
+        "Reconstruction", "bsrem_mlem_equivalence", a.bsremMlemEquivalenceMode);
+    a.bsremDiagnostics =
+        cfg.getBool("Reconstruction", "bsrem_diagnostics", a.bsremDiagnostics);
+    a.bsremDiagInterval =
+        cfg.getInt("Reconstruction", "bsrem_diag_interval", a.bsremDiagInterval);
     a.bProjPath = cfg.getString("Reconstruction", "b_proj", a.bProjPath);
 
     if (cfg.hasKey("CTAC", "auto_mu_nuclide"))
@@ -1315,6 +1376,8 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         a.bsremCurvEps = cfg.getDouble("BSREM", "curv_eps", a.bsremCurvEps);
         a.bsremUseKappaMap = cfg.getBool("BSREM", "kappa_map", a.bsremUseKappaMap);
         a.bsremKappaEps = cfg.getDouble("BSREM", "kappa_eps", a.bsremKappaEps);
+        a.bsremSensFloorRel = (float)cfg.getDouble(
+            "BSREM", "sens_floor_rel", a.bsremSensFloorRel);
         std::string kappaClip = cfg.getString("BSREM", "kappa_clip");
         if (!kappaClip.empty()) {
             auto kc = split(kappaClip, ',');
@@ -1325,6 +1388,12 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         }
         a.bsremSoftMask = cfg.getBool("BSREM", "soft_mask", a.bsremSoftMask);
         a.bsremSoftMaskLambdaOut = cfg.getDouble("BSREM", "soft_mask_lambda", a.bsremSoftMaskLambdaOut);
+        a.bsremMlemEquivalenceMode = cfg.getBool(
+            "BSREM", "mlem_equivalence", a.bsremMlemEquivalenceMode);
+        a.bsremDiagnostics =
+            cfg.getBool("BSREM", "diagnostics", a.bsremDiagnostics);
+        a.bsremDiagInterval =
+            cfg.getInt("BSREM", "diag_interval", a.bsremDiagInterval);
     }
 
     return true;
@@ -1343,6 +1412,7 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
          argName == "-dfList" || argName == "-bProjList" ||
          argName == "-fout" || argName == "-o" || argName == "-output" ||
          argName == "-chunkCSRDir" ||
+         argName == "-compactDenomCache" || argName == "-ctacFactorCacheDir" ||
          argName == "-attMap" || argName == "-regCT" || argName == "-bProj" ||
          argName == "-detZRowWeightsFile" || argName == "-normFactorFile" ||
          argName == "-badDetectorFile" ||
@@ -1671,6 +1741,10 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         std::cerr << "Error: BSREM curvature warmup iterations must be >= 0.\n";
         return false;
     }
+    if (args.bsremSensFloorRel < 0.0f || args.bsremSensFloorRel >= 1.0f) {
+        std::cerr << "Error: BSREM sensitivity floor must be in [0, 1).\n";
+        return false;
+    }
     if (!(args.bsremCurvEps > 0.0)) {
         std::cerr << "Error: BSREM curvature epsilon must be > 0.\n";
         return false;
@@ -1691,6 +1765,18 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     if (args.bsremSoftMask && std::isnan(args.maskFromAttThreshold)) {
         std::cerr << "Error: BSREM soft-mask requires -maskFromAtt.\n";
         return false;
+    }
+    if (args.bsremDiagInterval <= 0) {
+        std::cerr << "Error: -bsremDiagInterval must be > 0.\n";
+        return false;
+    }
+    if (args.bsremMlemEquivalenceMode) {
+        if (args.smoothApplyStage == "in_recon" ||
+            args.butterApplyStage == "in_recon") {
+            std::cerr << "Error: -bsremEquiv forbids in-recon smoothing/"
+                         "Butterworth.\n";
+            return false;
+        }
     }
 
     if (!args.ctacAutoMuFrom.empty() && !args.doCTAC) {
@@ -1881,9 +1967,14 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         std::cout << "curv_eps          = " << a.bsremCurvEps << "\n";
         std::cout << "kappa_map         = " << (a.bsremUseKappaMap ? "true" : "false") << "\n";
         std::cout << "kappa_eps         = " << a.bsremKappaEps << "\n";
+        std::cout << "sens_floor_rel    = " << a.bsremSensFloorRel << "\n";
         std::cout << "kappa_clip        = " << a.bsremKappaClipMin << "," << a.bsremKappaClipMax << "\n";
         std::cout << "soft_mask         = " << (a.bsremSoftMask ? "true" : "false") << "\n";
-        std::cout << "soft_mask_lambda  = " << a.bsremSoftMaskLambdaOut << "\n\n";
+        std::cout << "soft_mask_lambda  = " << a.bsremSoftMaskLambdaOut << "\n";
+        std::cout << "mlem_equivalence  = "
+                  << (a.bsremMlemEquivalenceMode ? "true" : "false") << "\n";
+        std::cout << "diagnostics       = "
+                  << (a.bsremDiagnostics ? "true" : "false") << "\n\n";
     }
     std::cout << "[Filtering]\n";
     std::cout << "butterworth_cutoff  = " << a.butterCutoff << "\n";
@@ -2031,11 +2122,15 @@ void ArgumentParser::printUsage() {
     std::cout << "  -bsremCurvFreeze on|off  Freeze curvature after warmup\n";
     std::cout << "  -bsremCurvWarmup <n>     Warmup iterations (default 2)\n";
     std::cout << "  -bsremCurvEps <v>        Stability epsilon (default 1e-6)\n";
+    std::cout << "  -bsremSensFloor <rel>    Freeze voxels with s < rel*max(s) (default 0=off)\n";
     std::cout << "  -bsremKappa on|off       Kappa map beta_j=beta*kappa_j\n";
     std::cout << "  -bsremKappaEps <v>       Kappa epsilon (default 1e-6)\n";
     std::cout << "  -bsremKappaClip <min,max>  Kappa clip range (default 0.1,10)\n";
     std::cout << "  -bsremSoftMask on|off    Soft-mask penalty boosting\n";
-    std::cout << "  -bsremSoftLambda <v>     Outside penalty boost (default 100)\n\n";
+    std::cout << "  -bsremSoftLambda <v>     Outside penalty boost (default 100)\n";
+    std::cout << "  -bsremEquiv on|off       MLEM degeneration mode (beta=0, alpha=1, no clip)\n";
+    std::cout << "  -bsremDiag on|off        Write iteration_metrics.csv\n";
+    std::cout << "  -bsremDiagInterval <n>   Diagnostic stride after iter 10 (default 5)\n\n";
 
     std::cout << "=== Regularization ===\n";
     std::cout << "  -reg <type[,beta,delta]> TV | RDP\n";
@@ -2102,6 +2197,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
     std::cout << "  -v                        Print version and complete changelog, then exit\n";
+    std::cout << "                            (-v <n> is rejected; use -vb)\n";
     std::cout << "  --version                 Print one-line version string and exit\n";
     std::cout << "  -th <N>                   Thread count\n";
     std::cout << "  -h, -help, --help         Show this help\n\n";

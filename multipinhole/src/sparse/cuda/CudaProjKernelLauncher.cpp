@@ -33,6 +33,10 @@ struct ProjDomainKernelCache {
   CUfunction compactBakeAttenFunction = nullptr;
   CUfunction compactAttenForwardFunction = nullptr;
   CUfunction compactAttenBackwardFunction = nullptr;
+  CUfunction compactPackColPairFunction = nullptr;
+  CUfunction compactCsrSpmvXPairFunction = nullptr;
+  CUfunction compactPackColQuadFunction = nullptr;
+  CUfunction compactCsrSpmvXQuadFunction = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -73,6 +77,10 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactBakeAttenFunction != nullptr &&
       g_projDomainKernelCache.compactAttenForwardFunction != nullptr &&
       g_projDomainKernelCache.compactAttenBackwardFunction != nullptr &&
+      g_projDomainKernelCache.compactPackColPairFunction != nullptr &&
+      g_projDomainKernelCache.compactCsrSpmvXPairFunction != nullptr &&
+      g_projDomainKernelCache.compactPackColQuadFunction != nullptr &&
+      g_projDomainKernelCache.compactCsrSpmvXQuadFunction != nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -103,6 +111,10 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactBakeAttenFunction = nullptr;
     g_projDomainKernelCache.compactAttenForwardFunction = nullptr;
     g_projDomainKernelCache.compactAttenBackwardFunction = nullptr;
+    g_projDomainKernelCache.compactPackColPairFunction = nullptr;
+    g_projDomainKernelCache.compactCsrSpmvXPairFunction = nullptr;
+    g_projDomainKernelCache.compactPackColQuadFunction = nullptr;
+    g_projDomainKernelCache.compactCsrSpmvXQuadFunction = nullptr;
   }
 
   cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
@@ -148,6 +160,18 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactAttenBackwardFunction,
       g_projDomainKernelCache.module, "compact_atten_fused_spmvt"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactPackColPairFunction,
+      g_projDomainKernelCache.module, "compact_pack_colpair_to_float2"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactCsrSpmvXPairFunction,
+      g_projDomainKernelCache.module, "compact_csr_spmv_xpair"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactPackColQuadFunction,
+      g_projDomainKernelCache.module, "compact_pack_colquad_to_float4"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactCsrSpmvXQuadFunction,
+      g_projDomainKernelCache.module, "compact_csr_spmv_xquad"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -591,6 +615,106 @@ void launchCompactAttenFusedBackwardKernel(
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
+void launchCompactPackColPairToFloat2Kernel(const float *x0, const float *x1,
+                                            float *xPair, int cols,
+                                            cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (cols <= 0) {
+    return;
+  }
+  CUdeviceptr x0Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x0));
+  CUdeviceptr x1Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x1));
+  CUdeviceptr outPtr = reinterpret_cast<CUdeviceptr>(xPair);
+  void *args[] = {&x0Ptr, &x1Ptr, &outPtr, &cols};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((static_cast<unsigned int>(cols) + blockSize -
+                                 1) /
+                                blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactPackColPairFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *xPair,
+                                     float *y0, float *y1, int rows,
+                                     cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr xPairPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(xPair));
+  CUdeviceptr y0Ptr = reinterpret_cast<CUdeviceptr>(y0);
+  CUdeviceptr y1Ptr = reinterpret_cast<CUdeviceptr>(y1);
+  void *args[] = {&valuesPtr, &rowPtrPtr, &colIdxPtr, &xPairPtr, &y0Ptr,
+                  &y1Ptr, &rows};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactCsrSpmvXPairFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactPackColQuadToFloat4Kernel(const float *x0, const float *x1,
+                                            const float *x2, const float *x3,
+                                            float *xQuad, int cols,
+                                            cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (cols <= 0) {
+    return;
+  }
+  CUdeviceptr x0Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x0));
+  CUdeviceptr x1Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x1));
+  CUdeviceptr x2Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x2));
+  CUdeviceptr x3Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x3));
+  CUdeviceptr outPtr = reinterpret_cast<CUdeviceptr>(xQuad);
+  void *args[] = {&x0Ptr, &x1Ptr, &x2Ptr, &x3Ptr, &outPtr, &cols};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((static_cast<unsigned int>(cols) + blockSize -
+                                 1) /
+                                blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactPackColQuadFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *xQuad,
+                                     float *y0, float *y1, float *y2, float *y3,
+                                     int rows, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr xQuadPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(xQuad));
+  CUdeviceptr y0Ptr = reinterpret_cast<CUdeviceptr>(y0);
+  CUdeviceptr y1Ptr = reinterpret_cast<CUdeviceptr>(y1);
+  CUdeviceptr y2Ptr = reinterpret_cast<CUdeviceptr>(y2);
+  CUdeviceptr y3Ptr = reinterpret_cast<CUdeviceptr>(y3);
+  void *args[] = {&valuesPtr, &rowPtrPtr, &colIdxPtr, &xQuadPtr, &y0Ptr,
+                  &y1Ptr, &y2Ptr, &y3Ptr, &rows};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize = static_cast<unsigned int>(rows);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactCsrSpmvXQuadFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
 
 } // namespace spect
 

@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include "recon/BsremUpdate.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
 #include "cuda/CudaConfig.h"
+#include "cuda/CudaLaunchConfig.h"
 #include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/CompactChunkCSR.h"
 #include "sparse/ProjDomainChunked.h"
@@ -257,7 +259,9 @@ TEST_F(MultiBedCompactNumeratorTest,
   EXPECT_NE(log.find("host cache 0 MiB is below matrix size"),
             std::string::npos);
   EXPECT_NE(log.find("estimated persistent prefix 0 / 1"), std::string::npos);
-  EXPECT_NE(log.find("Resident matrix cache:"), std::string::npos);
+  EXPECT_NE(log.find("GPU resident warmup remains enabled"), std::string::npos);
+  EXPECT_EQ(log.find("GPU resident matrix warmup was unavailable"),
+            std::string::npos);
 
   EXPECT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   std::filesystem::remove_all(dir);
@@ -412,6 +416,153 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsWithCtacMatchSingleBedRuns) {
   EXPECT_GT(diff, 1e-6) << "beds produced identical numerators unexpectedly";
 
   std::filesystem::remove_all(dir);
+}
+
+TEST_F(MultiBedCompactNumeratorTest, ToyAdjointAndSensitivity) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto full = expandCompactToyToFullDense(meta, compact);
+  const int rows = meta.fullRows();
+  const int cols = meta.totalVoxels;
+
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_adjoint_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1024 * 1024);
+
+  std::vector<double> x(static_cast<size_t>(cols));
+  std::vector<double> q(static_cast<size_t>(rows));
+  for (int i = 0; i < cols; ++i)
+    x[static_cast<size_t>(i)] = 0.4 + 0.05 * static_cast<double>(i);
+  for (int i = 0; i < rows; ++i)
+    q[static_cast<size_t>(i)] = 0.3 + 0.02 * static_cast<double>(i);
+
+  std::vector<double> Ax(static_cast<size_t>(rows), 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+      chunks, meta, x.data(), 1, Ax.data(), nullptr));
+
+  double L = 0.0;
+  double q2 = 0.0;
+  for (int i = 0; i < rows; ++i) {
+    L += Ax[static_cast<size_t>(i)] * q[static_cast<size_t>(i)];
+    q2 += q[static_cast<size_t>(i)] * q[static_cast<size_t>(i)];
+  }
+
+  std::vector<double> y(static_cast<size_t>(rows));
+  for (int i = 0; i < rows; ++i)
+    y[static_cast<size_t>(i)] =
+        q[static_cast<size_t>(i)] * std::max(Ax[static_cast<size_t>(i)], 1e-12);
+
+  std::vector<double> Atq(static_cast<size_t>(cols), 0.0);
+  const double *projPtr = y.data();
+  const double *xPtr = x.data();
+  double *nPtr = Atq.data();
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, &projPtr, nullptr, &xPtr, 1, 1, &nPtr, false, nullptr,
+      nullptr));
+
+  double R = 0.0;
+  double x2 = 0.0;
+  for (int i = 0; i < cols; ++i) {
+    R += x[static_cast<size_t>(i)] * Atq[static_cast<size_t>(i)];
+    x2 += x[static_cast<size_t>(i)] * x[static_cast<size_t>(i)];
+  }
+  const double eAdj = std::abs(L - R) / std::max({std::abs(L), std::abs(R), 1.0});
+  EXPECT_LE(eAdj, 1e-4) << "L=" << L << " R=" << R;
+
+  std::vector<double> sCuda(static_cast<size_t>(cols), 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+      chunks, meta, 1, sCuda.data(), nullptr, nullptr));
+  const auto sRef = spect::io::test::compactToyDenom(meta, compact);
+  double ns = 0.0;
+  double ds = 0.0;
+  for (int i = 0; i < cols; ++i) {
+    const double d = sCuda[static_cast<size_t>(i)] - sRef[static_cast<size_t>(i)];
+    ns += d * d;
+    ds += sRef[static_cast<size_t>(i)] * sRef[static_cast<size_t>(i)];
+  }
+  EXPECT_LE(std::sqrt(ns) / (std::sqrt(ds) + 1e-30), 1e-5);
+
+  (void)q2;
+  (void)x2;
+  (void)full;
+  std::filesystem::remove_all(dir);
+}
+
+TEST_F(MultiBedCompactNumeratorTest, EquivalenceModeMatchesHostMlem) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_bsrem_equiv_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1024 * 1024);
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  std::vector<double> xMlem(nvox, 1.0);
+  std::vector<double> xBsrem(nvox, 1.0);
+  std::vector<double> y(fullRows);
+  for (size_t i = 0; i < fullRows; ++i)
+    y[i] = 1.1 + 0.03 * static_cast<double>(i);
+  std::vector<double> s(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+      chunks, meta, 1, s.data(), nullptr, nullptr));
+
+  spect::BsremUpdateParams p;
+  p.mlemEquivalenceMode = true;
+  p.threads = 1;
+  const double *yPtr = y.data();
+  for (int it = 0; it < 5; ++it) {
+    std::vector<double> nM(nvox, 0.0);
+    std::vector<double> nB(nvox, 0.0);
+    const double *xM = xMlem.data();
+    const double *xB = xBsrem.data();
+    double *nMp = nM.data();
+    double *nBp = nB.data();
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, &yPtr, nullptr, &xM, 1, 1, &nMp, false, nullptr,
+        nullptr));
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, &yPtr, nullptr, &xB, 1, 1, &nBp, false, nullptr,
+        nullptr));
+    spect::applyMlemUpdate(xMlem, nM, s, nullptr, true, 1);
+    spect::applyBsremUpdate(xBsrem, nB, s, s, p);
+  }
+  double num = 0.0;
+  double den = 0.0;
+  for (size_t i = 0; i < nvox; ++i) {
+    const double d = xBsrem[i] - xMlem[i];
+    num += d * d;
+    den += xMlem[i] * xMlem[i];
+  }
+  EXPECT_LT(std::sqrt(num) / (std::sqrt(den) + 1e-30), 1e-4);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(CompactPackedForwardK, L2BudgetSelectsSampling4And220As2) {
+  const uint64_t l2 = 48ull * 1024ull * 1024ull;
+  const int samplingCols = 108 * 108 * 160;
+  const int cols220 = 120 * 120 * 220;
+  EXPECT_EQ(spect::cuda::compactPackedForwardKMem(samplingCols, 40, l2), 4);
+  EXPECT_EQ(spect::cuda::compactPackedForwardKMem(cols220, 40, l2), 2);
+  EXPECT_EQ(spect::cuda::compactPackedForwardTile(4, true), 4);
+  EXPECT_EQ(spect::cuda::compactPackedForwardTile(4, false), 2);
+  EXPECT_EQ(spect::cuda::compactPackedForwardTile(2, true), 2);
+  EXPECT_EQ(spect::cuda::compactPackedForwardTile(1, true), 1);
 }
 
 } // namespace

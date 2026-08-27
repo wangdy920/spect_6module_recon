@@ -181,6 +181,8 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
             std::string::npos);
   EXPECT_NE(text.find("\"soft_mask_lambda\": 42.00000000000000000"),
             std::string::npos);
+  EXPECT_NE(text.find("\"mlem_equivalence\": false"), std::string::npos);
+  EXPECT_NE(text.find("\"diagnostics\": false"), std::string::npos);
   EXPECT_NE(text.find("\"regularization_enabled\": true"),
             std::string::npos);
   EXPECT_NE(text.find("\"regularizer_type\": \"RDP\""),
@@ -254,15 +256,14 @@ TEST(RunManifestTest, MissingOutputDirFailsFast) {
   EXPECT_THROW(main::writeRunManifest(input), std::runtime_error);
 }
 
-TEST(RunLoggingTest, DefaultLogNameIsTimestampWithoutPid) {
+TEST(RunLoggingTest, DefaultLogNameUsesSecondTimestampOnly) {
   cli::ReconArgs args;
   args.outputDir = "C:/tmp/spect_log_name";
   args.outputName = "recon";
   const auto path = main::makeDefaultLogPath(args);
   const std::string name = path.filename().string();
-  EXPECT_TRUE(std::regex_match(
-      name, std::regex(R"(recon_\d{8}_\d{6}_\d{3}\.log)")));
-  EXPECT_EQ(name.find("_pid"), std::string::npos);
+  EXPECT_TRUE(std::regex_match(name,
+                               std::regex(R"(recon_\d{8}_\d{6}\.log)")));
 }
 
 } // namespace test

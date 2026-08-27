@@ -133,6 +133,11 @@ void noteCudaCusparseBackwardHost(double seconds) {
   ++g_cudaChunkStageTiming.cusparseBackwardHostCalls;
 }
 
+void noteCudaTransformBackward(double seconds, size_t calls) {
+  g_cudaChunkStageTiming.transformBackwardSeconds += seconds;
+  g_cudaChunkStageTiming.transformBackwardCalls += calls;
+}
+
 void noteCudaCompactMatrixUpload(double seconds) {
   g_cudaChunkStageTiming.compactMatrixUploadSeconds += seconds;
   ++g_cudaChunkStageTiming.compactMatrixUploadCalls;

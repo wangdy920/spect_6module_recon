@@ -114,6 +114,7 @@ def discover_exe(explicit: Path | None) -> Path:
             raise FileNotFoundError(f"SPECT_recon not found: {path}")
         return path
     candidates = [
+        REPO_ROOT / "build" / "verify-vs" / "bin" / "Release" / "SPECT_recon.exe",
         REPO_ROOT / "build" / "Release" / "bin" / "Release" / "SPECT_recon.exe",
         REPO_ROOT / "build" / "bin" / "Release" / "SPECT_recon.exe",
         REPO_ROOT / "staging" / "SPECT_recon_rc_dev" / "bin" / "SPECT_recon.exe",

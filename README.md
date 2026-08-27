@@ -146,12 +146,9 @@ or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
 | --- | --- | --- |
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
 | `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Override the resource-aware host matrix cache; auto keeps the whole matrix only when current RAM leaves safe headroom |
-| `SPECT_COMPACT_BRANCH_BATCH` | on | Batch symmetry branches and beds in cuSPARSE SpMM; set `0` for the protected scalar-branch performance baseline |
+| `SPECT_COMPACT_BRANCH_BATCH` | on | Resident branch×bed batch (packed-K forward + CSR_ALG2 transpose); set `0` disables resident MLEM and is not a product A/B |
 | `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
-| `SPECT_CUDA_SPMV_ALG` | cuSPARSE default | SpMV algorithm selection when supported |
-| `SPECT_CUDA_SPMV_FWD_ALG` | `SPECT_CUDA_SPMV_ALG` | Forward SpMV algorithm override |
-| `SPECT_CUDA_SPMV_BWD_ALG` | `SPECT_CUDA_SPMV_ALG` | Backward SpMV algorithm override |
 
 mmap 失败时会 stderr 输出 `[NOTE] compact-chunk mmap failed ... falling back to full copy load`。16 GB 显存部署保留 6 GiB 给临时矩阵、SpMM、PSF 和输出滤波；50 次迭代的低时延配置建议使用 64 GB 主存及 SSD/NVMe 矩阵。32 GB 主存可通过降低 `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 运行，但无法保证相同吞吐。
 

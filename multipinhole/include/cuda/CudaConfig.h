@@ -164,6 +164,14 @@ inline GpuMemoryInfo getMemoryInfo() {
     return info;
 }
 
+inline uint64_t getL2CacheBytes() {
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    cudaDeviceProp props{};
+    CUDA_CHECK(cudaGetDeviceProperties(&props, device));
+    return static_cast<uint64_t>(props.l2CacheSize);
+}
+
 } // namespace cuda
 } // namespace spect
 

@@ -37,14 +37,20 @@ std::string timestampNow() {
 void writeLine(std::ostream &os, const std::string &prefix,
                const std::string &message) {
   os << timestampNow() << prefix << message << '\n';
+  // Progress-bar hosts read a redirected stdout pipe; without this the
+  // [ITER] line can sit in the 4 KiB buffer until the process exits.
+  os.flush();
 }
 
 } // namespace
 
 void logInfo(const std::string &message) {
-  // Console is verbosity-gated; the durable .log must still receive INFO when
-  // -vb 0 would otherwise leave only the path banner (via the tee of cout).
-  if (gVerbosity >= 1)
+  // [ITER] n/N compact is the field progress-bar contract: always reach
+  // cout (and the tee'd .log). Other INFO stays quiet at -vb 0 and is
+  // written only to the file sink so the console is not duplicated.
+  const bool progressLine =
+      message.size() >= 6 && message.compare(0, 6, "[ITER]") == 0;
+  if (progressLine || gVerbosity >= 1)
     writeLine(std::cout, " ", message);
   else if (gFileLog)
     writeLine(*gFileLog, " ", message);

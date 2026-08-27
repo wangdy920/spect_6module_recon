@@ -31,4 +31,9 @@ double compute_reg_energy(const std::vector<double> &f, int nx, int ny, int nz,
                           const RegConf &reg,
                           const std::vector<uint8_t> *mask);
 
+/// Unscaled R(x): no beta and no kappa. Zero if type is None.
+double compute_reg_energy_raw(const std::vector<double> &f, int nx, int ny,
+                              int nz, const RegConf &reg,
+                              const std::vector<uint8_t> *mask);
+
 } // namespace spect::regularizer

@@ -16,7 +16,7 @@ cd D:\path\to\<package_root>
 3. `.\bin\config\algo_bsrem.conf`
 
 发布配置默认启用 `[Compatibility] recon_sections_override_cli=true`：
-`spect_config.ini` 对 Regularization、PSF、Filtering 和 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级；算法、迭代、几何、输入输出等其他正式 CLI 参数仍按 CLI 优先。未知或已退役 CLI 参数只打印 `[NOTE]` 并忽略，已识别参数的非法取值仍会失败。
+`spect_config.ini` 对 Regularization、PSF、Filtering 和 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级；算法、迭代、几何、输入输出等其他正式 CLI 参数仍按 CLI 优先。未知或已退役 CLI 参数只打印 `[NOTE]` 并忽略，已识别参数的非法取值仍会失败。`-iter` / `-iterations` / `-verbose` / `-verbosity` 以及 `-v <n>` 会失败（请用 `-it` / `-vb`）；单独的 `-v` / `--version` 仍只打印版本后退出。
 
 只有在明确要覆盖发布包默认配置时才传：
 
@@ -107,7 +107,7 @@ seam_xy_align = 0
 - `-opti mlem|bsrem`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
-性能相关环境变量不属于重建数值合同：`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 默认按矩阵总量和启动时可用内存自动选择，也可显式覆盖；`SPECT_COMPACT_BRANCH_BATCH` 默认开启，设为 `0` 可运行逐分支基线；mmap 默认关闭。16 GB 显存的低时延实测使用 64 GB 主存与 SSD/NVMe 矩阵，32 GB 主存通常只能缓存部分矩阵，性能需重新以交错重复运行的中位数签收。
+性能相关环境变量不属于重建数值合同：`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 默认按矩阵总量和启动时可用内存自动选择，也可显式覆盖；`SPECT_COMPACT_BRANCH_BATCH` 默认开启（packed-K 正向 + CSR_ALG2 转置），设为 `0` 会关闭常驻 MLEM，不是产品 A/B；mmap 默认关闭。16 GB 显存的低时延实测使用 64 GB 主存与 SSD/NVMe 矩阵，32 GB 主存通常只能缓存部分矩阵，性能需重新以交错重复运行的中位数签收。
 
 ## 查看合并配置
 
