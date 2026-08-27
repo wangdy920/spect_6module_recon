@@ -8,6 +8,20 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- BSREM gains production diagnostics and step control: `-bsremDiag` /
+  `-bsremDiagInterval` write per-iteration Poisson objective, projected
+  gradient and clamp/step quantiles to `iteration_metrics.csv`;
+  `-bsremSensFloor` freezes low-sensitivity voxels; `-bsremEquiv` provides an
+  exact MLEM-equivalence mode for regression anchoring.
+- CUDA sparse path moves to packed-K forward and CSR_ALG2 transpose with the
+  reworked chunk cache and launch configuration; `spect_transpose_bench`
+  measures the transpose path in isolation. Regularizer energy is also
+  reported unweighted for diagnostics.
+- Legacy aliases `-iter(s)` / `-verbose` / `-v <n>` now fail hard instead of
+  being silently ignored; recon log names drop the millisecond suffix and
+  `[ITER]` progress prints at `-vb 0`.
+- `spect_config.experiment.ini` is tracked for experiment use but excluded
+  from installed/deployed packages.
 - Helper kernels (`volume_ops`, `projdomain`, `butterworth_mask`) ship as
   build-time fatbins for sm_86/89/120. Runtime NVRTC is disabled; a GPU
   outside that set is a hard failure.
