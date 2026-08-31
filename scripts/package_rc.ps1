@@ -41,6 +41,7 @@ if ([string]::IsNullOrWhiteSpace($PackageName)) {
 $distRoot = Join-Path $repo "dist\release_candidates"
 $packageRoot = Join-Path $distRoot $PackageName
 $packageBin = Join-Path $packageRoot "bin"
+$packageConfig = Join-Path $packageRoot "config"
 $packageDocs = Join-Path $packageRoot "docs"
 
 $runtimeDlls = @(
@@ -107,7 +108,7 @@ if ($CleanPrevious -and (Test-Path -LiteralPath $distRoot)) {
 if (Test-Path -LiteralPath $packageRoot) {
     Remove-Item -LiteralPath $packageRoot -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $packageBin, $packageDocs | Out-Null
+New-Item -ItemType Directory -Force -Path $packageBin, $packageConfig, $packageDocs | Out-Null
 
 Write-Step "copy staging bin -> $packageBin"
 Get-ChildItem -LiteralPath (Join-Path $StagingRoot "bin") -Force | ForEach-Object {
@@ -138,6 +139,11 @@ Write-Step "copy CUDA/MSVC runtime DLLs"
 foreach ($dll in $runtimeDlls) {
     $src = Resolve-RuntimeDllPath $dll
     Copy-Item -LiteralPath $src -Destination (Join-Path $packageBin $dll) -Force
+}
+
+Write-Step "copy authoritative reconstruction configs"
+Get-ChildItem -LiteralPath (Join-Path $repo "multipinhole\config") -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $packageConfig -Force
 }
 
 Write-Step "generate docs/SPECT_recon_help.txt and version.txt"
