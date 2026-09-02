@@ -38,7 +38,8 @@ TEST(IOTest, CompactChunkHostCacheBudgetAdaptsToMatrixAndRam) {
 
 void writeCompactMetadata(const std::filesystem::path &path, int use90,
                           int useZ, int use45, int symCode,
-                          int symmetryOrder) {
+                          int symmetryOrder,
+                          bool legacyDoubleVoxelSize = false) {
     std::ofstream out(path, std::ios::binary);
     ASSERT_TRUE(out);
     auto scalar = [&](const auto &value) {
@@ -72,7 +73,12 @@ void writeCompactMetadata(const std::filesystem::path &path, int use90,
     scalar(nx);
     scalar(ny);
     scalar(nz);
-    scalar(voxelSize);
+    if (legacyDoubleVoxelSize) {
+        const double legacyVoxelSize = 0.3;
+        scalar(legacyVoxelSize);
+    } else {
+        scalar(voxelSize);
+    }
     scalar(detNxDuplicate);
     scalar(detNz);
     scalar(pixelSize);
@@ -97,8 +103,69 @@ TEST(IOTest, CompactSymmetryMetadataAcceptsCanonical90ZContract) {
     EXPECT_EQ(meta.fullRows(), 360 * 48 * 48);
     EXPECT_EQ(meta.xySymmetryCount(), 4);
     EXPECT_EQ(meta.zBranchCount(), 2);
+    EXPECT_FALSE(meta.legacyDoubleVoxelSizeLayout);
     EXPECT_STREQ(spect::io::compactSymmetryModeName(), "90z");
     std::filesystem::remove(path);
+}
+
+TEST(IOTest, CompactSymmetryMetadataLegacyDoubleVoxelMatchesCanonical) {
+    const auto canonicalPath = std::filesystem::temp_directory_path() /
+                               "spect_compact_meta_canonical_88.bin";
+    const auto legacyPath = std::filesystem::temp_directory_path() /
+                            "spect_compact_meta_legacy_double_92.bin";
+    writeCompactMetadata(canonicalPath, 1, 1, 0, 90, 4, false);
+    writeCompactMetadata(legacyPath, 1, 1, 0, 90, 4, true);
+    ASSERT_EQ(std::filesystem::file_size(canonicalPath),
+              spect::io::kCompactMetadataBytes);
+    ASSERT_EQ(std::filesystem::file_size(legacyPath),
+              spect::io::kLegacyDoubleVoxelMetadataBytes);
+
+    const auto canonical =
+        spect::io::loadCompactSymmetryMetadata(canonicalPath.string());
+    const auto legacy =
+        spect::io::loadCompactSymmetryMetadata(legacyPath.string());
+    EXPECT_TRUE(legacy.legacyDoubleVoxelSizeLayout);
+    EXPECT_EQ(legacy.totalRows, canonical.totalRows);
+    EXPECT_EQ(legacy.totalVoxels, canonical.totalVoxels);
+    EXPECT_EQ(legacy.maxNnz, canonical.maxNnz);
+    EXPECT_EQ(legacy.compactNumAngles, canonical.compactNumAngles);
+    EXPECT_EQ(legacy.detNx, canonical.detNx);
+    EXPECT_EQ(legacy.compactDetZ, canonical.compactDetZ);
+    EXPECT_EQ(legacy.compactRaysPerAngle, canonical.compactRaysPerAngle);
+    EXPECT_EQ(legacy.fullNumAngles, canonical.fullNumAngles);
+    EXPECT_EQ(legacy.Nx, canonical.Nx);
+    EXPECT_EQ(legacy.Ny, canonical.Ny);
+    EXPECT_EQ(legacy.Nz, canonical.Nz);
+    EXPECT_FLOAT_EQ(legacy.voxelSize, canonical.voxelSize);
+    EXPECT_EQ(legacy.detNz, canonical.detNz);
+    EXPECT_FLOAT_EQ(legacy.pixelSize, canonical.pixelSize);
+    EXPECT_FLOAT_EQ(legacy.detectorY, canonical.detectorY);
+    EXPECT_FLOAT_EQ(legacy.detectorThickness, canonical.detectorThickness);
+    EXPECT_EQ(legacy.symCode, canonical.symCode);
+    EXPECT_EQ(legacy.symmetryOrder, canonical.symmetryOrder);
+    std::filesystem::remove(canonicalPath);
+    std::filesystem::remove(legacyPath);
+}
+
+TEST(IOTest, RealLu177LegacyDoubleVoxelMetadataParsesWhenPresent) {
+    const std::filesystem::path metaPath =
+        std::filesystem::path("test_data") / "6module" / "Lu177_sysmat" /
+        "matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD" /
+        "metadata.bin";
+    if (!std::filesystem::exists(metaPath)) {
+        GTEST_SKIP() << "Lu177 legacy metadata sample not available";
+    }
+    const auto meta =
+        spect::io::loadCompactSymmetryMetadata(metaPath.string());
+    EXPECT_TRUE(meta.legacyDoubleVoxelSizeLayout);
+    EXPECT_EQ(meta.Nx, 120);
+    EXPECT_EQ(meta.Ny, 120);
+    EXPECT_EQ(meta.Nz, 220);
+    EXPECT_FLOAT_EQ(meta.voxelSize, 0.3f);
+    EXPECT_EQ(meta.compactRows(), 90 * 48 * 24);
+    EXPECT_EQ(meta.fullRows(), 360 * 48 * 48);
+    EXPECT_EQ(meta.symCode, 90);
+    EXPECT_EQ(meta.symmetryOrder, 4);
 }
 
 TEST(IOTest, CompactSymmetryMetadataRejectsLegacy45ZContract) {
@@ -141,7 +208,8 @@ TEST(IOTest, CompactSymmetryMetadataRejectsUnexpectedTrailingBytes) {
     const auto path = dir / "metadata_trailing.bin";
 
     {
-        std::vector<char> bytes(spect::io::kCompactMetadataBytes + 4, 0);
+        std::vector<char> bytes(
+            spect::io::kLegacyDoubleVoxelMetadataBytes + 4, 0);
         std::ofstream out(path, std::ios::binary);
         ASSERT_TRUE(out);
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));

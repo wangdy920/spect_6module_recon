@@ -9,7 +9,10 @@
 namespace spect::io {
 
 // Canonical v4 metadata.bin layout: 22 int32/float fields, no magic prefix.
+// Legacy matrices may store only voxelSize as float64, shifting the remaining
+// fields by four bytes. Both layouts map to the same validated memory model.
 constexpr std::size_t kCompactMetadataBytes = 88;
+constexpr std::size_t kLegacyDoubleVoxelMetadataBytes = 92;
 
 struct CompactSymmetryMetadata {
   int totalRows = 0;
@@ -31,6 +34,7 @@ struct CompactSymmetryMetadata {
   float detectorThickness = 0.0f;
   int symCode = 0;
   int symmetryOrder = 0;
+  bool legacyDoubleVoxelSizeLayout = false;
 
   int fullRaysPerAngle() const { return detNx * detNz; }
   int64_t fullRows() const {

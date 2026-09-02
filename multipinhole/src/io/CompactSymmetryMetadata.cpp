@@ -1,7 +1,9 @@
 #include "io/CompactSymmetryMetadata.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -36,11 +38,14 @@ const char *compactSymmetryModeName() { return "90z"; }
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   const std::size_t fileSize = metadataFileSize(path);
-  if (fileSize != kCompactMetadataBytes) {
+  const bool legacyDoubleVoxel = fileSize == kLegacyDoubleVoxelMetadataBytes;
+  if (fileSize != kCompactMetadataBytes && !legacyDoubleVoxel) {
     throw std::runtime_error(
         "Compact metadata size mismatch (" + std::to_string(fileSize) +
-        " bytes, canonical v4 SYM_90Z metadata requires exactly " +
-        std::to_string(kCompactMetadataBytes) + "): " + path);
+        " bytes, supported SYM_90Z metadata layouts are canonical float32 " +
+        std::to_string(kCompactMetadataBytes) +
+        " or legacy float64-voxelSize " +
+        std::to_string(kLegacyDoubleVoxelMetadataBytes) + "): " + path);
   }
 
   std::ifstream in(path, std::ios::binary);
@@ -49,6 +54,7 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   }
 
   CompactSymmetryMetadata meta;
+  meta.legacyDoubleVoxelSizeLayout = legacyDoubleVoxel;
   int detNxDuplicate = 0;
   int use90 = 0;
   int useZ = 0;
@@ -59,9 +65,22 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
       !readScalar(in, meta.detNx) || !readScalar(in, meta.compactDetZ) ||
       !readScalar(in, meta.compactRaysPerAngle) ||
       !readScalar(in, meta.fullNumAngles) || !readScalar(in, meta.Nx) ||
-      !readScalar(in, meta.Ny) || !readScalar(in, meta.Nz) ||
-      !readScalar(in, meta.voxelSize) ||
-      !readScalar(in, detNxDuplicate) || !readScalar(in, meta.detNz) ||
+      !readScalar(in, meta.Ny) || !readScalar(in, meta.Nz)) {
+    throw std::runtime_error("Compact metadata is truncated: " + path);
+  }
+  if (legacyDoubleVoxel) {
+    double voxelSize = 0.0;
+    if (!readScalar(in, voxelSize) || !std::isfinite(voxelSize) ||
+        voxelSize <= 0.0 ||
+        voxelSize > static_cast<double>(std::numeric_limits<float>::max())) {
+      throw std::runtime_error(
+          "Legacy compact metadata has invalid float64 voxelSize: " + path);
+    }
+    meta.voxelSize = static_cast<float>(voxelSize);
+  } else if (!readScalar(in, meta.voxelSize)) {
+    throw std::runtime_error("Compact metadata is truncated: " + path);
+  }
+  if (!readScalar(in, detNxDuplicate) || !readScalar(in, meta.detNz) ||
       !readScalar(in, meta.pixelSize) || !readScalar(in, meta.detectorY) ||
       !readScalar(in, meta.detectorThickness) || !readScalar(in, use90) ||
       !readScalar(in, useZ) || !readScalar(in, use45) ||
@@ -81,6 +100,11 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   requirePositive(meta.Nx, "Nx");
   requirePositive(meta.Ny, "Ny");
   requirePositive(meta.Nz, "Nz");
+  if (!std::isfinite(meta.voxelSize) || meta.voxelSize <= 0.0f) {
+    throw std::runtime_error(
+        "Compact symmetry metadata has invalid voxelSize=" +
+        std::to_string(meta.voxelSize));
+  }
 
   auto reject = [&](const std::string &reason) {
     throw std::runtime_error("Compact metadata is not canonical v4 SYM_90Z (" +

@@ -429,6 +429,11 @@ int runProgram(int argc, char **argv) {
     const std::string compactMetaPath = resolveCompactMetadataPath(args);
     spect::io::CompactSymmetryMetadata compactMeta =
         spect::io::loadCompactSymmetryMetadata(compactMetaPath);
+    if (compactMeta.legacyDoubleVoxelSizeLayout) {
+      logWarn("Compatibility: loaded 92-byte legacy compact metadata with "
+              "float64 voxelSize; converted to the canonical in-memory "
+              "SYM_90Z contract after validation: " + compactMetaPath);
+    }
     // Matrix metadata is authoritative for reconstruction dims and voxel
     // size: it always overrides -dim/-vox (the device command line may carry
     // stale or wrong values). Warn when an explicit -dim disagrees so the

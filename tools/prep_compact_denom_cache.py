@@ -29,6 +29,7 @@ DUMMY_DIRNAME = CACHE_DIRNAME / "_dummy_proj"
 SCRATCH_DIRNAME = CACHE_DIRNAME / "_prep_scratch"
 MAX_BEDS = 5
 META_FMT = struct.Struct("<11if2i3f5i")
+LEGACY_DOUBLE_VOXEL_META_FMT = struct.Struct("<11id2i3f5i")
 
 CACHE_SAVED_RE = re.compile(r"compact denom cache saved:\s*(.+)$", re.MULTILINE)
 CACHE_HIT_RE = re.compile(r"compact denom cache hit:\s*(.+)$", re.MULTILINE)
@@ -84,13 +85,19 @@ def write_dummy_projection_bin(path: Path, num_angles: int, rays_per_angle: int,
     return 8 + count * 8
 
 
-def read_compact_metadata(path: Path) -> dict[str, int | float]:
+def read_compact_metadata(path: Path) -> dict[str, int | float | str]:
     data = path.read_bytes()
-    if len(data) != META_FMT.size:
+    if len(data) == META_FMT.size:
+        fields = META_FMT.unpack(data)
+        layout = "canonical_float32_voxel_88"
+    elif len(data) == LEGACY_DOUBLE_VOXEL_META_FMT.size:
+        fields = LEGACY_DOUBLE_VOXEL_META_FMT.unpack(data)
+        layout = "legacy_float64_voxel_92"
+    else:
         raise RuntimeError(
             f"Compact metadata size mismatch ({len(data)} bytes, "
-            f"canonical v4 requires {META_FMT.size}): {path}")
-    fields = META_FMT.unpack(data)
+            f"supported sizes are {META_FMT.size} and "
+            f"{LEGACY_DOUBLE_VOXEL_META_FMT.size}): {path}")
     meta = {
         "fullNumAngles": int(fields[7]),
         "Nx": int(fields[8]),
@@ -99,6 +106,7 @@ def read_compact_metadata(path: Path) -> dict[str, int | float]:
         "voxelSize": float(fields[11]),
         "detNx": int(fields[4]),
         "detNz": int(fields[13]),
+        "metadataLayout": layout,
     }
     rays = meta["detNx"] * meta["detNz"]
     if meta["fullNumAngles"] <= 0 or rays <= 0:

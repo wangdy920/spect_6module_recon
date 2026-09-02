@@ -326,6 +326,10 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("chunk_csr_dir", args.chunkCSRDir);
   json.string("metadata_path",
               input.compactMetaPath != nullptr ? *input.compactMetaPath : "");
+  json.string("metadata_layout",
+              meta.legacyDoubleVoxelSizeLayout
+                  ? "legacy_float64_voxel_92"
+                  : "canonical_float32_voxel_88");
   json.integerVector("dims", std::vector<int>{meta.Nx, meta.Ny, meta.Nz});
   json.number("voxel_size_mm", meta.voxelSize);
   json.string("symmetry_mode", "sym90z");
