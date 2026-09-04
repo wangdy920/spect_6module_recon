@@ -149,6 +149,41 @@ bool downloadCompactResidentImageCUDA(double *image, size_t count) {
   return true;
 }
 
+bool finishCompactResidentBsremIterationCUDA(
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const double *denom, const uint8_t *mask,
+    const std::vector<double> *castorKx,
+    const std::vector<double> *castorKy,
+    const std::vector<double> *castorKz,
+    const cuda::CompactBsremUpdateParams &params,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().finishCompactResidentBsremIteration(
+      globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+      commonTransformParams, denom, mask, castorKx, castorKy, castorKz, params,
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+  return true;
+}
+
+const double *compactResidentImageDeviceCUDA(size_t count) {
+  if (!isCudaAvailable()) {
+    return nullptr;
+  }
+  return cudaState().compactResidentImageDevice(count);
+}
+
+double *compactResidentGradientDeviceCUDA(size_t count) {
+  if (!isCudaAvailable()) {
+    return nullptr;
+  }
+  return cudaState().compactResidentGradientDevice(count);
+}
+
 bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
                                     const io::CSRView &current) {
   if (!isCudaAvailable()) {
@@ -537,6 +572,19 @@ bool finishCompactResidentMlemIterationCUDA(
 }
 
 bool downloadCompactResidentImageCUDA(double *, size_t) { return false; }
+
+bool finishCompactResidentBsremIterationCUDA(
+    size_t, int, const int *, int, bool,
+    const cuda::CompactDeviceTransformParams &, const double *,
+    const uint8_t *, const std::vector<double> *, const std::vector<double> *,
+    const std::vector<double> *, const cuda::CompactBsremUpdateParams &, bool,
+    bool, bool *) {
+  return false;
+}
+
+const double *compactResidentImageDeviceCUDA(size_t) { return nullptr; }
+
+double *compactResidentGradientDeviceCUDA(size_t) { return nullptr; }
 
 bool prefetchCompactFloatMatrixCUDA(const io::CSRView &, const io::CSRView &) {
   return false;

@@ -50,6 +50,34 @@ struct CompactDeviceBackwardTiming {
     double transformBackwardSeconds = 0.0;
 };
 
+/// Device BSREM-II relative update on the resident image (subset = 1), same
+/// contract as the host BsremUpdateParams / applyBsremUpdate:
+///   lambda = betaScaled * kappa
+///   u = alpha * (q - S - lambda * r) / (S + lambda * max(c, 0) + denomEps)
+///   x <- max(x, 1e-12) * (1 + clip(u))
+/// The regularizer gradient r is a device array produced by the volume ops
+/// (computeRegGradientDeviceCUDA) from the resident image; the curvature
+/// surrogate c = |r| / max(x, curvEps) is kept on the device and refreshed only
+/// when refreshCurvature is set; kappa is a host array uploaded once.
+struct CompactBsremUpdateParams {
+    double alpha = 1.0;
+    double betaScaled = 0.0;
+    double denomEps = 1e-12;
+    double sMin = 1e-12;
+    bool clipRelativeStep = true;
+    double clipMin = -0.9;
+    double clipMax = 1.0;
+    bool nonneg = true;
+    bool zeroLowSensitivity = true;
+    /// Device regularizer gradient (nullptr: no penalty term).
+    const double* deviceGradient = nullptr;
+    bool useCurvature = false;
+    bool refreshCurvature = false;
+    double curvEps = 1e-12;
+    /// Host kappa map (nullptr: kappa = 1); uploaded once per host pointer.
+    const double* kappa = nullptr;
+};
+
 /// Parameters for compact CTAC attenuation lookup:
 /// effective[t] = val[t] * att[fullAngle(row(t)), unrotatedVoxel(col(t))].
 /// Combines the row->full-angle mapping of CompactDeviceRatioParams with the
@@ -101,6 +129,24 @@ bool finishCompactResidentMlemIterationCUDA(
     bool requirePositiveNumerator, bool refreshStaticInputs,
     bool *imageAllZero);
 bool downloadCompactResidentImageCUDA(double *image, size_t count);
+/// Resident BSREM-II iteration tail: accumulates q like the MLEM variant and
+/// applies the relative update with the given penalty terms.
+bool finishCompactResidentBsremIterationCUDA(
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ,
+    const CompactDeviceTransformParams &commonTransformParams,
+    const double *denom, const uint8_t *mask,
+    const std::vector<double> *castorKx,
+    const std::vector<double> *castorKy,
+    const std::vector<double> *castorKz,
+    const CompactBsremUpdateParams &params,
+    bool requirePositiveNumerator, bool refreshStaticInputs,
+    bool *imageAllZero);
+/// Device pointer of the resident image (count doubles) for the volume ops;
+/// nullptr when CUDA is unavailable.
+const double *compactResidentImageDeviceCUDA(size_t count);
+/// Device scratch (count doubles) that receives the regularizer gradient.
+double *compactResidentGradientDeviceCUDA(size_t count);
 bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
                                     const io::CSRView &current);
 // csrt experiment (SPECT_COMPACT_T_SPMM=csrt): pre-derive host CSR(A^T)

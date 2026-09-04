@@ -8,6 +8,7 @@
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/BadDetectorMask.h"
 #include "io/MHDWriter.h"
 #include "io/DetZRowWeights.h"
@@ -1072,13 +1073,27 @@ std::vector<double> runCompactSymmetricReconstruction(
                 : nullptr;
         bool compactChunkReverseOrderNext = !loadedCompactDenomCache;
         const bool debugStats = getVerbosity() >= 2;
-        const bool residentMlemEligible =
-            !debugStats && !useBsremUpdate && !prepared.butterConf.enabled &&
+        // Both optimizers update the resident image on the device; only the
+        // host-side diagnostics, the MLEM-equivalence debug mode and the
+        // in-iteration output filters still need the host image every
+        // iteration.
+        const bool residentUpdateEligible =
+            !debugStats && !prepared.butterConf.enabled &&
             !prepared.smoothConf.enabled && !args.bsremMlemEquivalenceMode &&
             !args.bsremDiagnostics;
-        if (!anyBackground || csrqMatrices) {
-          // Pre-upload every window's projections (and CSRQ backgrounds) so
-          // the first numerator does not pay the H2D inside iteration_core_s.
+        const bool residentRegGradient =
+            useRegularization && residentUpdateEligible &&
+            (args.reg.type == RegType::RDP ||
+             args.reg.type == RegType::TVIsotropic);
+        // A penalty without a CUDA gradient kernel keeps the host update.
+        const bool residentUpdateAllowed =
+            residentUpdateEligible && (!useRegularization || residentRegGradient);
+        bool deviceCurvatureInitialized = false;
+        {
+          // Pre-upload every window's projections and backgrounds so the
+          // first numerator does not pay the H2D inside iteration_core_s;
+          // the device ratio kernels of both formats read them from their
+          // slots for the rest of the run.
           const size_t fullProjectionCount =
               static_cast<size_t>(compactMeta.fullRows());
           for (size_t channel = 0; channel < channelCount; ++channel) {
@@ -1172,12 +1187,12 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::vector<double> numer;
           const std::vector<double> *bedImageSource = &image;
 
-          // CSRB's fused device ratio has no background term; the CSRQ ratio
-          // kernel does, so backgrounds keep the resident path there.
+          // The resident branch-batch input (image rotated on the device)
+          // serves any bed count and both formats, backgrounds included; CTAC
+          // and ROI-pruned matrices still take the host input path.
           const bool residentBatchInput =
-              !debugStats && bedCount > 1 &&
-              (!anyBackground || csrqMatrices) &&
-              !compactHasAttenuation && !compactRoiPrunesMatrix &&
+              !debugStats && !compactHasAttenuation &&
+              !compactRoiPrunesMatrix &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
               spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
@@ -1192,9 +1207,9 @@ std::vector<double> runCompactSymmetricReconstruction(
             }
             imageResident = false;
           }
-          const bool residentMlemIteration =
-              residentBatchInput && residentMlemEligible;
-          if (!residentMlemIteration)
+          const bool residentIteration =
+              residentBatchInput && residentUpdateAllowed;
+          if (!residentIteration)
             numer.assign(globalNvox, 0.0);
 
             std::vector<std::vector<double>> localImages(
@@ -1203,7 +1218,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 static_cast<size_t>(bedCount));
             std::vector<std::vector<double>> localNumers(
                 static_cast<size_t>(bedCount));
-            if (!residentMlemIteration) {
+            if (!residentIteration) {
               for (auto &localNumer : localNumers)
                 localNumer.assign(baseNvox, 0.0);
             }
@@ -1266,7 +1281,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 if (background != nullptr && !background->empty())
                   backgroundPtrs[slot] = background->data() + projectionOffset;
               }
-              if (!residentMlemIteration) {
+              if (!residentIteration) {
                 numerPtrs[static_cast<size_t>(bed)] =
                     localNumers[static_cast<size_t>(bed)].data();
               }
@@ -1278,12 +1293,12 @@ std::vector<double> runCompactSymmetricReconstruction(
                 anyBackground ? backgroundPtrs.data() : nullptr,
                 residentBatchInput ? nullptr : imagePtrs.data(), bedCount,
                 opts.threads,
-                residentMlemIteration ? nullptr : numerPtrs.data(),
+                residentIteration ? nullptr : numerPtrs.data(),
                 compactChunkReverseOrderNext, &compactCudaTiming,
                 compactAttFactorPtrs.empty() ? nullptr
                                              : compactAttFactorPtrs.data(),
-                /*refreshProjectionInputs=*/anyBackground && !csrqMatrices,
-                residentBatchInput, !residentMlemIteration);
+                /*refreshProjectionInputs=*/false, residentBatchInput,
+                !residentIteration);
             if (!ok) {
               throw std::runtime_error(
                   "compact-symmetric numerator requires CUDA sparse backend.");
@@ -1293,18 +1308,74 @@ std::vector<double> runCompactSymmetricReconstruction(
                 std::chrono::duration<double>(ProfileClock::now() - numerStart)
                     .count();
 
-          if (residentMlemIteration) {
+          if (residentIteration) {
             const auto updateStart = ProfileClock::now();
             bool imageAllZero = false;
-            if (!spect::cuda::finishCompactResidentMlemIterationCUDA(
-                    compactMeta, globalNvox, args.Nz, bedZStarts.data(),
-                    bedCount, bedVirtualZFlip, denom.data(),
-                    maskPtr == nullptr ? nullptr : maskPtr->data(),
-                    compactPsfActive ? psfPtr : nullptr,
-                    compactPositiveProjectionInput, !imageResident,
-                    &imageAllZero)) {
-              throw std::runtime_error(
-                  "compact resident MLEM update requires CUDA backend.");
+            if (!useBsremUpdate) {
+              if (!spect::cuda::finishCompactResidentMlemIterationCUDA(
+                      compactMeta, globalNvox, args.Nz, bedZStarts.data(),
+                      bedCount, bedVirtualZFlip, denom.data(),
+                      maskPtr == nullptr ? nullptr : maskPtr->data(),
+                      compactPsfActive ? psfPtr : nullptr,
+                      compactPositiveProjectionInput, !imageResident,
+                      &imageAllZero)) {
+                throw std::runtime_error(
+                    "compact resident MLEM update requires CUDA backend.");
+              }
+            } else {
+              // BSREM-II on the resident image: penalty gradient from the
+              // device image, then the relative update, no host round trip.
+              const int k = it - 1;
+              spect::cuda::CompactBsremUpdateParams updateParams;
+              updateParams.alpha =
+                  args.bsrem_alpha0 /
+                  (1.0 + static_cast<double>(args.bsrem_gamma) * k);
+              updateParams.betaScaled = useRegularization ? args.reg.beta : 0.0;
+              updateParams.denomEps = 1e-12;
+              updateParams.sMin = std::max(1e-12, bsremSensFloorAbs);
+              updateParams.clipRelativeStep = true;
+              updateParams.nonneg = opts.nonneg;
+              updateParams.zeroLowSensitivity = true;
+              updateParams.kappa =
+                  args.bsremUseKappaMap ? kappaMap.data() : nullptr;
+              if (residentRegGradient) {
+                const auto regStart = ProfileClock::now();
+                const double *dImage =
+                    spect::cuda::compactResidentImageDeviceCUDA(globalNvox);
+                double *dGrad =
+                    spect::cuda::compactResidentGradientDeviceCUDA(globalNvox);
+                if (dImage == nullptr || dGrad == nullptr ||
+                    !cuda::computeRegGradientDeviceCUDA(
+                        dImage, args.Nx, args.Ny, args.Nz, args.reg,
+                        maskForReg, dGrad)) {
+                  throw std::runtime_error(
+                      "Regularization gradient requires CUDA volume helpers.");
+                }
+                compactTiming.regGradientSeconds +=
+                    std::chrono::duration<double>(ProfileClock::now() -
+                                                  regStart)
+                        .count();
+                ++compactTiming.regGradientCalls;
+                updateParams.deviceGradient = dGrad;
+                if (args.bsremUseCurvDenom) {
+                  updateParams.useCurvature = true;
+                  updateParams.refreshCurvature =
+                      !deviceCurvatureInitialized || !args.bsremFreezeCurv ||
+                      it <= std::max(1, args.bsremCurvWarmupIters);
+                  updateParams.curvEps = args.bsremCurvEps;
+                  deviceCurvatureInitialized = true;
+                }
+              }
+              if (!spect::cuda::finishCompactResidentBsremIterationCUDA(
+                      compactMeta, globalNvox, args.Nz, bedZStarts.data(),
+                      bedCount, bedVirtualZFlip, denom.data(),
+                      maskPtr == nullptr ? nullptr : maskPtr->data(),
+                      compactPsfActive ? psfPtr : nullptr, updateParams,
+                      compactPositiveProjectionInput, !imageResident,
+                      &imageAllZero)) {
+                throw std::runtime_error(
+                    "compact resident BSREM update requires CUDA backend.");
+              }
             }
             compactTiming.mlemUpdateSeconds +=
                 std::chrono::duration<double>(ProfileClock::now() - updateStart)

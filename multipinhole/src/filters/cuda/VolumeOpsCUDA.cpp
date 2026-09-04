@@ -352,6 +352,12 @@ struct VolumeOpsState {
   std::vector<float> cachedKyF;
   std::vector<float> cachedKzF;
   std::vector<float> cachedZnormF;
+
+  // Host pointers behind the current mask / CT uploads (device-input path).
+  const uint8_t *cachedMaskHost = nullptr;
+  size_t cachedMaskCount = 0;
+  const double *cachedCtHost = nullptr;
+  size_t cachedCtCount = 0;
 };
 
 thread_local VolumeOpsState g_volumeOpsState;
@@ -885,10 +891,14 @@ bool computeRDPGradientCUDA(const std::vector<double> &f, int Nx, int Ny,
   state.secondary.ensure(total);
   const bool hasMask = mask != nullptr;
   const bool hasCt = ctImage != nullptr;
-  if (hasMask)
+  if (hasMask) {
     state.mask.upload(mask->data(), total);
-  if (hasCt)
+    state.cachedMaskHost = nullptr;
+  }
+  if (hasCt) {
     state.ct.upload(ctImage->data(), total);
+    state.cachedCtHost = nullptr;
+  }
 
   launchRdpGradientKernel(state.primary.get(),
                           hasMask ? state.mask.get() : nullptr,
@@ -933,10 +943,14 @@ bool computeTVGradientCUDA(const std::vector<double> &f, int Nx, int Ny,
   state.secondary.ensure(total);
   const bool hasMask = mask != nullptr;
   const bool hasCt = ctImage != nullptr;
-  if (hasMask)
+  if (hasMask) {
     state.mask.upload(mask->data(), total);
-  if (hasCt)
+    state.cachedMaskHost = nullptr;
+  }
+  if (hasCt) {
     state.ct.upload(ctImage->data(), total);
+    state.cachedCtHost = nullptr;
+  }
 
   launchTvGradientKernel(state.primary.get(),
                          hasMask ? state.mask.get() : nullptr,
@@ -968,6 +982,66 @@ bool computeRegGradientCUDA(const std::vector<double> &f, int Nx, int Ny,
   default:
     return false;
   }
+}
+
+bool computeRegGradientDeviceCUDA(const double *dImage, int Nx, int Ny, int Nz,
+                                  const spect::RegConf &reg,
+                                  const std::vector<uint8_t> *mask,
+                                  double *dGrad) {
+  using spect::RegType;
+  if (!shouldUseCudaVolumeOps())
+    return false;
+  if (reg.type != RegType::RDP && reg.type != RegType::TVIsotropic)
+    return false;
+  if (dImage == nullptr || dGrad == nullptr)
+    throw std::runtime_error("CUDA regularizer gradient needs device arrays");
+
+  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
+                       static_cast<size_t>(Nz);
+  const std::vector<double> *ctImage = reg.ct_image;
+  if (mask && mask->size() != total)
+    throw std::runtime_error("CUDA regularizer mask size mismatch");
+  if (ctImage && ctImage->size() != total)
+    throw std::runtime_error("CUDA regularizer registered CT size mismatch");
+  if (ctImage && !(reg.ct_sigma > 0.0))
+    throw std::runtime_error("CUDA regularizer CT sigma must be positive");
+  if (reg.ct_weight_floor < 0.0 || reg.ct_weight_floor > 1.0)
+    throw std::runtime_error("CUDA regularizer CT weight floor must be in [0,1]");
+
+  auto &state = g_volumeOpsState;
+  const bool hasMask = mask != nullptr;
+  const bool hasCt = ctImage != nullptr;
+  // The mask and CT do not change within a reconstruction; upload once per
+  // host pointer.
+  if (hasMask && (state.cachedMaskHost != mask->data() ||
+                  state.cachedMaskCount != total)) {
+    state.mask.upload(mask->data(), total);
+    state.cachedMaskHost = mask->data();
+    state.cachedMaskCount = total;
+  }
+  if (hasCt && (state.cachedCtHost != ctImage->data() ||
+                state.cachedCtCount != total)) {
+    state.ct.upload(ctImage->data(), total);
+    state.cachedCtHost = ctImage->data();
+    state.cachedCtCount = total;
+  }
+
+  if (reg.type == RegType::RDP) {
+    const double eps = std::max(reg.delta, 1e-6);
+    launchRdpGradientKernel(dImage, hasMask ? state.mask.get() : nullptr,
+                            hasCt ? state.ct.get() : nullptr, hasMask, hasCt,
+                            reg.skip_outside_mask, Nx, Ny, Nz, eps, reg.gamma,
+                            reg.ct_sigma, reg.ct_weight_floor, dGrad,
+                            static_cast<unsigned long long>(total));
+  } else {
+    const double epsVal = std::max(reg.tv_eps, 1e-12);
+    launchTvGradientKernel(dImage, hasMask ? state.mask.get() : nullptr,
+                           hasCt ? state.ct.get() : nullptr, hasMask, hasCt,
+                           reg.skip_outside_mask, Nx, Ny, Nz, epsVal,
+                           reg.ct_sigma, reg.ct_weight_floor, dGrad,
+                           static_cast<unsigned long long>(total));
+  }
+  return true;
 }
 
 bool computeTVProxCUDA(const std::vector<double> &v, int Nx, int Ny, int Nz,

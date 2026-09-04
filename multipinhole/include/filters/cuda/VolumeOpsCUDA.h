@@ -81,6 +81,15 @@ bool computeRegGradientCUDA(const std::vector<double> &f, int Nx, int Ny,
                             const std::vector<uint8_t> *mask,
                             std::vector<double> &gradR);
 
+/// Same dispatch on device arrays: dImage (Nx*Ny*Nz doubles, e.g. the
+/// resident reconstruction image) -> dGrad, no host round trip. mask and the
+/// registered CT are host arrays uploaded once per pointer. Returns false when
+/// the reg type has no CUDA kernel.
+bool computeRegGradientDeviceCUDA(const double *dImage, int Nx, int Ny, int Nz,
+                                  const spect::RegConf &reg,
+                                  const std::vector<uint8_t> *mask,
+                                  double *dGrad);
+
 /// TV proximal via Chambolle-Pock primal-dual on GPU.
 /// Solves: u = argmin_u (1/2)||u-v||^2 + lambda*TV(u)
 /// Returns true only when the CUDA kernel ran successfully.
@@ -156,6 +165,13 @@ inline bool computeRegGradientCUDA(const std::vector<double> &, int, int, int,
                                    const spect::RegConf &,
                                    const std::vector<uint8_t> *,
                                    std::vector<double> &) {
+  return false;
+}
+
+inline bool computeRegGradientDeviceCUDA(const double *, int, int, int,
+                                         const spect::RegConf &,
+                                         const std::vector<uint8_t> *,
+                                         double *) {
   return false;
 }
 

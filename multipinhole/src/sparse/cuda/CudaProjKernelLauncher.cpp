@@ -41,6 +41,8 @@ struct ProjDomainKernelCache {
   CUfunction csrqPackFunction = nullptr;
   CUfunction csrqUnitRatioFunction = nullptr;
   CUfunction compactUnitRatioBatchFunction = nullptr;
+  CUfunction compactBsremCurvatureFunction = nullptr;
+  CUfunction compactBsremUpdateFunction = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -89,6 +91,8 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.csrqPackFunction != nullptr &&
       g_projDomainKernelCache.csrqUnitRatioFunction != nullptr &&
       g_projDomainKernelCache.compactUnitRatioBatchFunction != nullptr &&
+      g_projDomainKernelCache.compactBsremCurvatureFunction != nullptr &&
+      g_projDomainKernelCache.compactBsremUpdateFunction != nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -127,6 +131,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.csrqPackFunction = nullptr;
     g_projDomainKernelCache.csrqUnitRatioFunction = nullptr;
     g_projDomainKernelCache.compactUnitRatioBatchFunction = nullptr;
+    g_projDomainKernelCache.compactBsremCurvatureFunction = nullptr;
+    g_projDomainKernelCache.compactBsremUpdateFunction = nullptr;
   }
 
   cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
@@ -196,6 +202,12 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactUnitRatioBatchFunction,
       g_projDomainKernelCache.module, "compact_unit_ratio_chunk_batch"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactBsremCurvatureFunction,
+      g_projDomainKernelCache.module, "compact_bsrem_curvature"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactBsremUpdateFunction,
+      g_projDomainKernelCache.module, "compact_bsrem_update"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -341,6 +353,74 @@ void launchCompactMlemUpdateKernel(
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactMlemUpdateFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactBsremCurvatureKernel(const double *image,
+                                       const double *gradient, double eps,
+                                       double *curvature, size_t count,
+                                       cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (count == 0)
+    return;
+  CUdeviceptr imagePtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(image));
+  CUdeviceptr gradPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(gradient));
+  CUdeviceptr curvPtr = reinterpret_cast<CUdeviceptr>(curvature);
+  unsigned long long total = static_cast<unsigned long long>(count);
+  void *args[] = {&imagePtr, &gradPtr, &eps, &curvPtr, &total};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((count + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactBsremCurvatureFunction, gridSize, 1, 1,
+      blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactBsremUpdateKernel(
+    double *image, const double *numer, const double *denom,
+    const double *gradient, const double *curvature, const double *kappa,
+    const uint8_t *mask, bool hasMask, size_t count,
+    const cuda::CompactBsremUpdateParams &params, uint32_t *flags,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (count == 0)
+    return;
+  CUdeviceptr imagePtr = reinterpret_cast<CUdeviceptr>(image);
+  CUdeviceptr numerPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(numer));
+  CUdeviceptr denomPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(denom));
+  CUdeviceptr gradPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(gradient));
+  CUdeviceptr curvPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(curvature));
+  CUdeviceptr kappaPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(kappa));
+  CUdeviceptr maskPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<uint8_t *>(mask));
+  CUdeviceptr flagsPtr = reinterpret_cast<CUdeviceptr>(flags);
+  int useMask = hasMask ? 1 : 0;
+  unsigned long long total = static_cast<unsigned long long>(count);
+  double alpha = params.alpha;
+  double beta = params.betaScaled;
+  double denomEps = params.denomEps;
+  double sMin = params.sMin;
+  int clip = params.clipRelativeStep ? 1 : 0;
+  double clipMin = params.clipMin;
+  double clipMax = params.clipMax;
+  int nonneg = params.nonneg ? 1 : 0;
+  int zeroLow = params.zeroLowSensitivity ? 1 : 0;
+  void *args[] = {&imagePtr, &numerPtr, &denomPtr, &gradPtr, &curvPtr,
+                  &kappaPtr, &maskPtr,  &useMask,  &total,   &alpha,
+                  &beta,     &denomEps, &sMin,     &clip,    &clipMin,
+                  &clipMax,  &nonneg,   &zeroLow,  &flagsPtr};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned int gridSize =
+      static_cast<unsigned int>((count + blockSize - 1) / blockSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactBsremUpdateFunction, gridSize, 1, 1,
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 

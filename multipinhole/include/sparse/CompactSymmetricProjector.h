@@ -3,6 +3,7 @@
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "filters/PSFConfig.h"
+#include "sparse/SparseOpsCUDA.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -117,6 +118,17 @@ bool finishCompactResidentMlemIterationCUDA(
     const spect::filters::PSFKernels *castorPsf,
     bool requirePositiveNumerator, bool refreshStaticInputs,
     bool *imageAllZero);
+
+// BSREM-II counterpart: same data-term accumulation, then the relative update
+// with params (penalty gradient already on the device, see
+// compactResidentImageDeviceCUDA / compactResidentGradientDeviceCUDA).
+bool finishCompactResidentBsremIterationCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
+    const spect::filters::PSFKernels *castorPsf,
+    const CompactBsremUpdateParams &params, bool requirePositiveNumerator,
+    bool refreshStaticInputs, bool *imageAllZero);
 
 bool runCompactChunkMlemNumerCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,

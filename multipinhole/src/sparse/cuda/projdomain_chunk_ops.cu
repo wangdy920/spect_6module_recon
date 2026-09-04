@@ -354,6 +354,84 @@ extern "C" __global__ void compact_mlem_update(
   if (threadIdx.x == 0 && blockFlags != 0) atomicOr(flags, blockFlags);
 }
 
+// BSREM curvature surrogate D_reg = |grad R| / max(x, eps) (the host
+// bsremUseCurvDenom heuristic), refreshed only on the iterations the host
+// asks for so a frozen curvature stays frozen.
+extern "C" __global__ void compact_bsrem_curvature(
+    const double *image, const double *gradient, double eps, double *curvature,
+    unsigned long long count) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= count) {
+    return;
+  }
+  const double base = image[index] > eps ? image[index] : eps;
+  curvature[index] = fabs(gradient[index]) / base;
+}
+
+// BSREM-II relative update, one voxel per thread, same arithmetic as the host
+// applyBsremUpdate (subset = 1, so the subset and global sensitivities are the
+// same array):
+//   lambda = beta * kappa;  v = (q - S - lambda * r) / (S + lambda * max(c,0) + eps)
+//   u = clip(alpha * v);     x <- max(x, 1e-12) * (1 + u), floored per nonneg
+// gradient / curvature / kappa / mask may be null. Flags share the MLEM
+// layout: 1 non-finite numerator, 2 positive numerator seen, 4 negative
+// numerator seen, 8 non-finite image, 16 nonzero image.
+extern "C" __global__ void compact_bsrem_update(
+    double *image, const double *numer, const double *denom,
+    const double *gradient, const double *curvature, const double *kappa,
+    const unsigned char *mask, int hasMask, unsigned long long count,
+    double alpha, double beta, double denomEps, double sMin, int clip,
+    double clipMin, double clipMax, int nonneg, int zeroLowSensitivity,
+    unsigned int *flags) {
+  __shared__ unsigned int blockFlags;
+  if (threadIdx.x == 0) blockFlags = 0;
+  __syncthreads();
+
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  unsigned int localFlags = 0;
+  if (index < count) {
+    const double n = numer[index];
+    if (!isfinite(n)) localFlags |= 1U;
+    else if (n > 0.0) localFlags |= 2U;
+    else if (n < 0.0) localFlags |= 4U;
+
+    const double imageEps = 1e-12;
+    double value = image[index];
+    if (hasMask != 0 && mask[index] == 0) {
+      value = 0.0;
+    } else {
+      const double s = denom[index];
+      if (!(s > sMin)) {
+        if (zeroLowSensitivity != 0) value = 0.0;
+      } else {
+        const double k = kappa != nullptr ? kappa[index] : 1.0;
+        const double lambda = beta * k;
+        const double r = gradient != nullptr ? gradient[index] : 0.0;
+        double c = curvature != nullptr ? curvature[index] : 0.0;
+        if (c < 0.0) c = 0.0;
+        const double v = (n - s - lambda * r) / (s + lambda * c + denomEps);
+        double u = alpha * v;
+        if (clip != 0) {
+          if (u > clipMax) u = clipMax;
+          if (u < clipMin) u = clipMin;
+        }
+        double f = value < imageEps ? imageEps : value;
+        f = f * (1.0 + u);
+        if (f < imageEps) f = nonneg != 0 ? 0.0 : imageEps;
+        value = f;
+      }
+    }
+    image[index] = value;
+    if (!isfinite(value)) localFlags |= 8U;
+    else if (value != 0.0) localFlags |= 16U;
+  }
+  if (localFlags != 0) atomicOr(&blockFlags, localFlags);
+  __syncthreads();
+  if (threadIdx.x == 0 && blockFlags != 0) atomicOr(flags, blockFlags);
+}
+
 extern "C" __global__ void compact_transform_forward_batch(
     const float *bedImage, float *rotatedBatch, unsigned long long nvox,
     int branchCount, int zBranchCount, int symmetryMode,

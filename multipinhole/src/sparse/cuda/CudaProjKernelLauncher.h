@@ -49,6 +49,21 @@ void launchCompactMlemUpdateKernel(
     const uint8_t *mask, bool hasMask, size_t count, uint32_t *flags,
     double eps, cudaStream_t stream = nullptr);
 
+// curvature = |gradient| / max(image, eps) (BSREM curvature surrogate).
+void launchCompactBsremCurvatureKernel(const double *image,
+                                       const double *gradient, double eps,
+                                       double *curvature, size_t count,
+                                       cudaStream_t stream = nullptr);
+
+// BSREM-II relative update in place; gradient / curvature / kappa / mask may
+// be null. Flags share the MLEM update layout.
+void launchCompactBsremUpdateKernel(
+    double *image, const double *numer, const double *denom,
+    const double *gradient, const double *curvature, const double *kappa,
+    const uint8_t *mask, bool hasMask, size_t count,
+    const cuda::CompactBsremUpdateParams &params, uint32_t *flags,
+    cudaStream_t stream = nullptr);
+
 void launchCompactTransformForwardBatchKernel(
     const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,
     int zBranchCount, const cuda::CompactDeviceTransformParams &commonParams,

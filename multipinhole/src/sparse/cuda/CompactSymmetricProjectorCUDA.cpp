@@ -1298,7 +1298,7 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const double *globalImage, size_t globalImageCount, int globalNz,
     const int *bedZStarts, int bedCount, bool flipLocalZ,
     const spect::filters::PSFKernels *castorPsf, bool uploadGlobalImage) {
-  if (bedCount <= 1 || !compactBranchBatchEnabled())
+  if (bedCount < 1 || !compactBranchBatchEnabled())
     return false;
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
@@ -1326,6 +1326,24 @@ bool finishCompactResidentMlemIterationCUDA(
       castorPsf == nullptr ? nullptr : &castorPsf->kx,
       castorPsf == nullptr ? nullptr : &castorPsf->ky,
       castorPsf == nullptr ? nullptr : &castorPsf->kz,
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+}
+
+bool finishCompactResidentBsremIterationCUDA(
+    const spect::io::CompactSymmetryMetadata &meta,
+    size_t globalImageCount, int globalNz, const int *bedZStarts,
+    int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
+    const spect::filters::PSFKernels *castorPsf,
+    const CompactBsremUpdateParams &params, bool requirePositiveNumerator,
+    bool refreshStaticInputs, bool *imageAllZero) {
+  const CompactDeviceTransformParams commonTransform =
+      makeCompactDeviceTransformParams(meta, 0, false);
+  return spect::cuda::finishCompactResidentBsremIterationCUDA(
+      globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+      commonTransform, denom, mask,
+      castorPsf == nullptr ? nullptr : &castorPsf->kx,
+      castorPsf == nullptr ? nullptr : &castorPsf->ky,
+      castorPsf == nullptr ? nullptr : &castorPsf->kz, params,
       requirePositiveNumerator, refreshStaticInputs, imageAllZero);
 }
 
@@ -1543,10 +1561,6 @@ bool accumulatePoissonBackprojectedRatioCUDA(
   // backward accumulation always stay on the device; CTAC only selects the
   // attenuation-aware per-branch kernels instead of the branch batch.
   const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
-  if (bedCount == 1 && (branchBatchInputPrepared || !downloadBackwardOutputs)) {
-    throw std::runtime_error(
-        "compact resident branch-batch execution requires multiple beds.");
-  }
   applyCompactCsrLocalityHint(chunks, meta);
 
   const auto totalStart = Clock::now();

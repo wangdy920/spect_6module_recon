@@ -2582,24 +2582,24 @@ public:
     }
   }
 
-  void finishCompactResidentMlemIteration(
+  // Shared tail of a resident iteration: per bed, convert the backward
+  // accumulator, apply the CASToR PSF adjoint, and add the bed volume into the
+  // global numerator q on the device. Refreshes the static denominator / mask
+  // uploads when asked. Caller holds mutex_.
+  void accumulateCompactResidentDataTermLocked(
       size_t globalImageCount, int globalNz, const int *bedZStarts,
       int bedCount, bool flipLocalZ,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const double *denom, const uint8_t *mask,
       const std::vector<double> *castorKx,
       const std::vector<double> *castorKy,
-      const std::vector<double> *castorKz,
-      bool requirePositiveNumerator, bool refreshStaticInputs,
-      bool *imageAllZero) {
-    ensureCudaRuntimeAvailable();
-    std::lock_guard<std::mutex> lock(mutex_);
+      const std::vector<double> *castorKz, bool refreshStaticInputs) {
     if (globalImageCount == 0 || globalNz <= 0 || bedZStarts == nullptr ||
         bedCount <= 0 || bedCount > spect::core::kMaxBeds || denom == nullptr ||
         compactResidentImageCount_ != globalImageCount ||
         dCompactGlobalImage_.get() == nullptr) {
       throw std::runtime_error(
-          "compact resident MLEM update parameters are invalid.");
+          "compact resident data-term parameters are invalid.");
     }
     const bool useCastor =
         castorKx != nullptr || castorKy != nullptr || castorKz != nullptr;
@@ -2615,7 +2615,7 @@ public:
         plane * static_cast<size_t>(commonTransformParams.nz);
     if (globalImageCount != plane * static_cast<size_t>(globalNz)) {
       throw std::runtime_error(
-          "compact resident MLEM global dimensions do not match.");
+          "compact resident global dimensions do not match.");
     }
     for (int bed = 0; bed < bedCount; ++bed) {
       const size_t slot = compactBackwardAccumulatorSlot(bed);
@@ -2668,16 +2668,13 @@ public:
           commonTransformParams.nx, commonTransformParams.ny,
           commonTransformParams.nz, globalNz, bedZStarts[bed], flipLocalZ);
     }
+  }
 
-    dCompactIterationFlags_.allocate(1);
-    CUDA_CHECK(cudaMemset(dCompactIterationFlags_.get(), 0,
-                          sizeof(uint32_t)));
-    launchCompactMlemUpdateKernel(
-        dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
-        dCompactDenom_.get(), mask == nullptr ? nullptr : dCompactMask_.get(),
-        mask != nullptr, globalImageCount, dCompactIterationFlags_.get(),
-        1e-12);
-
+  // Reads the iteration flags written by an update kernel and turns them
+  // into the shared error / all-zero contract.
+  void checkCompactResidentUpdateFlagsLocked(bool requirePositiveNumerator,
+                                             bool *imageAllZero,
+                                             const char *what) {
     uint32_t flags = 0;
     dCompactIterationFlags_.copyToHost(&flags, 1);
     if ((flags & (1U | 4U)) != 0 ||
@@ -2686,11 +2683,125 @@ public:
           "compact resident numerator is non-finite, zero, or non-positive.");
     }
     if ((flags & 8U) != 0) {
-      throw std::runtime_error(
-          "compact resident MLEM update produced a non-finite image.");
+      throw std::runtime_error(std::string("compact resident ") + what +
+                               " update produced a non-finite image.");
     }
     if (imageAllZero != nullptr)
       *imageAllZero = (flags & 16U) == 0;
+  }
+
+  void finishCompactResidentMlemIteration(
+      size_t globalImageCount, int globalNz, const int *bedZStarts,
+      int bedCount, bool flipLocalZ,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const double *denom, const uint8_t *mask,
+      const std::vector<double> *castorKx,
+      const std::vector<double> *castorKy,
+      const std::vector<double> *castorKz,
+      bool requirePositiveNumerator, bool refreshStaticInputs,
+      bool *imageAllZero) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    accumulateCompactResidentDataTermLocked(
+        globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+        commonTransformParams, denom, mask, castorKx, castorKy, castorKz,
+        refreshStaticInputs);
+    dCompactIterationFlags_.allocate(1);
+    CUDA_CHECK(cudaMemset(dCompactIterationFlags_.get(), 0,
+                          sizeof(uint32_t)));
+    launchCompactMlemUpdateKernel(
+        dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
+        dCompactDenom_.get(), mask == nullptr ? nullptr : dCompactMask_.get(),
+        mask != nullptr, globalImageCount, dCompactIterationFlags_.get(),
+        1e-12);
+    checkCompactResidentUpdateFlagsLocked(requirePositiveNumerator,
+                                          imageAllZero, "MLEM");
+  }
+
+  // Device pointer of the resident global image (valid until the next
+  // releaseCompactExecution); the volume ops read it to form the regularizer
+  // gradient without a host round trip.
+  const double *compactResidentImageDevice(size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count == 0 || count != compactResidentImageCount_ ||
+        dCompactGlobalImage_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact resident image is not available on the device.");
+    }
+    return dCompactGlobalImage_.get();
+  }
+
+  // Device scratch for the regularizer gradient of the resident image.
+  double *compactResidentGradientDevice(size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count == 0) {
+      throw std::runtime_error("compact resident gradient scratch is empty.");
+    }
+    dCompactGradient_.allocate(count);
+    return dCompactGradient_.get();
+  }
+
+  void finishCompactResidentBsremIteration(
+      size_t globalImageCount, int globalNz, const int *bedZStarts,
+      int bedCount, bool flipLocalZ,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const double *denom, const uint8_t *mask,
+      const std::vector<double> *castorKx,
+      const std::vector<double> *castorKy,
+      const std::vector<double> *castorKz,
+      const cuda::CompactBsremUpdateParams &params,
+      bool requirePositiveNumerator, bool refreshStaticInputs,
+      bool *imageAllZero) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    accumulateCompactResidentDataTermLocked(
+        globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
+        commonTransformParams, denom, mask, castorKx, castorKy, castorKz,
+        refreshStaticInputs);
+
+    const double *dKappa = nullptr;
+    if (params.kappa != nullptr) {
+      if (compactKappaHostKey_ != params.kappa ||
+          compactKappaCount_ != globalImageCount ||
+          dCompactKappa_.get() == nullptr) {
+        dCompactKappa_.copyFromHost(params.kappa, globalImageCount);
+        compactKappaHostKey_ = params.kappa;
+        compactKappaCount_ = globalImageCount;
+      }
+      dKappa = dCompactKappa_.get();
+    }
+    const double *dCurvature = nullptr;
+    if (params.useCurvature) {
+      if (params.deviceGradient == nullptr) {
+        throw std::runtime_error(
+            "compact resident BSREM curvature needs the regularizer gradient.");
+      }
+      const bool needsRefresh =
+          params.refreshCurvature ||
+          dCompactCurvature_.get() == nullptr ||
+          compactCurvatureCount_ != globalImageCount;
+      dCompactCurvature_.allocate(globalImageCount);
+      if (needsRefresh) {
+        launchCompactBsremCurvatureKernel(
+            dCompactGlobalImage_.get(), params.deviceGradient, params.curvEps,
+            dCompactCurvature_.get(), globalImageCount);
+        compactCurvatureCount_ = globalImageCount;
+      }
+      dCurvature = dCompactCurvature_.get();
+    }
+
+    dCompactIterationFlags_.allocate(1);
+    CUDA_CHECK(cudaMemset(dCompactIterationFlags_.get(), 0,
+                          sizeof(uint32_t)));
+    launchCompactBsremUpdateKernel(
+        dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
+        dCompactDenom_.get(), params.deviceGradient, dCurvature, dKappa,
+        mask == nullptr ? nullptr : dCompactMask_.get(), mask != nullptr,
+        globalImageCount, params, dCompactIterationFlags_.get());
+    checkCompactResidentUpdateFlagsLocked(requirePositiveNumerator,
+                                          imageAllZero, "BSREM");
   }
 
   void downloadCompactResidentImage(double *image, size_t count) {
@@ -2725,6 +2836,9 @@ public:
     dBatchSymIds_.reset();
     dBatchZMirrors_.reset();
     dCompactGlobalImage_.reset();
+    dCompactGradient_.reset();
+    dCompactCurvature_.reset();
+    dCompactKappa_.reset();
     dCompactBedPrimary_.reset();
     dCompactBedSecondary_.reset();
     dCompactGlobalNumer_.reset();
@@ -2748,6 +2862,9 @@ public:
 
     compactResidentImageCount_ = 0;
     compactResidentStaticCount_ = 0;
+    compactCurvatureCount_ = 0;
+    compactKappaHostKey_ = nullptr;
+    compactKappaCount_ = 0;
     compactResidentHasMask_ = false;
     compactBatchInputCount_ = 0;
     compactSortedHint_ = false;
@@ -3612,6 +3729,14 @@ private:
   DeviceArray<double> dCompactRowWeights_;
   const double *compactRowWeightsHostKey_ = nullptr;
   size_t compactRowWeightsCount_ = 0;
+  // Resident BSREM-II state: regularizer gradient scratch (filled by the
+  // volume ops), curvature surrogate, kappa map.
+  DeviceArray<double> dCompactGradient_;
+  DeviceArray<double> dCompactCurvature_;
+  size_t compactCurvatureCount_ = 0;
+  DeviceArray<double> dCompactKappa_;
+  const double *compactKappaHostKey_ = nullptr;
+  size_t compactKappaCount_ = 0;
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
   // CSRQ scratch shared by all resident matrices: dCsrqX_ is the [voxel][8]

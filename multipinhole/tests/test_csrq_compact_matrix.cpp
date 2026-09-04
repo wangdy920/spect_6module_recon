@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
 #include "cuda/CudaConfig.h"
+#include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/CompactChunkCSR.h"
+#include "recon/BedOffsets.h"
+#include "recon/BsremUpdate.h"
+#include "regularizer/RegConfig.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/ProjDomainChunked.h"
 #include "sparse/SparseOpsCUDA.h"
@@ -629,6 +633,169 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   EXPECT_FALSE(spect::cuda::csrqResidentCUDA(1));
   std::filesystem::remove_all(root);
+}
+
+// One resident BSREM-II + RDP iteration on the device (two beds, CSRB
+// production format) against the host oracle: host numerator / sensitivity
+// through the same projector, RDP gradient through the host volume-ops entry,
+// applyBsremUpdate with the loop's curvature surrogate. The resident path
+// rounds the per-bed numerator through float before the global accumulate, so
+// the tolerance is fp32-level; the BSREM step must also visibly differ from
+// the plain MLEM step to prove the penalty and relaxation reached the kernel.
+TEST_F(CsrqCompactMatrixTest, ResidentBsremIterationMatchesHostOracle) {
+  spect::io::CompactSymmetryMetadata meta;
+  meta.Nx = 16;
+  meta.Ny = 16;
+  meta.Nz = 2;
+  meta.totalVoxels = 16 * 16 * 2;
+  meta.fullNumAngles = 12;
+  meta.compactNumAngles = 3;
+  meta.detNx = 4;
+  meta.detNz = 4;
+  meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8;
+  meta.totalRows = 24;
+  meta.symCode = 90;
+  meta.symmetryOrder = 4;
+
+  std::mt19937 rng(11u);
+  std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels;
+  src.rowPtr.push_back(0u);
+  for (int row = 0; row < src.rows; ++row) {
+    uint32_t pos = static_cast<uint32_t>(rng() % 5);
+    while (pos + 3u < static_cast<uint32_t>(src.cols)) {
+      const uint32_t len = 1u + rng() % 3u;
+      for (uint32_t k = 0; k < len; ++k) {
+        src.colIdx.push_back(pos + k);
+        src.values.push_back(valueDist(rng));
+      }
+      pos += len + 2u + rng() % 4u;
+    }
+    src.rowPtr.push_back(static_cast<uint32_t>(src.colIdx.size()));
+  }
+  const auto pair = makeMatrixPair("spect_bsrem_resident_test", meta, src);
+  const auto &chunks = pair.csrb;
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  constexpr int kBeds = 2;
+  const int globalNz = kBeds * meta.Nz;
+  const size_t globalNvox = nvox * kBeds;
+  const int bedZStarts[kBeds] = {0, meta.Nz};
+
+  std::vector<double> image(globalNvox);
+  for (size_t i = 0; i < globalNvox; ++i)
+    image[i] = 0.6 + 0.4 * std::sin(0.13 * static_cast<double>(i)) +
+               0.05 * static_cast<double>(i % 7);
+  std::vector<double> proj0(fullRows), proj1(fullRows);
+  for (size_t i = 0; i < fullRows; ++i) {
+    proj0[i] = 1.0 + 0.02 * static_cast<double>(i % 41);
+    proj1[i] = 1.5 + 0.03 * static_cast<double>(i % 29);
+  }
+  const double *projPtrs[kBeds] = {proj0.data(), proj1.data()};
+
+  // Host oracle.
+  std::vector<double> localDenom(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+      chunks, meta, 1, localDenom.data(), nullptr, nullptr));
+  std::vector<double> denom(globalNvox, 0.0);
+  for (int bed = 0; bed < kBeds; ++bed)
+    spect::app::accumulateBedVolumeToGlobal(denom, localDenom, meta.Nx,
+                                            meta.Ny, meta.Nz, bedZStarts[bed],
+                                            false);
+  std::vector<std::vector<double>> localImages(kBeds), localNumers(kBeds);
+  const double *imagePtrs[kBeds];
+  double *numerPtrs[kBeds];
+  for (int bed = 0; bed < kBeds; ++bed) {
+    localImages[bed] = spect::app::extractBedVolumeFromGlobal(
+        image, meta.Nx, meta.Ny, meta.Nz, bedZStarts[bed], false);
+    localNumers[bed].assign(nvox, 0.0);
+    imagePtrs[bed] = localImages[bed].data();
+    numerPtrs[bed] = localNumers[bed].data();
+  }
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, nullptr, imagePtrs, kBeds, 1, numerPtrs));
+  std::vector<double> numer(globalNvox, 0.0);
+  for (int bed = 0; bed < kBeds; ++bed)
+    spect::app::accumulateBedVolumeToGlobal(numer, localNumers[bed], meta.Nx,
+                                            meta.Ny, meta.Nz, bedZStarts[bed],
+                                            false);
+
+  spect::RegConf reg;
+  reg.type = spect::RegType::RDP;
+  reg.beta = 0.05;
+  reg.delta = 0.01;
+  reg.gamma = 2.0;
+  reg.skip_outside_mask = false;
+  std::vector<double> grad;
+  ASSERT_TRUE(spect::cuda::computeRegGradientCUDA(image, meta.Nx, meta.Ny,
+                                                  globalNz, reg, nullptr,
+                                                  grad));
+  const double curvEps = 1e-3;
+  std::vector<double> curvature(globalNvox);
+  for (size_t i = 0; i < globalNvox; ++i)
+    curvature[i] = std::abs(grad[i]) / std::max(image[i], curvEps);
+
+  spect::BsremUpdateParams hostParams;
+  hostParams.gradient = &grad;
+  hostParams.curvature = &curvature;
+  hostParams.betaScaled = reg.beta;
+  hostParams.alpha = 0.7;
+  hostParams.denomEps = 1e-12;
+  hostParams.sMin = 1e-12;
+  hostParams.clipRelativeStep = true;
+  hostParams.nonneg = true;
+  hostParams.threads = 1;
+  std::vector<double> hostBsrem = image;
+  spect::applyBsremUpdate(hostBsrem, numer, denom, denom, hostParams);
+  std::vector<double> hostMlem = image;
+  spect::applyMlemUpdate(hostMlem, numer, denom, nullptr, true, 1);
+  ASSERT_GT(relL2(hostBsrem, hostMlem), 1e-3)
+      << "test setup: BSREM step must differ from MLEM";
+
+  // Device: resident batch input, device numerator, device gradient, device
+  // BSREM-II update.
+  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+      meta, image.data(), image.size(), globalNz, bedZStarts, kBeds, false,
+      nullptr, true));
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+      chunks, meta, projPtrs, nullptr, nullptr, kBeds, 1, nullptr, false,
+      nullptr, nullptr, true, true, false));
+  const double *dImage = spect::cuda::compactResidentImageDeviceCUDA(globalNvox);
+  double *dGrad = spect::cuda::compactResidentGradientDeviceCUDA(globalNvox);
+  ASSERT_NE(dImage, nullptr);
+  ASSERT_NE(dGrad, nullptr);
+  ASSERT_TRUE(spect::cuda::computeRegGradientDeviceCUDA(
+      dImage, meta.Nx, meta.Ny, globalNz, reg, nullptr, dGrad));
+  spect::cuda::CompactBsremUpdateParams deviceParams;
+  deviceParams.alpha = hostParams.alpha;
+  deviceParams.betaScaled = reg.beta;
+  deviceParams.denomEps = 1e-12;
+  deviceParams.sMin = 1e-12;
+  deviceParams.clipRelativeStep = true;
+  deviceParams.nonneg = true;
+  deviceParams.deviceGradient = dGrad;
+  deviceParams.useCurvature = true;
+  deviceParams.refreshCurvature = true;
+  deviceParams.curvEps = curvEps;
+  bool allZero = true;
+  ASSERT_TRUE(spect::cuda::finishCompactResidentBsremIterationCUDA(
+      meta, globalNvox, globalNz, bedZStarts, kBeds, false, denom.data(),
+      nullptr, nullptr, deviceParams, true, true, &allZero));
+  EXPECT_FALSE(allZero);
+  std::vector<double> deviceBsrem(globalNvox, 0.0);
+  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(
+      deviceBsrem.data(), globalNvox));
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+
+  EXPECT_LE(relL2(deviceBsrem, hostBsrem), 1e-6)
+      << "device BSREM-II vs host oracle";
+  EXPECT_GT(relL2(deviceBsrem, hostMlem), 1e-3)
+      << "device BSREM-II must differ from MLEM";
+  std::filesystem::remove_all(pair.csrqDir.parent_path());
 }
 
 TEST(CsrqCompactMatrixFormat, RejectsMixedAndTruncatedDirectories) {
