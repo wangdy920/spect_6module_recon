@@ -1165,10 +1165,7 @@ bool runCsrqMlemNumerMultiBed(
 
 } // namespace
 
-
-
-
-bool computeCompactChunkSensitivityCUDA(
+bool computePoissonSensitivityCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing, const uint16_t *attFactors) {
@@ -1323,11 +1320,11 @@ bool computeCompactChunkSensitivityCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing, const uint16_t *attFactors) {
-  return computeCompactChunkSensitivityCUDA(singleChannel(chunks), meta,
-                                            threads, denom, timing, attFactors);
+  return computePoissonSensitivityCUDA(singleChannel(chunks), meta, threads,
+                                       denom, timing, attFactors);
 }
 
-bool prepareCompactChunkExecutionCUDA(
+bool prepareChannelExecutionCUDA(
     const std::vector<CompactMatrixChannel> &channels) {
   if (channels.empty()) {
     throw std::runtime_error("compact execution prepare needs a matrix.");
@@ -1404,7 +1401,7 @@ bool runCompactChunkMlemNumerCUDA(
     const double *const images[] = {smoothedImage};
     double *const numers[] = {numer};
     const uint16_t *const attFactorList[] = {attFactors};
-    return runCompactChunkMlemNumerMultiBedCUDA(
+    return accumulatePoissonBackprojectedRatioCUDA(
         singleChannel(chunks), meta, projections,
         fullBackground == nullptr ? nullptr : backgrounds, images, 1, threads,
         numers, reverseChunkOrder, timing,
@@ -1753,14 +1750,14 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors, bool refreshProjectionInputs,
     bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
-  return runCompactChunkMlemNumerMultiBedCUDA(
+  return accumulatePoissonBackprojectedRatioCUDA(
       singleChannel(chunks), meta, fullProjections, fullBackgrounds,
       smoothedImages, bedCount, threads, numers, reverseChunkOrder, timing,
       attFactors, refreshProjectionInputs, branchBatchInputPrepared,
       downloadBackwardOutputs);
 }
 
-bool runCompactChunkMlemNumerMultiBedCUDA(
+bool accumulatePoissonBackprojectedRatioCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta,
     const double *const *fullProjections,

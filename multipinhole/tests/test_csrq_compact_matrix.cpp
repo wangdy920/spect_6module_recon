@@ -516,7 +516,7 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   channels[1].weight = w2;
 
   std::vector<double> denomJoint(nvox, 0.0);
-  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+  ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
       channels, meta, 1, denomJoint.data(), nullptr, nullptr));
   EXPECT_TRUE(spect::cuda::csrqResidentCUDA(0));
   EXPECT_TRUE(spect::cuda::csrqResidentCUDA(1));
@@ -531,7 +531,7 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
     const double *projections[2] = {projA.data(), projB.data()};
     const double *images[1] = {image.data()};
     double *numers[1] = {numerJoint.data()};
-    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
         channels, meta, projections, nullptr, images, 1, 1, numers));
     std::vector<double> expected(nvox);
     for (size_t i = 0; i < nvox; ++i)
@@ -545,7 +545,7 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
     const double *backgrounds[2] = {nullptr, backgroundB.data()};
     const double *images[1] = {image.data()};
     double *numers[1] = {numerJoint.data()};
-    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
         channels, meta, projections, backgrounds, images, 1, 1, numers));
     std::vector<double> expected(nvox);
     for (size_t i = 0; i < nvox; ++i)
@@ -569,7 +569,7 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
     const double *projections[4] = {projA.data(), projA.data(), projB.data(),
                                     projB.data()};
     double *numers[2] = {numersJoint[0].data(), numersJoint[1].data()};
-    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
         channels, meta, projections, nullptr, nullptr, 2, 1, numers, false,
         nullptr, nullptr, true, true, true));
     std::vector<double> expected0(nvox);

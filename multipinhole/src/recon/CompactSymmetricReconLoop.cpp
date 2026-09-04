@@ -796,7 +796,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (loadedCompactDenomCache) {
             logInfo("compact denom cache hit: " +
                     compactDenomCachePath.string());
-            spect::cuda::prepareCompactChunkExecutionCUDA(channels);
+            spect::cuda::prepareChannelExecutionCUDA(channels);
           } else {
             if (isCompactDenomManifestMismatch(cacheStatus)) {
               throw std::runtime_error(
@@ -934,7 +934,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           // Assign every window its device matrix slot (aliasing channels
           // that share a directory) before any per-channel call below.
-          spect::cuda::prepareCompactChunkExecutionCUDA(channels);
+          spect::cuda::prepareChannelExecutionCUDA(channels);
           auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
             std::fill(localDenom.begin(), localDenom.end(), 0.0);
             if (useWeightedSensitivity) {
@@ -970,7 +970,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               }
               return;
             }
-            const bool ok = spect::cuda::computeCompactChunkSensitivityCUDA(
+            const bool ok = spect::cuda::computePoissonSensitivityCUDA(
                 channels, compactMeta, opts.threads, localDenom.data(),
                 &compactCudaTiming, attenuation);
             if (!ok) {
@@ -1272,7 +1272,7 @@ std::vector<double> runCompactSymmetricReconstruction(
             }
 
             const auto numerStart = ProfileClock::now();
-            const bool ok = spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+            const bool ok = spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
                 channels, compactMeta, projectionPtrs.data(),
                 anyBackground ? backgroundPtrs.data() : nullptr,
                 residentBatchInput ? nullptr : imagePtrs.data(), bedCount,

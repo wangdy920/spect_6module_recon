@@ -22,12 +22,14 @@ struct CompactSymmetricStageTiming {
   size_t numeratorCalls = 0;
 };
 
-// One energy window of a joint multi-window (MB-JR) reconstruction: its own
-// system matrix directory and the scalar w that turns the matrix into the
-// window mean (w * A x + background), i.e. emission intensity x window
-// efficiency when the matrix is per emitted photon. A single-window run is
-// the one-channel case with weight 1. Only CSRQ directories may be combined;
-// CSRB stays single-channel.
+// One measurement channel of the Poisson model: an energy window with its own
+// system matrix directory and the scalar w_k that turns the matrix into the
+// window mean (w_k * A_k x + b_k), i.e. emission intensity x window efficiency
+// when the matrix is per emitted photon. A single-window run is the
+// one-channel case with weight 1. Channels are measurement groupings, never
+// subsets: every channel and chunk accumulates into the same statistics and
+// the image is updated once per iteration. Only CSRQ directories may be
+// combined; CSRB stays single-channel.
 struct CompactMatrixChannel {
   const spect::io::CompactChunkCSRDirectory *chunks = nullptr;
   double weight = 1.0;
@@ -35,17 +37,25 @@ struct CompactMatrixChannel {
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
 
-// Joint sensitivity sum_k w_k A_k^T 1 over all channels.
-bool computeCompactChunkSensitivityCUDA(
+// --- Poisson data-term contract ---------------------------------------------
+// Every optimizer (MLEM, BSREM-II) consumes the same two sufficient statistics
+// of the Poisson log-likelihood over all channels k:
+//   q = sum_k H_k^T ( p_k / (H_k x + b_k) )   backprojected ratio (per bed)
+//   S = sum_k H_k^T 1                          sensitivity (once, cached)
+// with H_k = w_k A_k. The data gradient is q - S. Nothing below knows which
+// optimizer or penalty will use the result.
+
+// S: joint sensitivity over all channels.
+bool computePoissonSensitivityCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing = nullptr,
     const uint16_t *attFactors = nullptr);
 
-// Joint numerator sum_k w_k A_k^T(p_k / (w_k A_k x + b_k)) per bed.
+// q: joint backprojected ratio per bed.
 // fullProjections / fullBackgrounds are indexed [channel * bedCount + bed]
 // (fullBackgrounds may be nullptr, or hold nullptr entries).
-bool runCompactChunkMlemNumerMultiBedCUDA(
+bool accumulatePoissonBackprojectedRatioCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta,
     const double *const *fullProjections,
@@ -58,8 +68,9 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     bool branchBatchInputPrepared = false,
     bool downloadBackwardOutputs = true);
 
-// Uploads every channel's CSRQ matrix (or warms the CSRB resident cache).
-bool prepareCompactChunkExecutionCUDA(
+// Assigns device matrix slots and uploads every channel's CSRQ matrix (or
+// warms the CSRB resident cache). Must run before the per-channel calls.
+bool prepareChannelExecutionCUDA(
     const std::vector<CompactMatrixChannel> &channels);
 
 // CSRQ residency policy. By default a matrix stays resident when it fits next
@@ -71,6 +82,10 @@ void setCsrqForceStreamingCUDA(bool force);
 bool csrqForceStreamingCUDA();
 
 
+// --- Single-directory forms -------------------------------------------------
+// Thin wrappers over the one-channel case, kept so the CSRB production callers
+// and tests are untouched.
+//
 // attFactors (optional, CTAC): full-angle attenuation table in the unrotated
 // image frame, laid out as att[fullAngle * totalVoxels + voxel] (uint16,
 // scale 1/65535), fullNumAngles * totalVoxels entries. nullptr disables CTAC.
