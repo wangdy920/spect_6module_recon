@@ -289,6 +289,12 @@ bool csrqWarmupEndCUDA(int matrixIndex);
 /// True while matrix matrixIndex is loaded (cleared by
 /// releaseCompactExecutionCUDA).
 bool csrqResidentCUDA(int matrixIndex);
+/// Packed [nvox][8] CSRQ backward: all eight branches scattered in one pass
+/// with float4 atomics (native on sm_90+, scalar fallback on sm_86/89 where it
+/// is ~5x slower than the branch-major default). Default from
+/// SPECT_CSRQ_BACKWARD_PACKED=1; exposed for the sm_120 trial and tests.
+bool setCsrqPackedBackwardCUDA(bool enabled);
+bool csrqPackedBackwardCUDA();
 /// Forward + ratio + backward of one window for beds [0, bedCount) in one
 /// chunk-outer pass. Bed b's mean is weight * H_b x_b + background_b
 /// (fullBackgrounds may be null or hold null entries); the backward adds

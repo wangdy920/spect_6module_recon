@@ -399,6 +399,21 @@ bool csrqResidentCUDA(int matrixIndex) {
   return cudaState().csrqResident(matrixIndex);
 }
 
+bool setCsrqPackedBackwardCUDA(bool enabled) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().setCsrqPackedBackward(enabled);
+  return true;
+}
+
+bool csrqPackedBackwardCUDA() {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  return cudaState().csrqPackedBackward();
+}
+
 bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       const CompactDeviceRatioParams &commonRatioParams,
                       const CompactDeviceTransformParams &commonTransformParams,
@@ -659,6 +674,10 @@ bool csrqWarmupChunkCUDA(int, size_t, const io::CompactRunU16View &) {
 bool csrqWarmupEndCUDA(int) { return false; }
 
 bool csrqResidentCUDA(int) { return false; }
+
+bool setCsrqPackedBackwardCUDA(bool) { return false; }
+
+bool csrqPackedBackwardCUDA() { return false; }
 
 bool csrqRunNumerCUDA(int, int, int, const CompactDeviceRatioParams &,
                       const CompactDeviceTransformParams &, const int *,

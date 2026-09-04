@@ -737,6 +737,17 @@ compact_atten_mapped_voxel(unsigned long long index, int symmetryMode,
          static_cast<unsigned long long>(x);
 }
 
+// Decoded CTAC factor with the per-window energy exponent: att^power, where
+// att is the u16 table value / 65535 (power 1 = the table itself; power =
+// mu_w(E_window)/mu_w(E_map) rescales the line integral to another photon
+// energy under the water-scaled mu model, since att = exp(-integral mu)).
+__device__ __forceinline__ float compact_atten_decode(unsigned short q,
+                                                      float power) {
+  const float att =
+      static_cast<float>(q) * (1.0f / static_cast<float>(kAttenUint16Scale));
+  return power == 1.0f ? att : __powf(att, power);
+}
+
 // ROW-packed 2-RHS forward CSR. Not a revival of compact_csr_spmm_col_tile4:
 // that kernel gathered four COL-major B columns (stride = n_cols) and lost to
 // CSR_ALG2 (35.433 s vs 27.076 s). Here each 2-RHS tile is packed to float2 so
@@ -1219,6 +1230,111 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
   }
 }
 
+// Vector atomic add of four floats. sm_90+ has a native float4 global atomic
+// (red.global.add.v4.f32): one instruction and one 16-byte sector per four
+// branches. Older parts fall back to four scalar atomics on the same
+// addresses, so the packed layout below computes the same sums everywhere
+// and only the instruction (and the speed) differ.
+__device__ __forceinline__ void csrq_atomic_add_float4(float4 *dst, float4 v) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  atomicAdd(dst, v);
+#else
+  float *f = reinterpret_cast<float *>(dst);
+  atomicAdd(f, v.x);
+  atomicAdd(f + 1, v.y);
+  atomicAdd(f + 2, v.z);
+  atomicAdd(f + 3, v.w);
+#endif
+}
+
+// Packed-output backward: yPacked[col][8] += v_t * ratio[row][8] for all
+// eight branches in one pass over the matrix (two float4 atomics per nnz)
+// instead of four branch-major passes of two scalar atomics each. Opt-in
+// (SPECT_CSRQ_BACKWARD_PACKED=1): on sm_86/89 the scalar fallback is the
+// [voxel][8] layout that measured 715 ms per pass (32 scattered sectors per
+// warp atomic); it exists for the sm_120 vector-atomic trial.
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed(
+    const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
+    const float *rowMax, const unsigned int *runs,
+    const unsigned short *valuesQ, const float4 *ratioPacked, float4 *yPacked,
+    int rows) {
+  __shared__ CsrqTile s;
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const float4 r0 = ratioPacked[2 * row];
+  const float4 r1 = ratioPacked[2 * row + 1];
+  if (r0.x == 0.0f && r0.y == 0.0f && r0.z == 0.0f && r0.w == 0.0f &&
+      r1.x == 0.0f && r1.y == 0.0f && r1.z == 0.0f && r1.w == 0.0f) {
+    return;
+  }
+  const unsigned int runBegin = rowRunPtr[row];
+  const unsigned int runEnd = rowRunPtr[row + 1];
+  unsigned int valBase = rowNnzPtr[row];
+  const float m = rowMax[row];
+  for (unsigned int tileBase = runBegin; tileBase < runEnd;
+       tileBase += CSRQ_RUN_TILE) {
+    const unsigned int tileRuns = min(static_cast<unsigned int>(CSRQ_RUN_TILE),
+                                      runEnd - tileBase);
+    const unsigned int tileNnz = csrq_load_tile(runs, tileBase, tileRuns, s);
+    for (unsigned int p = threadIdx.x; p < tileNnz; p += CSRQ_BLOCK) {
+      const unsigned int j = s.runId[p];
+      const unsigned int col = s.start[j] + (p - s.off[j]);
+      const float t = static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
+      const float v = m * (t * t);
+      csrq_atomic_add_float4(yPacked + 2u * col,
+                             make_float4(v * r0.x, v * r0.y, v * r0.z, v * r0.w));
+      csrq_atomic_add_float4(yPacked + 2u * col + 1u,
+                             make_float4(v * r1.x, v * r1.y, v * r1.z, v * r1.w));
+    }
+    valBase += tileNnz;
+    __syncthreads();
+  }
+}
+
+// Consumer of the packed backward output: accum[M_k(v)] += y[v][k] (times the
+// branch's CTAC factor^power when attSlices is given), one thread per voxel
+// reading its two float4 and issuing eight double atomics.
+extern "C" __global__ void compact_transform_backward_add_packed8(
+    const float4 *yPacked, double *accum, unsigned long long nvox,
+    int symmetryMode, int nx, int ny, int nz, const int *symIds,
+    const int *zMirrors, const unsigned short *attSlices, const int *sliceIndex,
+    float power) {
+  const unsigned long long v =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (v >= nvox || nx <= 0 || ny <= 0 || nz <= 0) {
+    return;
+  }
+  const float4 a = yPacked[2 * v];
+  const float4 b = yPacked[2 * v + 1];
+  const float vals[CSRQ_K] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+#pragma unroll
+  for (int k = 0; k < CSRQ_K; ++k) {
+    float value = vals[k];
+    if (value == 0.0f) {
+      continue;
+    }
+    int valid = 0;
+    const unsigned long long mapped = compact_atten_mapped_voxel(
+        v, symmetryMode, symIds[k], zMirrors[k], nx, ny, nz, plane, &valid);
+    if (valid == 0) {
+      continue;
+    }
+    if (attSlices != nullptr) {
+      const int slice = sliceIndex[k];
+      if (slice >= 0) {
+        value *= compact_atten_decode(
+            attSlices[static_cast<unsigned long long>(slice) * nvox + mapped],
+            power);
+      }
+    }
+    atomicAdd(&accum[mapped], static_cast<double>(value));
+  }
+}
+
 // [8][nvox] branch-major input (one bed of the branch batch) -> [nvox][8].
 extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                              float4 *packed,
@@ -1235,17 +1351,6 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                   branchMajor[5 * nvox + v],
                                   branchMajor[6 * nvox + v],
                                   branchMajor[7 * nvox + v]);
-}
-
-// Decoded CTAC factor with the per-window energy exponent: att^power, where
-// att is the u16 table value / 65535 (power 1 = the table itself; power =
-// mu_w(E_window)/mu_w(E_map) rescales the line integral to another photon
-// energy under the water-scaled mu model, since att = exp(-integral mu)).
-__device__ __forceinline__ float compact_atten_decode(unsigned short q,
-                                                      float power) {
-  const float att =
-      static_cast<float>(q) * (1.0f / static_cast<float>(kAttenUint16Scale));
-  return power == 1.0f ? att : __powf(att, power);
 }
 
 // CTAC pack for one compact angle: packed[v][k] = branchMajor[k*nvox + v] *

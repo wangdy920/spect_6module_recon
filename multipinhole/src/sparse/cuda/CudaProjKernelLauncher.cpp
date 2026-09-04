@@ -35,6 +35,8 @@ struct ProjDomainKernelCache {
   CUfunction compactCsrSpmvXQuadFunction = nullptr;
   CUfunction csrqForwardFunction = nullptr;
   CUfunction csrqBackwardFunction = nullptr;
+  CUfunction csrqBackwardPackedFunction = nullptr;
+  CUfunction compactTransformBackwardPacked8Function = nullptr;
   CUfunction csrqPackFunction = nullptr;
   CUfunction csrqPackAttenFunction = nullptr;
   CUfunction compactBranchBatchAttenScaleFunction = nullptr;
@@ -85,6 +87,8 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactCsrSpmvXQuadFunction != nullptr &&
       g_projDomainKernelCache.csrqForwardFunction != nullptr &&
       g_projDomainKernelCache.csrqBackwardFunction != nullptr &&
+      g_projDomainKernelCache.csrqBackwardPackedFunction != nullptr &&
+      g_projDomainKernelCache.compactTransformBackwardPacked8Function != nullptr &&
       g_projDomainKernelCache.csrqPackFunction != nullptr &&
       g_projDomainKernelCache.csrqPackAttenFunction != nullptr &&
       g_projDomainKernelCache.compactBranchBatchAttenScaleFunction != nullptr &&
@@ -126,6 +130,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactCsrSpmvXQuadFunction = nullptr;
     g_projDomainKernelCache.csrqForwardFunction = nullptr;
     g_projDomainKernelCache.csrqBackwardFunction = nullptr;
+    g_projDomainKernelCache.csrqBackwardPackedFunction = nullptr;
+    g_projDomainKernelCache.compactTransformBackwardPacked8Function = nullptr;
     g_projDomainKernelCache.csrqPackFunction = nullptr;
     g_projDomainKernelCache.csrqPackAttenFunction = nullptr;
     g_projDomainKernelCache.compactBranchBatchAttenScaleFunction = nullptr;
@@ -185,6 +191,13 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqBackwardFunction,
       g_projDomainKernelCache.module, "csrq_backward_k8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqBackwardPackedFunction,
+      g_projDomainKernelCache.module, "csrq_backward_k8_packed"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactTransformBackwardPacked8Function,
+      g_projDomainKernelCache.module,
+      "compact_transform_backward_add_packed8"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqPackFunction,
       g_projDomainKernelCache.module, "csrq_pack_branch8"));
@@ -801,6 +814,69 @@ void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.csrqBackwardFunction,
       static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCsrqBackwardK8PackedKernel(const CsrqDeviceChunkPtrs &chunk,
+                                      const float *ratioPacked, float *yPacked,
+                                      cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (chunk.rows <= 0) {
+    return;
+  }
+  CUdeviceptr rowNnzPtr = devPtr(chunk.rowNnzPtr);
+  CUdeviceptr rowRunPtr = devPtr(chunk.rowRunPtr);
+  CUdeviceptr rowMax = devPtr(chunk.rowMax);
+  CUdeviceptr runs = devPtr(chunk.runs);
+  CUdeviceptr valuesQ = devPtr(chunk.valuesQ);
+  CUdeviceptr r = devPtr(ratioPacked);
+  CUdeviceptr y = devPtr(yPacked);
+  int rows = chunk.rows;
+  void *args[] = {&rowNnzPtr, &rowRunPtr, &rowMax, &runs, &valuesQ, &r, &y,
+                  &rows};
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqBackwardPackedFunction,
+      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactTransformBackwardAddPacked8Kernel(
+    const float *yPacked, double *accum, size_t nvox,
+    const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, const uint16_t *attSlices, const int *dSliceIndex,
+    float power, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (nvox == 0) {
+    return;
+  }
+  if ((attSlices == nullptr) != (dSliceIndex == nullptr) || !(power > 0.0f)) {
+    throw std::runtime_error(
+        "packed transform-add launch needs both factor slices and slice ids "
+        "(or neither) and a positive exponent.");
+  }
+  CUdeviceptr y = devPtr(yPacked);
+  CUdeviceptr accumPtr = devPtr(accum);
+  CUdeviceptr symIds = devPtr(dSymIds);
+  CUdeviceptr zMirrors = devPtr(dZMirrors);
+  CUdeviceptr att = devPtr(attSlices);
+  CUdeviceptr slices = devPtr(dSliceIndex);
+  unsigned long long voxelCount = static_cast<unsigned long long>(nvox);
+  void *args[] = {&y,
+                  &accumPtr,
+                  &voxelCount,
+                  const_cast<int *>(&commonParams.symmetryMode),
+                  const_cast<int *>(&commonParams.nx),
+                  const_cast<int *>(&commonParams.ny),
+                  const_cast<int *>(&commonParams.nz),
+                  &symIds,
+                  &zMirrors,
+                  &att,
+                  &slices,
+                  &power};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactTransformBackwardPacked8Function,
+      gridFor(voxelCount, blockSize), 1, 1, blockSize, 1, 1, 0,
       reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 

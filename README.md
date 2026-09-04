@@ -210,6 +210,7 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
 | `SPECT_COMPACT_BRANCH_BATCH` | on | Resident branch×bed batch (packed-K forward + CSR_ALG2 transpose); set `0` disables resident MLEM and is not a product A/B |
 | `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
+| `SPECT_CSRQ_BACKWARD_PACKED` | off | CSRQ backward scatters all eight branches in one pass into `[voxel][8]` with `float4` atomics (native on sm_90+, e.g. the RTX 5060 Ti); on sm_86/89 the scalar fallback is 4x slower than the branch-major default. Numerically equivalent; for the sm_120 trial |
 
 mmap 失败时会 stderr 输出 `[NOTE] compact-chunk mmap failed ... falling back to full copy load`。16 GB 显存部署保留 6 GiB 给临时矩阵、SpMM、PSF 和输出滤波；50 次迭代的低时延配置建议使用 64 GB 主存及 SSD/NVMe 矩阵。32 GB 主存可通过降低 `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 运行，但无法保证相同吞吐。
 

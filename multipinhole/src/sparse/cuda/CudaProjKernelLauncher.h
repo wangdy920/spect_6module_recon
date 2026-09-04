@@ -145,6 +145,22 @@ void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
                                 size_t nvox, int kFirst, int kCount,
                                 cudaStream_t stream = nullptr);
 
+// Packed-output backward (opt-in, sm_120 vector-atomic trial): all eight
+// branches in one pass into yPacked[nvox][8] (float4 atomics on sm_90+,
+// scalar fallback below).
+void launchCsrqBackwardK8PackedKernel(const CsrqDeviceChunkPtrs &chunk,
+                                      const float *ratioPacked, float *yPacked,
+                                      cudaStream_t stream = nullptr);
+
+// accum[M_k(v)] += yPacked[v][k] (times attSlices[sliceIndex[k]][M_k(v)]^power
+// when attSlices is non-null); consumer of the packed backward.
+void launchCompactTransformBackwardAddPacked8Kernel(
+    const float *yPacked, double *accum, size_t nvox,
+    const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, const uint16_t *attSlices = nullptr,
+    const int *dSliceIndex = nullptr, float power = 1.0f,
+    cudaStream_t stream = nullptr);
+
 // Branches scattered per backward pass over the matrix. Measured on the
 // 120x120x220 Tc99m matrix (RTX 4070 Ti SUPER, ms per full-matrix backward):
 // 1 branch x 8 passes 207, 2 x 4 150, 4 x 2 179, 8 x 1 191. Two branches keep

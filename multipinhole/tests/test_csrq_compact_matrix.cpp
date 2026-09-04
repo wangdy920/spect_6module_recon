@@ -461,6 +461,16 @@ TEST_F(CsrqCompactMatrixTest, MultiTileRunsMatchDequantizedCsrb) {
   spect::cuda::setCsrqForceStreamingCUDA(false);
   EXPECT_NE(log.find("streaming forced"), std::string::npos) << log;
   EXPECT_NE(log.find("streamed (pinned host)"), std::string::npos) << log;
+
+  // Packed [voxel][8] backward (float4 atomics on sm_90+, scalar fallback
+  // here): same sums through a different scatter layout and consumer.
+  ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(true));
+  testing::internal::CaptureStderr();
+  expectCsrqMatchesCsrb(pair3, meta, 1e-5);
+  const std::string packedLog = testing::internal::GetCapturedStderr();
+  ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(false));
+  EXPECT_NE(packedLog.find("packed [voxel][8] backward"), std::string::npos)
+      << packedLog;
   std::filesystem::remove_all(pair3.csrqDir.parent_path());
 }
 
@@ -968,6 +978,14 @@ TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   runAll(pair.csrb, gotCsrb, true);
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   expectMatches(gotCsrb, "CSRB");
+  // CSRQ with the packed backward (attenuated packed transform-add), then the
+  // default branch-major backward whose outputs feed the adjoint check.
+  ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(true));
+  Outputs gotPacked;
+  runAll(pair.csrq, gotPacked, true);
+  ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(false));
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  expectMatches(gotPacked, "CSRQ packed");
   Outputs got;
   runAll(pair.csrq, got, true);
   expectMatches(got, "CSRQ");

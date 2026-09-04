@@ -2983,6 +2983,21 @@ public:
            csrqMatrices_[static_cast<size_t>(matrixIndex)].ready;
   }
 
+  static bool csrqPackedBackwardDefault() {
+    const char *v = std::getenv("SPECT_CSRQ_BACKWARD_PACKED");
+    return v != nullptr && v[0] == '1';
+  }
+
+  void setCsrqPackedBackward(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    csrqPackedBackward_ = enabled;
+  }
+
+  bool csrqPackedBackward() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return csrqPackedBackward_;
+  }
+
   static uint64_t csrqChunkDeviceBytes(uint64_t rows, uint64_t nnz,
                                        uint64_t runCount) {
     return 2ull * sizeof(uint32_t) * (rows + 1ull) + sizeof(float) * rows +
@@ -3167,7 +3182,12 @@ public:
     std::cerr << "[NOTE] CSRQ matrix " << matrixIndex << ": "
               << target.shapes.size() << " chunks, " << (target.bytes / kMiB)
               << " MiB " << (target.streamed ? "streamed (pinned host)" : "resident")
-              << ", " << target.totalRows << " compact rows.\n";
+              << ", " << target.totalRows << " compact rows"
+              << (csrqPackedBackward_
+                      ? ", packed [voxel][8] backward (float4 atomics on "
+                        "sm_90+, scalar fallback below)"
+                      : "")
+              << ".\n";
   }
 
   // Forward + ratio + backward of matrix matrixIndex for beds
@@ -4143,13 +4163,12 @@ private:
                                     const uint16_t *dSlices,
                                     const int *dSliceIndex, float attPower,
                                     double *accum) {
-    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
-                               nullptr));
-    for (int kFirst = 0; kFirst < kCsrqK;
-         kFirst += kCsrqBackwardBranchesPerPass) {
-      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
-      launchCsrqBackwardK8Kernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
-                                 kCount);
+    csrqScatterBackwardLocked(rows, ratio, nvox);
+    if (csrqPackedBackward_) {
+      launchCompactTransformBackwardAddPacked8Kernel(
+          dCsrqY_.get(), accum, nvox, tp, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), dSlices, dSliceIndex, attPower);
+      return;
     }
     launchCompactTransformBackwardAddBatchAttenKernel(
         dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
@@ -4201,11 +4220,6 @@ private:
     return csrqMatrices_[static_cast<size_t>(matrixIndex)];
   }
 
-  static constexpr size_t csrqBackwardPassCount() {
-    return static_cast<size_t>(
-        (kCsrqK + kCsrqBackwardBranchesPerPass - 1) / kCsrqBackwardBranchesPerPass);
-  }
-
   void csrqEnsureTimersLocked(size_t passes) {
     auto grow = [passes](std::vector<TimedCudaStagePair> &timers) {
       while (timers.size() < passes) {
@@ -4221,21 +4235,48 @@ private:
   // target stays L2-resident, then the symmetry transform-add kernel. (A
   // shared-memory slice-tile variant was measured 2x slower on sm_89 — no
   // native fp32 shared atomics; see reports/attachments/2026-09-04-*.)
+  // Packed mode (csrqPackedBackward_) scatters all eight branches in one pass
+  // into [nvox][8] with float4 atomics (sm_90+; scalar fallback elsewhere)
+  // and consumes it with the packed transform-add.
   void csrqBackwardChunkLocked(const CsrqDeviceChunk &chunk, const float *ratio,
                                size_t nvox,
                                const cuda::CompactDeviceTransformParams &tp,
                                double *accum) {
-    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
-                               nullptr));
-    for (int kFirst = 0; kFirst < kCsrqK;
-         kFirst += kCsrqBackwardBranchesPerPass) {
-      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
-      launchCsrqBackwardK8Kernel(chunk.ptrs(), ratio, dCsrqY_.get(), nvox,
-                                 kFirst, kCount);
+    csrqScatterBackwardLocked(chunk.ptrs(), ratio, nvox);
+    if (csrqPackedBackward_) {
+      launchCompactTransformBackwardAddPacked8Kernel(
+          dCsrqY_.get(), accum, nvox, tp, dBatchSymIds_.get(),
+          dBatchZMirrors_.get());
+      return;
     }
     launchCompactTransformBackwardAddBatchKernel(
         dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
         dBatchZMirrors_.get());
+  }
+
+  // Scatter of rows into dCsrqY_ (zeroed first): branch-major two branches
+  // per pass, or packed [nvox][8] in one pass.
+  void csrqScatterBackwardLocked(const CsrqDeviceChunkPtrs &rows,
+                                 const float *ratio, size_t nvox) {
+    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
+                               nullptr));
+    if (csrqPackedBackward_) {
+      launchCsrqBackwardK8PackedKernel(rows, ratio, dCsrqY_.get());
+      return;
+    }
+    for (int kFirst = 0; kFirst < kCsrqK;
+         kFirst += kCsrqBackwardBranchesPerPass) {
+      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
+      launchCsrqBackwardK8Kernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
+                                 kCount);
+    }
+  }
+
+  size_t csrqBackwardPassCount() const {
+    return csrqPackedBackward_
+               ? 1u
+               : static_cast<size_t>((kCsrqK + kCsrqBackwardBranchesPerPass - 1) /
+                                     kCsrqBackwardBranchesPerPass);
   }
 
   // Visits every chunk of a matrix in compact row order on the default
@@ -4302,30 +4343,6 @@ private:
           "CSRQ backward accumulator was not initialized for this matrix.");
     }
     return accum;
-  }
-
-  static size_t csrqBackwardLaunchCountLocked(const CsrqResidentMatrix &matrix) {
-    constexpr int passes =
-        (kCsrqK + kCsrqBackwardBranchesPerPass - 1) / kCsrqBackwardBranchesPerPass;
-    return matrix.chunks.size() * static_cast<size_t>(passes);
-  }
-
-  // A^T over every chunk of one matrix: dCsrqRatio_ ([compactRow][8])
-  // scatters into the branch-major dCsrqY_ ([8][nvox]), a few branches per
-  // matrix pass so the atomic target stays L2-resident.
-  void csrqBackwardAllChunksLocked(const CsrqResidentMatrix &matrix,
-                                   size_t nvox) {
-    for (int kFirst = 0; kFirst < kCsrqK;
-         kFirst += kCsrqBackwardBranchesPerPass) {
-      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
-      for (const auto &chunk : matrix.chunks) {
-        launchCsrqBackwardK8Kernel(
-            chunk->ptrs(),
-            dCsrqRatio_.get() +
-                static_cast<size_t>(chunk->compactRowBase) * kCsrqK,
-            dCsrqY_.get(), nvox, kFirst, kCount);
-      }
-    }
   }
 
   void csrqEnsureBranchMetadataLocked(const int *symIds, const int *zMirrors) {
@@ -4457,6 +4474,9 @@ private:
   std::array<bool, kCsrqAttSlots> csrqAttSlotUsed_{};
   int csrqAttNextSlot_ = 0;
   std::vector<CsrqPinnedHostTable> csrqPinnedTables_;
+  // Packed [nvox][8] backward with float4 atomics (sm_120 trial; default from
+  // SPECT_CSRQ_BACKWARD_PACKED=1, tests toggle it directly).
+  bool csrqPackedBackward_ = csrqPackedBackwardDefault();
   // CSRB CTAC: per-chunk slice tables and sub-CSR row pointers, keyed by the
   // chunk's compact row base (revalidated against the uploaded chunk).
   std::map<int, CsrbAttenChunk> csrbAttenChunks_;

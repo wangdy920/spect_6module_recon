@@ -8,6 +8,17 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Experimental packed CSRQ backward for the sm_120 vector-atomic trial
+  (`SPECT_CSRQ_BACKWARD_PACKED=1`, default off): `csrq_backward_k8_packed`
+  scatters all eight branches in one pass over the matrix into a `[voxel][8]`
+  buffer with two `float4` atomics per nnz (native `REDG.E.ADD.F32x4` on
+  sm_90+, four scalar atomics on sm_86/89), and
+  `compact_transform_backward_add_packed8` consumes it (with the CTAC factor
+  and energy exponent when active). Numerically identical to the branch-major
+  default (unit tests on both the plain and the attenuated path; Derenzo CSRQ
+  MLEM it10 relL2 4.3e-8). On this RTX 4070 Ti SUPER (sm_89) the scalar
+  fallback is 4.2x slower per matrix pass (730 vs 175 ms), as measured for
+  this layout before; the sm_120 timing needs the field RTX 5060 Ti.
 - CSRB CTAC moved to the factorised path and the fused/baked attenuation
   kernels are gone. Both matrix formats now apply the u16 factor in the image
   domain per compact angle: the CSRB branch batch is scaled by
