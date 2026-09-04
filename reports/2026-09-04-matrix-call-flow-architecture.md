@@ -113,7 +113,7 @@ flowchart TD
 
 ## 5. 待办与限制
 
-- CSRQ 不支持 CTAC 衰减（`requireCsrqSupportedInputs` 直接拒绝）；CSRB 保留 bake 路径。
+- ~~CSRQ 不支持 CTAC 衰减~~ 2026-09-04 P2 起支持：因子在 pack / 收口阶段按 compact 角度施加（`csrq_pack_branch8_atten` / `compact_transform_backward_add_batch_atten`），SpMV 核不变；每 (chunk, 床) 同步上传该 chunk 触及的 60 个全角度切片（0.38 GB），表每床每迭代过一次 PCIe。MDP 小鼠两床真实 μ：vs CSRB CTAC it20 relL2 1.4e-7，1.02 s/iter（CSRB CTAC 44 s/iter，因为逐床 2.3 GB 表全部驻留 + 逐分支 fused 核；5 床时显存 15.8 GB 触发 WDDM 分页，5 min/iter）。CSRB 保留 bake/fused 路径作为参考实现。双窗 + CTAC 仍拒绝（需逐光电峰 μ 表）。
 - CSRQ 双窗需要预处理产出两套窗投影 + 113 keV 的 TEW 散射估计作 `-bProj2`；`spect_preprocess_YJ` 目前只输出一个光电峰窗。窗权重（分支比 0.0617/0.1036 × 相对窗效率或标定）待用户决定。
 - 反投核 150 ms/遍的下限是 L2 原子吞吐；(angle, z-slice) shared-memory tile 两种形式实测 2× 更慢，已移除（`reports/2026-09-04-csrq-slice-backward-experiment.md`）。唯一未试的线索是 sm_120 的 `red.global.v4.f32` 向量原子（现场 RTX 5060 Ti）。
 - 常驻规划在 WDDM 下偏乐观：另一进程占 3.2 GB 时 `cudaMemGetInfo` 仍报 15.1 GB 空闲（nvidia-smi 12.8 GB），`planCsrqStreaming` 于是让 208 keV 常驻，上传完 9.2 GB 后 113 keV 的两个流槽 + 2 GiB 保留放不下，程序 FATAL 退出（`lu177_dual_auto_it50`）。GPU 独占时 auto 方案（208 常驻 + 113 流式，0.64 s/iter，设备约 11.9 GB + 2 GiB 保留）可用；共享 GPU 时用 `-csrqResidency streamed`。可选改进：放不下时把常驻矩阵降级为流式重试，而不是中止。

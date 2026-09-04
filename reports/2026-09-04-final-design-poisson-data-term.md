@@ -192,9 +192,9 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 5. ~~xCurrent/xNext 双缓冲~~ → 执行时改为两核方案：先用现有 RDP/TV 梯度核（保留 CT 引导权重逻辑）从设备图像算出 ∇R 到独立缓冲，再逐体素原位更新（`compact_bsrem_update`，逐项复刻 `applyBsremUpdate`），不需要 ping-pong；`residentUpdateEligible` 去掉算法条件，`residentBatchInput` 去掉 `bedCount > 1` 与背景项限制。
 6. 测试：BSREM oracle（单元 + Derenzo it1–5 relL2 ≤ 1.1e-8）。RDP 有限差分与双窗 penalty-once 测试留待 P2 一并补。**发现：** `algo_bsrem.conf`（δ=0.01）的迭代对 fp32 累加噪声每迭代放大 2–3×，同一二进制两次运行 it20 相差 ~1e-3，BSREM 门只能取早期迭代。
 
-**P2 — CTAC 因子分解**
-7. `pack_branch8_atten`、按角度组的 x̃/y 布局、`atten_transform_backward_add`；CSRB 与 CSRQ 两后端；表驻留进 plan；删 CSRB 旧 atten 核。前提：准备一套真实 μ 表测试数据（现仓库无 CTAC 回归数据）。
-8. 伴随测试 + CSRQ-vs-CSRB CTAC 数值门。
+**P2 — CTAC 因子分解**（CSRQ 侧已完成，2026-09-04）
+7. ~~`pack_branch8_atten`、按角度组的 x̃/y 布局、`atten_transform_backward_add`~~ → 执行时取 **G = 1**（按 compact 角度逐个处理）：`csrq_pack_branch8_atten` 在 pack 时乘 `att[fullAngle(θ_c,k), M_k(v)]`，`compact_transform_backward_add_batch_atten` 在收口时乘同一因子；forward/backward 核只是按行子区间（1152 行）启动，核本体不变。选 G = 1 的原因：backward 的两分支 L2 驻留论证要求 y 目标 ≤ 25 MB，G > 1 会把它放大 G 倍；pack / 收口的总量与 G 无关；启动数 720/迭代/床可忽略。表驻留：每 (chunk, 床) 只暂存该 chunk 触及的 60 个全角度切片（≈0.38 GB，同步 `cudaMemcpy`，每床每迭代整表过一次 PCIe ≈ 0.25 s），未进 plan；与计算重叠留给 P3。**CSRB 侧未改**：CSRB 是受保护生产路径，其现有 CTAC 核作为参考实现保留（§6 门已用它通过）；是否用因子分解形式替换（预计 44 s/iter → ~3 s/iter，两床）留作用户决定。真实 μ 表数据：MDP 小鼠 2h（Tc-99m，CT/SPECT DICOM `dcmdata/mouse_samples/20260729_SPECT_mouse_MDP/20260729_162015`，投影 `E:\...\mdp_seam_ab_20260730\preproc_2h`），`prepare_ct_mu_map.py --profile recon220 --beds 2,3 --z-bed-flip`；Lu-177 在本机只有 CT 原始投影（`data_platform1.mhd` 是 1536×1536×720 的投影栈，不是重建体），等厂商 CT DICOM。
+8. ~~伴随测试 + CSRQ-vs-CSRB CTAC 数值门~~ 通过：单元测试（随机 24 角矩阵、2 chunk、两张逐床表）CSRQ vs CSRB 全部 ≤ 1e-5、伴随 ≤ 1e-5；真实数据 it20 relL2 1.4e-7（分母 1.1e-7，零模式一致），BSREM-II+RDP it1–5 ≤ 1.7e-7；两床 1.02 s/iter（核 0.48 s + 表上传 0.5 s）vs CSRB CTAC 44 s/iter。
 
 **P3 — 性能收尾**
 9. WDDM 规划修正与降级重试；表流式与计算重叠；多床时打包/累加暂存复用；5060 Ti 上 `red.global.v4.f32` 试验（仍是唯一未试的反投线索）。

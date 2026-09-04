@@ -154,14 +154,23 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   this, e.g. on a shared GPU). With two windows the larger matrix is kept
   resident first and the rest streamed. Startup fails only when even two
   chunk slots plus the reserve do not fit.
-- No CTAC attenuation and no background projections on the CSRQ path (both
-  raise a clear error); everything else (MLEM/BSREM, PSF, masks, multi-bed,
-  weighted sensitivity, bad detectors) is unchanged.
+- CTAC (`-ctac -attMap`) and background projections (`-bProj`) work on the
+  CSRQ path. Attenuation is applied in the image domain, one compact angle
+  at a time (`csrq_pack_branch8_atten` before the forward,
+  `compact_transform_backward_add_batch_atten` after the backward scatter),
+  so the SpMV kernels are the same as without CTAC; the per-bed factor table
+  crosses PCIe once per bed per iteration (~0.25 s on this host) and only
+  the slices a chunk needs stay on the device (~0.4 GB). Everything else
+  (MLEM/BSREM, PSF, masks, multi-bed, weighted sensitivity, bad detectors) is
+  unchanged. Joint dual-window runs still reject `-ctac` (one μ table per
+  photopeak is not implemented).
 - Same-input numerics vs the fp32 CSRB run on the frozen Derenzo workload:
   image relL2 `1.5e-6` at MLEM it200, denom relL2 `8e-7`; 5-bed mouse MLEM
   it50 relL2 `6.2e-7` (gate `1e-5`). Measured on this host (RTX 4070 Ti
   SUPER): single-bed `0.25 s/iter` (CSRB `2.6 s`), five-bed `1.13 s/iter`
-  (CSRB `2.87 s`).
+  (CSRB `2.87 s`). With CTAC on a real CT μ-map (MDP mouse, two beds):
+  MLEM it20 image relL2 `1.4e-7` and sensitivity relL2 `1.1e-7` vs the CSRB
+  CTAC path, at `1.0 s/iter` (CSRB CTAC `44 s/iter`).
 
 ## Documentation
 

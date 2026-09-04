@@ -8,6 +8,31 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- CTAC on the CSRQ path (P2 of the Poisson data-term design): the attenuation
+  model `h_ij = a_ij * att[fullAngle(i), unrotatedVoxel(j)]` is factorised out
+  of the nnz loop. A chunk is walked one compact angle at a time;
+  `csrq_pack_branch8_atten` multiplies the rotated image of each branch by
+  its full angle's factor slice before the forward, and
+  `compact_transform_backward_add_batch_atten` multiplies the scattered
+  branch outputs by the same slice at the unrotated voxel after the backward,
+  so forward and backward stay exact adjoints and the SpMV kernels are the
+  ones used without CTAC. Only the slices a chunk reaches (60 full angles,
+  ~0.4 GB for the 120x120x220 grid) are staged per (chunk, bed) with a
+  synchronous copy, so the table crosses PCIe once per bed per iteration
+  instead of living on the device per bed (the CSRB path keeps one 2.3 GB
+  table per bed resident, which pages under WDDM with five beds). Numerator,
+  sensitivity and forward projection accept per-bed tables; CTAC runs now use
+  the resident device path (rotation, PSF, update on the device) for both
+  MLEM and BSREM-II. Gates: unit test (random 24-angle matrix, two chunks,
+  two per-bed tables) CSRQ vs CSRB relL2 ≤ 1e-5 on sensitivity / numerator /
+  forward / two-bed host and resident numerators, plus the adjoint identity
+  <Hx, y> = <x, H^T y> ≤ 1e-5; real data (MDP mouse Tc99m, beds 2–3, CT
+  μ-map from `prepare_ct_mu_map.py --profile recon220`) CSRQ vs CSRB CTAC
+  MLEM it5/10/15/20 relL2 7.9e-8 / 1.2e-7 / 1.2e-7 / 1.4e-7, sensitivity
+  relL2 1.1e-7 with identical zero pattern, BSREM-II+RDP it1–5 relL2 ≤
+  1.7e-7. Time per iteration for two beds: 1.02 s (kernels 0.48 s, table
+  upload ~0.5 s) vs 44 s on the CSRB CTAC path. Joint dual-window runs still
+  reject `-ctac` (they need one μ table per photopeak). Suite 280 pass.
 - BSREM-II + RDP now runs on the resident device image (P1 of the Poisson
   data-term design): the regularizer gradient is formed from the device image
   (`computeRegGradientDeviceCUDA`, RDP/TV with the CT-guided weights), the
