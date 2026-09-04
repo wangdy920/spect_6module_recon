@@ -4,6 +4,7 @@
 #include "recon/BsremUpdate.h"
 #include "recon/ProjectionOps.h"
 #include "core/Masks.h"
+#include "core/ReconLimits.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
@@ -376,13 +377,32 @@ bool isCompactDenomManifestMismatch(const std::string &status) {
   return status.rfind("cache manifest mismatch", 0) == 0;
 }
 
+void appendChunkDirectoryIdentity(
+    std::ostringstream &oss, const std::string &prefix,
+    const spect::io::CompactChunkCSRDirectory &chunks) {
+  oss << prefix << "chunk_count=" << chunks.chunks().size() << '\n';
+  oss << prefix << "chunk_total_rows=" << chunks.totalRows() << '\n';
+  oss << prefix << "chunk_total_nnz=" << chunks.totalNnz() << '\n';
+  for (size_t i = 0; i < chunks.chunks().size(); ++i) {
+    const auto &chunk = chunks.chunks()[i];
+    const std::string chunkPrefix = prefix + "chunk_" + std::to_string(i);
+    appendFileStatIdentity(oss, chunkPrefix, chunk.path);
+    oss << chunkPrefix << "_rows=" << chunk.rows << '\n';
+    oss << chunkPrefix << "_angle_offset=" << chunk.angleOffset << '\n';
+    oss << chunkPrefix << "_angle_count=" << chunk.angleCount << '\n';
+    oss << chunkPrefix << "_nnz=" << chunk.nnz << '\n';
+    oss << chunkPrefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
+  }
+}
+
 std::string buildCompactDenomCacheManifest(
     const ReconArgs &args, const OutputGeometry &geometry,
     const spect::io::CompactSymmetryMetadata &compactMeta,
     const std::string &compactMetaPath,
     const spect::io::CompactChunkCSRDirectory &compactChunks,
     const std::vector<int> &bedZStarts,
-    const spect::filters::PSFKernels *psfKernels) {
+    const spect::filters::PSFKernels *psfKernels,
+    const spect::io::CompactChunkCSRDirectory *compactChunks2 = nullptr) {
   std::ostringstream oss;
   oss << std::setprecision(17);
   oss << "cache_schema=compact_global_denom_v4_portable_stat_identity\n";
@@ -403,18 +423,20 @@ std::string buildCompactDenomCacheManifest(
   oss << "compact_rows=" << compactMeta.compactRows() << '\n';
   oss << "full_rows=" << compactMeta.fullRows() << '\n';
   oss << "matrix_cols=" << compactMeta.totalVoxels << '\n';
-  oss << "chunk_count=" << compactChunks.chunks().size() << '\n';
-  oss << "chunk_total_rows=" << compactChunks.totalRows() << '\n';
-  oss << "chunk_total_nnz=" << compactChunks.totalNnz() << '\n';
-  for (size_t i = 0; i < compactChunks.chunks().size(); ++i) {
-    const auto &chunk = compactChunks.chunks()[i];
-    const std::string prefix = "chunk_" + std::to_string(i);
-    appendFileStatIdentity(oss, prefix, chunk.path);
-    oss << prefix << "_rows=" << chunk.rows << '\n';
-    oss << prefix << "_angle_offset=" << chunk.angleOffset << '\n';
-    oss << prefix << "_angle_count=" << chunk.angleCount << '\n';
-    oss << prefix << "_nnz=" << chunk.nnz << '\n';
-    oss << prefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
+  appendChunkDirectoryIdentity(oss, "", compactChunks);
+  // Joint dual-window: the sensitivity is sum_k w_k A_k^T 1, so the second
+  // matrix and both weights are part of the identity. Emitted only when
+  // active so single-window caches keep matching their stored manifests.
+  if (compactChunks2 != nullptr) {
+    oss << "dual_window=1\n";
+    oss << "matrix2_profile="
+        << normalizePathForCache(compactChunks2->directory()).filename().string()
+        << '\n';
+    appendChunkDirectoryIdentity(oss, "matrix2_", *compactChunks2);
+    oss << "energy_window_weights=";
+    for (size_t k = 0; k < args.energyWindowWeights.size(); ++k)
+      oss << (k ? "," : "") << args.energyWindowWeights[k];
+    oss << '\n';
   }
   oss << "global_dims=" << geometry.nx << ',' << geometry.ny << ','
       << geometry.nz << '\n';
@@ -637,6 +659,43 @@ std::vector<double> runCompactSymmetricReconstruction(
   const std::string &compactMetaPath = *ctx.compactMetaPath;
   const spect::io::CompactChunkCSRDirectory &compactChunks =
       *ctx.compactChunks;
+  // Energy-window channels: one for a plain run, two for joint dual-window
+  // MLEM. Projections/backgrounds of window k live in channelProjections[k].
+  std::vector<spect::cuda::CompactMatrixChannel> channels;
+  std::vector<const std::vector<double> *> channelProjections;
+  std::vector<const std::vector<double> *> channelBackgrounds;
+  {
+    spect::cuda::CompactMatrixChannel first;
+    first.chunks = &compactChunks;
+    first.weight =
+        args.energyWindowWeights.empty() ? 1.0 : args.energyWindowWeights[0];
+    channels.push_back(first);
+    channelProjections.push_back(ctx.projections);
+    channelBackgrounds.push_back(ctx.backgroundProj);
+    if (ctx.compactChunks2 != nullptr) {
+      if (ctx.projections2 == nullptr || ctx.projections2->empty() ||
+          args.energyWindowWeights.size() != 2) {
+        throw std::runtime_error(
+            "joint dual-window reconstruction needs second-window projections "
+            "and two energy weights.");
+      }
+      spect::cuda::CompactMatrixChannel second;
+      second.chunks = ctx.compactChunks2;
+      second.weight = args.energyWindowWeights[1];
+      channels.push_back(second);
+      channelProjections.push_back(ctx.projections2);
+      channelBackgrounds.push_back(ctx.backgroundProj2);
+    }
+  }
+  const size_t channelCount = channels.size();
+  bool anyBackground = false;
+  for (const auto *background : channelBackgrounds)
+    anyBackground = anyBackground || (background != nullptr && !background->empty());
+  const bool csrqMatrices =
+      compactChunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
+#if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
+  spect::cuda::setCsrqForceStreamingCUDA(args.csrqResidency == "streamed");
+#endif
   CompactExecutionTiming &compactTiming = *ctx.timing;
   const auto loadToIterationStart = ctx.loadToIterationStart;
   const auto fullCommandStart = ctx.fullCommandStart;
@@ -720,7 +779,7 @@ std::vector<double> runCompactSymmetricReconstruction(
         if (!compactDenomCachePath.empty() || !compactHasAttenuation) {
           compactDenomManifest = buildCompactDenomCacheManifest(
               args, geometry, compactMeta, compactMetaPath, compactChunks,
-              bedZStarts, psfPtr);
+              bedZStarts, psfPtr, ctx.compactChunks2);
         }
         if (compactDenomCachePath.empty() && !compactHasAttenuation) {
           compactDenomCachePath =
@@ -737,7 +796,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (loadedCompactDenomCache) {
             logInfo("compact denom cache hit: " +
                     compactDenomCachePath.string());
-            spect::cuda::prepareCompactChunkExecutionCUDA(compactChunks);
+            spect::cuda::prepareCompactChunkExecutionCUDA(channels);
           } else {
             if (isCompactDenomManifestMismatch(cacheStatus)) {
               throw std::runtime_error(
@@ -873,33 +932,46 @@ std::vector<double> runCompactSymmetricReconstruction(
                     std::to_string(detZEdgeCensor) +
                     " detZ rows censored per side) for the denominator.");
           }
+          // Assign every window its device matrix slot (aliasing channels
+          // that share a directory) before any per-channel call below.
+          spect::cuda::prepareCompactChunkExecutionCUDA(channels);
           auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
             std::fill(localDenom.begin(), localDenom.end(), 0.0);
             if (useWeightedSensitivity) {
-              std::fill(detZSensFwd.begin(), detZSensFwd.end(), 0.0);
-              bool ok = spect::cuda::computeCompactChunkForwardProjectionCUDA(
-                  compactChunks, compactMeta, detZSensOnes.data(),
-                  opts.threads, detZSensFwd.data(), attenuation);
-              if (!ok) {
-                throw std::runtime_error(
-                    "compact-symmetric weighted sensitivity forward "
-                    "projection requires CUDA sparse backend.");
-              }
-              for (size_t row = 0; row < detZSensFwd.size(); ++row)
-                detZSensFwd[row] *= detZSensWeights[row];
-              ok = spect::cuda::runCompactChunkMlemNumerCUDA(
-                  compactChunks, compactMeta, detZSensFwd.data(), nullptr,
-                  detZSensOnes.data(), opts.threads, localDenom.data(), false,
-                  &compactCudaTiming, attenuation);
-              if (!ok) {
-                throw std::runtime_error(
-                    "compact-symmetric weighted sensitivity requires CUDA "
-                    "sparse backend.");
+              // Weighted sensitivity sum_k w_k A_k^T w is synthesized per
+              // window as A_k^T((A_k 1 * w) / (A_k 1)) through the numerator
+              // path (the window weight cancels there) and scaled by w_k.
+              std::vector<double> channelDenom(baseNvox, 0.0);
+              for (size_t channel = 0; channel < channelCount; ++channel) {
+                const auto &chunks = *channels[channel].chunks;
+                std::fill(detZSensFwd.begin(), detZSensFwd.end(), 0.0);
+                bool ok = spect::cuda::computeCompactChunkForwardProjectionCUDA(
+                    chunks, compactMeta, detZSensOnes.data(), opts.threads,
+                    detZSensFwd.data(), attenuation);
+                if (!ok) {
+                  throw std::runtime_error(
+                      "compact-symmetric weighted sensitivity forward "
+                      "projection requires CUDA sparse backend.");
+                }
+                for (size_t row = 0; row < detZSensFwd.size(); ++row)
+                  detZSensFwd[row] *= detZSensWeights[row];
+                ok = spect::cuda::runCompactChunkMlemNumerCUDA(
+                    chunks, compactMeta, detZSensFwd.data(), nullptr,
+                    detZSensOnes.data(), opts.threads, channelDenom.data(),
+                    false, &compactCudaTiming, attenuation);
+                if (!ok) {
+                  throw std::runtime_error(
+                      "compact-symmetric weighted sensitivity requires CUDA "
+                      "sparse backend.");
+                }
+                const double weight = channels[channel].weight;
+                for (size_t i = 0; i < baseNvox; ++i)
+                  localDenom[i] += weight * channelDenom[i];
               }
               return;
             }
             const bool ok = spect::cuda::computeCompactChunkSensitivityCUDA(
-                compactChunks, compactMeta, opts.threads, localDenom.data(),
+                channels, compactMeta, opts.threads, localDenom.data(),
                 &compactCudaTiming, attenuation);
             if (!ok) {
               throw std::runtime_error(
@@ -1003,16 +1075,26 @@ std::vector<double> runCompactSymmetricReconstruction(
             !debugStats && !useBsremUpdate && !prepared.butterConf.enabled &&
             !prepared.smoothConf.enabled && !args.bsremMlemEquivalenceMode &&
             !args.bsremDiagnostics;
-        if (backgroundProj.empty()) {
+        if (!anyBackground || csrqMatrices) {
+          // Pre-upload every window's projections (and CSRQ backgrounds) so
+          // the first numerator does not pay the H2D inside iteration_core_s.
           const size_t fullProjectionCount =
               static_cast<size_t>(compactMeta.fullRows());
-          for (int bed = 0; bed < bedCount; ++bed) {
-            if (!spect::cuda::refreshCompactProjectionCUDA(
-                    projections.data() +
-                        static_cast<size_t>(bed) * fullProjectionCount,
-                    fullProjectionCount, bed)) {
-              throw std::runtime_error(
-                  "compact projection upload requires CUDA sparse backend.");
+          for (size_t channel = 0; channel < channelCount; ++channel) {
+            for (int bed = 0; bed < bedCount; ++bed) {
+              const size_t offset =
+                  static_cast<size_t>(bed) * fullProjectionCount;
+              const auto *background = channelBackgrounds[channel];
+              if (!spect::cuda::refreshCompactProjectionCUDA(
+                      channelProjections[channel]->data() + offset,
+                      fullProjectionCount,
+                      static_cast<int>(channel) * spect::core::kMaxBeds + bed,
+                      (background == nullptr || background->empty())
+                          ? nullptr
+                          : background->data() + offset)) {
+                throw std::runtime_error(
+                    "compact projection upload requires CUDA sparse backend.");
+              }
             }
           }
         }
@@ -1089,8 +1171,11 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::vector<double> numer;
           const std::vector<double> *bedImageSource = &image;
 
+          // CSRB's fused device ratio has no background term; the CSRQ ratio
+          // kernel does, so backgrounds keep the resident path there.
           const bool residentBatchInput =
-              !debugStats && bedCount > 1 && backgroundProj.empty() &&
+              !debugStats && bedCount > 1 &&
+              (!anyBackground || csrqMatrices) &&
               !compactHasAttenuation && !compactRoiPrunesMatrix &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
@@ -1121,10 +1206,11 @@ std::vector<double> runCompactSymmetricReconstruction(
               for (auto &localNumer : localNumers)
                 localNumer.assign(baseNvox, 0.0);
             }
+            // [channel * bedCount + bed]
             std::vector<const double *> projectionPtrs(
-                static_cast<size_t>(bedCount), nullptr);
+                channelCount * static_cast<size_t>(bedCount), nullptr);
             std::vector<const double *> backgroundPtrs(
-                static_cast<size_t>(bedCount), nullptr);
+                channelCount * static_cast<size_t>(bedCount), nullptr);
             std::vector<const double *> imagePtrs(static_cast<size_t>(bedCount),
                                                   nullptr);
             std::vector<double *> numerPtrs(static_cast<size_t>(bedCount),
@@ -1169,11 +1255,15 @@ std::vector<double> runCompactSymmetricReconstruction(
               const size_t projectionOffset =
                   static_cast<size_t>(bed) *
                   static_cast<size_t>(compactMeta.fullRows());
-              projectionPtrs[static_cast<size_t>(bed)] =
-                  projections.data() + projectionOffset;
-              if (!backgroundProj.empty()) {
-                backgroundPtrs[static_cast<size_t>(bed)] =
-                    backgroundProj.data() + projectionOffset;
+              for (size_t channel = 0; channel < channelCount; ++channel) {
+                const size_t slot =
+                    channel * static_cast<size_t>(bedCount) +
+                    static_cast<size_t>(bed);
+                projectionPtrs[slot] =
+                    channelProjections[channel]->data() + projectionOffset;
+                const auto *background = channelBackgrounds[channel];
+                if (background != nullptr && !background->empty())
+                  backgroundPtrs[slot] = background->data() + projectionOffset;
               }
               if (!residentMlemIteration) {
                 numerPtrs[static_cast<size_t>(bed)] =
@@ -1183,16 +1273,16 @@ std::vector<double> runCompactSymmetricReconstruction(
 
             const auto numerStart = ProfileClock::now();
             const bool ok = spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
-                compactChunks, compactMeta, projectionPtrs.data(),
-                backgroundProj.empty() ? nullptr : backgroundPtrs.data(),
+                channels, compactMeta, projectionPtrs.data(),
+                anyBackground ? backgroundPtrs.data() : nullptr,
                 residentBatchInput ? nullptr : imagePtrs.data(), bedCount,
                 opts.threads,
                 residentMlemIteration ? nullptr : numerPtrs.data(),
                 compactChunkReverseOrderNext, &compactCudaTiming,
                 compactAttFactorPtrs.empty() ? nullptr
                                              : compactAttFactorPtrs.data(),
-                !backgroundProj.empty(), residentBatchInput,
-                !residentMlemIteration);
+                /*refreshProjectionInputs=*/anyBackground && !csrqMatrices,
+                residentBatchInput, !residentMlemIteration);
             if (!ok) {
               throw std::runtime_error(
                   "compact-symmetric numerator requires CUDA sparse backend.");
@@ -1442,8 +1532,8 @@ std::vector<double> runCompactSymmetricReconstruction(
                 residualPath.string());
           }
           residualOut
-              << "bed,angle,det_z,count,measured_sum,expected_sum,relative_"
-                 "bias,poisson_deviance_per_bin,pearson_rms\n";
+              << "window,bed,angle,det_z,count,measured_sum,expected_sum,"
+                 "relative_bias,poisson_deviance_per_bin,pearson_rms\n";
           residualOut << std::setprecision(12);
 
           const std::vector<double> *diagnosticBedSource = &image;
@@ -1462,7 +1552,8 @@ std::vector<double> runCompactSymmetricReconstruction(
                                 opts, psfPtr, opts.threads);
               localImageForProjection = localUsed.data();
             }
-
+           for (size_t channel = 0; channel < channelCount; ++channel) {
+            // Window mean = w_k * A_k x + b_k.
             std::vector<double> expected(fullRows, 0.0);
             const uint16_t *bedAttenuation =
                 compactAttFactorPtrs.empty()
@@ -1470,21 +1561,27 @@ std::vector<double> runCompactSymmetricReconstruction(
                     : compactAttFactorPtrs[static_cast<size_t>(bed)];
             const bool forwardOk =
                 spect::cuda::computeCompactChunkForwardProjectionCUDA(
-                    compactChunks, compactMeta, localImageForProjection,
-                    opts.threads, expected.data(), bedAttenuation);
+                    *channels[channel].chunks, compactMeta,
+                    localImageForProjection, opts.threads, expected.data(),
+                    bedAttenuation);
             if (!forwardOk) {
               throw std::runtime_error(
                   "compact projection residual diagnostic requires CUDA "
                   "sparse backend.");
             }
+            const double windowWeight = channels[channel].weight;
+            for (double &value : expected)
+              value *= windowWeight;
 
             const size_t projectionOffset =
                 static_cast<size_t>(bed) * fullRows;
-            const double *measured = projections.data() + projectionOffset;
+            const double *measured =
+                channelProjections[channel]->data() + projectionOffset;
+            const auto *channelBackground = channelBackgrounds[channel];
             const double *background =
-                backgroundProj.empty()
+                (channelBackground == nullptr || channelBackground->empty())
                     ? nullptr
-                    : backgroundProj.data() + projectionOffset;
+                    : channelBackground->data() + projectionOffset;
             ProjectionResidualStats bedStats;
             for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
               for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
@@ -1504,9 +1601,10 @@ std::vector<double> runCompactSymmetricReconstruction(
                   addProjectionResidualSample(bedStats, measured[index],
                                               totalExpected);
                 }
-                residualOut << bed << ',' << angle << ',' << detZ << ','
-                            << rowStats.count << ',' << rowStats.measuredSum
-                            << ',' << rowStats.expectedSum << ','
+                residualOut << channel << ',' << bed << ',' << angle << ','
+                            << detZ << ',' << rowStats.count << ','
+                            << rowStats.measuredSum << ','
+                            << rowStats.expectedSum << ','
                             << projectionRelativeBias(rowStats) << ','
                             << projectionDeviancePerBin(rowStats) << ','
                             << projectionPearsonRms(rowStats) << '\n';
@@ -1514,7 +1612,8 @@ std::vector<double> runCompactSymmetricReconstruction(
             }
             std::ostringstream metric;
             metric << std::setprecision(12)
-                   << "[METRIC] compact_projection_residual bed=" << bed
+                   << "[METRIC] compact_projection_residual window=" << channel
+                   << " bed=" << bed
                    << " count=" << bedStats.count
                    << " measured_sum=" << bedStats.measuredSum
                    << " expected_sum=" << bedStats.expectedSum
@@ -1523,6 +1622,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                    << projectionDeviancePerBin(bedStats)
                    << " pearson_rms=" << projectionPearsonRms(bedStats);
             logDebug(metric.str());
+           }
           }
           residualOut.flush();
           if (!residualOut) {

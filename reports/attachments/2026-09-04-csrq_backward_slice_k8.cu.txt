@@ -1,0 +1,255 @@
+// ---------------------------------------------------------------------------
+// CSRQ slice-tile backward (P3 successor)
+// ---------------------------------------------------------------------------
+// Per chunk, a (row, z) index: zRunBegin[row*(nz+1) + z] is the chunk-local
+// index of the first run of `row` whose start column lies in slice z or later
+// (runs are column-sorted inside a row), zNnzOff[...] the chunk-local value
+// offset of that run. Entry nz holds the row end. One thread per row.
+extern "C" __global__ void csrq_build_zindex(
+    const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
+    const unsigned int *runs, int rows, unsigned int plane, int nz,
+    unsigned int *zRunBegin, unsigned int *zNnzOff) {
+  const int row = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (row >= rows || plane == 0u) {
+    return;
+  }
+  const unsigned int runBegin = rowRunPtr[row];
+  const unsigned int runEnd = rowRunPtr[row + 1];
+  unsigned int nnz = rowNnzPtr[row];
+  unsigned int *zb = zRunBegin + static_cast<size_t>(row) * (nz + 1);
+  unsigned int *zo = zNnzOff + static_cast<size_t>(row) * (nz + 1);
+  int z = 0;
+  for (unsigned int j = runBegin; j < runEnd; ++j) {
+    const unsigned int word = runs[j];
+    const unsigned int start = word >> CSRQ_RUN_LEN_BITS;
+    const unsigned int len = (word & (CSRQ_MAX_RUN_LEN - 1u)) + 1u;
+    int zj = static_cast<int>(start / plane);
+    if (zj > nz) zj = nz;
+    while (z <= zj) {
+      zb[z] = j;
+      zo[z] = nnz;
+      ++z;
+    }
+    nnz += len;
+  }
+  while (z <= nz) {
+    zb[z] = runEnd;
+    zo[z] = nnz;
+    ++z;
+  }
+}
+
+// Unrotated (x, y) of a rotated-frame voxel (x, y) for symmetry branch symId
+// (same tables as compact_transform_backward_add_batch).
+__device__ __forceinline__ void csrq_unrotate_xy(int ix, int iy, int nx, int ny,
+                                                 int symmetryMode, int symId,
+                                                 int *x, int *y) {
+  int ox = ix;
+  int oy = iy;
+  if (symmetryMode == 45) {
+    switch (symId) {
+    case 1: ox = iy; oy = ix; break;
+    case 2: ox = nx - 1 - iy; oy = ix; break;
+    case 3: ox = nx - 1 - ix; oy = iy; break;
+    case 4: ox = nx - 1 - ix; oy = ny - 1 - iy; break;
+    case 5: ox = nx - 1 - iy; oy = ny - 1 - ix; break;
+    case 6: ox = iy; oy = ny - 1 - ix; break;
+    case 7: ox = ix; oy = ny - 1 - iy; break;
+    default: break;
+    }
+  } else {
+    switch (symId) {
+    case 1: ox = nx - 1 - iy; oy = ix; break;
+    case 2: ox = nx - 1 - ix; oy = ny - 1 - iy; break;
+    case 3: ox = iy; oy = ny - 1 - ix; break;
+    default: break;
+    }
+  }
+  *x = ox;
+  *y = oy;
+}
+
+#define CSRQ_SLICE_BLOCK 512
+#define CSRQ_SLICE_WARPS (CSRQ_SLICE_BLOCK / 32)
+
+// Affine form of csrq_unrotate_xy for a fixed branch: ox = ax*ix + ay*iy + tx,
+// oy = bx*ix + by*iy + ty.
+struct CsrqRotation {
+  int ax, ay, tx;
+  int bx, by, ty;
+};
+
+__device__ __forceinline__ CsrqRotation csrq_rotation(int nx, int ny,
+                                                      int symmetryMode,
+                                                      int symId) {
+  int x00 = 0, y00 = 0, x10 = 0, y10 = 0, x01 = 0, y01 = 0;
+  csrq_unrotate_xy(0, 0, nx, ny, symmetryMode, symId, &x00, &y00);
+  csrq_unrotate_xy(1, 0, nx, ny, symmetryMode, symId, &x10, &y10);
+  csrq_unrotate_xy(0, 1, nx, ny, symmetryMode, symId, &x01, &y01);
+  CsrqRotation r;
+  r.tx = x00; r.ty = y00;
+  r.ax = x10 - x00; r.bx = y10 - y00;
+  r.ay = x01 - x00; r.by = y01 - y00;
+  return r;
+}
+
+// A^T for one (angle, z-slice) of a chunk, accumulated straight into the
+// unrotated double accumulator. Block (angleLocal, z): each warp walks whole
+// rows of that angle; for every row it takes the runs of slice z (from the
+// (row, z) index, plus the run that may wrap in from slice z-1), scans 32 run
+// lengths at a time for the value offsets and lets the 32 lanes cover each
+// run's nnz, adding v * ratio[row][k] into a per-slice fp32 tile in shared
+// memory at the unrotated (x, y) of every branch k with zMirrors[k] ==
+// mirrorPass. The tile is flushed with one double atomic per voxel into slice
+// z (pass 0) or nz-1-z (pass 1), cutting global atomics by nnz/distinct-voxels
+// per slice (~29x on the 120x120x220 matrices). Dynamic shared memory: the
+// tile, ny * (nx | 1) floats (odd stride keeps rotated columns bank-free).
+extern "C" __global__ void __launch_bounds__(CSRQ_SLICE_BLOCK)
+csrq_backward_slice_k8(const unsigned int *rowNnzPtr,
+                       const unsigned int *rowRunPtr, const float *rowMax,
+                       const unsigned int *runs, const unsigned short *valuesQ,
+                       const unsigned int *zRunBegin, const unsigned int *zNnzOff,
+                       const float4 *ratioPacked, int raysPerAngle, int nx,
+                       int ny, int nz, int symmetryMode, const int *symIds,
+                       const int *zMirrors, int mirrorPass, double *accum) {
+  extern __shared__ __align__(16) float tile[];
+  const int angleLocal = static_cast<int>(blockIdx.x);
+  const int z = static_cast<int>(blockIdx.y);
+  if (z >= nz || nx <= 0 || ny <= 0 || raysPerAngle <= 0) {
+    return;
+  }
+  const unsigned int plane =
+      static_cast<unsigned int>(nx) * static_cast<unsigned int>(ny);
+  const unsigned int zBase = static_cast<unsigned int>(z) * plane;
+  const int tileStride = nx | 1;
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
+  const int rowBase = angleLocal * raysPerAngle;
+
+  // Branch selection and rotations (block-uniform; fixed indices keep the
+  // arrays in registers).
+  bool sel[CSRQ_K];
+  CsrqRotation rot[CSRQ_K];
+#pragma unroll
+  for (int k = 0; k < CSRQ_K; ++k) {
+    sel[k] = zMirrors[k] == mirrorPass;
+    rot[k] = csrq_rotation(nx, ny, symmetryMode, symIds[k]);
+  }
+
+  for (int i = static_cast<int>(threadIdx.x); i < ny * tileStride;
+       i += CSRQ_SLICE_BLOCK) {
+    tile[i] = 0.0f;
+  }
+  __syncthreads();
+
+  for (int s = warp; s < raysPerAngle; s += CSRQ_SLICE_WARPS) {
+    const int row = rowBase + s;
+    const float4 r0 = ratioPacked[2 * row];
+    const float4 r1 = ratioPacked[2 * row + 1];
+    float r[CSRQ_K] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w};
+    bool any = false;
+#pragma unroll
+    for (int k = 0; k < CSRQ_K; ++k) {
+      if (!sel[k]) r[k] = 0.0f;
+      any = any || r[k] != 0.0f;
+    }
+    if (!any) continue;
+
+    const size_t zi = static_cast<size_t>(row) * (nz + 1) + z;
+    unsigned int runBegin = zRunBegin[zi];
+    const unsigned int runEnd = zRunBegin[zi + 1];
+    unsigned int valBase = zNnzOff[zi];
+    // The run just before may wrap from slice z-1 into z (runs follow linear
+    // columns); include it, its off-slice head is skipped per nnz below.
+    if (runBegin > rowRunPtr[row]) {
+      const unsigned int prev = runs[runBegin - 1u];
+      const unsigned int prevLen = (prev & (CSRQ_MAX_RUN_LEN - 1u)) + 1u;
+      if ((prev >> CSRQ_RUN_LEN_BITS) + prevLen > zBase) {
+        runBegin -= 1u;
+        valBase -= prevLen;
+      }
+    }
+    if (runBegin >= runEnd) continue;
+    const float m = rowMax[row];
+
+    for (unsigned int j0 = runBegin; j0 < runEnd; j0 += 32u) {
+      const unsigned int groupRuns = min(32u, runEnd - j0);
+      unsigned int word = 0;
+      unsigned int len = 0;
+      if (static_cast<unsigned int>(lane) < groupRuns) {
+        word = runs[j0 + lane];
+        len = (word & (CSRQ_MAX_RUN_LEN - 1u)) + 1u;
+      }
+      // Warp exclusive scan of the run lengths -> value offset of each run.
+      unsigned int inclusive = len;
+      for (int offset = 1; offset < 32; offset <<= 1) {
+        const unsigned int n = __shfl_up_sync(0xffffffffu, inclusive, offset);
+        if (lane >= offset) inclusive += n;
+      }
+      const unsigned int groupNnz = __shfl_sync(0xffffffffu, inclusive, 31);
+      const unsigned int runOff = inclusive - len;
+      for (unsigned int u = 0; u < groupRuns; ++u) {
+        const unsigned int uWord = __shfl_sync(0xffffffffu, word, u);
+        const unsigned int uLen = (uWord & (CSRQ_MAX_RUN_LEN - 1u)) + 1u;
+        const unsigned int uStart = uWord >> CSRQ_RUN_LEN_BITS;
+        const unsigned int uVal = valBase + __shfl_sync(0xffffffffu, runOff, u);
+        // (y, x) of the run start once; lanes advance along x with carry.
+        const unsigned int rem0 = uStart - zBase; // may be "negative" (wrap)
+        const bool startsInSlice = rem0 < plane;
+        int iy0 = 0;
+        int ix0 = 0;
+        int skip = 0;
+        if (startsInSlice) {
+          iy0 = static_cast<int>(rem0 / static_cast<unsigned int>(nx));
+          ix0 = static_cast<int>(rem0 - static_cast<unsigned int>(iy0) *
+                                            static_cast<unsigned int>(nx));
+        } else {
+          // Head lies in slice z-1: the first in-slice nnz is at column zBase.
+          skip = static_cast<int>(zBase - uStart);
+        }
+        for (int k = lane; k < static_cast<int>(uLen); k += 32) {
+          if (k < skip) continue;
+          const unsigned int col = uStart + static_cast<unsigned int>(k);
+          const unsigned int rem = col - zBase;
+          if (rem >= plane) break; // tail wrapped into slice z+1
+          int ix;
+          int iy;
+          if (startsInSlice) {
+            ix = ix0 + k;
+            iy = iy0;
+            while (ix >= nx) { ix -= nx; ++iy; }
+          } else {
+            const unsigned int r2 = rem;
+            iy = static_cast<int>(r2 / static_cast<unsigned int>(nx));
+            ix = static_cast<int>(r2 - static_cast<unsigned int>(iy) *
+                                           static_cast<unsigned int>(nx));
+          }
+          const float tq =
+              static_cast<float>(valuesQ[uVal + static_cast<unsigned int>(k)]) *
+              kCsrqInvQScale;
+          const float v = m * (tq * tq);
+#pragma unroll
+          for (int k = 0; k < CSRQ_K; ++k) {
+            if (r[k] == 0.0f) continue;
+            const int ox = rot[k].ax * ix + rot[k].ay * iy + rot[k].tx;
+            const int oy = rot[k].bx * ix + rot[k].by * iy + rot[k].ty;
+            atomicAdd(&tile[oy * tileStride + ox], v * r[k]);
+          }
+        }
+      }
+      valBase += groupNnz;
+    }
+  }
+  __syncthreads();
+
+  const int zOut = mirrorPass != 0 ? (nz - 1 - z) : z;
+  double *slice = accum + static_cast<size_t>(zOut) * plane;
+  for (int i = static_cast<int>(threadIdx.x); i < ny * nx; i += CSRQ_SLICE_BLOCK) {
+    const int y = i / nx;
+    const int x = i - y * nx;
+    const float value = tile[y * tileStride + x];
+    if (value != 0.0f) {
+      atomicAdd(slice + i, static_cast<double>(value));
+    }
+  }
+}

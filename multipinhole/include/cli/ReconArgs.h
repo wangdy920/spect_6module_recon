@@ -124,6 +124,26 @@ struct ReconArgs {
     std::string chunkCSRDir;               ///< Directory with metadata.bin + chunk_*.csrb
     bool chunkCSRDirExplicit = false;      ///< True if -chunkCSRDir was used explicitly
 
+    // ========== Joint dual-window reconstruction (MB-JR) ==========
+    // A second energy window with its own system matrix and projections shares
+    // the activity estimate; both windows enter one Poisson likelihood
+    // (Lu-177: 113 keV + 208 keV). CSRQ matrices only.
+    std::string chunkCSRDir2;              ///< Second window matrix directory
+    std::string projPath2;                 ///< Second window single-bed projection
+    std::vector<std::string> projPaths2;   ///< Second window multi-bed projections
+    std::string bProjPath2;                ///< Second window background projection
+    std::vector<std::string> bProjPaths2;  ///< Second window multi-bed background
+    /// Window weights w_k (window mean = w_k * A_k x + b_k): emission
+    /// intensity x window efficiency unless the matrices already carry it.
+    /// Required whenever chunkCSRDir2 is set; empty means single window.
+    std::vector<double> energyWindowWeights;
+    /// CSRQ device residency: "auto" keeps a matrix resident when it fits next
+    /// to the reserve and streams it otherwise; "streamed" always streams
+    /// (two device chunk slots per matrix), e.g. when the GPU is shared.
+    std::string csrqResidency = "auto";
+
+    bool dualWindow() const { return !chunkCSRDir2.empty(); }
+
     // ========== Miscellaneous ==========
     std::vector<float> voxelSizeMM = {1.0f, 1.0f, 1.0f};
     int verbosity = 1;
@@ -165,6 +185,8 @@ struct ReconArgs {
     std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     double bedStepMm = 0.0;        ///< Scanner bed step in mm (0 = use kMultiBedStepMm default 16.8)
+    bool singleBedStepAligned = true; ///< Single-bed crop follows step+blend;
+                                      ///< false keeps legacy 72 layers
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
     bool seamXyAlign = false;      ///< Align adjacent beds in XY from overlap NCC; default off

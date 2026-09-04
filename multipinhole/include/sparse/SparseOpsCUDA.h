@@ -74,8 +74,12 @@ namespace cuda {
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView>& matrices,
                                  uint64_t reserveBytes = 0);
 void noteCompactCsrLocalityCUDA(bool sortedHint);
+/// Uploads the measured projection (and, when given, its background /
+/// scatter estimate) into cacheSlot. Slots [0, kMaxBeds) belong to the CSRB
+/// path and CSRQ window 0; CSRQ window m uses slot m * kMaxBeds + bed.
 bool refreshCompactProjectionCUDA(const double* projection, size_t count,
-                                  int cacheSlot = 0);
+                                  int cacheSlot = 0,
+                                  const double* background = nullptr);
 bool refreshCompactBranchBatchInputCUDA(const float* input, size_t count);
 bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const double *globalImage, size_t globalImageCount, int globalNz,
@@ -198,6 +202,68 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
+
+// --- CSRQ matrices (CompactChunkFormat::CsrqRunU16) ------------------------
+// Each energy window's matrix is loaded once into device slot matrixIndex
+// through the incremental warmup below (chunk by chunk, so the host holds one
+// chunk at a time). The state keeps it resident when it fits next to
+// kCsrqResidentDeviceReserveBytes, otherwise streams it from pinned host
+// memory through two device chunk slots; hard failure when even that does
+// not fit. Every pass walks the chunks of one matrix chunk-outer with the
+// custom K=8 kernels. Inputs come from the same branch-batch buffer as the
+// CSRB path (refreshCompactBranchBatchInputCUDA /
+// prepareCompactBranchBatchInputFromGlobalCUDA, layout [bed][branch][voxel]);
+// outputs are added to the compact device backward accumulators
+// (compactDeviceBackwardBeginCUDA / DownloadCUDA), so several windows simply
+// accumulate into the same per-bed slot (joint multi-window MLEM).
+struct CsrqChunkShape {
+    int rows = 0;
+    uint64_t nnz = 0;
+    uint64_t runCount = 0;
+    int compactRowBase = 0;
+};
+/// Announces the matrix; *streamed reports whether it will be streamed
+/// rather than resident (forceStreamed skips the fit test). Drops whatever
+/// slot matrixIndex held.
+bool csrqWarmupBeginCUDA(int matrixIndex, int cols,
+                         const std::vector<CsrqChunkShape>& shapes,
+                         uint64_t reserveBytes, bool forceStreamed = false,
+                         bool* streamed = nullptr);
+/// Hands over one chunk (uploaded or pinned before returning).
+bool csrqWarmupChunkCUDA(int matrixIndex, size_t chunkIndex,
+                         const io::CompactRunU16View& view);
+/// Marks the matrix usable once every chunk was handed over.
+bool csrqWarmupEndCUDA(int matrixIndex);
+/// True while matrix matrixIndex is loaded (cleared by
+/// releaseCompactExecutionCUDA).
+bool csrqResidentCUDA(int matrixIndex);
+/// Forward + ratio + backward of one window for beds [0, bedCount) in one
+/// chunk-outer pass. Bed b's mean is weight * A x_b + background_b
+/// (fullBackgrounds may be null or hold null entries); the backward adds
+/// weight * A^T(p_b / mean_b) to accumulator accumulatorBase + b and caches
+/// the projection in slot cacheSlotBase + b. commonRatioParams.compactRowBase
+/// is replaced per chunk.
+bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
+                      const CompactDeviceRatioParams& commonRatioParams,
+                      const CompactDeviceTransformParams& commonTransformParams,
+                      const int* symIds, const int* zMirrors,
+                      const double* const* fullProjections,
+                      const double* const* fullBackgrounds,
+                      size_t fullProjectionCount, double weight,
+                      int accumulatorBase, int cacheSlotBase,
+                      CompactDeviceRatioTiming* ratioTiming = nullptr,
+                      CompactDeviceBackwardTiming* backwardTiming = nullptr);
+/// weight * A^T 1 over rows with a valid full projection counterpart.
+bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
+                            const CompactDeviceRatioParams& commonRatioParams,
+                            const CompactDeviceTransformParams& commonTransformParams,
+                            const int* symIds, const int* zMirrors,
+                            int accumulatorIndex,
+                            CompactDeviceBackwardTiming* backwardTiming = nullptr);
+/// Forward projection of one window over the refreshed single-bed branch
+/// batch; hostYhatPacked receives [compactRow][branch] floats (rows * 8).
+bool csrqRunForwardCUDA(int matrixIndex, int branchCount,
+                        float* hostYhatPacked, size_t count);
 }
 
 } // namespace spect

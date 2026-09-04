@@ -46,6 +46,10 @@ struct CompactSymmetricReconLoopContext {
   const io::CompactSymmetryMetadata *compactMeta = nullptr;
   const std::string *compactMetaPath = nullptr;
   const io::CompactChunkCSRDirectory *compactChunks = nullptr;
+  // Joint dual-window (optional second energy window; nullptr = single).
+  const io::CompactChunkCSRDirectory *compactChunks2 = nullptr;
+  const std::vector<double> *projections2 = nullptr;
+  const std::vector<double> *backgroundProj2 = nullptr;
   CompactExecutionTiming *timing = nullptr;
   std::chrono::steady_clock::time_point loadToIterationStart{};
   std::chrono::steady_clock::time_point fullCommandStart{};

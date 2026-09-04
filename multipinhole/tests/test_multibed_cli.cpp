@@ -118,6 +118,18 @@ TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     EXPECT_TRUE(args.xOutFlip);
 }
 
+TEST(IOTest, SingleBedStepAlignedDefaultsOnAndCanBeDisabled) {
+    spect::cli::ReconArgs defaults;
+    ASSERT_TRUE(parseReconArgsForTest(compactBaseArgs(), defaults));
+    EXPECT_TRUE(defaults.singleBedStepAligned);
+
+    spect::cli::ReconArgs disabled;
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-singleBedStepAligned", "0"});
+    ASSERT_TRUE(parseReconArgsForTest(argv, disabled));
+    EXPECT_FALSE(disabled.singleBedStepAligned);
+}
+
 TEST(IOTest, MultiBedParserAcceptsCompactChunkCtac) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
@@ -149,6 +161,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         ASSERT_TRUE(out);
         out << "[MultiBed]\n";
         out << "bed_overlap = 164\n";
+        out << "single_bed_step_aligned = false\n";
         out << "crop_end = 2,3\n";
         out << "z_bed_flip = 0\n";
         out << "z_out_flip = 1\n";
@@ -163,6 +176,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
     EXPECT_EQ(args.bedOverlaps, (std::vector<int>{164}));
+    EXPECT_FALSE(args.singleBedStepAligned);
     EXPECT_EQ(args.cropEndStart, 2);
     EXPECT_EQ(args.cropEndEnd, 3);
     EXPECT_FALSE(args.zBedFlip);

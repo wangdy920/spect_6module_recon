@@ -136,6 +136,7 @@ TEST(ReconSetupTest, PrepareBedSetupUsesFixedSingleBedRoi) {
   args.Nx = 108;
   args.Ny = 108;
   args.Nz = 80;
+  args.dz = 0.3;
   args.projPath = "Bed1.bin";
 
   const BedSetupResult result = prepareBedSetup(args);
@@ -143,6 +144,25 @@ TEST(ReconSetupTest, PrepareBedSetupUsesFixedSingleBedRoi) {
   EXPECT_EQ(result.bedCount, 1);
   EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 30.0f);
   EXPECT_FLOAT_EQ(args.cylinderHeightMM, 21.6f);
+  EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 66);
+  EXPECT_EQ(result.canonicalGeom.blendOverlap, 10);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupCanKeepLegacySingleBedCrop) {
+  ReconArgs args;
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.dz = 0.3;
+  args.projPath = "Bed1.bin";
+  args.singleBedStepAligned = false;
+
+  const BedSetupResult result = prepareBedSetup(args);
+
+  EXPECT_EQ(result.bedCount, 1);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 0);
+  EXPECT_NE(result.summary.find("legacy 72-layer"), std::string::npos);
 }
 
 TEST(ReconSetupTest, PrepareBedSetupPreservesExplicitCylinderRoi) {

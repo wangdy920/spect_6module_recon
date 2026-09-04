@@ -5,6 +5,12 @@
 
 constexpr int kCompactDeviceBackwardMaxAccumulators =
   cuda::kCompactDeviceBackwardMaxAccumulators;
+// Projection/background cache slots: one per (energy window, bed). CSRB uses
+// slots [0, kMaxBeds); CSRQ window m uses [m * kMaxBeds, (m + 1) * kMaxBeds).
+constexpr int kCsrqMaxMatrices = cuda::kCsrqMaxMatrices;
+constexpr int kCsrqStreamSlots = cuda::kCsrqStreamSlots;
+constexpr int kCompactProjectionSlots =
+  spect::core::kMaxBeds * kCsrqMaxMatrices;
 
 // Phase-B transpose experiment switch (default off; A/B measurement only).
 // The production compact transpose path stays per-RHS cusparseSpMV CSR_ALG2
@@ -348,6 +354,60 @@ inline void ensureCudaRuntimeAvailable() {
 }
 
 class SparseOpsCUDAState {
+private:
+  // CSRQ resident matrices: every chunk of every energy window lives on the
+  // device for the whole reconstruction (declared first so the method
+  // signatures below can name them).
+  struct CsrqDeviceChunk {
+    int rows = 0;
+    int compactRowBase = 0;
+    uint64_t nnz = 0;
+    uint64_t runCount = 0;
+    DeviceArray<uint32_t> dRowNnzPtr;
+    DeviceArray<uint32_t> dRowRunPtr;
+    DeviceArray<float> dRowMax;
+    DeviceArray<uint32_t> dRuns;
+    DeviceArray<uint16_t> dValuesQ;
+
+    CsrqDeviceChunkPtrs ptrs() const {
+      CsrqDeviceChunkPtrs p;
+      p.rowNnzPtr = dRowNnzPtr.get();
+      p.rowRunPtr = dRowRunPtr.get();
+      p.rowMax = dRowMax.get();
+      p.runs = dRuns.get();
+      p.valuesQ = dValuesQ.get();
+      p.rows = rows;
+      return p;
+    }
+  };
+  // Pinned host mirror of one chunk of a streamed matrix.
+  struct CsrqHostChunk {
+    PinnedHostArray<uint32_t> rowNnzPtr;
+    PinnedHostArray<uint32_t> rowRunPtr;
+    PinnedHostArray<float> rowMax;
+    PinnedHostArray<uint32_t> runs;
+    PinnedHostArray<uint16_t> valuesQ;
+  };
+  struct CsrqChunkDims {
+    size_t rows = 0;
+    size_t nnz = 0;
+    size_t runCount = 0;
+  };
+  // One energy window's matrix. Resident: chunks[i] holds chunk i. Streamed:
+  // chunks holds kCsrqStreamSlots device slots sized to the largest chunk and
+  // host[i] the pinned copy of chunk i.
+  struct CsrqResidentMatrix {
+    std::vector<std::unique_ptr<CsrqDeviceChunk>> chunks;
+    std::vector<CsrqHostChunk> host;
+    std::vector<cuda::CsrqChunkShape> shapes;
+    std::vector<bool> loaded;
+    bool streamed = false;
+    bool ready = false;
+    int cols = 0;
+    size_t totalRows = 0;
+    uint64_t bytes = 0;
+  };
+
 public:
   template <typename MatrixType>
   void executeSpMV(const MatrixType &matrix, const double *x, double *y,
@@ -1318,7 +1378,7 @@ private:
       throw std::runtime_error(
           "compact device-ratio CUDA helper received an empty projection.");
     }
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+    if (cacheSlot < 0 || cacheSlot >= kCompactProjectionSlots) {
       throw std::runtime_error("compact projection cache slot out of range.");
     }
     // The canonical host ratio divides the double measurement by a promoted
@@ -1334,6 +1394,34 @@ private:
     dProjection.copyFromHost(src, count);
     compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = src;
     compactProjectionCount_[static_cast<size_t>(cacheSlot)] = count;
+    noteCudaCompactProjectionH2D(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      uploadStart)
+            .count(),
+        count * sizeof(double));
+  }
+
+  // Same caching contract as the projection, for the per-window background
+  // (scatter estimate) the CSRQ ratio adds to the forward estimate.
+  void ensureCompactBackgroundUploaded(const double *src, size_t count,
+                                       int cacheSlot) {
+    if (src == nullptr || count == 0) {
+      throw std::runtime_error(
+          "compact device-ratio CUDA helper received an empty background.");
+    }
+    if (cacheSlot < 0 || cacheSlot >= kCompactProjectionSlots) {
+      throw std::runtime_error("compact background cache slot out of range.");
+    }
+    auto &dBackground = dCompactBackgroundInput_[static_cast<size_t>(cacheSlot)];
+    if (compactBackgroundHostKey_[static_cast<size_t>(cacheSlot)] == src &&
+        compactBackgroundCount_[static_cast<size_t>(cacheSlot)] == count &&
+        dBackground.get() != nullptr && dBackground.size() >= count) {
+      return;
+    }
+    const auto uploadStart = std::chrono::steady_clock::now();
+    dBackground.copyFromHost(src, count);
+    compactBackgroundHostKey_[static_cast<size_t>(cacheSlot)] = src;
+    compactBackgroundCount_[static_cast<size_t>(cacheSlot)] = count;
     noteCudaCompactProjectionH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       uploadStart)
@@ -2842,6 +2930,8 @@ public:
     dCompactIterationFlags_.reset();
     for (auto &projection : dCompactProjectionInput_)
       projection.reset();
+    for (auto &background : dCompactBackgroundInput_)
+      background.reset();
     for (auto &accumulator : dCompactBackwardAccum_)
       accumulator.reset();
     for (size_t bed = 0; bed < dAttenTable_.size(); ++bed) {
@@ -2850,6 +2940,7 @@ public:
       dBakedValues_[bed].reset();
     }
     dBuffer_.reset();
+    releaseCsrqResidentLocked();
 
     compactResidentImageCount_ = 0;
     compactResidentStaticCount_ = 0;
@@ -2859,6 +2950,8 @@ public:
     compactPackedKLogged_ = false;
     compactProjectionHostKey_ = {};
     compactProjectionCount_ = {};
+    compactBackgroundHostKey_ = {};
+    compactBackgroundCount_ = {};
     compactBackwardAccumSize_ = {};
     attenTableHostPtr_ = {};
     attenTableCount_ = {};
@@ -2889,16 +2982,428 @@ public:
   }
 
   void refreshCompactProjection(const double *projection, size_t count,
-                                int cacheSlot) {
+                                int cacheSlot, const double *background) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
+    if (cacheSlot < 0 || cacheSlot >= kCompactProjectionSlots) {
       throw std::runtime_error("compact projection cache slot out of range.");
     }
     // A recycled host address is not proof that a new reconstruction owns the
     // same data. Refresh once per numerator pass; inner branches still reuse it.
     compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = nullptr;
     ensureCompactFullProjectionUploaded(projection, count, cacheSlot);
+    compactBackgroundHostKey_[static_cast<size_t>(cacheSlot)] = nullptr;
+    if (background != nullptr) {
+      ensureCompactBackgroundUploaded(background, count, cacheSlot);
+    }
+  }
+
+  // ---- CSRQ matrices ---------------------------------------------------------
+  // Up to kCsrqMaxMatrices energy windows share one voxel grid (same cols);
+  // each matrix set is addressed by matrixIndex and is either resident (every
+  // chunk on the device) or streamed (pinned host copies, two device chunk
+  // slots refilled per pass). Both are walked chunk-outer by the passes below
+  // so a streamed chunk is uploaded once per pass whatever the bed count.
+
+  bool csrqResident(int matrixIndex) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return matrixIndex >= 0 &&
+           static_cast<size_t>(matrixIndex) < csrqMatrices_.size() &&
+           csrqMatrices_[static_cast<size_t>(matrixIndex)].ready;
+  }
+
+  static uint64_t csrqChunkDeviceBytes(uint64_t rows, uint64_t nnz,
+                                       uint64_t runCount) {
+    return 2ull * sizeof(uint32_t) * (rows + 1ull) + sizeof(float) * rows +
+           sizeof(uint32_t) * runCount + sizeof(uint16_t) * nnz;
+  }
+
+  // Starts loading matrix matrixIndex (dropping whatever that slot held).
+  // Decides resident vs streamed from the free device memory: resident when
+  // the whole matrix plus scratch plus reserve fits, streamed when at least
+  // two chunk slots do, error otherwise. Returns true when streamed.
+  bool beginCsrqWarmup(int matrixIndex, int cols,
+                       const std::vector<cuda::CsrqChunkShape> &shapes,
+                       uint64_t reserveBytes, bool forceStreamed) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (shapes.empty() || cols <= 0) {
+      throw std::runtime_error("CSRQ warmup received no chunks.");
+    }
+    if (matrixIndex < 0 || matrixIndex >= kCsrqMaxMatrices) {
+      throw std::runtime_error("CSRQ matrix index out of range.");
+    }
+    for (const auto &resident : csrqMatrices_) {
+      if (resident.ready && resident.cols != cols) {
+        throw std::runtime_error(
+            "CSRQ matrices must share the voxel grid (cols differ).");
+      }
+    }
+    if (csrqMatrices_.size() <= static_cast<size_t>(matrixIndex)) {
+      csrqMatrices_.resize(static_cast<size_t>(matrixIndex) + 1u);
+    }
+    CsrqResidentMatrix &target = csrqMatrices_[static_cast<size_t>(matrixIndex)];
+    target = CsrqResidentMatrix{};
+
+    uint64_t matrixBytes = 0;
+    uint64_t totalRows = 0;
+    uint64_t maxChunkBytes = 0;
+    CsrqChunkDims maxDims;
+    for (const auto &shape : shapes) {
+      if (shape.rows <= 0 || shape.compactRowBase < 0 ||
+          static_cast<uint64_t>(shape.compactRowBase) != totalRows) {
+        throw std::runtime_error(
+            "CSRQ warmup: chunks are not contiguous in compact row order.");
+      }
+      const uint64_t bytes = csrqChunkDeviceBytes(
+          static_cast<uint64_t>(shape.rows), shape.nnz, shape.runCount);
+      matrixBytes += bytes;
+      maxChunkBytes = std::max(maxChunkBytes, bytes);
+      totalRows += static_cast<uint64_t>(shape.rows);
+      maxDims.rows = std::max(maxDims.rows, static_cast<size_t>(shape.rows));
+      maxDims.nnz = std::max(maxDims.nnz, static_cast<size_t>(shape.nnz));
+      maxDims.runCount =
+          std::max(maxDims.runCount, static_cast<size_t>(shape.runCount));
+    }
+    if (totalRows > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error("CSRQ warmup: too many compact rows.");
+    }
+    const size_t nvox = static_cast<size_t>(cols);
+    const size_t ratioRows =
+        std::max(csrqMaxRowsLocked(), static_cast<size_t>(totalRows));
+    const uint64_t scratchBytes =
+        (dCsrqX_.get() == nullptr ? 2ull * nvox * kCsrqK * sizeof(float) : 0ull) +
+        (ratioRows > dCsrqRatio_.size() / kCsrqK
+             ? (ratioRows - dCsrqRatio_.size() / kCsrqK) * kCsrqK * sizeof(float)
+             : 0ull);
+    uint64_t freeBytes = 0;
+    try {
+      freeBytes = static_cast<uint64_t>(cuda::getMemoryInfo().free);
+    } catch (const std::exception &ex) {
+      throw std::runtime_error(
+          std::string("CSRQ warmup: CUDA memory query failed: ") + ex.what());
+    }
+    constexpr uint64_t kMiB = 1024ull * 1024ull;
+    const uint64_t needResident = matrixBytes + scratchBytes + reserveBytes;
+    const uint64_t needStreamed =
+        static_cast<uint64_t>(kCsrqStreamSlots) * maxChunkBytes + scratchBytes +
+        reserveBytes;
+    if (!forceStreamed && freeBytes >= needResident) {
+      target.streamed = false;
+    } else if (freeBytes >= needStreamed) {
+      target.streamed = true;
+      std::cerr << "[NOTE] CSRQ matrix " << matrixIndex << " ("
+                << (matrixBytes / kMiB) << " MiB) "
+                << (forceStreamed ? "streaming forced"
+                                  : "exceeds free device memory")
+                << " (free " << (freeBytes / kMiB) << " MiB, reserve "
+                << (reserveBytes / kMiB) << " MiB); streaming it through "
+                << kCsrqStreamSlots << " chunk slots of "
+                << (maxChunkBytes / kMiB) << " MiB from pinned host memory.\n";
+    } else {
+      throw std::runtime_error(
+          "CSRQ matrix does not fit on the device even streamed: two chunk "
+          "slots " + std::to_string(2 * maxChunkBytes / kMiB) +
+          " MiB + scratch " + std::to_string(scratchBytes / kMiB) +
+          " MiB + reserve " + std::to_string(reserveBytes / kMiB) +
+          " MiB > free " + std::to_string(freeBytes / kMiB) +
+          " MiB. Use the CSRB directory or a GPU with more memory.");
+    }
+    target.cols = cols;
+    target.totalRows = static_cast<size_t>(totalRows);
+    target.bytes = matrixBytes;
+    target.shapes = shapes;
+    if (target.streamed) {
+      target.host.resize(shapes.size());
+      for (int slot = 0; slot < kCsrqStreamSlots; ++slot) {
+        auto dev = std::make_unique<CsrqDeviceChunk>();
+        dev->dRowNnzPtr.allocate(maxDims.rows + 1u);
+        dev->dRowRunPtr.allocate(maxDims.rows + 1u);
+        dev->dRowMax.allocate(maxDims.rows);
+        dev->dRuns.allocate(maxDims.runCount);
+        dev->dValuesQ.allocate(maxDims.nnz);
+        target.chunks.push_back(std::move(dev));
+      }
+    } else {
+      target.chunks.resize(shapes.size());
+    }
+    dCsrqX_.allocate(nvox * kCsrqK);
+    dCsrqY_.allocate(nvox * kCsrqK);
+    dCsrqRatio_.allocate(ratioRows * kCsrqK);
+    target.loaded.assign(shapes.size(), false);
+    csrqWarmupStart_ = std::chrono::steady_clock::now();
+    return target.streamed;
+  }
+
+  // Uploads (resident) or pins (streamed) one chunk; the host view may be
+  // released by the caller as soon as this returns.
+  void warmupCsrqChunk(int matrixIndex, size_t chunkIndex,
+                       const io::CompactRunU16View &view) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CsrqResidentMatrix &target = csrqRequireWarmupTargetLocked(matrixIndex);
+    if (chunkIndex >= target.shapes.size()) {
+      throw std::runtime_error("CSRQ warmup chunk index out of range.");
+    }
+    const cuda::CsrqChunkShape &shape = target.shapes[chunkIndex];
+    if (!view.valid() || view.cols != target.cols || view.rows != shape.rows ||
+        view.nnz != shape.nnz || view.runCount != shape.runCount) {
+      throw std::runtime_error(
+          "CSRQ warmup chunk does not match the announced shape.");
+    }
+    const size_t ptrCount = static_cast<size_t>(view.rows) + 1u;
+    if (target.streamed) {
+      CsrqHostChunk &host = target.host[chunkIndex];
+      host.rowNnzPtr.copyFromHost(view.rowNnzPtr, ptrCount);
+      host.rowRunPtr.copyFromHost(view.rowRunPtr, ptrCount);
+      host.rowMax.copyFromHost(view.rowMax, static_cast<size_t>(view.rows));
+      host.runs.copyFromHost(view.runs, static_cast<size_t>(view.runCount));
+      host.valuesQ.copyFromHost(view.valuesQ, static_cast<size_t>(view.nnz));
+    } else {
+      auto dev = std::make_unique<CsrqDeviceChunk>();
+      dev->rows = view.rows;
+      dev->compactRowBase = shape.compactRowBase;
+      dev->nnz = view.nnz;
+      dev->runCount = view.runCount;
+      dev->dRowNnzPtr.copyFromHost(view.rowNnzPtr, ptrCount);
+      dev->dRowRunPtr.copyFromHost(view.rowRunPtr, ptrCount);
+      dev->dRowMax.copyFromHost(view.rowMax, static_cast<size_t>(view.rows));
+      dev->dRuns.copyFromHost(view.runs, static_cast<size_t>(view.runCount));
+      dev->dValuesQ.copyFromHost(view.valuesQ, static_cast<size_t>(view.nnz));
+      target.chunks[chunkIndex] = std::move(dev);
+    }
+    target.loaded[chunkIndex] = true;
+  }
+
+  void endCsrqWarmup(int matrixIndex) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CsrqResidentMatrix &target = csrqRequireWarmupTargetLocked(matrixIndex);
+    for (size_t i = 0; i < target.loaded.size(); ++i) {
+      if (!target.loaded[i]) {
+        throw std::runtime_error("CSRQ warmup ended with chunk " +
+                                 std::to_string(i) + " missing.");
+      }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    target.ready = true;
+    noteCudaCompactMatrixUpload(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      csrqWarmupStart_)
+            .count());
+    constexpr uint64_t kMiB = 1024ull * 1024ull;
+    std::cerr << "[NOTE] CSRQ matrix " << matrixIndex << ": "
+              << target.shapes.size() << " chunks, " << (target.bytes / kMiB)
+              << " MiB " << (target.streamed ? "streamed (pinned host)" : "resident")
+              << ", " << target.totalRows << " compact rows.\n";
+  }
+
+  // Forward + ratio + backward of matrix matrixIndex for beds
+  // [0, bedCount) of the refreshed branch batch ([bed][branch][voxel]),
+  // chunk-outer so a streamed chunk crosses PCIe once per pass. Bed b
+  // accumulates weight * A^T(p_b / (weight * A x_b + background_b)) into
+  // accumulator accumulatorBase + b; projection cache slot cacheSlotBase + b.
+  void csrqRunNumer(int matrixIndex, int bedCount, int branchCount,
+                    const cuda::CompactDeviceRatioParams &commonRatioParams,
+                    const cuda::CompactDeviceTransformParams &commonTransformParams,
+                    const int *symIds, const int *zMirrors,
+                    const double *const *fullProjections,
+                    const double *const *fullBackgrounds,
+                    size_t fullProjectionCount, double weight,
+                    int accumulatorBase, int cacheSlotBase,
+                    cuda::CompactDeviceRatioTiming *ratioTimingOut,
+                    cuda::CompactDeviceBackwardTiming *backwardTimingOut) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
+    const size_t nvox = static_cast<size_t>(matrix.cols);
+    if (bedCount <= 0 || bedCount > spect::core::kMaxBeds ||
+        accumulatorBase < 0 || cacheSlotBase < 0 ||
+        accumulatorBase + bedCount > kCompactDeviceBackwardMaxAccumulators ||
+        cacheSlotBase + bedCount > kCompactProjectionSlots) {
+      throw std::runtime_error("CSRQ numerator bed/slot range out of range.");
+    }
+    if (commonRatioParams.symmetryMode != 45 &&
+        commonRatioParams.symmetryMode != 90) {
+      throw std::runtime_error("CSRQ numerator requires symmetryMode 45 or 90.");
+    }
+    if (!(weight > 0.0)) {
+      throw std::runtime_error("CSRQ window weight must be positive.");
+    }
+    if (fullProjections == nullptr) {
+      throw std::runtime_error("CSRQ numerator received null projections.");
+    }
+    const size_t batchNeeded =
+        static_cast<size_t>(bedCount) * static_cast<size_t>(kCsrqK) * nvox;
+    if (dBatchInput_.get() == nullptr || compactBatchInputCount_ < batchNeeded) {
+      throw std::runtime_error(
+          "CSRQ branch-batch input was not refreshed for these beds.");
+    }
+    std::array<DeviceArray<double> *, spect::core::kMaxBeds> accums{};
+    std::array<const double *, spect::core::kMaxBeds> dProjections{};
+    std::array<const double *, spect::core::kMaxBeds> dBackgrounds{};
+    for (int bed = 0; bed < bedCount; ++bed) {
+      accums[bed] =
+          &csrqRequireAccumulatorLocked(accumulatorBase + bed, matrix.cols);
+      const int slot = cacheSlotBase + bed;
+      ensureCompactFullProjectionUploaded(fullProjections[bed],
+                                          fullProjectionCount, slot);
+      dProjections[bed] = dCompactProjectionInput_[static_cast<size_t>(slot)].get();
+      const double *background =
+          fullBackgrounds == nullptr ? nullptr : fullBackgrounds[bed];
+      if (background != nullptr) {
+        ensureCompactBackgroundUploaded(background, fullProjectionCount, slot);
+        dBackgrounds[bed] =
+            dCompactBackgroundInput_[static_cast<size_t>(slot)].get();
+      }
+    }
+    csrqEnsureBranchMetadataLocked(symIds, zMirrors);
+    ensureProjDomainKernelsLoaded();
+
+    const size_t passes = matrix.shapes.size() * static_cast<size_t>(bedCount);
+    csrqEnsureTimersLocked(passes);
+    size_t pass = 0;
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+      cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
+      ratioParams.compactRowBase = chunk.compactRowBase;
+      float *ratio = dCsrqRatio_.get() +
+                     static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      for (int bed = 0; bed < bedCount; ++bed, ++pass) {
+        const float *bedInput =
+            dBatchInput_.get() +
+            static_cast<size_t>(bed) * static_cast<size_t>(kCsrqK) * nvox;
+        launchCsrqPackBranch8Kernel(bedInput, dCsrqX_.get(), nvox);
+
+        csrqForwardTimers_[pass].recordStart(nullptr);
+        launchCsrqForwardK8Kernel(chunk.ptrs(), dCsrqX_.get(), ratio);
+        csrqForwardTimers_[pass].recordStop(nullptr);
+
+        csrqRatioTimers_[pass].recordStart(nullptr);
+        launchCsrqRatioK8Kernel(ratio, dProjections[bed], dBackgrounds[bed],
+                                fullProjectionCount, weight, ratioParams,
+                                dBatchSymIds_.get(), dBatchZMirrors_.get(),
+                                chunk.rows, 1e-10);
+        csrqRatioTimers_[pass].recordStop(nullptr);
+
+        csrqBackwardTimers_[pass].recordStart(nullptr);
+        csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+                                accums[bed]->get());
+        csrqBackwardTimers_[pass].recordStop(nullptr);
+      }
+    });
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    const double forwardSeconds = accumulateTimedCudaPairs(csrqForwardTimers_, passes);
+    const double ratioSeconds = accumulateTimedCudaPairs(csrqRatioTimers_, passes);
+    const double backwardSeconds = accumulateTimedCudaPairs(csrqBackwardTimers_, passes);
+    noteCudaCsrqForward(forwardSeconds, passes);
+    noteCudaRatio(ratioSeconds, passes);
+    noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
+    if (ratioTimingOut != nullptr) {
+      ratioTimingOut->forwardSeconds += forwardSeconds;
+      ratioTimingOut->ratioSeconds += ratioSeconds;
+      ratioTimingOut->backwardSeconds += backwardSeconds;
+    }
+    if (backwardTimingOut != nullptr) {
+      // The backward here includes the symmetry transform-add into the
+      // accumulator.
+      backwardTimingOut->backwardSeconds += backwardSeconds;
+    }
+  }
+
+  // weight * A^T 1 of matrix matrixIndex restricted to (row, branch) pairs
+  // with a full projection counterpart, added to accumulatorIndex.
+  void csrqRunSensitivity(
+      int matrixIndex, int branchCount, double weight,
+      const cuda::CompactDeviceRatioParams &commonRatioParams,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const int *symIds, const int *zMirrors, int accumulatorIndex,
+      cuda::CompactDeviceBackwardTiming *backwardTimingOut) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
+    const size_t nvox = static_cast<size_t>(matrix.cols);
+    if (commonRatioParams.symmetryMode != 45 &&
+        commonRatioParams.symmetryMode != 90) {
+      throw std::runtime_error(
+          "CSRQ sensitivity requires symmetryMode 45 or 90.");
+    }
+    if (!(weight > 0.0)) {
+      throw std::runtime_error("CSRQ window weight must be positive.");
+    }
+    DeviceArray<double> &accum =
+        csrqRequireAccumulatorLocked(accumulatorIndex, matrix.cols);
+    csrqEnsureBranchMetadataLocked(symIds, zMirrors);
+    ensureProjDomainKernelsLoaded();
+
+    const size_t passes = matrix.shapes.size();
+    csrqEnsureTimersLocked(passes);
+    size_t pass = 0;
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+      cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
+      ratioParams.compactRowBase = chunk.compactRowBase;
+      float *ratio = dCsrqRatio_.get() +
+                     static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      launchCsrqUnitRatioK8Kernel(ratio, static_cast<float>(weight), ratioParams,
+                                  dBatchSymIds_.get(), dBatchZMirrors_.get(),
+                                  chunk.rows);
+      csrqBackwardTimers_[pass].recordStart(nullptr);
+      csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+                              accum.get());
+      csrqBackwardTimers_[pass].recordStop(nullptr);
+      ++pass;
+    });
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    const double backwardSeconds = accumulateTimedCudaPairs(csrqBackwardTimers_, passes);
+    noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
+    if (backwardTimingOut != nullptr) {
+      backwardTimingOut->backwardSeconds += backwardSeconds;
+    }
+  }
+
+  // Forward projection of matrix matrixIndex over the single-bed branch
+  // batch (8 * nvox floats refreshed by refreshCompactBranchBatchInput);
+  // hostYhatPacked receives [compactRow][branch] for every compact row.
+  void csrqRunForward(int matrixIndex, int branchCount, float *hostYhatPacked,
+                      size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
+    const size_t nvox = static_cast<size_t>(matrix.cols);
+    if (hostYhatPacked == nullptr ||
+        count != matrix.totalRows * static_cast<size_t>(kCsrqK)) {
+      throw std::runtime_error(
+          "CSRQ forward output must hold compactRows * 8 floats.");
+    }
+    if (dBatchInput_.get() == nullptr ||
+        compactBatchInputCount_ != static_cast<size_t>(kCsrqK) * nvox) {
+      throw std::runtime_error(
+          "CSRQ forward requires a refreshed single-bed branch batch input.");
+    }
+    ensureProjDomainKernelsLoaded();
+    launchCsrqPackBranch8Kernel(dBatchInput_.get(), dCsrqX_.get(), nvox);
+
+    const size_t passes = matrix.shapes.size();
+    csrqEnsureTimersLocked(passes);
+    size_t pass = 0;
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+      csrqForwardTimers_[pass].recordStart(nullptr);
+      launchCsrqForwardK8Kernel(
+          chunk.ptrs(), dCsrqX_.get(),
+          dCsrqRatio_.get() + static_cast<size_t>(chunk.compactRowBase) * kCsrqK);
+      csrqForwardTimers_[pass].recordStop(nullptr);
+      ++pass;
+    });
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    noteCudaCsrqForward(accumulateTimedCudaPairs(csrqForwardTimers_, passes),
+                        passes);
+
+    const auto outputStart = std::chrono::steady_clock::now();
+    dCsrqRatio_.copyToHost(hostYhatPacked, count);
+    noteCudaCompactOutputD2H(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      outputStart)
+            .count(),
+        count * sizeof(float), false);
   }
 
   void prefetchCompactFloatMatrix(const io::CSRView &next,
@@ -3909,6 +4414,202 @@ private:
     return static_cast<size_t>(accumulatorIndex);
   }
 
+  void releaseCsrqResidentLocked() {
+    csrqMatrices_.clear();
+    dCsrqX_.reset();
+    dCsrqY_.reset();
+    dCsrqRatio_.reset();
+    csrqForwardTimers_.clear();
+    csrqRatioTimers_.clear();
+    csrqBackwardTimers_.clear();
+    for (auto &used : csrqSlotUsed_) {
+      used = false;
+    }
+  }
+
+  size_t csrqMaxRowsLocked() const {
+    size_t rows = 0;
+    for (const auto &matrix : csrqMatrices_) {
+      rows = std::max(rows, matrix.totalRows);
+    }
+    return rows;
+  }
+
+  CsrqResidentMatrix &csrqRequireWarmupTargetLocked(int matrixIndex) {
+    if (matrixIndex < 0 ||
+        static_cast<size_t>(matrixIndex) >= csrqMatrices_.size() ||
+        csrqMatrices_[static_cast<size_t>(matrixIndex)].shapes.empty()) {
+      throw std::runtime_error("CSRQ warmup was not started for matrix " +
+                               std::to_string(matrixIndex) + ".");
+    }
+    return csrqMatrices_[static_cast<size_t>(matrixIndex)];
+  }
+
+  // The CSRQ kernels are compiled for exactly kCsrqK = 8 right-hand sides
+  // (4 xy symmetries x 2 z branches).
+  CsrqResidentMatrix &csrqRequireReadyLocked(int matrixIndex, int branchCount) {
+    if (matrixIndex < 0 ||
+        static_cast<size_t>(matrixIndex) >= csrqMatrices_.size() ||
+        !csrqMatrices_[static_cast<size_t>(matrixIndex)].ready ||
+        dCsrqX_.get() == nullptr) {
+      throw std::runtime_error(
+          "CSRQ matrix " + std::to_string(matrixIndex) +
+          " is not loaded on the device (warmup missing).");
+    }
+    if (branchCount != kCsrqK) {
+      throw std::runtime_error(
+          "CSRQ kernels require exactly " + std::to_string(kCsrqK) +
+          " symmetry branches, got " + std::to_string(branchCount) + ".");
+    }
+    return csrqMatrices_[static_cast<size_t>(matrixIndex)];
+  }
+
+  static constexpr size_t csrqBackwardPassCount() {
+    return static_cast<size_t>(
+        (kCsrqK + kCsrqBackwardBranchesPerPass - 1) / kCsrqBackwardBranchesPerPass);
+  }
+
+  void csrqEnsureTimersLocked(size_t passes) {
+    auto grow = [passes](std::vector<TimedCudaStagePair> &timers) {
+      while (timers.size() < passes) {
+        timers.emplace_back();
+      }
+    };
+    grow(csrqForwardTimers_);
+    grow(csrqRatioTimers_);
+    grow(csrqBackwardTimers_);
+  }
+
+  // A^T of one chunk added into accum (unrotated frame): scatter into the
+  // branch-major dCsrqY_ ([8][nvox]) a few branches per pass so the atomic
+  // target stays L2-resident, then the symmetry transform-add kernel. (A
+  // shared-memory slice-tile variant was measured 2x slower on sm_89 — no
+  // native fp32 shared atomics; see reports/attachments/2026-09-04-*.)
+  void csrqBackwardChunkLocked(const CsrqDeviceChunk &chunk, const float *ratio,
+                               size_t nvox,
+                               const cuda::CompactDeviceTransformParams &tp,
+                               double *accum) {
+    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
+                               nullptr));
+    for (int kFirst = 0; kFirst < kCsrqK;
+         kFirst += kCsrqBackwardBranchesPerPass) {
+      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
+      launchCsrqBackwardK8Kernel(chunk.ptrs(), ratio, dCsrqY_.get(), nvox,
+                                 kFirst, kCount);
+    }
+    launchCompactTransformBackwardAddBatchKernel(
+        dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
+        dBatchZMirrors_.get());
+  }
+
+  // Visits every chunk of a matrix in compact row order on the default
+  // stream. Resident chunks are handed over directly; streamed chunks are
+  // copied from their pinned host mirror into one of kCsrqStreamSlots device
+  // slots on the upload stream, double-buffered: the copy of chunk c+1 runs
+  // while chunk c computes, and a slot is refilled only after the default
+  // stream has finished reading it.
+  template <typename Fn>
+  void csrqForEachChunkLocked(CsrqResidentMatrix &matrix, Fn &&fn) {
+    if (!matrix.streamed) {
+      for (size_t chunkIndex = 0; chunkIndex < matrix.chunks.size(); ++chunkIndex) {
+        fn(*matrix.chunks[chunkIndex], chunkIndex);
+      }
+      return;
+    }
+    cudaStream_t upload = csrqUploadStream_.get();
+    auto enqueueUpload = [&](size_t chunkIndex) {
+      const int slot = static_cast<int>(chunkIndex % kCsrqStreamSlots);
+      if (csrqSlotUsed_[slot]) {
+        CUDA_CHECK(cudaStreamWaitEvent(upload, csrqSlotFree_[slot].get(), 0));
+      }
+      const CsrqHostChunk &host = matrix.host[chunkIndex];
+      const cuda::CsrqChunkShape &shape = matrix.shapes[chunkIndex];
+      CsrqDeviceChunk &dev = *matrix.chunks[slot];
+      const size_t ptrCount = static_cast<size_t>(shape.rows) + 1u;
+      dev.dRowNnzPtr.copyFromHostAsync(host.rowNnzPtr.data(), ptrCount, upload);
+      dev.dRowRunPtr.copyFromHostAsync(host.rowRunPtr.data(), ptrCount, upload);
+      dev.dRowMax.copyFromHostAsync(host.rowMax.data(),
+                                    static_cast<size_t>(shape.rows), upload);
+      dev.dRuns.copyFromHostAsync(host.runs.data(),
+                                  static_cast<size_t>(shape.runCount), upload);
+      dev.dValuesQ.copyFromHostAsync(host.valuesQ.data(),
+                                     static_cast<size_t>(shape.nnz), upload);
+      csrqUploadReady_[slot].record(upload);
+      csrqSlotUsed_[slot] = true;
+    };
+    const size_t chunkCount = matrix.shapes.size();
+    enqueueUpload(0);
+    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+      const int slot = static_cast<int>(chunkIndex % kCsrqStreamSlots);
+      if (chunkIndex + 1 < chunkCount) {
+        enqueueUpload(chunkIndex + 1);
+      }
+      CsrqDeviceChunk &dev = *matrix.chunks[slot];
+      const cuda::CsrqChunkShape &shape = matrix.shapes[chunkIndex];
+      dev.rows = shape.rows;
+      dev.compactRowBase = shape.compactRowBase;
+      dev.nnz = shape.nnz;
+      dev.runCount = shape.runCount;
+      csrqUploadReady_[slot].wait(nullptr);
+      fn(dev, chunkIndex);
+      csrqSlotFree_[slot].record(nullptr);
+    }
+  }
+
+  DeviceArray<double> &csrqRequireAccumulatorLocked(int accumulatorIndex,
+                                                    int cols) {
+    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
+    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
+    if (accum.get() == nullptr ||
+        compactBackwardAccumSize_[slot] != static_cast<size_t>(cols)) {
+      throw std::runtime_error(
+          "CSRQ backward accumulator was not initialized for this matrix.");
+    }
+    return accum;
+  }
+
+  static size_t csrqBackwardLaunchCountLocked(const CsrqResidentMatrix &matrix) {
+    constexpr int passes =
+        (kCsrqK + kCsrqBackwardBranchesPerPass - 1) / kCsrqBackwardBranchesPerPass;
+    return matrix.chunks.size() * static_cast<size_t>(passes);
+  }
+
+  // A^T over every chunk of one matrix: dCsrqRatio_ ([compactRow][8])
+  // scatters into the branch-major dCsrqY_ ([8][nvox]), a few branches per
+  // matrix pass so the atomic target stays L2-resident.
+  void csrqBackwardAllChunksLocked(const CsrqResidentMatrix &matrix,
+                                   size_t nvox) {
+    for (int kFirst = 0; kFirst < kCsrqK;
+         kFirst += kCsrqBackwardBranchesPerPass) {
+      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
+      for (const auto &chunk : matrix.chunks) {
+        launchCsrqBackwardK8Kernel(
+            chunk->ptrs(),
+            dCsrqRatio_.get() +
+                static_cast<size_t>(chunk->compactRowBase) * kCsrqK,
+            dCsrqY_.get(), nvox, kFirst, kCount);
+      }
+    }
+  }
+
+  void csrqEnsureBranchMetadataLocked(const int *symIds, const int *zMirrors) {
+    if (symIds == nullptr || zMirrors == nullptr) {
+      throw std::runtime_error("CSRQ branch symmetry tables are null.");
+    }
+    const size_t count = static_cast<size_t>(kCsrqK);
+    const bool changed =
+        batchSymIdsHost_.size() != count || batchZMirrorsHost_.size() != count ||
+        !std::equal(batchSymIdsHost_.begin(), batchSymIdsHost_.end(), symIds) ||
+        !std::equal(batchZMirrorsHost_.begin(), batchZMirrorsHost_.end(),
+                    zMirrors);
+    if (changed) {
+      dBatchSymIds_.copyFromHost(symIds, count);
+      dBatchZMirrors_.copyFromHost(zMirrors, count);
+      batchSymIdsHost_.assign(symIds, symIds + count);
+      batchZMirrorsHost_.assign(zMirrors, zMirrors + count);
+    }
+  }
+
   CuSparseHandleGuard handle_;
   CachedMatrix cache_;
   std::array<CachedMatrix, 4> subsetCache_;
@@ -3939,7 +4640,7 @@ private:
   DeviceArray<float> dInput_;
   DeviceArray<float> dOutput_;
   DeviceArray<float> dProjectionInput_;
-  std::array<DeviceArray<double>, spect::core::kMaxBeds>
+  std::array<DeviceArray<double>, kCompactProjectionSlots>
       dCompactProjectionInput_;
   DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
@@ -3972,10 +4673,36 @@ private:
   std::array<DeviceArray<double>, kCompactDeviceBackwardMaxAccumulators>
       dCompactBackwardAccum_;
   std::vector<float> hostFloatScratch_;
-  std::array<const double *, spect::core::kMaxBeds> compactProjectionHostKey_{};
-  std::array<size_t, spect::core::kMaxBeds> compactProjectionCount_{};
+  std::array<const double *, kCompactProjectionSlots> compactProjectionHostKey_{};
+  std::array<size_t, kCompactProjectionSlots> compactProjectionCount_{};
+  // Per-window background (scatter estimate) next to each projection slot;
+  // only the CSRQ ratio kernel consumes it.
+  std::array<DeviceArray<double>, kCompactProjectionSlots>
+      dCompactBackgroundInput_;
+  std::array<const double *, kCompactProjectionSlots> compactBackgroundHostKey_{};
+  std::array<size_t, kCompactProjectionSlots> compactBackgroundCount_{};
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
+  // CSRQ scratch shared by all resident matrices: dCsrqX_ is the [voxel][8]
+  // packed forward input, dCsrqY_ the branch-major [8][voxel] backward
+  // output, and dCsrqRatio_ the [compactRow][8] forward/ratio buffer sized
+  // for the largest matrix (3.3 MB at 103680 rows), so forward/ratio/backward
+  // run as three whole-matrix stages instead of interleaving per chunk.
+  std::vector<CsrqResidentMatrix> csrqMatrices_;
+  DeviceArray<float> dCsrqX_;
+  DeviceArray<float> dCsrqY_;
+  DeviceArray<float> dCsrqRatio_;
+  // Streaming: upload stream plus per-slot ready/free events (shared by all
+  // streamed matrices; passes run one matrix at a time).
+  CudaStreamGuard csrqUploadStream_;
+  std::array<CudaEventGuard, kCsrqStreamSlots> csrqUploadReady_;
+  std::array<CudaEventGuard, kCsrqStreamSlots> csrqSlotFree_;
+  std::array<bool, kCsrqStreamSlots> csrqSlotUsed_{};
+  // Per-(chunk, bed) stage timers reused across passes.
+  std::vector<TimedCudaStagePair> csrqForwardTimers_;
+  std::vector<TimedCudaStagePair> csrqRatioTimers_;
+  std::vector<TimedCudaStagePair> csrqBackwardTimers_;
+  std::chrono::steady_clock::time_point csrqWarmupStart_{};
   DeviceBuffer dBuffer_;
   // Compact CTAC: resident attenuation table plus explicit debug/reference
   // baked-values scratch. Default CTAC uses fused kernels above.

@@ -337,6 +337,13 @@ void writeRunManifest(const RunManifestInput &input) {
   json.integer("full_angles", meta.fullNumAngles);
   json.integer("det_nx", meta.detNx);
   json.integer("det_nz", meta.detNz);
+  if (args.dualWindow()) {
+    // Joint dual-window MLEM (MB-JR): second matrix + per-window weights.
+    json.string("chunk_csr_dir2", args.chunkCSRDir2);
+    json.numberVector("energy_window_weights", args.energyWindowWeights);
+    json.string("multi_window_model", "joint_likelihood_mb_jr");
+  }
+  json.string("csrq_residency", args.csrqResidency);
   json.endObject();
 
   json.beginObject("execution");
@@ -357,6 +364,17 @@ void writeRunManifest(const RunManifestInput &input) {
     }
   } else {
     json.string("1", args.projPath);
+  }
+  if (args.dualWindow()) {
+    const std::vector<std::string> window2 =
+        args.projPaths2.empty() ? std::vector<std::string>{args.projPath2}
+                                : args.projPaths2;
+    json.stringVector("window2_files", window2);
+    std::vector<std::string> background2 = args.bProjPaths2;
+    if (background2.empty() && !args.bProjPath2.empty())
+      background2 = {args.bProjPath2};
+    if (!background2.empty())
+      json.stringVector("window2_background_files", background2);
   }
   json.boolean("merge_time_segments", args.mergeTimeSegments);
   if (args.mergeTimeSegments && !args.projectionSourceGroups.empty()) {
@@ -445,6 +463,7 @@ void writeRunManifest(const RunManifestInput &input) {
   json.number("bed_step_mm",
               args.bedStepMm > 0.0 ? args.bedStepMm
                                    : spect::core::sixmodule::kMultiBedStepMm);
+  json.boolean("single_bed_step_aligned", args.singleBedStepAligned);
   json.integer("overlap_layers", transform.canonicalGeom.blendOverlap);
   json.numberVector("fitted_bed_gains", fittedGains);
   json.string("gain_fit_method", "adjacent_overlap_log_median_mad");

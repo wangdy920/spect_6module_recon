@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +34,19 @@ namespace {
 constexpr uint32_t kChunkCSRMagic = 0x42525343u;
 constexpr uint32_t kChunkCSRVersion1 = 1u;
 constexpr uint64_t kChunkHeaderBytes = 28ull;
+
+// CSRQ header layout is frozen in tools/convert_csrb_to_csrq.py.
+constexpr uint32_t kChunkCSRQMagic = 0x51525343u;
+constexpr uint32_t kChunkCSRQVersion1 = 1u;
+constexpr uint64_t kChunkCSRQHeaderBytes = 48ull;
+constexpr uint32_t kChunkCSRQValueEncodingU16Sqrt = 1u;
+
+uint64_t csrqValuesPadBytes(uint64_t nnz) { return (4ull - (2ull * nnz) % 4ull) % 4ull; }
+
+uint64_t csrqExpectedFileSize(uint64_t rows, uint64_t nnz, uint64_t runCount) {
+  return kChunkCSRQHeaderBytes + 12ull * rows + 8ull + 2ull * nnz +
+         csrqValuesPadBytes(nnz) + 4ull * runCount;
+}
 
 enum class ChunkColIdxValidationMode { Off, Sample, Strict };
 
@@ -103,6 +117,11 @@ bool endsWith(const std::string &text, const std::string &suffix) {
 bool isChunkCSRFile(const std::filesystem::path &path) {
   const std::string name = lowerString(path.filename().string());
   return startsWith(name, "chunk_") && endsWith(name, ".csrb");
+}
+
+bool isChunkCSRQFile(const std::filesystem::path &path) {
+  const std::string name = lowerString(path.filename().string());
+  return startsWith(name, "chunk_") && endsWith(name, ".csrq");
 }
 
 uint64_t fileSize(const std::filesystem::path &path) {
@@ -381,6 +400,75 @@ CompactChunkCSRInfo readChunkHeader(const std::filesystem::path &path) {
   return info;
 }
 
+CompactChunkCSRInfo readChunkCSRQHeader(const std::filesystem::path &path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    throw std::runtime_error("Cannot open compact chunk CSRQ: " + path.string());
+
+  uint32_t magic = 0;
+  uint32_t version = 0;
+  int32_t rows = 0;
+  int32_t angleOffset = 0;
+  int32_t angleCount = 0;
+  int32_t cols = 0;
+  uint64_t nnz = 0;
+  uint64_t runCount = 0;
+  uint32_t runLenBits = 0;
+  uint32_t valueEncoding = 0;
+  readScalar(in, magic, "csrq magic");
+  readScalar(in, version, "csrq version");
+  readScalar(in, rows, "csrq rows");
+  readScalar(in, angleOffset, "csrq angle_offset");
+  readScalar(in, angleCount, "csrq angle_count");
+  readScalar(in, cols, "csrq cols");
+  readScalar(in, nnz, "csrq nnz");
+  readScalar(in, runCount, "csrq run_count");
+  readScalar(in, runLenBits, "csrq run_len_bits");
+  readScalar(in, valueEncoding, "csrq value_encoding");
+
+  if (magic != kChunkCSRQMagic)
+    throw std::runtime_error("Invalid chunk CSRQ magic in " + path.string());
+  if (version != kChunkCSRQVersion1)
+    throw std::runtime_error("Unsupported chunk CSRQ version in " + path.string());
+  if (runLenBits != static_cast<uint32_t>(kCompactRunLenBits) ||
+      valueEncoding != kChunkCSRQValueEncodingU16Sqrt) {
+    std::ostringstream oss;
+    oss << "Unsupported CSRQ encoding in " << path.string()
+        << ": run_len_bits=" << runLenBits << " value_encoding=" << valueEncoding
+        << " (expected " << kCompactRunLenBits << " / "
+        << kChunkCSRQValueEncodingU16Sqrt << ")";
+    throw std::runtime_error(oss.str());
+  }
+  if (rows <= 0 || angleOffset < 0 || angleCount <= 0 || cols <= 0)
+    throw std::runtime_error("Invalid chunk CSRQ dimensions in " + path.string());
+  if (nnz > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+      runCount > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    throw std::runtime_error("Chunk CSRQ nnz/run_count exceed the u32 row "
+                             "pointer range in " + path.string());
+  }
+  const uint64_t expectedSize =
+      csrqExpectedFileSize(static_cast<uint64_t>(rows), nnz, runCount);
+  const uint64_t actualSize = fileSize(path);
+  if (actualSize != expectedSize) {
+    std::ostringstream oss;
+    oss << "Chunk CSRQ size mismatch for " << path.string() << ": file="
+        << actualSize << ", expected=" << expectedSize;
+    throw std::runtime_error(oss.str());
+  }
+
+  CompactChunkCSRInfo info;
+  info.path = path;
+  info.format = CompactChunkFormat::CsrqRunU16;
+  info.version = version;
+  info.rows = rows;
+  info.angleOffset = angleOffset;
+  info.angleCount = angleCount;
+  info.nnz = nnz;
+  info.runCount = runCount;
+  info.fileSizeBytes = actualSize;
+  return info;
+}
+
 std::vector<CompactChunkCSRInfo>
 discoverChunkInfos(const std::filesystem::path &directory) {
   if (!std::filesystem::is_directory(directory)) {
@@ -389,10 +477,23 @@ discoverChunkInfos(const std::filesystem::path &directory) {
   }
 
   std::vector<CompactChunkCSRInfo> infos;
+  size_t csrbCount = 0;
+  size_t csrqCount = 0;
   for (const auto &entry : std::filesystem::directory_iterator(directory)) {
-    if (entry.is_regular_file() && isChunkCSRFile(entry.path())) {
+    if (!entry.is_regular_file())
+      continue;
+    if (isChunkCSRFile(entry.path())) {
       infos.push_back(readChunkHeader(entry.path()));
+      ++csrbCount;
+    } else if (isChunkCSRQFile(entry.path())) {
+      infos.push_back(readChunkCSRQHeader(entry.path()));
+      ++csrqCount;
     }
+  }
+  if (csrbCount > 0 && csrqCount > 0) {
+    throw std::runtime_error(
+        "Compact chunk directory mixes chunk_*.csrb and chunk_*.csrq files: " +
+        directory.string());
   }
   std::sort(infos.begin(), infos.end(), [](const auto &a, const auto &b) {
     if (a.angleOffset != b.angleOffset)
@@ -400,7 +501,7 @@ discoverChunkInfos(const std::filesystem::path &directory) {
     return a.path.filename().string() < b.path.filename().string();
   });
   if (infos.empty()) {
-    throw std::runtime_error("No chunk_*.csrb files found in " +
+    throw std::runtime_error("No chunk_*.csrb or chunk_*.csrq files found in " +
                              directory.string());
   }
   return infos;
@@ -531,7 +632,95 @@ CompactChunkCSRData loadChunkDataMapped(const CompactChunkCSRInfo &info,
   return data;
 }
 
+void loadChunkPtr32(const CompactChunkCSRInfo &info, std::istream &in,
+                    uint64_t expectedEnd, const char *label,
+                    std::vector<uint32_t> &ptr) {
+  ptr.resize(static_cast<size_t>(info.rows) + 1u);
+  readExact(in, ptr.data(), ptr.size(), label);
+  if (ptr.front() != 0 || ptr.back() != expectedEnd) {
+    throw std::runtime_error(std::string("Invalid ") + label +
+                             " endpoints in " + info.path.string());
+  }
+  for (size_t i = 1; i < ptr.size(); ++i) {
+    if (ptr[i] < ptr[i - 1]) {
+      throw std::runtime_error(std::string("Non-monotonic ") + label + " in " +
+                               info.path.string());
+    }
+  }
+}
+
+// Full structural validation: every run stays inside [0, cols), run lengths
+// sum to the row nnz, and runs never overlap or go backwards within a row.
+// This walks ~nnz/15 words once per load; the cost is negligible next to
+// reading the chunk.
+void validateChunkRuns(const CompactChunkCSRInfo &info,
+                       const CompactChunkCSRData &data) {
+  const uint32_t cols = static_cast<uint32_t>(data.cols);
+  for (int row = 0; row < info.rows; ++row) {
+    const size_t r = static_cast<size_t>(row);
+    uint64_t total = 0;
+    uint64_t prevEnd = 0;
+    for (uint32_t j = data.rowRunPtr[r]; j < data.rowRunPtr[r + 1]; ++j) {
+      const uint32_t word = data.runs[j];
+      const uint32_t start = word >> kCompactRunLenBits;
+      const uint32_t len = (word & (kCompactRunMaxLen - 1u)) + 1u;
+      if (start < prevEnd || static_cast<uint64_t>(start) + len > cols) {
+        std::ostringstream oss;
+        oss << "Chunk CSRQ run out of range/order in " << info.path.string()
+            << " row " << row << " run " << j << ": start=" << start
+            << " len=" << len << " cols=" << cols;
+        throw std::runtime_error(oss.str());
+      }
+      prevEnd = static_cast<uint64_t>(start) + len;
+      total += len;
+    }
+    if (total != static_cast<uint64_t>(data.rowPtr[r + 1] - data.rowPtr[r])) {
+      std::ostringstream oss;
+      oss << "Chunk CSRQ run lengths (" << total << ") do not match row nnz ("
+          << (data.rowPtr[r + 1] - data.rowPtr[r]) << ") in "
+          << info.path.string() << " row " << row;
+      throw std::runtime_error(oss.str());
+    }
+  }
+}
+
+CompactChunkCSRData loadChunkDataCSRQ(const CompactChunkCSRInfo &info,
+                                      int cols) {
+  std::ifstream in(info.path, std::ios::binary);
+  if (!in)
+    throw std::runtime_error("Cannot open compact chunk CSRQ: " +
+                             info.path.string());
+  in.seekg(static_cast<std::streamoff>(kChunkCSRQHeaderBytes), std::ios::beg);
+  if (!in)
+    throw std::runtime_error("Failed to seek CSRQ payload: " + info.path.string());
+
+  CompactChunkCSRData data;
+  data.info = info;
+  data.cols = cols;
+  loadChunkPtr32(info, in, info.nnz, "csrq row_nnz_ptr", data.rowPtr);
+  loadChunkPtr32(info, in, info.runCount, "csrq row_run_ptr", data.rowRunPtr);
+  data.rowMax.resize(static_cast<size_t>(info.rows));
+  readExact(in, data.rowMax.data(), data.rowMax.size(), "csrq row_max");
+  data.valuesQ.resize(static_cast<size_t>(info.nnz));
+  readExact(in, data.valuesQ.data(), data.valuesQ.size(), "csrq values");
+  in.seekg(static_cast<std::streamoff>(csrqValuesPadBytes(info.nnz)),
+           std::ios::cur);
+  data.runs.resize(static_cast<size_t>(info.runCount));
+  readExact(in, data.runs.data(), data.runs.size(), "csrq runs");
+  for (size_t r = 0; r < data.rowMax.size(); ++r) {
+    if (!(data.rowMax[r] >= 0.0f) || !std::isfinite(data.rowMax[r])) {
+      throw std::runtime_error("Chunk CSRQ row_max is negative or non-finite in " +
+                               info.path.string());
+    }
+  }
+  validateChunkRuns(info, data);
+  return data;
+}
+
 CompactChunkCSRData loadChunkData(const CompactChunkCSRInfo &info, int cols) {
+  if (info.format == CompactChunkFormat::CsrqRunU16) {
+    return loadChunkDataCSRQ(info, cols);
+  }
   if (!shouldMapChunkPayload(info)) {
     return loadChunkDataCopied(info, cols);
   }
@@ -548,6 +737,10 @@ CompactChunkCSRData loadChunkData(const CompactChunkCSRInfo &info, int cols) {
 } // namespace
 
 CSRView CompactChunkCSRData::view() const {
+  if (info.format != CompactChunkFormat::CsrbFloat32) {
+    throw std::runtime_error(
+        "CSRQ compact chunk has no float CSR view: " + info.path.string());
+  }
   CSRView out;
   out.rows = info.rows;
   out.cols = cols;
@@ -555,6 +748,24 @@ CSRView CompactChunkCSRData::view() const {
   out.col_idx = colIdxData();
   out.val = valuesData();
   out.nnz = static_cast<uint64_t>(valuesCount());
+  return out;
+}
+
+CompactRunU16View CompactChunkCSRData::runView() const {
+  if (info.format != CompactChunkFormat::CsrqRunU16) {
+    throw std::runtime_error(
+        "CSRB compact chunk has no run-encoded view: " + info.path.string());
+  }
+  CompactRunU16View out;
+  out.rows = info.rows;
+  out.cols = cols;
+  out.nnz = info.nnz;
+  out.runCount = info.runCount;
+  out.rowNnzPtr = rowPtr.data();
+  out.rowRunPtr = rowRunPtr.data();
+  out.rowMax = rowMax.data();
+  out.runs = runs.data();
+  out.valuesQ = valuesQ.data();
   return out;
 }
 
@@ -567,7 +778,11 @@ uint64_t CompactChunkCSRData::residentBytes() const {
   }
   return rowPtrBytes +
          static_cast<uint64_t>(colIdx.size()) * sizeof(uint32_t) +
-         static_cast<uint64_t>(values.size()) * sizeof(float);
+         static_cast<uint64_t>(values.size()) * sizeof(float) +
+         static_cast<uint64_t>(rowRunPtr.size()) * sizeof(uint32_t) +
+         static_cast<uint64_t>(rowMax.size()) * sizeof(float) +
+         static_cast<uint64_t>(runs.size()) * sizeof(uint32_t) +
+         static_cast<uint64_t>(valuesQ.size()) * sizeof(uint16_t);
 }
 
 const uint32_t *CompactChunkCSRData::colIdxData() const {
@@ -659,9 +874,15 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
                       ? std::numeric_limits<uint64_t>::max()
                       : matrixBytes + info.fileSizeBytes;
   }
+  // CSRQ chunks are uploaded once to a GPU-resident copy and never re-read,
+  // so the host cache would only pin the matrix in RAM for the whole run.
+  const bool csrq = !infos.empty() &&
+                    infos.front().format == CompactChunkFormat::CsrqRunU16;
   const SystemMemoryInfo memory = querySystemMemoryInfo();
-  const uint64_t automaticBudget = recommendCompactChunkHostCacheBudgetBytes(
-      matrixBytes, memory.totalBytes, memory.availableBytes);
+  const uint64_t automaticBudget =
+      csrq ? 0ull
+           : recommendCompactChunkHostCacheBudgetBytes(
+                 matrixBytes, memory.totalBytes, memory.availableBytes);
   const char *overrideValue =
       std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES");
   const uint64_t cacheBudget =

@@ -85,11 +85,12 @@ void noteCompactCsrLocalityCUDA(bool sortedHint) {
 }
 
 bool refreshCompactProjectionCUDA(const double *projection, size_t count,
-                                  int cacheSlot) {
+                                  int cacheSlot, const double *background) {
   if (!isCudaAvailable()) {
     return false;
   }
-  cudaState().refreshCompactProjection(projection, count, cacheSlot);
+  cudaState().refreshCompactProjection(projection, count, cacheSlot,
+                                       background);
   return true;
 }
 
@@ -328,6 +329,91 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
   return true;
 }
 
+bool csrqWarmupBeginCUDA(int matrixIndex, int cols,
+                         const std::vector<CsrqChunkShape> &shapes,
+                         uint64_t reserveBytes, bool forceStreamed,
+                         bool *streamed) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  const bool isStreamed = cudaState().beginCsrqWarmup(
+      matrixIndex, cols, shapes, reserveBytes, forceStreamed);
+  if (streamed != nullptr) {
+    *streamed = isStreamed;
+  }
+  return true;
+}
+
+bool csrqWarmupChunkCUDA(int matrixIndex, size_t chunkIndex,
+                         const io::CompactRunU16View &view) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().warmupCsrqChunk(matrixIndex, chunkIndex, view);
+  return true;
+}
+
+bool csrqWarmupEndCUDA(int matrixIndex) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().endCsrqWarmup(matrixIndex);
+  return true;
+}
+
+bool csrqResidentCUDA(int matrixIndex) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  return cudaState().csrqResident(matrixIndex);
+}
+
+bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
+                      const CompactDeviceRatioParams &commonRatioParams,
+                      const CompactDeviceTransformParams &commonTransformParams,
+                      const int *symIds, const int *zMirrors,
+                      const double *const *fullProjections,
+                      const double *const *fullBackgrounds,
+                      size_t fullProjectionCount, double weight,
+                      int accumulatorBase, int cacheSlotBase,
+                      CompactDeviceRatioTiming *ratioTiming,
+                      CompactDeviceBackwardTiming *backwardTiming) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().csrqRunNumer(matrixIndex, bedCount, branchCount,
+                           commonRatioParams, commonTransformParams, symIds,
+                           zMirrors, fullProjections, fullBackgrounds,
+                           fullProjectionCount, weight, accumulatorBase,
+                           cacheSlotBase, ratioTiming, backwardTiming);
+  return true;
+}
+
+bool csrqRunSensitivityCUDA(
+    int matrixIndex, int branchCount, double weight,
+    const CompactDeviceRatioParams &commonRatioParams,
+    const CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int accumulatorIndex,
+    CompactDeviceBackwardTiming *backwardTiming) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().csrqRunSensitivity(matrixIndex, branchCount, weight,
+                                 commonRatioParams, commonTransformParams,
+                                 symIds, zMirrors, accumulatorIndex,
+                                 backwardTiming);
+  return true;
+}
+
+bool csrqRunForwardCUDA(int matrixIndex, int branchCount,
+                        float *hostYhatPacked, size_t count) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().csrqRunForward(matrixIndex, branchCount, hostYhatPacked, count);
+  return true;
+}
+
 
 void resetCudaChunkStageTimingCUDA() { g_cudaChunkStageTiming = {}; }
 
@@ -402,6 +488,10 @@ CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
   snapshot.compactBackwardOutputD2HBytes =
       g_cudaChunkStageTiming.compactBackwardOutputD2HBytes;
   snapshot.deviceCacheHitCalls = g_cudaChunkStageTiming.deviceCacheHitCalls;
+  snapshot.csrqForwardSeconds = g_cudaChunkStageTiming.csrqForwardSeconds;
+  snapshot.csrqBackwardSeconds = g_cudaChunkStageTiming.csrqBackwardSeconds;
+  snapshot.csrqForwardCalls = g_cudaChunkStageTiming.csrqForwardCalls;
+  snapshot.csrqBackwardCalls = g_cudaChunkStageTiming.csrqBackwardCalls;
   return snapshot;
 }
 
@@ -430,7 +520,8 @@ bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &,
   return false;
 }
 
-bool refreshCompactProjectionCUDA(const double *, size_t, int) {
+bool refreshCompactProjectionCUDA(const double *, size_t, int,
+                                  const double *) {
   return false;
 }
 
@@ -485,6 +576,37 @@ bool compactAttenSpmvTFloatCUDA(const io::CSRView &, const uint16_t *, size_t,
                                 const float *, float *) {
   return false;
 }
+
+bool csrqWarmupBeginCUDA(int, int, const std::vector<CsrqChunkShape> &,
+                         uint64_t, bool, bool *) {
+  return false;
+}
+
+bool csrqWarmupChunkCUDA(int, size_t, const io::CompactRunU16View &) {
+  return false;
+}
+
+bool csrqWarmupEndCUDA(int) { return false; }
+
+bool csrqResidentCUDA(int) { return false; }
+
+bool csrqRunNumerCUDA(int, int, int, const CompactDeviceRatioParams &,
+                      const CompactDeviceTransformParams &, const int *,
+                      const int *, const double *const *,
+                      const double *const *, size_t, double, int, int,
+                      CompactDeviceRatioTiming *,
+                      CompactDeviceBackwardTiming *) {
+  return false;
+}
+
+bool csrqRunSensitivityCUDA(int, int, double,
+                            const CompactDeviceRatioParams &,
+                            const CompactDeviceTransformParams &, const int *,
+                            const int *, int, CompactDeviceBackwardTiming *) {
+  return false;
+}
+
+bool csrqRunForwardCUDA(int, int, float *, size_t) { return false; }
 
 void resetCudaChunkStageTimingCUDA() {}
 

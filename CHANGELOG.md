@@ -8,6 +8,34 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Experimental (CSRB stays the production path): joint dual-window MLEM
+  (MB-JR, Phys. Med. Biol. 2025 doi 10.1088/1361-6560/ae2ce0) on the CSRQ
+  path: `-chunkCSRDir2` + `-df2/-dfList2`
+  (+ `-bProj2/-bProjList2`) + `-energyWeights w1,w2` add a second energy
+  window with its own system matrix and projections to one Poisson likelihood
+  (Lu-177 113 + 208 keV). Up to two CSRQ matrices are loaded; each stays
+  resident when it fits next to the 2 GiB reserve and is otherwise streamed
+  from pinned host memory through two device chunk slots once per iteration
+  (`-csrqResidency auto|streamed`), so the 9.0 + 6.2 GiB Lu-177 pair runs on
+  a 16 GB card. The CSRQ ratio gained a window scale and per-window
+  background; the denominator cache identity and run manifest record the
+  second matrix, weights and residency. The CSRQ backward now scatters
+  branch-major, two branches per pass (150 ms per 120x120x220 matrix pass,
+  from 715 ms).
+- Experimental: new GPU-resident compact matrix format `chunk_*.csrq` (run-length sorted
+  columns + u16 sqrt-companded values, 2.2 B/nnz; Tc99m 24.3 GiB → 6.74 GiB),
+  produced offline by `tools/convert_csrb_to_csrq.py` from the canonical CSRB.
+  `-chunkCSRDir` accepts either format (never mixed). CSRQ uploads the whole
+  matrix once and runs custom K=8 forward/ratio/backward fatbin kernels
+  (`cuda.csrq_fwd` / `cuda.csrq_bwd`); no CTAC or background projection on
+  this path, hard failure when the matrix plus a 2 GiB reserve does not fit in
+  VRAM. Frozen Derenzo MLEM it200 image relL2 vs fp32 CSRB `1.5e-6`, five-bed
+  mouse it50 `6.2e-7`; `iteration_core_s` 0.25 s/iter single-bed and
+  1.13 s/iter five-bed on the 120×120×220 matrix (CSRB 2.6 / 2.87 s).
+- Single-bed output now defaults to the same `bed_step + 10` center crop used
+  by each multi-bed segment (`66` layers at `16.8/0.3 mm`); use
+  `-singleBedStepAligned 0` or `[MultiBed] single_bed_step_aligned=false` for
+  the legacy fixed 72-layer output.
 - BSREM gains production diagnostics and step control: `-bsremDiag` /
   `-bsremDiagInterval` write per-iteration Poisson objective, projected
   gradient and clamp/step quantiles to `iteration_metrics.csv`;

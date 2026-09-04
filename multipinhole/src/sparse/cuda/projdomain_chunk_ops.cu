@@ -1,6 +1,21 @@
 // Device-only helper kernels. Compiled with nvcc --fatbin for sm_86/89/120.
 static constexpr float kAttenUint16Scale = 65535.0f;
 
+// CSRQ resident-matrix kernels (io/CompactChunkCSR.h, CompactChunkFormat::
+// CsrqRunU16). One block per compact row, 256 threads. Runs are consumed in
+// tiles of 256; each tile is expanded in shared memory to a per-nnz run id so
+// threads stride over nnz (coalesced u16 value loads, contiguous x within a
+// run). K = 8 right-hand sides (4 xy symmetries x 2 z branches). The forward
+// gathers x as [voxel][8] floats (one 32-byte sector per nnz); the backward
+// scatters into branch-major [8][voxel] so warp atomics coalesce.
+#define CSRQ_K 8
+#define CSRQ_BLOCK 256
+#define CSRQ_RUN_LEN_BITS 6
+#define CSRQ_MAX_RUN_LEN 64
+#define CSRQ_RUN_TILE 256
+#define CSRQ_TILE_MAX_NNZ (CSRQ_RUN_TILE * CSRQ_MAX_RUN_LEN)
+static constexpr float kCsrqInvQScale = 1.0f / 65535.0f;
+
 extern "C" __device__ __forceinline__ int mirror_index(int idx, int size) {
   if (size <= 1) {
     return 0;
@@ -909,3 +924,353 @@ extern "C" __global__ void compact_csr_spmv_xquad(const float *values,
   }
 }
 
+// ---------------------------------------------------------------------------
+// CSRQ kernels
+// ---------------------------------------------------------------------------
+
+struct CsrqTile {
+  unsigned int start[CSRQ_RUN_TILE];       // first column of each run
+  unsigned short off[CSRQ_RUN_TILE];       // nnz offset of each run in the tile
+  unsigned char runId[CSRQ_TILE_MAX_NNZ];  // run index for every nnz in the tile
+  unsigned int warpSums[CSRQ_BLOCK / 32];
+};
+
+// Exclusive scan over the 256 block threads; returns this thread's prefix and
+// broadcasts the block total. Callers must __syncthreads() before reusing
+// warpSums (the tile loop ends with a barrier).
+__device__ __forceinline__ unsigned int csrq_block_exclusive_scan(
+    unsigned int value, unsigned int *warpSums, unsigned int *total) {
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
+  unsigned int inclusive = value;
+  for (int offset = 1; offset < 32; offset <<= 1) {
+    const unsigned int n = __shfl_up_sync(0xffffffffu, inclusive, offset);
+    if (lane >= offset) inclusive += n;
+  }
+  if (lane == 31) warpSums[warp] = inclusive;
+  __syncthreads();
+  if (warp == 0) {
+    unsigned int w = lane < (CSRQ_BLOCK / 32) ? warpSums[lane] : 0u;
+    for (int offset = 1; offset < (CSRQ_BLOCK / 32); offset <<= 1) {
+      const unsigned int n = __shfl_up_sync(0xffffffffu, w, offset);
+      if (lane >= offset) w += n;
+    }
+    if (lane < (CSRQ_BLOCK / 32)) warpSums[lane] = w;
+  }
+  __syncthreads();
+  const unsigned int warpPrefix = warp == 0 ? 0u : warpSums[warp - 1];
+  *total = warpSums[(CSRQ_BLOCK / 32) - 1];
+  return warpPrefix + inclusive - value;
+}
+
+// Loads up to 256 run words starting at tileBase, scans their lengths and
+// expands the per-nnz run id table. Returns the tile nnz count.
+__device__ __forceinline__ unsigned int csrq_load_tile(
+    const unsigned int *runs, unsigned int tileBase, unsigned int tileRuns,
+    CsrqTile &s) {
+  unsigned int len = 0;
+  unsigned int start = 0;
+  if (threadIdx.x < tileRuns) {
+    const unsigned int word = runs[tileBase + threadIdx.x];
+    len = (word & (CSRQ_MAX_RUN_LEN - 1u)) + 1u;
+    start = word >> CSRQ_RUN_LEN_BITS;
+  }
+  unsigned int total = 0;
+  const unsigned int off = csrq_block_exclusive_scan(len, s.warpSums, &total);
+  if (threadIdx.x < tileRuns) {
+    s.start[threadIdx.x] = start;
+    s.off[threadIdx.x] = static_cast<unsigned short>(off);
+    for (unsigned int k = 0; k < len; ++k) {
+      s.runId[off + k] = static_cast<unsigned char>(threadIdx.x);
+    }
+  }
+  __syncthreads();
+  return total;
+}
+
+// yPacked[row*8 + k] = sum_t v_t * xPacked[col_t*8 + k]. Value decode matches
+// tools/convert_csrb_to_csrq.py dequantize_u16_sqrt bit for bit (fp32).
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
+    const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
+    const float *rowMax, const unsigned int *runs,
+    const unsigned short *valuesQ, const float4 *xPacked, float *yPacked,
+    int rows) {
+  __shared__ CsrqTile s;
+  __shared__ float sRed[CSRQ_BLOCK / 32][CSRQ_K];
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const unsigned int runBegin = rowRunPtr[row];
+  const unsigned int runEnd = rowRunPtr[row + 1];
+  unsigned int valBase = rowNnzPtr[row];
+  const float m = rowMax[row];
+  float acc[CSRQ_K];
+#pragma unroll
+  for (int k = 0; k < CSRQ_K; ++k) acc[k] = 0.0f;
+
+  for (unsigned int tileBase = runBegin; tileBase < runEnd;
+       tileBase += CSRQ_RUN_TILE) {
+    const unsigned int tileRuns = min(static_cast<unsigned int>(CSRQ_RUN_TILE),
+                                      runEnd - tileBase);
+    const unsigned int tileNnz = csrq_load_tile(runs, tileBase, tileRuns, s);
+    for (unsigned int p = threadIdx.x; p < tileNnz; p += CSRQ_BLOCK) {
+      const unsigned int j = s.runId[p];
+      const unsigned int col = s.start[j] + (p - s.off[j]);
+      const float t = static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
+      const float v = m * (t * t);
+      const float4 x0 = xPacked[2u * col];
+      const float4 x1 = xPacked[2u * col + 1u];
+      acc[0] = fmaf(v, x0.x, acc[0]);
+      acc[1] = fmaf(v, x0.y, acc[1]);
+      acc[2] = fmaf(v, x0.z, acc[2]);
+      acc[3] = fmaf(v, x0.w, acc[3]);
+      acc[4] = fmaf(v, x1.x, acc[4]);
+      acc[5] = fmaf(v, x1.y, acc[5]);
+      acc[6] = fmaf(v, x1.z, acc[6]);
+      acc[7] = fmaf(v, x1.w, acc[7]);
+    }
+    valBase += tileNnz;
+    __syncthreads();
+  }
+
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
+#pragma unroll
+  for (int k = 0; k < CSRQ_K; ++k) {
+    float v = acc[k];
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      v += __shfl_down_sync(0xffffffffu, v, offset);
+    }
+    if (lane == 0) sRed[warp][k] = v;
+  }
+  __syncthreads();
+  if (threadIdx.x < CSRQ_K) {
+    float sum = 0.0f;
+    for (int w = 0; w < CSRQ_BLOCK / 32; ++w) sum += sRed[w][threadIdx.x];
+    yPacked[static_cast<size_t>(row) * CSRQ_K + threadIdx.x] = sum;
+  }
+}
+
+// yBranch[k*nvox + col] += sum_rows v_t * ratioPacked[row*8 + k] (atomic
+// float) for k in [kFirst, kFirst + kCount). The output is branch-major
+// ([8][nvox], the layout compact_transform_backward_add_batch consumes) on
+// purpose: for one k the 32 lanes of a warp hit 32 consecutive floats, so the
+// L2 coalesces each warp atomic into four 32-byte sectors instead of 32
+// scattered ones as a [nvox][8] layout would. The branch subset lets the
+// caller keep the touched output (kCount * nvox floats) inside L2; re-reading
+// the matrix per pass is cheap next to the atomic traffic. Rows whose
+// selected ratios are all zero (no valid full projection index, or a masked
+// row) are skipped entirely.
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
+    const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
+    const float *rowMax, const unsigned int *runs,
+    const unsigned short *valuesQ, const float4 *ratioPacked, float *yBranch,
+    unsigned long long nvox, int rows, int kFirst, int kCount) {
+  __shared__ CsrqTile s;
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const float4 r0 = ratioPacked[2 * row];
+  const float4 r1 = ratioPacked[2 * row + 1];
+  const float r[CSRQ_K] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w};
+  const int kEnd = kFirst + kCount;
+  // Selected ratios into registers (a runtime index into r[] would spill to
+  // local memory); the two-branch pass is the production configuration.
+  float ra = 0.0f;
+  float rb = 0.0f;
+  const bool twoBranch = kCount == 2;
+  if (twoBranch) {
+    switch (kFirst) {
+    case 0: ra = r0.x; rb = r0.y; break;
+    case 2: ra = r0.z; rb = r0.w; break;
+    case 4: ra = r1.x; rb = r1.y; break;
+    case 6: ra = r1.z; rb = r1.w; break;
+    default: ra = 0.0f; rb = 0.0f; break;
+    }
+    if (ra == 0.0f && rb == 0.0f) {
+      return;
+    }
+  } else {
+    bool anyNonZero = false;
+#pragma unroll
+    for (int k = 0; k < CSRQ_K; ++k) {
+      anyNonZero = anyNonZero || (k >= kFirst && k < kEnd && r[k] != 0.0f);
+    }
+    if (!anyNonZero) {
+      return;
+    }
+  }
+  const unsigned int runBegin = rowRunPtr[row];
+  const unsigned int runEnd = rowRunPtr[row + 1];
+  unsigned int valBase = rowNnzPtr[row];
+  const float m = rowMax[row];
+  float *dstA = yBranch + static_cast<unsigned long long>(kFirst) * nvox;
+  float *dstB = dstA + nvox;
+
+  for (unsigned int tileBase = runBegin; tileBase < runEnd;
+       tileBase += CSRQ_RUN_TILE) {
+    const unsigned int tileRuns = min(static_cast<unsigned int>(CSRQ_RUN_TILE),
+                                      runEnd - tileBase);
+    const unsigned int tileNnz = csrq_load_tile(runs, tileBase, tileRuns, s);
+    if (twoBranch) {
+      for (unsigned int p = threadIdx.x; p < tileNnz; p += CSRQ_BLOCK) {
+        const unsigned int j = s.runId[p];
+        const unsigned int col = s.start[j] + (p - s.off[j]);
+        const float t =
+            static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
+        const float v = m * (t * t);
+        atomicAdd(dstA + col, v * ra);
+        atomicAdd(dstB + col, v * rb);
+      }
+    } else {
+      for (unsigned int p = threadIdx.x; p < tileNnz; p += CSRQ_BLOCK) {
+        const unsigned int j = s.runId[p];
+        const unsigned int col = s.start[j] + (p - s.off[j]);
+        const float t =
+            static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
+        const float v = m * (t * t);
+        float *dst = yBranch + col;
+#pragma unroll
+        for (int k = 0; k < CSRQ_K; ++k) {
+          if (k >= kFirst && k < kEnd) {
+            atomicAdd(dst + static_cast<unsigned long long>(k) * nvox,
+                      v * r[k]);
+          }
+        }
+      }
+    }
+    valBase += tileNnz;
+    __syncthreads();
+  }
+}
+
+// [8][nvox] branch-major input (one bed of the branch batch) -> [nvox][8].
+extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
+                                             float4 *packed,
+                                             unsigned long long nvox) {
+  const unsigned long long v =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (v >= nvox) {
+    return;
+  }
+  packed[2 * v] = make_float4(branchMajor[v], branchMajor[nvox + v],
+                              branchMajor[2 * nvox + v],
+                              branchMajor[3 * nvox + v]);
+  packed[2 * v + 1] = make_float4(branchMajor[4 * nvox + v],
+                                  branchMajor[5 * nvox + v],
+                                  branchMajor[6 * nvox + v],
+                                  branchMajor[7 * nvox + v]);
+}
+
+// Same row -> full projection mapping as compute_compact_ratio_chunk_batch.
+__device__ __forceinline__ int csrq_full_projection_index(
+    int compactRow, int symmetryMode, int compactRaysPerAngle,
+    int compactNumAngles, int detNx, int detNz, int compactDetZ,
+    int fullNumAngles, int fullRaysPerAngle, int symId, int zMirror,
+    unsigned long long *fullIndex) {
+  const int compactAngle = compactRow / compactRaysPerAngle;
+  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  const int ix = rr % detNx;
+  const int izCompact = rr / detNx;
+  int fullAngle = 0;
+  if (symmetryMode == 45) {
+    const int q = fullNumAngles / 8;
+    if ((symId & 1) == 0) {
+      if (compactAngle >= q) return 0;
+      fullAngle = symId * q + compactAngle;
+    } else {
+      if (compactAngle <= 0) return 0;
+      fullAngle = symId * q + (q - compactAngle);
+    }
+  } else {
+    if (compactAngle < 0 || compactAngle >= compactNumAngles) return 0;
+    fullAngle = compactAngle + symId * compactNumAngles;
+  }
+  int izFull = izCompact;
+  if (zMirror != 0) {
+    izFull = detNz - 1 - izCompact;
+    if (izFull < compactDetZ) return 0;
+  }
+  if (fullAngle < 0 || fullAngle >= fullNumAngles || izFull < 0 ||
+      izFull >= detNz) {
+    return 0;
+  }
+  *fullIndex = static_cast<unsigned long long>(fullAngle) *
+                   static_cast<unsigned long long>(fullRaysPerAngle) +
+               static_cast<unsigned long long>(izFull) *
+                   static_cast<unsigned long long>(detNx) +
+               static_cast<unsigned long long>(ix);
+  return 1;
+}
+
+// In place: yhatPacked[row*8 + b] ->
+//   scale * projection[fullIndex] / max(scale * yhat + background, eps),
+// 0 where the (row, branch) has no full projection counterpart. scale is the
+// window weight of a joint multi-window MLEM (mean = scale * A x + background);
+// with scale = 1 and no background this is the plain MLEM ratio.
+extern "C" __global__ void csrq_ratio_k8(
+    float *yhatPacked, const double *fullProjection,
+    const double *fullBackground, unsigned long long fullProjectionCount,
+    double scale, int symmetryMode, int compactRowBase,
+    int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
+    int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
+    const int *symIds, const int *zMirrors, int rows, double eps) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      static_cast<unsigned long long>(rows) * CSRQ_K;
+  if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
+    return;
+  }
+  const int row = static_cast<int>(index / CSRQ_K);
+  const int b = static_cast<int>(index % CSRQ_K);
+  unsigned long long fullIndex = 0;
+  if (!csrq_full_projection_index(compactRowBase + row, symmetryMode,
+                                  compactRaysPerAngle, compactNumAngles, detNx,
+                                  detNz, compactDetZ, fullNumAngles,
+                                  fullRaysPerAngle, symIds[b], zMirrors[b],
+                                  &fullIndex) ||
+      fullIndex >= fullProjectionCount) {
+    yhatPacked[index] = 0.0f;
+    return;
+  }
+  double denom = scale * static_cast<double>(yhatPacked[index]);
+  if (fullBackground != nullptr) {
+    denom += fullBackground[fullIndex];
+  }
+  if (denom < eps) {
+    denom = eps;
+  }
+  yhatPacked[index] =
+      static_cast<float>(scale * fullProjection[fullIndex] / denom);
+}
+
+// ratioPacked[row*8 + b] = value where the (row, branch) maps to a full
+// projection row, else 0: the sensitivity value * A^T 1 over valid rows only
+// (value is the window weight of a joint multi-window MLEM, 1 otherwise).
+extern "C" __global__ void csrq_unit_ratio_k8(
+    float *ratioPacked, float value, int symmetryMode, int compactRowBase,
+    int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
+    int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
+    const int *symIds, const int *zMirrors, int rows) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      static_cast<unsigned long long>(rows) * CSRQ_K;
+  if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
+    return;
+  }
+  const int row = static_cast<int>(index / CSRQ_K);
+  const int b = static_cast<int>(index % CSRQ_K);
+  unsigned long long fullIndex = 0;
+  ratioPacked[index] =
+      csrq_full_projection_index(compactRowBase + row, symmetryMode,
+                                 compactRaysPerAngle, compactNumAngles, detNx,
+                                 detNz, compactDetZ, fullNumAngles,
+                                 fullRaysPerAngle, symIds[b], zMirrors[b],
+                                 &fullIndex)
+          ? value
+          : 0.0f;
+}

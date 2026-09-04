@@ -35,6 +35,19 @@ constexpr uint64_t kPreparedChunkHostCacheEffectiveAvailableDenominator = 3ull;
 constexpr uint64_t kCompactChunkHostCacheFallbackBytes = 26ull * kCudaGiB;
 constexpr uint64_t kCompactChunkHostCacheMinReserveBytes = 8ull * kCudaGiB;
 constexpr uint64_t kCompactChunkResidentDeviceReserveBytes = 6ull * kCudaGiB;
+// CSRQ keeps the whole matrix resident and runs custom kernels; its working
+// set is the [bed][branch][voxel] batch input plus two [voxel][8] scratch
+// vectors, accumulators and volumes (~1 GiB at 120x120x220, 5 beds), so the
+// reserve only needs to cover those and the PSF/regularizer volume helpers.
+constexpr uint64_t kCsrqResidentDeviceReserveBytes = 2ull * kCudaGiB;
+// Energy windows (system matrices) that may be resident at once for joint
+// multi-window MLEM (Lu-177: 113 keV + 208 keV).
+constexpr int kCsrqMaxMatrices = 2;
+// CSRQ kernels process exactly this many right-hand sides (4 xy symmetries x
+// 2 z branches) and a streamed matrix double-buffers through this many
+// device chunk slots.
+constexpr int kCsrqBranchCount = 8;
+constexpr int kCsrqStreamSlots = 2;
 constexpr uint64_t kDeviceChunkCacheReserveBytes = 2ull * 3ull * kCudaGiB;
 
 constexpr size_t kTransientRangeSlotCount = 2;

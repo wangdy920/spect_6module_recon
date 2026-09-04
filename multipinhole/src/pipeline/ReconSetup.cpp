@@ -210,10 +210,25 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   }
 
   const int joints = std::max(0, result.bedCount - 1);
+  const double voxelSizeZ =
+      args.dz > 0.0 ? args.dz : static_cast<double>(args.Vz);
+  const double stepMm =
+      args.bedStepMm > 0.0 ? args.bedStepMm
+                           : spect::core::sixmodule::kMultiBedStepMm;
+  const int expectedStep = voxelSizeZ > 0.0
+      ? static_cast<int>(std::llround(stepMm / voxelSizeZ))
+      : 0;
+  const int expectedOverlap = result.baseNz - expectedStep;
   if (joints == 0) {
+    if (args.singleBedStepAligned) {
+      result.canonicalGeom = computeCanonicalOutputGeometry(
+          result.baseNz, {expectedOverlap}, voxelSizeZ, args.bedStepMm);
+    }
     args.bedOverlaps.clear();
     args.outputBedOverlaps.clear();
-    result.summary = "Single-bed reconstruction";
+    result.summary = args.singleBedStepAligned
+        ? "Single-bed reconstruction: output crop follows bed step"
+        : "Single-bed reconstruction: legacy 72-layer output crop";
     return result;
   }
 
@@ -238,20 +253,12 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     );
   }
 
-  const double voxelSizeZ =
-      args.dz > 0.0 ? args.dz : static_cast<double>(args.Vz);
   // The bed overlap is a derived quantity: baseNz - step, where
   // step = round(bed_step_mm / voxel_z) and bed_step_mm (CLI -bedStepMm /
   // INI [MultiBed] bed_step_mm, default 16.8 mm) is the authoritative
   // scanner property. When the user omits -bedOverlap the fixed table is all
   // zeros; when it is wrong it disagrees with the derived step. In both
   // cases we re-derive the overlap from the scanner step.
-  const double stepMm =
-      args.bedStepMm > 0.0 ? args.bedStepMm
-                           : spect::core::sixmodule::kMultiBedStepMm;
-  const int expectedStep =
-      static_cast<int>(std::llround(stepMm / voxelSizeZ));
-  const int expectedOverlap = result.baseNz - expectedStep;
   if (expectedOverlap <= 0 || expectedOverlap >= result.baseNz) {
     throw std::runtime_error(
         "Scanner bed step " + std::to_string(stepMm) +

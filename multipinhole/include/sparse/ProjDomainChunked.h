@@ -54,6 +54,11 @@ struct CudaChunkStageTimingSnapshot {
   uint64_t compactBackwardOutputD2HBytes = 0;
   // P3-D: device-side chunk cache hit counter
   size_t deviceCacheHitCalls = 0;
+  // CSRQ resident-matrix custom kernels (per chunk pass).
+  double csrqForwardSeconds = 0.0;
+  double csrqBackwardSeconds = 0.0;
+  size_t csrqForwardCalls = 0;
+  size_t csrqBackwardCalls = 0;
 };
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)

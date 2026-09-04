@@ -8,6 +8,7 @@
 #include "sparse/SparseOpsCUDA.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -434,6 +435,338 @@ void warmCompactChunkResidentDeviceCache(
   chunks.setAcceleratorLease(lease);
 }
 
+// CSRQ (CompactChunkFormat::CsrqRunU16): the whole matrix is handed to the
+// device once per chunk directory into matrix slot matrixIndex (resident, or
+// streamed from pinned host memory when it does not fit).
+struct CsrqResidentLease {
+  bool complete = false;
+  int matrixIndex = 0;
+};
+
+std::atomic<bool> g_csrqForceStreaming{false};
+
+bool isCsrqDirectory(const spect::io::CompactChunkCSRDirectory &chunks) {
+  return chunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
+}
+
+// Device bytes of one CSRQ chunk (row pointers, run pointers, row max, run
+// words, u16 values); mirrors the state's estimate.
+uint64_t csrqChunkDeviceBytes(const spect::io::CompactChunkCSRInfo &info) {
+  const uint64_t rows = static_cast<uint64_t>(info.rows);
+  return 2ull * sizeof(uint32_t) * (rows + 1ull) + sizeof(float) * rows +
+         sizeof(uint32_t) * info.runCount + sizeof(uint16_t) * info.nnz;
+}
+
+void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
+                      int matrixIndex, bool forceStreamed) {
+  static std::mutex warmupMutex;
+  std::lock_guard<std::mutex> lock(warmupMutex);
+  auto lease = std::static_pointer_cast<CsrqResidentLease>(
+      chunks.acceleratorLease());
+  if (lease && lease->complete && lease->matrixIndex == matrixIndex &&
+      csrqResidentCUDA(matrixIndex)) {
+    return;
+  }
+  // Chunks are validated contiguous in angle order by the directory loader,
+  // so the compact row base is the running row count. Shapes come from the
+  // headers; chunk payloads are loaded one at a time and dropped right after
+  // the state took them (uploaded or pinned), so the host holds one chunk.
+  std::vector<CsrqChunkShape> shapes;
+  shapes.reserve(chunks.chunks().size());
+  int compactRowBase = 0;
+  for (const auto &info : chunks.chunks()) {
+    CsrqChunkShape shape;
+    shape.rows = info.rows;
+    shape.nnz = info.nnz;
+    shape.runCount = info.runCount;
+    shape.compactRowBase = compactRowBase;
+    compactRowBase += info.rows;
+    shapes.push_back(shape);
+  }
+  bool streamed = false;
+  if (!csrqWarmupBeginCUDA(matrixIndex, chunks.cols(), shapes,
+                           kCsrqResidentDeviceReserveBytes,
+                           forceStreamed || g_csrqForceStreaming.load(),
+                           &streamed)) {
+    throw std::runtime_error(
+        "CSRQ compact matrix requires the CUDA sparse backend.");
+  }
+  for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
+    const auto chunk = chunks.loadChunk(chunkIndex);
+    if (!csrqWarmupChunkCUDA(matrixIndex, chunkIndex, chunk->runView())) {
+      throw std::runtime_error(
+          "CSRQ compact matrix requires the CUDA sparse backend.");
+    }
+  }
+  if (!csrqWarmupEndCUDA(matrixIndex)) {
+    throw std::runtime_error(
+        "CSRQ compact matrix requires the CUDA sparse backend.");
+  }
+  lease = std::make_shared<CsrqResidentLease>();
+  lease->complete = true;
+  lease->matrixIndex = matrixIndex;
+  chunks.setAcceleratorLease(lease);
+}
+
+int csrqAssignedSlot(const spect::io::CompactChunkCSRDirectory &chunks) {
+  auto lease = std::static_pointer_cast<CsrqResidentLease>(
+      chunks.acceleratorLease());
+  return (lease && lease->complete) ? lease->matrixIndex : -1;
+}
+
+bool sameDirectory(const spect::io::CompactChunkCSRDirectory &a,
+                   const spect::io::CompactChunkCSRDirectory &b) {
+  if (&a == &b) {
+    return true;
+  }
+  std::error_code ec;
+  return std::filesystem::equivalent(a.directory(), b.directory(), ec);
+}
+
+// First device slot that is neither claimed by a channel in this set nor
+// still holding another matrix. A slot is never reassigned while occupied:
+// a second window silently replacing window 0's matrix would corrupt the
+// joint likelihood, so exhaustion is a hard error.
+int csrqFreeSlot(const std::vector<int> &claimed) {
+  for (int slot = 0; slot < kCsrqMaxMatrices; ++slot) {
+    const bool taken =
+        std::find(claimed.begin(), claimed.end(), slot) != claimed.end() ||
+        csrqResidentCUDA(slot);
+    if (!taken) {
+      return slot;
+    }
+  }
+  throw std::runtime_error(
+      "no free CSRQ device matrix slot: at most " +
+      std::to_string(kCsrqMaxMatrices) +
+      " distinct matrices can be resident (release the previous "
+      "reconstruction first).");
+}
+
+// Device matrix slot of a CSRQ directory used outside a channel set (forward
+// projection, single-window callers): keeps an existing lease, otherwise
+// warms the matrix into a free slot (resident when it fits, else streamed).
+int csrqMatrixIndexOf(const spect::io::CompactChunkCSRDirectory &chunks) {
+  int slot = csrqAssignedSlot(chunks);
+  if (slot < 0 || !csrqResidentCUDA(slot)) {
+    slot = slot >= 0 ? slot : csrqFreeSlot({});
+    warmCsrqResident(chunks, slot, false);
+  }
+  return slot;
+}
+
+// Residency plan for a channel set that is not loaded yet: the matrices that
+// still have to be loaded are placed largest first, each kept resident only
+// if the remaining ones can still get their two streaming slots; whatever
+// does not fit is streamed (PCIe cost grows with the streamed bytes, so the
+// small matrix streams first). Aliased channels share one decision.
+std::vector<bool> planCsrqStreaming(
+    const std::vector<CompactMatrixChannel> &channels,
+    const std::vector<int> &slots) {
+  std::vector<bool> streamed(channels.size(), false);
+  struct Pending {
+    size_t channel = 0;
+    uint64_t bytes = 0;
+    uint64_t twoSlots = 0;
+  };
+  std::vector<Pending> pending;
+  uint64_t nvox = 0;
+  uint64_t maxRows = 0;
+  for (size_t index = 0; index < channels.size(); ++index) {
+    const auto &chunks = *channels[index].chunks;
+    if (!isCsrqDirectory(chunks) || csrqResidentCUDA(slots[index])) {
+      continue;
+    }
+    bool seen = false;
+    for (const auto &p : pending) {
+      seen = seen || slots[p.channel] == slots[index];
+    }
+    if (seen) {
+      continue;
+    }
+    Pending p;
+    p.channel = index;
+    uint64_t largest = 0;
+    for (const auto &info : chunks.chunks()) {
+      const uint64_t bytes = csrqChunkDeviceBytes(info);
+      p.bytes += bytes;
+      largest = std::max(largest, bytes);
+    }
+    p.twoSlots = static_cast<uint64_t>(kCsrqStreamSlots) * largest;
+    pending.push_back(p);
+    nvox = std::max<uint64_t>(nvox, static_cast<uint64_t>(chunks.cols()));
+    maxRows = std::max<uint64_t>(maxRows, chunks.totalRows());
+  }
+  if (pending.size() < 2) {
+    return streamed; // the state decides alone for a single matrix
+  }
+  std::sort(pending.begin(), pending.end(),
+            [](const Pending &a, const Pending &b) { return a.bytes > b.bytes; });
+  uint64_t freeBytes = 0;
+  try {
+    freeBytes = static_cast<uint64_t>(cuda::getMemoryInfo().free);
+  } catch (...) {
+    return streamed;
+  }
+  const uint64_t scratch = 2ull * nvox * kCsrqBranchCount * sizeof(float) +
+                           maxRows * kCsrqBranchCount * sizeof(float);
+  const uint64_t fixed = kCsrqResidentDeviceReserveBytes + scratch;
+  uint64_t budget = freeBytes > fixed ? freeBytes - fixed : 0ull;
+  constexpr uint64_t kMiB = 1024ull * 1024ull;
+  std::cerr << "[NOTE] CSRQ residency plan for " << pending.size()
+            << " matrices: free " << (freeBytes / kMiB) << " MiB, reserve+scratch "
+            << (fixed / kMiB) << " MiB;";
+  for (size_t i = 0; i < pending.size(); ++i) {
+    uint64_t othersMinimum = 0;
+    for (size_t j = i + 1; j < pending.size(); ++j) {
+      othersMinimum += pending[j].twoSlots;
+    }
+    const bool resident = pending[i].bytes + othersMinimum <= budget;
+    budget -= std::min(budget, resident ? pending[i].bytes : pending[i].twoSlots);
+    std::cerr << " matrix " << slots[pending[i].channel] << " ("
+              << (pending[i].bytes / kMiB) << " MiB) "
+              << (resident ? "resident" : "streamed") << ';';
+    if (!resident) {
+      for (size_t index = 0; index < channels.size(); ++index) {
+        if (slots[index] == slots[pending[i].channel]) {
+          streamed[index] = true;
+        }
+      }
+    }
+  }
+  std::cerr << '\n';
+  return streamed;
+}
+
+bool isCsrqChannelSet(const std::vector<CompactMatrixChannel> &channels) {
+  return !channels.empty() && isCsrqDirectory(*channels.front().chunks);
+}
+
+// Shape/format rules shared by every channel-aware entry point.
+void validateChannels(const std::vector<CompactMatrixChannel> &channels,
+                      const spect::io::CompactSymmetryMetadata &meta,
+                      const char *what) {
+  if (channels.empty() || channels.size() > static_cast<size_t>(kCsrqMaxMatrices)) {
+    throw std::runtime_error(std::string("compact ") + what + " needs 1.." +
+                             std::to_string(kCsrqMaxMatrices) +
+                             " matrix channels.");
+  }
+  for (const auto &channel : channels) {
+    if (channel.chunks == nullptr) {
+      throw std::runtime_error(std::string("compact ") + what +
+                               " received a null matrix channel.");
+    }
+    if (channel.chunks->totalRows() !=
+            static_cast<uint64_t>(meta.compactRows()) ||
+        channel.chunks->cols() != meta.totalVoxels) {
+      throw std::runtime_error(std::string("compact ") + what +
+                               " matrix/metadata mismatch.");
+    }
+    if (!(channel.weight > 0.0)) {
+      throw std::runtime_error(std::string("compact ") + what +
+                               " channel weight must be positive.");
+    }
+    if (channels.size() > 1 && !isCsrqDirectory(*channel.chunks)) {
+      throw std::runtime_error(
+          "joint multi-window reconstruction requires CSRQ matrices for "
+          "every channel; convert the CSRB directories first.");
+    }
+  }
+  if (meta.Nx != meta.Ny) {
+    throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
+  }
+}
+
+// Device matrix slot per channel: an existing lease wins, channels naming
+// the same directory as an earlier channel share its copy (one matrix
+// modelling several windows with different weights), and every other
+// directory takes a free slot in channel order.
+std::vector<int> csrqChannelMatrixIndices(
+    const std::vector<CompactMatrixChannel> &channels) {
+  std::vector<int> indices(channels.size(), -1);
+  std::vector<int> claimed;
+  for (size_t index = 0; index < channels.size(); ++index) {
+    const int assigned = csrqAssignedSlot(*channels[index].chunks);
+    if (assigned >= 0) {
+      indices[index] = assigned;
+      claimed.push_back(assigned);
+    }
+  }
+  for (size_t index = 0; index < channels.size(); ++index) {
+    if (indices[index] >= 0) {
+      continue;
+    }
+    for (size_t earlier = 0; earlier < index; ++earlier) {
+      if (indices[earlier] >= 0 &&
+          sameDirectory(*channels[earlier].chunks, *channels[index].chunks)) {
+        indices[index] = indices[earlier];
+        break;
+      }
+    }
+    if (indices[index] < 0) {
+      indices[index] = csrqFreeSlot(claimed);
+      claimed.push_back(indices[index]);
+    }
+  }
+  return indices;
+}
+
+void warmCompactChunks(const std::vector<CompactMatrixChannel> &channels) {
+  const std::vector<int> slots = csrqChannelMatrixIndices(channels);
+  const std::vector<bool> streamed = planCsrqStreaming(channels, slots);
+  for (size_t index = 0; index < channels.size(); ++index) {
+    const auto &chunks = *channels[index].chunks;
+    if (!isCsrqDirectory(chunks)) {
+      warmCompactChunkResidentDeviceCache(chunks);
+      continue;
+    }
+    bool aliased = false;
+    for (size_t earlier = 0; earlier < index && !aliased; ++earlier) {
+      aliased = slots[earlier] == slots[index];
+    }
+    if (aliased) {
+      // Same directory as an earlier channel: reuse its device copy.
+      if (csrqAssignedSlot(chunks) != slots[index]) {
+        auto lease = std::make_shared<CsrqResidentLease>();
+        lease->complete = true;
+        lease->matrixIndex = slots[index];
+        chunks.setAcceleratorLease(lease);
+      }
+      continue;
+    }
+    warmCsrqResident(chunks, slots[index], streamed[index]);
+  }
+}
+
+void warmCompactChunks(const spect::io::CompactChunkCSRDirectory &chunks) {
+  if (isCsrqDirectory(chunks)) {
+    (void)csrqMatrixIndexOf(chunks);
+  } else {
+    warmCompactChunkResidentDeviceCache(chunks);
+  }
+}
+
+std::vector<CompactMatrixChannel>
+singleChannel(const spect::io::CompactChunkCSRDirectory &chunks) {
+  CompactMatrixChannel channel;
+  channel.chunks = &chunks;
+  channel.weight = 1.0;
+  return {channel};
+}
+
+int csrqProjectionSlot(int channel, int bed) {
+  return channel * spect::core::kMaxBeds + bed;
+}
+
+void requireCsrqSupportedInputs(const uint16_t *attFactors, const char *what) {
+  if (attFactors != nullptr) {
+    throw std::runtime_error(
+        std::string("CSRQ compact matrix does not support CTAC attenuation "
+                    "in ") +
+        what + "; use the CSRB directory.");
+  }
+}
+
 struct CompactBranchDescriptor {
   int symId = 0;
   bool zMirror = false;
@@ -473,6 +806,17 @@ enumerateCompactBranches(const spect::io::CompactSymmetryMetadata &meta) {
     }
   }
   return branches;
+}
+
+void fillBranchSymmetryTables(const std::vector<CompactBranchDescriptor> &branches,
+                              std::vector<int> &symIds,
+                              std::vector<int> &zMirrors) {
+  symIds.resize(branches.size());
+  zMirrors.resize(branches.size());
+  for (size_t b = 0; b < branches.size(); ++b) {
+    symIds[b] = branches[b].symId;
+    zMirrors[b] = branches[b].zMirror ? 1 : 0;
+  }
 }
 
 size_t compactChunkBranchOffset(size_t branchIndex, size_t branchCount,
@@ -696,6 +1040,128 @@ void requireCompleteForwardProjectionCoverage(
   }
 }
 
+// CSRQ numerator for 1..kMaxBeds beds and 1..kCsrqMaxMatrices windows:
+// every window of every bed accumulates weight_k * A_k^T(p_k / mean_k) into
+// the bed's device accumulator. fullProjections / fullBackgrounds are
+// indexed [channel * bedCount + bed]; the CSRQ projection cache slot is
+// channel * kMaxBeds + bed. Channels are already validated and warm.
+bool runCsrqMlemNumerMultiBed(
+    const std::vector<CompactMatrixChannel> &channels,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *const *fullProjections,
+    const double *const *fullBackgrounds,
+    const double *const *smoothedImages, int bedCount, int threads,
+    double *const *numers, CompactSymmetricStageTiming *timing,
+    const uint16_t *attFactors, bool refreshProjectionInputs,
+    bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
+  requireCsrqSupportedInputs(attFactors, "the numerator");
+  const auto totalStart = Clock::now();
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const auto branches = enumerateCompactBranches(meta);
+  const size_t branchCount = branches.size();
+  const size_t channelCount = channels.size();
+  const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
+
+  auto projectionAt = [&](size_t channel, int bed) {
+    return fullProjections[channel * static_cast<size_t>(bedCount) +
+                           static_cast<size_t>(bed)];
+  };
+  auto backgroundAt = [&](size_t channel, int bed) -> const double * {
+    return fullBackgrounds == nullptr
+               ? nullptr
+               : fullBackgrounds[channel * static_cast<size_t>(bedCount) +
+                                 static_cast<size_t>(bed)];
+  };
+
+  if (refreshProjectionInputs) {
+    for (size_t channel = 0; channel < channelCount; ++channel) {
+      for (int bed = 0; bed < bedCount; ++bed) {
+        if (!refreshCompactProjectionCUDA(
+                projectionAt(channel, bed), fullProjectionCount,
+                csrqProjectionSlot(static_cast<int>(channel), bed),
+                backgroundAt(channel, bed))) {
+          return false;
+        }
+      }
+    }
+  }
+  if (!branchBatchInputPrepared) {
+    std::vector<float> rotatedImages(
+        static_cast<size_t>(bedCount) * branchCount * nvox, 0.0f);
+    for (int bed = 0; bed < bedCount; ++bed) {
+      for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
+        const auto &branch = branches[branchIndex];
+        float *imgRot =
+            rotatedImages.data() +
+            (static_cast<size_t>(bed) * branchCount + branchIndex) * nvox;
+        const auto stageStart = Clock::now();
+        transformForwardIntoFloat(smoothedImages[bed], imgRot, meta,
+                                  branch.symId, branch.zMirror, threads);
+        if (timing)
+          addTiming(timing->transformForwardSeconds, stageStart);
+      }
+    }
+    if (!refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
+                                            rotatedImages.size())) {
+      return false;
+    }
+  }
+  std::vector<int> symIds;
+  std::vector<int> zMirrors;
+  fillBranchSymmetryTables(branches, symIds, zMirrors);
+  const CompactDeviceRatioParams commonRatio =
+      makeCompactDeviceRatioParams(meta, 0, 0, false);
+  const CompactDeviceTransformParams commonTransform =
+      makeCompactDeviceTransformParams(meta, 0, false);
+  for (int bed = 0; bed < bedCount; ++bed) {
+    if (downloadBackwardOutputs)
+      std::fill(numers[bed], numers[bed] + nvox, 0.0);
+    if (!compactDeviceBackwardBeginCUDA(nvox, bed)) {
+      return false;
+    }
+  }
+  // One chunk-outer pass per window over all beds (a streamed matrix then
+  // crosses PCIe once per iteration); windows accumulate into the same
+  // per-bed accumulators.
+  for (size_t channel = 0; channel < channelCount; ++channel) {
+    const double *const *channelProjections =
+        fullProjections + channel * static_cast<size_t>(bedCount);
+    const double *const *channelBackgrounds =
+        fullBackgrounds == nullptr
+            ? nullptr
+            : fullBackgrounds + channel * static_cast<size_t>(bedCount);
+    CompactDeviceRatioTiming deviceTiming;
+    CompactDeviceBackwardTiming backwardTiming;
+    if (!csrqRunNumerCUDA(csrqMatrixIndexOf(*channels[channel].chunks),
+                          bedCount, static_cast<int>(branchCount), commonRatio,
+                          commonTransform, symIds.data(), zMirrors.data(),
+                          channelProjections, channelBackgrounds,
+                          fullProjectionCount, channels[channel].weight, 0,
+                          csrqProjectionSlot(static_cast<int>(channel), 0),
+                          &deviceTiming, &backwardTiming)) {
+      return false;
+    }
+    if (timing) {
+      timing->forwardSeconds += deviceTiming.forwardSeconds;
+      timing->ratioSeconds += deviceTiming.ratioSeconds;
+      timing->backwardSeconds += deviceTiming.backwardSeconds;
+      timing->transformBackwardSeconds +=
+          backwardTiming.transformBackwardSeconds;
+    }
+  }
+  if (downloadBackwardOutputs) {
+    for (int bed = 0; bed < bedCount; ++bed) {
+      if (!compactDeviceBackwardDownloadCUDA(numers[bed], nvox, bed)) {
+        return false;
+      }
+    }
+  }
+  if (timing) {
+    timing->numeratorSeconds += elapsedSeconds(totalStart);
+    ++timing->numeratorCalls;
+  }
+  return true;
+}
 
 } // namespace
 
@@ -703,25 +1169,54 @@ void requireCompleteForwardProjectionCoverage(
 
 
 bool computeCompactChunkSensitivityCUDA(
-    const spect::io::CompactChunkCSRDirectory &chunks,
+    const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing, const uint16_t *attFactors) {
-  if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
-      chunks.cols() != meta.totalVoxels) {
-    throw std::runtime_error(
-        "compact chunk sensitivity matrix/metadata mismatch.");
-  }
-  if (meta.Nx != meta.Ny) {
-    throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
-  }
-
-  warmCompactChunkResidentDeviceCache(chunks);
+  validateChannels(channels, meta, "sensitivity");
+  warmCompactChunks(channels);
 
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
-  const size_t chunkCount = chunks.chunks().size();
   std::fill(denom, denom + nvox, 0.0);
+
+  if (isCsrqChannelSet(channels)) {
+    requireCsrqSupportedInputs(attFactors, "the sensitivity");
+    std::vector<int> symIds;
+    std::vector<int> zMirrors;
+    fillBranchSymmetryTables(branches, symIds, zMirrors);
+    if (!compactDeviceBackwardBeginCUDA(nvox, 0)) {
+      return false;
+    }
+    for (size_t channel = 0; channel < channels.size(); ++channel) {
+      CompactDeviceBackwardTiming backwardTiming;
+      if (!csrqRunSensitivityCUDA(
+              csrqMatrixIndexOf(*channels[channel].chunks),
+              static_cast<int>(branches.size()), channels[channel].weight,
+              makeCompactDeviceRatioParams(meta, 0, 0, false),
+              makeCompactDeviceTransformParams(meta, 0, false), symIds.data(),
+              zMirrors.data(), 0, &backwardTiming)) {
+        return false;
+      }
+      if (timing) {
+        timing->backwardSeconds += backwardTiming.backwardSeconds;
+        timing->transformBackwardSeconds +=
+            backwardTiming.transformBackwardSeconds;
+      }
+    }
+    if (!compactDeviceBackwardDownloadCUDA(denom, nvox, 0)) {
+      return false;
+    }
+    if (timing) {
+      timing->sensitivitySeconds += elapsedSeconds(totalStart);
+      ++timing->sensitivityCalls;
+    }
+    return true;
+  }
+
+  const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
+  const size_t chunkCount = chunks.chunks().size();
+
   std::vector<float> ratio;
   std::vector<float> bpRot;
   std::vector<double> accum;
@@ -824,9 +1319,30 @@ bool computeCompactChunkSensitivityCUDA(
   return true;
 }
 
+bool computeCompactChunkSensitivityCUDA(
+    const spect::io::CompactChunkCSRDirectory &chunks,
+    const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
+    CompactSymmetricStageTiming *timing, const uint16_t *attFactors) {
+  return computeCompactChunkSensitivityCUDA(singleChannel(chunks), meta,
+                                            threads, denom, timing, attFactors);
+}
+
+bool prepareCompactChunkExecutionCUDA(
+    const std::vector<CompactMatrixChannel> &channels) {
+  if (channels.empty()) {
+    throw std::runtime_error("compact execution prepare needs a matrix.");
+  }
+  warmCompactChunks(channels);
+  return true;
+}
+
+void setCsrqForceStreamingCUDA(bool force) { g_csrqForceStreaming.store(force); }
+
+bool csrqForceStreamingCUDA() { return g_csrqForceStreaming.load(); }
+
 bool prepareCompactChunkExecutionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks) {
-  warmCompactChunkResidentDeviceCache(chunks);
+  warmCompactChunks(chunks);
   return true;
 }
 
@@ -881,13 +1397,29 @@ bool runCompactChunkMlemNumerCUDA(
     throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
   }
 
-  warmCompactChunkResidentDeviceCache(chunks);
+  if (isCsrqDirectory(chunks)) {
+    // One CSRQ path for any bed count; the channel form owns it.
+    const double *const projections[] = {fullProjection};
+    const double *const backgrounds[] = {fullBackground};
+    const double *const images[] = {smoothedImage};
+    double *const numers[] = {numer};
+    const uint16_t *const attFactorList[] = {attFactors};
+    return runCompactChunkMlemNumerMultiBedCUDA(
+        singleChannel(chunks), meta, projections,
+        fullBackground == nullptr ? nullptr : backgrounds, images, 1, threads,
+        numers, reverseChunkOrder, timing,
+        attFactors == nullptr ? nullptr : attFactorList,
+        refreshProjectionInput, false, true);
+  }
+
+  warmCompactChunks(chunks);
   applyCompactCsrLocalityHint(chunks, meta);
 
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
   const size_t chunkCount = chunks.chunks().size();
+
   // The fused device-ratio/device-backward kernels have no attenuation
   // semantics; CTAC forces the generic bake + spmv route.
   const bool useDeviceBackward = attFactors == nullptr;
@@ -1121,12 +1653,65 @@ bool computeCompactChunkForwardProjectionCUDA(
     throw std::runtime_error(
         "compact chunk forward projection received null image/output data.");
   }
-  warmCompactChunkResidentDeviceCache(chunks);
+  warmCompactChunks(chunks);
 
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const size_t fullRows = static_cast<size_t>(meta.fullRows());
   std::fill(fullExpected, fullExpected + fullRows, 0.0);
   std::vector<uint8_t> coverage(fullRows, 0);
+
+  if (isCsrqDirectory(chunks)) {
+    requireCsrqSupportedInputs(attFactors, "the forward projection");
+    const int matrixIndex = csrqMatrixIndexOf(chunks);
+    const auto branches = enumerateCompactBranches(meta);
+    std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
+    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+      transformForwardIntoFloat(smoothedImage,
+                                rotatedImages.data() + branchIndex * nvox, meta,
+                                branches[branchIndex].symId,
+                                branches[branchIndex].zMirror, threads);
+    }
+    if (!refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
+                                            rotatedImages.size())) {
+      return false;
+    }
+    const size_t compactRows = static_cast<size_t>(chunks.totalRows());
+    std::vector<float> yhatPacked(compactRows * branches.size(), 0.0f);
+    if (!csrqRunForwardCUDA(matrixIndex, static_cast<int>(branches.size()),
+                            yhatPacked.data(), yhatPacked.size())) {
+      return false;
+    }
+    // Packed [compactRow][branch] -> one full projection row per valid pair,
+    // same coverage contract as the CSRB path below.
+    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+      const auto &branch = branches[branchIndex];
+      for (size_t row = 0; row < compactRows; ++row) {
+        uint64_t fullIndex = 0;
+        if (!spect::io::fullProjectionIndexFromCompactRow(
+                meta, static_cast<int>(row), branch.symId, branch.zMirror,
+                fullIndex)) {
+          continue;
+        }
+        const size_t index = static_cast<size_t>(fullIndex);
+        if (index >= coverage.size() || coverage[index] != 0) {
+          throw std::runtime_error(
+              "compact forward projection produced duplicate/out-of-range "
+              "full row.");
+        }
+        const double value = static_cast<double>(
+            yhatPacked[row * branches.size() + branchIndex]);
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "compact forward projection produced a non-finite value.");
+        }
+        fullExpected[index] = value;
+        coverage[index] = 1;
+      }
+    }
+    requireCompleteForwardProjectionCoverage(coverage);
+    return true;
+  }
+
   std::vector<float> imgRot(nvox, 0.0f);
   std::vector<float> y;
   for (const auto &branch : enumerateCompactBranches(meta)) {
@@ -1168,25 +1753,78 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
     CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors, bool refreshProjectionInputs,
     bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
+  return runCompactChunkMlemNumerMultiBedCUDA(
+      singleChannel(chunks), meta, fullProjections, fullBackgrounds,
+      smoothedImages, bedCount, threads, numers, reverseChunkOrder, timing,
+      attFactors, refreshProjectionInputs, branchBatchInputPrepared,
+      downloadBackwardOutputs);
+}
+
+bool runCompactChunkMlemNumerMultiBedCUDA(
+    const std::vector<CompactMatrixChannel> &channels,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *const *fullProjections,
+    const double *const *fullBackgrounds,
+    const double *const *smoothedImages, int bedCount, int threads,
+    double *const *numers, bool reverseChunkOrder,
+    CompactSymmetricStageTiming *timing,
+    const uint16_t *const *attFactors, bool refreshProjectionInputs,
+    bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
   if (bedCount < 1 || bedCount > spect::core::kMaxBeds) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper supports 1.." +
         std::to_string(spect::core::kMaxBeds) + " beds.");
   }
+  validateChannels(channels, meta, "numerator");
+  const size_t channelCount = channels.size();
   if (fullProjections == nullptr ||
       (smoothedImages == nullptr && !branchBatchInputPrepared) ||
       (numers == nullptr && downloadBackwardOutputs)) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper received null bed pointer arrays.");
   }
+  for (size_t channel = 0; channel < channelCount; ++channel) {
+    for (int bed = 0; bed < bedCount; ++bed) {
+      if (fullProjections[channel * static_cast<size_t>(bedCount) + bed] ==
+          nullptr) {
+        throw std::runtime_error(
+            "compact chunk multi-bed CUDA helper received null projections.");
+      }
+    }
+  }
   for (int bed = 0; bed < bedCount; ++bed) {
-    if (fullProjections[bed] == nullptr ||
-        (!branchBatchInputPrepared && smoothedImages[bed] == nullptr) ||
+    if ((!branchBatchInputPrepared && smoothedImages[bed] == nullptr) ||
         (downloadBackwardOutputs && numers[bed] == nullptr)) {
       throw std::runtime_error(
           "compact chunk multi-bed CUDA helper received null bed data.");
     }
   }
+
+  bool hasBackground = false;
+  if (fullBackgrounds != nullptr) {
+    for (size_t index = 0; index < channelCount * static_cast<size_t>(bedCount);
+         ++index) {
+      hasBackground = hasBackground || fullBackgrounds[index] != nullptr;
+    }
+  }
+  bool hasAtten = false;
+  if (attFactors != nullptr) {
+    for (int bed = 0; bed < bedCount; ++bed) {
+      hasAtten = hasAtten || attFactors[bed] != nullptr;
+    }
+  }
+
+  warmCompactChunks(channels);
+  const bool csrq = isCsrqChannelSet(channels);
+  if (csrq) {
+    return runCsrqMlemNumerMultiBed(
+        channels, meta, fullProjections, hasBackground ? fullBackgrounds : nullptr,
+        smoothedImages, bedCount, threads, numers, timing,
+        hasAtten ? attFactors[0] : nullptr, refreshProjectionInputs,
+        branchBatchInputPrepared, downloadBackwardOutputs);
+  }
+
+  const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
   if (bedCount == 1) {
     if (branchBatchInputPrepared || !downloadBackwardOutputs) {
       throw std::runtime_error(
@@ -1199,38 +1837,14 @@ bool runCompactChunkMlemNumerMultiBedCUDA(
         attFactors == nullptr ? nullptr : attFactors[0],
         refreshProjectionInputs);
   }
-
-  if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
-      chunks.cols() != meta.totalVoxels) {
-    throw std::runtime_error(
-        "compact chunk multi-bed numerator matrix/metadata mismatch.");
-  }
-  if (meta.Nx != meta.Ny) {
-    throw std::runtime_error(
-        "compact chunk multi-bed CUDA helper requires Nx == Ny.");
-  }
-
-  warmCompactChunkResidentDeviceCache(chunks);
   applyCompactCsrLocalityHint(chunks, meta);
-
-  bool hasBackground = false;
-  if (fullBackgrounds != nullptr) {
-    for (int bed = 0; bed < bedCount; ++bed) {
-      hasBackground = hasBackground || fullBackgrounds[bed] != nullptr;
-    }
-  }
-  bool hasAtten = false;
-  if (attFactors != nullptr) {
-    for (int bed = 0; bed < bedCount; ++bed) {
-      hasAtten = hasAtten || attFactors[bed] != nullptr;
-    }
-  }
 
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
   const size_t branchCount = branches.size();
   const size_t chunkCount = chunks.chunks().size();
+
   // Keep the projection ratio and backward accumulator resident whenever the
   // requested inputs are supported by the exact device path.
   const bool useDeviceRatio = !hasBackground;

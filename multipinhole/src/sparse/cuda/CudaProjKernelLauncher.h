@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cuda/CudaConfig.h"
+#include "cuda/CudaLaunchConfig.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
@@ -101,6 +102,60 @@ void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
                                      const int32_t *colIdx, const float *xQuad,
                                      float *y0, float *y1, float *y2, float *y3,
                                      int rows, cudaStream_t stream = nullptr);
+
+// CSRQ resident-matrix kernels (projdomain_chunk_ops.cu, "CSRQ kernels").
+// K = 8 right-hand sides packed [voxel][8]; block size is fixed by the
+// kernel's shared-memory tile layout.
+constexpr int kCsrqK = cuda::kCsrqBranchCount;
+constexpr unsigned int kCsrqBlockSize = 256;
+
+struct CsrqDeviceChunkPtrs {
+  const uint32_t *rowNnzPtr = nullptr;
+  const uint32_t *rowRunPtr = nullptr;
+  const float *rowMax = nullptr;
+  const uint32_t *runs = nullptr;
+  const uint16_t *valuesQ = nullptr;
+  int rows = 0;
+};
+
+void launchCsrqForwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+                               const float *xPacked, float *yPacked,
+                               cudaStream_t stream = nullptr);
+
+// ratioPacked is [row][8]; yBranch is branch-major [8][nvox] (the layout
+// launchCompactTransformBackwardAddBatchKernel consumes). Only branches
+// [kFirst, kFirst + kCount) are scattered.
+void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+                                const float *ratioPacked, float *yBranch,
+                                size_t nvox, int kFirst, int kCount,
+                                cudaStream_t stream = nullptr);
+
+// Branches scattered per backward pass over the matrix. Measured on the
+// 120x120x220 Tc99m matrix (RTX 4070 Ti SUPER, ms per full-matrix backward):
+// 1 branch x 8 passes 207, 2 x 4 150, 4 x 2 179, 8 x 1 191. Two branches keep
+// the 25 MB atomic target inside the 48 MB L2 while the per-pass matrix read
+// and tile expansion stay amortized; the kernel has a dedicated two-branch
+// path. The remaining floor is L2 atomic throughput (~22 G sector atomics/s),
+// i.e. the atomic count itself, not their locality.
+constexpr int kCsrqBackwardBranchesPerPass = 2;
+
+void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
+                                 size_t nvox, cudaStream_t stream = nullptr);
+
+// In place: yhat -> scale * p / max(scale * yhat + background, eps);
+// fullBackground may be null.
+void launchCsrqRatioK8Kernel(float *yhatPacked, const double *fullProjection,
+                             const double *fullBackground,
+                             size_t fullProjectionCount, double scale,
+                             const cuda::CompactDeviceRatioParams &params,
+                             const int *dSymIds, const int *dZMirrors, int rows,
+                             double eps, cudaStream_t stream = nullptr);
+
+// ratio = value where the (row, branch) has a full projection row, else 0.
+void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
+                                 const cuda::CompactDeviceRatioParams &params,
+                                 const int *dSymIds, const int *dZMirrors,
+                                 int rows, cudaStream_t stream = nullptr);
 
 } // namespace spect
 

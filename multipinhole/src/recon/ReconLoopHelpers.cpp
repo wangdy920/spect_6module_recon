@@ -47,6 +47,16 @@ void logCudaChunkTimingSnapshot(
                               cudaChunkTiming.cusparseForwardSeconds,
                               cudaChunkTiming.cusparseForwardCalls));
   }
+  if (cudaChunkTiming.csrqForwardCalls > 0) {
+    logInfo(formatProfileEntry("cuda.csrq_fwd",
+                              cudaChunkTiming.csrqForwardSeconds,
+                              cudaChunkTiming.csrqForwardCalls));
+  }
+  if (cudaChunkTiming.csrqBackwardCalls > 0) {
+    logInfo(formatProfileEntry("cuda.csrq_bwd",
+                              cudaChunkTiming.csrqBackwardSeconds,
+                              cudaChunkTiming.csrqBackwardCalls));
+  }
   logDebug(formatProfileEntry("cuda.cusparse_fwd_host",
                              cudaChunkTiming.cusparseForwardHostSeconds,
                              cudaChunkTiming.cusparseForwardHostCalls));

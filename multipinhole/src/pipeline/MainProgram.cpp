@@ -539,24 +539,56 @@ int runProgram(int argc, char **argv) {
             std::to_string(projectionSet.data.size()) + ", per bed=" +
             std::to_string(projectionSet.raysPerBed));
 
-    std::vector<double> backgroundProj;
-    std::vector<std::string> backgroundPaths = args.bProjPaths;
-    if (backgroundPaths.empty() && !args.bProjPath.empty())
-      backgroundPaths = {args.bProjPath};
-    if (!backgroundPaths.empty()) {
+    auto loadBackgroundFor = [&](const std::vector<std::string> &listPaths,
+                                 const std::string &singlePath,
+                                 const char *label) {
+      std::vector<double> background;
+      std::vector<std::string> backgroundPaths = listPaths;
+      if (backgroundPaths.empty() && !singlePath.empty())
+        backgroundPaths = {singlePath};
+      if (backgroundPaths.empty())
+        return background;
       if (bedCount > 1 && backgroundPaths.size() != static_cast<size_t>(bedCount))
         throw std::runtime_error("Background projection count must match bed count.");
       if (bedCount == 1 && backgroundPaths.size() > 1)
         throw std::runtime_error("Multiple background projections were provided for single-bed mode.");
 
       const LoadedProjectionSet backgroundSet =
-          loadProjectionSet(backgroundPaths, args.numAngles,
-                            "Background Projection", "b_proj");
+          loadProjectionSet(backgroundPaths, args.numAngles, label, "b_proj");
       if (backgroundSet.raysPerBed != projectionSet.raysPerBed)
         throw std::runtime_error("Background projection geometry does not match emission projections.");
-      backgroundProj = backgroundSet.data;
-      logInfo("Loaded background projection term with " +
-              std::to_string(backgroundProj.size()) + " rays.");
+      background = backgroundSet.data;
+      logInfo(std::string("Loaded ") + label + " term with " +
+              std::to_string(background.size()) + " rays.");
+      return background;
+    };
+    std::vector<double> backgroundProj =
+        loadBackgroundFor(args.bProjPaths, args.bProjPath, "Background Projection");
+
+    // Joint dual-window: the second window's projections mirror the first
+    // bed for bed and go through the same masking below.
+    std::vector<double> projections2;
+    std::vector<double> backgroundProj2;
+    if (args.dualWindow()) {
+      const std::vector<std::string> projPaths2 =
+          args.projPaths2.empty() ? std::vector<std::string>{args.projPath2}
+                                  : args.projPaths2;
+      LoadedProjectionSet projectionSet2 =
+          loadProjectionSet(projPaths2, args.numAngles,
+                            "Projection Data (window 2)", "matrix",
+                            args.mergeTimeSegments);
+      if (projectionSet2.raysPerBed != projectionSet.raysPerBed ||
+          projectionSet2.data.size() != projectionSet.data.size()) {
+        throw std::runtime_error(
+            "Second-window projections do not match the first window's "
+            "geometry (rays per bed / bed count).");
+      }
+      projections2 = std::move(projectionSet2.data);
+      backgroundProj2 = loadBackgroundFor(args.bProjPaths2, args.bProjPath2,
+                                          "Background Projection (window 2)");
+      logInfo("Joint dual-window reconstruction: window weights " +
+              std::to_string(args.energyWindowWeights[0]) + ", " +
+              std::to_string(args.energyWindowWeights[1]) + ".");
     }
 
     const auto spacingArray = voxelSpacingFromArgs(args);
@@ -677,6 +709,24 @@ int runProgram(int argc, char **argv) {
       compactChunks =
           std::make_unique<spect::io::CompactChunkCSRDirectory>(std::move(opened));
     }
+    std::unique_ptr<spect::io::CompactChunkCSRDirectory> compactChunks2;
+    if (args.dualWindow()) {
+      logDebug("Opening second-window compact chunk directory from " +
+               args.chunkCSRDir2);
+      auto opened2 = spect::io::openCompactChunkCSRDirectory(args.chunkCSRDir2,
+                                                             compactMeta);
+      if (opened2.format() != spect::io::CompactChunkFormat::CsrqRunU16 ||
+          compactChunks->format() != spect::io::CompactChunkFormat::CsrqRunU16) {
+        throw std::runtime_error(
+            "Joint dual-window reconstruction requires CSRQ matrices for both "
+            "windows (tools/convert_csrb_to_csrq.py).");
+      }
+      logDebug("Second-window chunk directory opened: chunks=" +
+               std::to_string(opened2.chunks().size()) +
+               ", nnz=" + std::to_string(opened2.totalNnz()));
+      compactChunks2 = std::make_unique<spect::io::CompactChunkCSRDirectory>(
+          std::move(opened2));
+    }
     compactTiming.csrMapOrLoadSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
 
@@ -729,16 +779,21 @@ int runProgram(int argc, char **argv) {
         const size_t fullRows = static_cast<size_t>(compactMeta.fullRows());
         const size_t maskedRows = static_cast<size_t>(std::count(
             badDetectorMask.begin(), badDetectorMask.end(), uint8_t{1}));
-        for (int bed = 0; bed < bedCount; ++bed) {
-          const size_t bedOffset = static_cast<size_t>(bed) * fullRows;
-          for (size_t row = 0; row < fullRows; ++row) {
-            if (!badDetectorMask[row])
-              continue;
-            projections[bedOffset + row] = 0.0;
-            if (!backgroundProj.empty())
-              backgroundProj[bedOffset + row] = 0.0;
+        auto zeroMaskedRows = [&](std::vector<double> &target) {
+          if (target.empty())
+            return;
+          for (int bed = 0; bed < bedCount; ++bed) {
+            const size_t bedOffset = static_cast<size_t>(bed) * fullRows;
+            for (size_t row = 0; row < fullRows; ++row) {
+              if (badDetectorMask[row])
+                target[bedOffset + row] = 0.0;
+            }
           }
-        }
+        };
+        zeroMaskedRows(projections);
+        zeroMaskedRows(backgroundProj);
+        zeroMaskedRows(projections2);
+        zeroMaskedRows(backgroundProj2);
         std::ostringstream detectorNames;
         for (size_t index = 0; index < badDetectors.size(); ++index) {
           if (index != 0)
@@ -773,21 +828,27 @@ int runProgram(int argc, char **argv) {
       const size_t raysPerAngle =
           static_cast<size_t>(compactMeta.fullRaysPerAngle());
       for (int bed = 0; bed < bedCount; ++bed) {
-        double *bedProj =
-            projections.data() + static_cast<size_t>(bed) * fullRows;
         size_t zeroedBins = 0;
-        for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
-          double *angleBase =
-              bedProj + static_cast<size_t>(angle) * raysPerAngle;
-          for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
-            if (detZ >= censorK && detZ < compactMeta.detNz - censorK)
-              continue;
-            double *row =
-                angleBase + static_cast<size_t>(detZ) * compactMeta.detNx;
-            std::fill(row, row + compactMeta.detNx, 0.0);
-            zeroedBins += static_cast<size_t>(compactMeta.detNx);
+        auto censorBed = [&](std::vector<double> &target, bool count) {
+          if (target.empty())
+            return;
+          double *bedProj = target.data() + static_cast<size_t>(bed) * fullRows;
+          for (int angle = 0; angle < compactMeta.fullNumAngles; ++angle) {
+            double *angleBase =
+                bedProj + static_cast<size_t>(angle) * raysPerAngle;
+            for (int detZ = 0; detZ < compactMeta.detNz; ++detZ) {
+              if (detZ >= censorK && detZ < compactMeta.detNz - censorK)
+                continue;
+              double *row =
+                  angleBase + static_cast<size_t>(detZ) * compactMeta.detNx;
+              std::fill(row, row + compactMeta.detNx, 0.0);
+              if (count)
+                zeroedBins += static_cast<size_t>(compactMeta.detNx);
+            }
           }
-        }
+        };
+        censorBed(projections, true);
+        censorBed(projections2, false);
         logInfo("detZ edge censoring: zeroed " + std::to_string(zeroedBins) +
                 " measured bins in bed " + std::to_string(bed) +
                 " (k=" + std::to_string(censorK) + ", detZ rows 0.." +
@@ -984,7 +1045,11 @@ int runProgram(int argc, char **argv) {
     outputTransform.centerCropNx = spect::core::sixmodule::kOutputMaskNx;
     outputTransform.centerCropNy = spect::core::sixmodule::kOutputMaskNy;
     outputTransform.centerCropNz =
-        bedCount == 1 ? spect::core::sixmodule::kSingleBedMaskNz : 0;
+        bedCount == 1
+            ? (args.singleBedStepAligned
+                   ? bedSetup.canonicalGeom.cropLayers
+                   : spect::core::sixmodule::kSingleBedMaskNz)
+            : 0;
     outputTransform.baseNz = baseNz;
     outputTransform.bedZStarts = bedZStarts;
     outputTransform.outputBedOverlaps = args.outputBedOverlaps;
@@ -1016,6 +1081,9 @@ int runProgram(int argc, char **argv) {
     compactContext.compactMeta = &compactMeta;
     compactContext.compactMetaPath = &compactMetaPath;
     compactContext.compactChunks = compactChunks.get();
+    compactContext.compactChunks2 = compactChunks2.get();
+    compactContext.projections2 = &projections2;
+    compactContext.backgroundProj2 = &backgroundProj2;
     compactContext.timing = &compactTiming;
     compactContext.loadToIterationStart = loadToIterationStart;
     compactContext.fullCommandStart = fullCommandStart;

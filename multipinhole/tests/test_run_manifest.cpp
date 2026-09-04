@@ -149,7 +149,8 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
   EXPECT_NE(text.find("\"schema\": \"spect_recon_run_manifest_v1\""),
             std::string::npos);
   EXPECT_NE(text.find("\"symmetry_mode\": \"sym90z\""), std::string::npos);
-  EXPECT_NE(text.find("\"det_nz\": 48\n  },\n  \"execution\": {"),
+  EXPECT_NE(text.find("\"det_nz\": 48,\n    \"csrq_residency\": \"auto\"\n  },\n"
+                      "  \"execution\": {"),
             std::string::npos);
   // Path backslashes must be JSON-escaped.
   EXPECT_NE(text.find("F:\\\\matrix\\\\chunks"), std::string::npos);
@@ -207,6 +208,8 @@ TEST(RunManifestTest, WritesSchemaGainsAndBedMapping) {
                       "\"adjacent_overlap_log_median_mad\""),
             std::string::npos);
   EXPECT_NE(text.find("\"stitch_method\": \"center66_cosine10\""),
+            std::string::npos);
+  EXPECT_NE(text.find("\"single_bed_step_aligned\": true"),
             std::string::npos);
   EXPECT_NE(text.find("\"gain_fit_reliability_policy\": "
                       "\"prototype_log_chain_no_gate\""),

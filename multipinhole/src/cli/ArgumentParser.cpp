@@ -416,6 +416,44 @@ void ArgumentParser::registerHandlers() {
         a.chunkCSRDirExplicit = true;
         return true;
     }, {"-chunkCSRDir"});
+    // Second energy window (joint dual-window MLEM).
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.chunkCSRDir2 = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir2");
+        return true;
+    }, {"-chunkCSRDir2"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.projPath2 = ArgumentParser::getRequiredArg(i, argc, argv, "-df2");
+        return true;
+    }, {"-df2"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.projPaths2 = spect::core::sortPathsByBedOrder(
+            splitPathList(ArgumentParser::getRequiredArg(i, argc, argv, "-dfList2")));
+        return true;
+    }, {"-dfList2"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bProjPath2 = ArgumentParser::getRequiredArg(i, argc, argv, "-bProj2");
+        return true;
+    }, {"-bProj2"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.bProjPaths2 = spect::core::sortPathsByBedOrder(
+            splitPathList(ArgumentParser::getRequiredArg(i, argc, argv, "-bProjList2")));
+        return true;
+    }, {"-bProjList2"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.csrqResidency =
+            ArgumentParser::getRequiredArg(i, argc, argv, "-csrqResidency");
+        return true;
+    }, {"-csrqResidency"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const auto parts =
+            split(ArgumentParser::getRequiredArg(i, argc, argv, "-energyWeights"), ',');
+        a.energyWindowWeights.clear();
+        for (auto& p : parts) {
+            if (!p.empty())
+                a.energyWindowWeights.push_back(std::stod(p));
+        }
+        return true;
+    }, {"-energyWeights"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.compactDenomCachePath =
             ArgumentParser::getRequiredArg(i, argc, argv, "-compactDenomCache");
@@ -858,6 +896,10 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-bedStepMm"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        return ArgumentParser::parseOnOffOptional(
+            i, argc, argv, a.singleBedStepAligned);
+    }, {"-singleBedStepAligned"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.detZEdgeCensor = std::stoi(
             ArgumentParser::getRequiredArg(i, argc, argv, "-detZEdgeCensor"));
         return true;
@@ -1129,6 +1171,21 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         a.compactDenomCachePath));
     a.compactDenomCacheDir = normalizePath(cfg.getString(
         "SystemMatrix", "compact_denom_cache_dir", a.compactDenomCacheDir));
+    // Joint dual-window: second matrix directory and per-window weights.
+    const std::string chunkDir2 = cfg.getString("SystemMatrix", "chunk_csr_dir2");
+    if (!chunkDir2.empty())
+        a.chunkCSRDir2 = normalizePath(chunkDir2);
+    a.csrqResidency =
+        cfg.getString("SystemMatrix", "csrq_residency", a.csrqResidency);
+    const std::string windowWeights =
+        cfg.getString("SystemMatrix", "energy_window_weights");
+    if (!windowWeights.empty()) {
+        a.energyWindowWeights.clear();
+        for (auto& p : split(windowWeights, ',')) {
+            if (!p.empty())
+                a.energyWindowWeights.push_back(std::stod(p));
+        }
+    }
 
     // Regularization
     std::string regT = cfg.getString("Regularization", "type");
@@ -1295,6 +1352,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         const double iniStepMm = cfg.getDouble("MultiBed", "bed_step_mm", 0.0);
         if (iniStepMm > 0.0)
             a.bedStepMm = iniStepMm;
+        a.singleBedStepAligned = cfg.getBool(
+            "MultiBed", "single_bed_step_aligned", a.singleBedStepAligned);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
         a.seamXyAlign = cfg.getBool("MultiBed", "seam_xy_align", a.seamXyAlign);
@@ -1410,6 +1469,8 @@ std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
     bool isPathArg =
         (argName == "-df" || argName == "-i" || argName == "-input" ||
          argName == "-dfList" || argName == "-bProjList" ||
+         argName == "-df2" || argName == "-dfList2" || argName == "-bProj2" ||
+         argName == "-bProjList2" || argName == "-chunkCSRDir2" ||
          argName == "-fout" || argName == "-o" || argName == "-output" ||
          argName == "-chunkCSRDir" ||
          argName == "-compactDenomCache" || argName == "-ctacFactorCacheDir" ||
@@ -1591,6 +1652,57 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     if (args.bedOverlaps.size() > static_cast<size_t>(spect::core::kMaxBeds)) {
         std::cerr << "Error: -bedOverlap supports at most "
                   << spect::core::kMaxBeds << " fixed bed slots.\n";
+        return false;
+    }
+    if (args.csrqResidency != "auto" && args.csrqResidency != "streamed") {
+        std::cerr << "Error: -csrqResidency expects auto|streamed, got '"
+                  << args.csrqResidency << "'.\n";
+        return false;
+    }
+    // Joint dual-window: the second window must mirror the first one bed for
+    // bed and carry explicit weights (a silent default would bias the joint
+    // likelihood toward whichever window the matrices happen to favour).
+    const bool hasProj2 = !args.projPath2.empty() || !args.projPaths2.empty();
+    const bool hasBProj2 = !args.bProjPath2.empty() || !args.bProjPaths2.empty();
+    if (!args.dualWindow()) {
+        if (hasProj2 || hasBProj2 || !args.energyWindowWeights.empty()) {
+            std::cerr << "Error: -df2/-dfList2, -bProj2/-bProjList2 and "
+                         "-energyWeights require -chunkCSRDir2.\n";
+            return false;
+        }
+        return true;
+    }
+    if (!args.projPaths2.empty() && !args.projPath2.empty()) {
+        std::cerr << "Error: Use either -df2 or -dfList2, not both.\n";
+        return false;
+    }
+    if (!hasProj2) {
+        std::cerr << "Error: -chunkCSRDir2 requires the second window's "
+                     "projections (-df2 or -dfList2).\n";
+        return false;
+    }
+    const size_t beds1 = args.projPaths.empty() ? 1u : args.projPaths.size();
+    const size_t beds2 = args.projPaths2.empty() ? 1u : args.projPaths2.size();
+    if (beds1 != beds2) {
+        std::cerr << "Error: the second window must list the same number of "
+                     "beds as the first (" << beds1 << " vs " << beds2 << ").\n";
+        return false;
+    }
+    if (!args.bProjPaths2.empty() && !args.bProjPath2.empty()) {
+        std::cerr << "Error: Use either -bProj2 or -bProjList2, not both.\n";
+        return false;
+    }
+    if (args.energyWindowWeights.size() != 2 ||
+        !(args.energyWindowWeights[0] > 0.0) ||
+        !(args.energyWindowWeights[1] > 0.0)) {
+        std::cerr << "Error: -energyWeights <w1,w2> (both > 0) is required with "
+                     "-chunkCSRDir2; e.g. Lu-177 branching 0.0617,0.1036 when "
+                     "the matrices are per emitted photon.\n";
+        return false;
+    }
+    if (args.doCTAC) {
+        std::cerr << "Error: joint dual-window reconstruction does not support "
+                     "CTAC (-ctac); the CSRQ path has no attenuation model.\n";
         return false;
     }
     return true;
@@ -2015,7 +2127,12 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "single_mask_xyz = "
               << spect::core::sixmodule::kOutputMaskNx << ","
               << spect::core::sixmodule::kOutputMaskNy << ","
-              << spect::core::sixmodule::kSingleBedMaskNz << "\n";
+              << (a.singleBedStepAligned
+                      ? std::string("step+") + std::to_string(
+                            spect::core::sixmodule::kDefaultBlendMarginLayers)
+                      : std::to_string(
+                            spect::core::sixmodule::kSingleBedMaskNz))
+              << " layers\n";
     std::cout << "multibed_roi_mm = "
               << spect::core::sixmodule::kMultiBedRoiDiameterMm << ","
               << spect::core::sixmodule::kMultiBedRoiHeightMm << "\n";
@@ -2033,7 +2150,16 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[SystemMatrix]\n";
     std::cout << "compact_denom_cache_path = " << (a.compactDenomCachePath.empty() ? "(auto)" : a.compactDenomCachePath) << "\n";
     std::cout << "compact_denom_cache_dir = " << (a.compactDenomCacheDir.empty() ? "recon_out/compact_denom_cache (cwd legacy)" : a.compactDenomCacheDir) << "\n";
-    std::cout << "chunk_csr_dir = " << (a.chunkCSRDir.empty() ? "(none)" : a.chunkCSRDir) << "\n\n";
+    std::cout << "chunk_csr_dir = " << (a.chunkCSRDir.empty() ? "(none)" : a.chunkCSRDir) << "\n";
+    std::cout << "chunk_csr_dir2 = " << (a.chunkCSRDir2.empty() ? "(none)" : a.chunkCSRDir2) << "\n";
+    std::cout << "energy_window_weights = ";
+    if (a.energyWindowWeights.empty()) {
+        std::cout << "(single window)";
+    } else {
+        for (size_t k = 0; k < a.energyWindowWeights.size(); ++k)
+            std::cout << (k ? "," : "") << a.energyWindowWeights[k];
+    }
+    std::cout << "\n\n";
 
     std::cout << "[MultiBed]\n";
     std::cout << "bed_count    = " << a.getEffectiveBedCount() << "\n";
@@ -2052,6 +2178,9 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
               << (a.bedStepMm > 0.0 ? a.bedStepMm
                                     : spect::core::sixmodule::kMultiBedStepMm)
               << "  # scanner bed step; crop = step+10, stride = step\n";
+    std::cout << "single_bed_step_aligned = "
+              << (a.singleBedStepAligned ? "true" : "false")
+              << "  # single-bed crop = step+10; false keeps legacy 72 layers\n";
     std::cout << "detz_edge_censor = " << a.detZEdgeCensor
               << "  # detZ edge rows censored per side (0=off; compact chunk layout only)\n";
     std::cout << "detz_row_weights_file = "
@@ -2098,8 +2227,12 @@ void ArgumentParser::printUsage() {
               << spect::core::kMaxBeds << " beds)\n";
     std::cout << "  merge_time_segments      [InputOutput] true + -df <timestamp/SPECT>: sum matching sibling BedN.bin inputs\n";
     std::cout << "  output_filters_overwrite_primary  [InputOutput] write output Smooth->Butter chain to the unsuffixed volume\n";
-    std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb\n";
+    std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb (or chunk_*.csrq)\n";
     std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
+    std::cout << "  -chunkCSRDir2 <dir>      Second energy window matrix (CSRQ) for joint dual-window MLEM;\n";
+    std::cout << "                           pair with -df2/-dfList2 (same beds), optional -bProj2/-bProjList2, and -energyWeights\n";
+    std::cout << "  -energyWeights <w1,w2>   Window weights (mean_k = w_k*A_k*x + b_k), e.g. Lu-177 branching 0.0617,0.1036\n";
+    std::cout << "  -csrqResidency <auto|streamed>  CSRQ matrices resident when they fit (auto) or always streamed from pinned host memory\n";
     std::cout << "  -compactDenomCache <mhd> Exact compact denominator cache path (overrides [SystemMatrix] cache path/dir)\n";
     std::cout << "  -ctacFactorCacheDir <dir> Directory for cached CTAC attenuation factor tables (default: recon_out/ctac_factor_cache)\n";
     std::cout << "  -attMap <path>           Attenuation map (mu, mm^-1) for attenuation correction / Chang's AC\n";
@@ -2166,6 +2299,7 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Multi-Bed ===\n";
     std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
     std::cout << "  -bedStepMm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z)\n";
+    std::cout << "  -singleBedStepAligned <0|1>  Single-bed crop = step+10 (default 1); 0 keeps legacy 72 layers\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
     std::cout << "  -normFactorFile <f>       Full projection correction factors c; applies reciprocal 1/c to sensitivity\n";

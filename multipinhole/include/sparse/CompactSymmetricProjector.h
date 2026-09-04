@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace spect::cuda {
 
@@ -21,7 +22,53 @@ struct CompactSymmetricStageTiming {
   size_t numeratorCalls = 0;
 };
 
+// One energy window of a joint multi-window (MB-JR) reconstruction: its own
+// system matrix directory and the scalar w that turns the matrix into the
+// window mean (w * A x + background), i.e. emission intensity x window
+// efficiency when the matrix is per emitted photon. A single-window run is
+// the one-channel case with weight 1. Only CSRQ directories may be combined;
+// CSRB stays single-channel.
+struct CompactMatrixChannel {
+  const spect::io::CompactChunkCSRDirectory *chunks = nullptr;
+  double weight = 1.0;
+};
+
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
+
+// Joint sensitivity sum_k w_k A_k^T 1 over all channels.
+bool computeCompactChunkSensitivityCUDA(
+    const std::vector<CompactMatrixChannel> &channels,
+    const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
+    CompactSymmetricStageTiming *timing = nullptr,
+    const uint16_t *attFactors = nullptr);
+
+// Joint numerator sum_k w_k A_k^T(p_k / (w_k A_k x + b_k)) per bed.
+// fullProjections / fullBackgrounds are indexed [channel * bedCount + bed]
+// (fullBackgrounds may be nullptr, or hold nullptr entries).
+bool runCompactChunkMlemNumerMultiBedCUDA(
+    const std::vector<CompactMatrixChannel> &channels,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const double *const *fullProjections,
+    const double *const *fullBackgrounds,
+    const double *const *smoothedImages, int bedCount, int threads,
+    double *const *numers, bool reverseChunkOrder = false,
+    CompactSymmetricStageTiming *timing = nullptr,
+    const uint16_t *const *attFactors = nullptr,
+    bool refreshProjectionInputs = true,
+    bool branchBatchInputPrepared = false,
+    bool downloadBackwardOutputs = true);
+
+// Uploads every channel's CSRQ matrix (or warms the CSRB resident cache).
+bool prepareCompactChunkExecutionCUDA(
+    const std::vector<CompactMatrixChannel> &channels);
+
+// CSRQ residency policy. By default a matrix stays resident when it fits next
+// to kCsrqResidentDeviceReserveBytes and is streamed from pinned host memory
+// otherwise; forcing streaming keeps the GPU memory free for other work (or
+// exercises the streamed path deliberately). Applies to matrices warmed
+// after the call.
+void setCsrqForceStreamingCUDA(bool force);
+bool csrqForceStreamingCUDA();
 
 
 // attFactors (optional, CTAC): full-angle attenuation table in the unrotated

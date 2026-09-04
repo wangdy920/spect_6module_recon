@@ -54,7 +54,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 
 | Option | Description |
 | --- | --- |
-| `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and `chunk_*.csrb` (**only matrix entry**). Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
+| `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and either `chunk_*.csrb` (canonical fp32 CSR) or `chunk_*.csrq` (derived GPU-resident format, see below); a directory must not mix the two (**only matrix entry**). Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
 | `[InputOutput] merge_time_segments=true` | With `-df <case/YYYYMMDD_HHMMSS/SPECT>`, scan sibling timestamp directories, require the same `BedN.bin` set and geometry in each, then sum matching beds in memory before reconstruction. Default is `false`; no merged projection files are written. |
 | `[InputOutput] output_filters_overwrite_primary=true` | Write enabled output-stage filters to `<fout>_it<N>.mhd/.raw` in Smooth→Butterworth order. Default `false` preserves the unfiltered primary; `_smooth` and `_butter` remain independent audit copies in both modes. |
@@ -69,6 +69,9 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds. |
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
+| `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
+| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window MLEM (MB-JR): a second energy window with its own CSRQ matrix and projections shares the activity estimate in one Poisson likelihood, `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. The second window lists the same beds as the first; `-energyWeights` (window mean scale, e.g. Lu-177 branching `0.0617,0.1036` for per-photon matrices) is required; CTAC is not supported; both matrices must be CSRQ. Two channels naming the same directory share one resident copy. |
+| `-csrqResidency <auto|streamed>` | CSRQ device residency (INI `[SystemMatrix] csrq_residency`). `auto` keeps each matrix resident when it fits and streams it from pinned host memory otherwise; `streamed` always streams (two 1–1.6 GiB chunk slots per matrix), for GPUs shared with other work. |
 | `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default. |
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
@@ -84,6 +87,8 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 For repeated acquisitions of one case, set `[InputOutput] merge_time_segments=true` and pass one timestamp's `SPECT` directory, for example `-df D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT`. Immediate sibling directories named `YYYYMMDD_HHMMSS` are processed chronologically. Every included segment must contain the identical `BedN.bin` set with matching BIN size/header/geometry; mismatches and non-finite sums fail before reconstruction. The run manifest records every source path per bed.
 
 The shipped 220-layer 6module geometry uses `-bedOverlap 164,164,164,164,0`, but the overlap is a derived quantity: `step_layers = round(bed_step_mm / voxel_z)` (default `-bedStepMm 16.8`; INI `[MultiBed] bed_step_mm`) and `overlap = baseNz - step_layers`. Omitting `-bedOverlap` auto-derives it from the scanner bed step and the matrix geometry; a wrong value is corrected with a warning (`bed_step_mm` is authoritative). The per-bed center crop is `step + 10` layers (66 for the 260601 geometry). Reconstruction segments are non-overlapping in storage. At save time the only production stitch:
+
+Single-bed output follows that same `step + 10` center-crop geometry when `[MultiBed] single_bed_step_aligned=true` (the default): `16.8 mm / 0.3 mm + 10 = 66` layers. Set it to `false`, or pass `-singleBedStepAligned 0`, only when the legacy fixed 72-layer output contract is required.
 
 1. takes the central `step + 10` layers from each bed (66 at 0.3 mm);
 2. estimates adjacent-bed scalar gains with the prototype log-ratio median/MAD rule, anchored at Bed1 (always applies the prototype log-ratio chain);
@@ -125,6 +130,38 @@ exactly one `bin/matrix/<matrix_name>/metadata.bin`, the executable selects it
 automatically; when multiple matrix directories are present, set
 `default_chunk_csr_dir = matrix/<matrix_name>` in `bin/config/spect_config.ini`
 or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
+
+### CSRQ: GPU-resident compressed matrix (derived from CSRB) — experimental
+
+Status (2026-09-03): CSRB remains the production matrix path and the
+protected numerical baseline; CSRQ and everything that depends on it (joint
+dual-window MLEM, streamed residency) are experimental and are not part of
+the shipped configuration. `chunk_*.csrq` is an offline derivative of the canonical CSRB chunks
+(`python tools/convert_csrb_to_csrq.py <csrb_dir> <csrq_dir>`): columns are
+sorted per row and stored as run-length words (`start << 6 | len-1`, runs of at
+most 64 voxels), values are u16 sqrt-companded against one fp32 row maximum
+(`v = rowmax * (q/65535)^2`). The Tc99m 120×120×220 matrix shrinks from
+24.3 GiB to 6.74 GiB (2.2 B/nnz). At load time the whole matrix is uploaded
+once and stays resident; forward/ratio/backward run with custom K=8 kernels
+(`cuda.csrq_fwd` / `cuda.csrq_bwd` in `[PROFILE]`) instead of cuSPARSE, so no
+matrix bytes cross PCIe during iterations and the host matrix cache is not
+used (`hostCacheBudgetBytes=0`). Requirements and limits:
+
+- CUDA only. A matrix stays resident when it fits next to a 2 GiB reserve
+  (Tc99m 6.9 GiB → ~9 GB peak on a 16 GB card); otherwise it is streamed
+  from pinned host memory through two device chunk slots, uploaded once per
+  iteration and overlapped with compute (`-csrqResidency streamed` forces
+  this, e.g. on a shared GPU). With two windows the larger matrix is kept
+  resident first and the rest streamed. Startup fails only when even two
+  chunk slots plus the reserve do not fit.
+- No CTAC attenuation and no background projections on the CSRQ path (both
+  raise a clear error); everything else (MLEM/BSREM, PSF, masks, multi-bed,
+  weighted sensitivity, bad detectors) is unchanged.
+- Same-input numerics vs the fp32 CSRB run on the frozen Derenzo workload:
+  image relL2 `1.5e-6` at MLEM it200, denom relL2 `8e-7`; 5-bed mouse MLEM
+  it50 relL2 `6.2e-7` (gate `1e-5`). Measured on this host (RTX 4070 Ti
+  SUPER): single-bed `0.25 s/iter` (CSRB `2.6 s`), five-bed `1.13 s/iter`
+  (CSRB `2.87 s`).
 
 ## Documentation
 

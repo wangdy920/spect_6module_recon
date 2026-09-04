@@ -138,6 +138,16 @@ void noteCudaTransformBackward(double seconds, size_t calls) {
   g_cudaChunkStageTiming.transformBackwardCalls += calls;
 }
 
+void noteCudaCsrqForward(double seconds, size_t calls) {
+  g_cudaChunkStageTiming.csrqForwardSeconds += seconds;
+  g_cudaChunkStageTiming.csrqForwardCalls += calls;
+}
+
+void noteCudaCsrqBackward(double seconds, size_t calls) {
+  g_cudaChunkStageTiming.csrqBackwardSeconds += seconds;
+  g_cudaChunkStageTiming.csrqBackwardCalls += calls;
+}
+
 void noteCudaCompactMatrixUpload(double seconds) {
   g_cudaChunkStageTiming.compactMatrixUploadSeconds += seconds;
   ++g_cudaChunkStageTiming.compactMatrixUploadCalls;

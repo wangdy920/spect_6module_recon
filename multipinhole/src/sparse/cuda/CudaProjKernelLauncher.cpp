@@ -37,6 +37,11 @@ struct ProjDomainKernelCache {
   CUfunction compactCsrSpmvXPairFunction = nullptr;
   CUfunction compactPackColQuadFunction = nullptr;
   CUfunction compactCsrSpmvXQuadFunction = nullptr;
+  CUfunction csrqForwardFunction = nullptr;
+  CUfunction csrqBackwardFunction = nullptr;
+  CUfunction csrqPackFunction = nullptr;
+  CUfunction csrqRatioFunction = nullptr;
+  CUfunction csrqUnitRatioFunction = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -81,6 +86,11 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactCsrSpmvXPairFunction != nullptr &&
       g_projDomainKernelCache.compactPackColQuadFunction != nullptr &&
       g_projDomainKernelCache.compactCsrSpmvXQuadFunction != nullptr &&
+      g_projDomainKernelCache.csrqForwardFunction != nullptr &&
+      g_projDomainKernelCache.csrqBackwardFunction != nullptr &&
+      g_projDomainKernelCache.csrqPackFunction != nullptr &&
+      g_projDomainKernelCache.csrqRatioFunction != nullptr &&
+      g_projDomainKernelCache.csrqUnitRatioFunction != nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -115,6 +125,11 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactCsrSpmvXPairFunction = nullptr;
     g_projDomainKernelCache.compactPackColQuadFunction = nullptr;
     g_projDomainKernelCache.compactCsrSpmvXQuadFunction = nullptr;
+    g_projDomainKernelCache.csrqForwardFunction = nullptr;
+    g_projDomainKernelCache.csrqBackwardFunction = nullptr;
+    g_projDomainKernelCache.csrqPackFunction = nullptr;
+    g_projDomainKernelCache.csrqRatioFunction = nullptr;
+    g_projDomainKernelCache.csrqUnitRatioFunction = nullptr;
   }
 
   cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
@@ -172,6 +187,21 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactCsrSpmvXQuadFunction,
       g_projDomainKernelCache.module, "compact_csr_spmv_xquad"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqForwardFunction,
+      g_projDomainKernelCache.module, "csrq_forward_k8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqBackwardFunction,
+      g_projDomainKernelCache.module, "csrq_backward_k8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqPackFunction,
+      g_projDomainKernelCache.module, "csrq_pack_branch8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqRatioFunction,
+      g_projDomainKernelCache.module, "csrq_ratio_k8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqUnitRatioFunction,
+      g_projDomainKernelCache.module, "csrq_unit_ratio_k8"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -714,6 +744,166 @@ void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactCsrSpmvXQuadFunction, gridSize, 1, 1,
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+namespace {
+
+CUdeviceptr devPtr(const void *p) {
+  return reinterpret_cast<CUdeviceptr>(const_cast<void *>(p));
+}
+
+unsigned int gridFor(unsigned long long count, unsigned int blockSize) {
+  return static_cast<unsigned int>((count + blockSize - 1ull) / blockSize);
+}
+
+} // namespace
+
+void launchCsrqForwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+                               const float *xPacked, float *yPacked,
+                               cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (chunk.rows <= 0) {
+    return;
+  }
+  CUdeviceptr rowNnzPtr = devPtr(chunk.rowNnzPtr);
+  CUdeviceptr rowRunPtr = devPtr(chunk.rowRunPtr);
+  CUdeviceptr rowMax = devPtr(chunk.rowMax);
+  CUdeviceptr runs = devPtr(chunk.runs);
+  CUdeviceptr valuesQ = devPtr(chunk.valuesQ);
+  CUdeviceptr x = devPtr(xPacked);
+  CUdeviceptr y = devPtr(yPacked);
+  int rows = chunk.rows;
+  void *args[] = {&rowNnzPtr, &rowRunPtr, &rowMax, &runs, &valuesQ, &x, &y,
+                  &rows};
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqForwardFunction,
+      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+                                const float *ratioPacked, float *yBranch,
+                                size_t nvox, int kFirst, int kCount,
+                                cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (chunk.rows <= 0 || nvox == 0 || kCount <= 0) {
+    return;
+  }
+  if (kFirst < 0 || kFirst + kCount > kCsrqK) {
+    throw std::runtime_error("CSRQ backward branch range out of [0, 8).");
+  }
+  CUdeviceptr rowNnzPtr = devPtr(chunk.rowNnzPtr);
+  CUdeviceptr rowRunPtr = devPtr(chunk.rowRunPtr);
+  CUdeviceptr rowMax = devPtr(chunk.rowMax);
+  CUdeviceptr runs = devPtr(chunk.runs);
+  CUdeviceptr valuesQ = devPtr(chunk.valuesQ);
+  CUdeviceptr r = devPtr(ratioPacked);
+  CUdeviceptr y = devPtr(yBranch);
+  unsigned long long voxels = static_cast<unsigned long long>(nvox);
+  int rows = chunk.rows;
+  int first = kFirst;
+  int count = kCount;
+  void *args[] = {&rowNnzPtr, &rowRunPtr, &rowMax, &runs, &valuesQ, &r, &y,
+                  &voxels, &rows, &first, &count};
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqBackwardFunction,
+      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
+                                 size_t nvox, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (nvox == 0) {
+    return;
+  }
+  CUdeviceptr in = devPtr(branchMajor);
+  CUdeviceptr out = devPtr(packed);
+  unsigned long long count = static_cast<unsigned long long>(nvox);
+  void *args[] = {&in, &out, &count};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqPackFunction, gridFor(count, blockSize), 1,
+      1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
+      nullptr));
+}
+
+void launchCsrqRatioK8Kernel(float *yhatPacked, const double *fullProjection,
+                             const double *fullBackground,
+                             size_t fullProjectionCount, double scale,
+                             const cuda::CompactDeviceRatioParams &params,
+                             const int *dSymIds, const int *dZMirrors, int rows,
+                             double eps, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr yhat = devPtr(yhatPacked);
+  CUdeviceptr proj = devPtr(fullProjection);
+  CUdeviceptr background = devPtr(fullBackground);
+  CUdeviceptr symIds = devPtr(dSymIds);
+  CUdeviceptr zMirrors = devPtr(dZMirrors);
+  unsigned long long projCount =
+      static_cast<unsigned long long>(fullProjectionCount);
+  void *args[] = {&yhat,
+                  &proj,
+                  &background,
+                  &projCount,
+                  &scale,
+                  const_cast<int *>(&params.symmetryMode),
+                  const_cast<int *>(&params.compactRowBase),
+                  const_cast<int *>(&params.compactRaysPerAngle),
+                  const_cast<int *>(&params.compactNumAngles),
+                  const_cast<int *>(&params.detNx),
+                  const_cast<int *>(&params.detNz),
+                  const_cast<int *>(&params.compactDetZ),
+                  const_cast<int *>(&params.fullNumAngles),
+                  const_cast<int *>(&params.fullRaysPerAngle),
+                  &symIds,
+                  &zMirrors,
+                  &rows,
+                  &eps};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned long long total =
+      static_cast<unsigned long long>(rows) * kCsrqK;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqRatioFunction, gridFor(total, blockSize), 1,
+      1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
+      nullptr));
+}
+
+void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
+                                 const cuda::CompactDeviceRatioParams &params,
+                                 const int *dSymIds, const int *dZMirrors,
+                                 int rows, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr ratio = devPtr(ratioPacked);
+  CUdeviceptr symIds = devPtr(dSymIds);
+  CUdeviceptr zMirrors = devPtr(dZMirrors);
+  void *args[] = {&ratio,
+                  &value,
+                  const_cast<int *>(&params.symmetryMode),
+                  const_cast<int *>(&params.compactRowBase),
+                  const_cast<int *>(&params.compactRaysPerAngle),
+                  const_cast<int *>(&params.compactNumAngles),
+                  const_cast<int *>(&params.detNx),
+                  const_cast<int *>(&params.detNz),
+                  const_cast<int *>(&params.compactDetZ),
+                  const_cast<int *>(&params.fullNumAngles),
+                  const_cast<int *>(&params.fullRaysPerAngle),
+                  &symIds,
+                  &zMirrors,
+                  &rows};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned long long total =
+      static_cast<unsigned long long>(rows) * kCsrqK;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqUnitRatioFunction,
+      gridFor(total, blockSize), 1, 1, blockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
 } // namespace spect
