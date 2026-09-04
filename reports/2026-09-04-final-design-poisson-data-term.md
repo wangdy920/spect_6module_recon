@@ -196,8 +196,8 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 7. ~~`pack_branch8_atten`、按角度组的 x̃/y 布局、`atten_transform_backward_add`~~ → 执行时取 **G = 1**（按 compact 角度逐个处理）：`csrq_pack_branch8_atten` 在 pack 时乘 `att[fullAngle(θ_c,k), M_k(v)]`，`compact_transform_backward_add_batch_atten` 在收口时乘同一因子；forward/backward 核只是按行子区间（1152 行）启动，核本体不变。选 G = 1 的原因：backward 的两分支 L2 驻留论证要求 y 目标 ≤ 25 MB，G > 1 会把它放大 G 倍；pack / 收口的总量与 G 无关；启动数 720/迭代/床可忽略。表驻留：每 (chunk, 床) 只暂存该 chunk 触及的 60 个全角度切片（≈0.38 GB，同步 `cudaMemcpy`，每床每迭代整表过一次 PCIe ≈ 0.25 s），未进 plan；与计算重叠留给 P3。**CSRB 侧未改**：CSRB 是受保护生产路径，其现有 CTAC 核作为参考实现保留（§6 门已用它通过）；是否用因子分解形式替换（预计 44 s/iter → ~3 s/iter，两床）留作用户决定。真实 μ 表数据：MDP 小鼠 2h（Tc-99m，CT/SPECT DICOM `dcmdata/mouse_samples/20260729_SPECT_mouse_MDP/20260729_162015`，投影 `E:\...\mdp_seam_ab_20260730\preproc_2h`），`prepare_ct_mu_map.py --profile recon220 --beds 2,3 --z-bed-flip`；Lu-177 在本机只有 CT 原始投影（`data_platform1.mhd` 是 1536×1536×720 的投影栈，不是重建体），等厂商 CT DICOM。
 8. ~~伴随测试 + CSRQ-vs-CSRB CTAC 数值门~~ 通过：单元测试（随机 24 角矩阵、2 chunk、两张逐床表）CSRQ vs CSRB 全部 ≤ 1e-5、伴随 ≤ 1e-5；真实数据 it20 relL2 1.4e-7（分母 1.1e-7，零模式一致），BSREM-II+RDP it1–5 ≤ 1.7e-7；两床 1.02 s/iter（核 0.48 s + 表上传 0.5 s）vs CSRB CTAC 44 s/iter。
 
-**P3 — 性能收尾**
-9. WDDM 规划修正与降级重试；表流式与计算重叠；多床时打包/累加暂存复用；5060 Ti 上 `red.global.v4.f32` 试验（仍是唯一未试的反投线索）。
+**P3 — 性能收尾**（2026-09-04 完成本机可做的部分）
+9. ~~WDDM 规划修正与降级重试~~ 做法：不改估计（WDDM 下 `cudaMemGetInfo` 没有可靠替代，NVML 另算依赖），而是把"放不下"变成可恢复错误 `CsrqDeviceMemoryError`：`warmCompactChunks` 捕获后把本次调用已常驻的矩阵降级为流式（清 lease、重读进 pinned 主机）再重试失败的矩阵。用 4 GiB 的 torch 进程复现今早的场景：208 常驻 → 113 "even streamed" 放不下（空闲 1197 MiB）→ 208 降级 → 113 常驻 → 跑完（原来 FATAL）。~~表流式与计算重叠~~ 做法：`cudaHostRegister` 页锁定调用方的逐床表（2.2 GB 用 0.08 s，失败则退回同步拷贝），切片经上传流进两个设备槽，与上一 (chunk, 床) 的核用 ready/free 事件双缓冲；逐矩阵的切片索引计划只建一次，遍内无同步拷贝。两床 CTAC 1.02 → **0.60 s/iter**，数值不变。多床时打包/累加暂存本来就共享（`dCsrqX_/dCsrqY_/dCsrqRatio_` 与两个切片槽），无需再改。**未做**：5060 Ti 上 `red.global.v4.f32` 向量原子（需要现场 GPU）；CTAC 切片槽（2 × 0.38 GB）未计入 `beginCsrqWarmup` 的 scratch 估计，现由 2 GiB 保留吸收。
 
 每个 P 步单独提交、单独跑 §6 对应门；P0 完成前不开始 P1，P2 依赖 P0 的 ratio/行权重契约。
 

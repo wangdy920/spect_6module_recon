@@ -159,8 +159,10 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   at a time (`csrq_pack_branch8_atten` before the forward,
   `compact_transform_backward_add_batch_atten` after the backward scatter),
   so the SpMV kernels are the same as without CTAC; the per-bed factor table
-  crosses PCIe once per bed per iteration (~0.25 s on this host) and only
-  the slices a chunk needs stay on the device (~0.4 GB). Everything else
+  is page-locked once and only the slices a chunk needs are streamed to the
+  device (two 0.4 GB slots, double-buffered against the previous chunk's
+  kernels), so the 2.3 GB per bed per iteration of table traffic is mostly
+  hidden behind compute. Everything else
   (MLEM/BSREM, PSF, masks, multi-bed, weighted sensitivity, bad detectors) is
   unchanged. Joint dual-window runs still reject `-ctac` (one μ table per
   photopeak is not implemented).
@@ -170,7 +172,12 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   SUPER): single-bed `0.25 s/iter` (CSRB `2.6 s`), five-bed `1.13 s/iter`
   (CSRB `2.87 s`). With CTAC on a real CT μ-map (MDP mouse, two beds):
   MLEM it20 image relL2 `1.4e-7` and sensitivity relL2 `1.1e-7` vs the CSRB
-  CTAC path, at `1.0 s/iter` (CSRB CTAC `44 s/iter`).
+  CTAC path, at `0.60 s/iter` (CSRB CTAC `44 s/iter`).
+- Residency is planned from `cudaMemGetInfo`, which under WDDM can ignore
+  other processes' allocations. When a later matrix then does not fit even
+  streamed, the matrices loaded resident by the same call are demoted to
+  streamed and the load is retried instead of aborting; on a shared GPU
+  `-csrqResidency streamed` still avoids the extra re-read.
 
 ## Documentation
 

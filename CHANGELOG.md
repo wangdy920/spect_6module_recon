@@ -8,6 +8,24 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- CSRQ residency and CTAC streaming (P3 of the Poisson data-term design).
+  The per-bed CTAC factor tables are page-locked once (`cudaHostRegister`,
+  0.08 s for 2.2 GB; synchronous fallback when registration is refused) and
+  the slices a chunk needs are copied on the upload stream into two device
+  slots, double-buffered against the previous (chunk, bed) pair's kernels
+  with ready/free events, and the per-matrix slice-index plan is built and
+  uploaded once, so no synchronous copy sits between launches. MDP mouse
+  CTAC (two beds) goes from 1.02 to 0.60 s/iter with identical numerics
+  (it20 relL2 1.4e-7 vs the CSRB CTAC path). The residency planner no longer
+  aborts when a later matrix does not fit even streamed (the free-memory
+  estimate under WDDM ignores other processes' allocations): the matrices
+  the same call made resident are demoted to streamed (re-read into pinned
+  memory) and the failed one is retried. Reproduced with a 4 GiB co-tenant
+  on the Lu-177 pair: 208 keV planned resident, 113 keV failed with 1.2 GB
+  free, 208 keV demoted, 113 keV became resident, run completed (previously
+  FATAL). `CsrqDeviceMemoryError` marks the fit failure;
+  `setCsrqWarmupFitFailuresForTestsCUDA` exercises the retry in the unit
+  test. Suite 281 pass.
 - CTAC on the CSRQ path (P2 of the Poisson data-term design): the attenuation
   model `h_ij = a_ij * att[fullAngle(i), unrotatedVoxel(j)]` is factorised out
   of the nnz loop. A chunk is walked one compact angle at a time;
