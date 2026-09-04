@@ -1394,6 +1394,88 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                   branchMajor[7 * nvox + v]);
 }
 
+// CTAC pack for one compact angle: packed[v][k] = branchMajor[k*nvox + v] *
+// att[slice_k * nvox + M_k(v)] / 65535, where M_k maps the rotated voxel v of
+// branch k back to the unrotated frame (compact_atten_mapped_voxel) and
+// slice_k = sliceIndex[k] is the staged factor slice of the branch's full
+// angle (-1: the branch has no full angle at this compact angle -> factor 1,
+// exactly like compact_atten_factor). Same algebra as compact_atten_fused_spmv,
+// applied once per voxel in the image domain instead of once per nnz.
+extern "C" __global__ void csrq_pack_branch8_atten(
+    const float *branchMajor, const unsigned short *attSlices,
+    const int *sliceIndex, float4 *packed, unsigned long long nvox,
+    int symmetryMode, int nx, int ny, int nz, const int *symIds,
+    const int *zMirrors) {
+  const unsigned long long v =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (v >= nvox) {
+    return;
+  }
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  float f[CSRQ_K];
+#pragma unroll
+  for (int k = 0; k < CSRQ_K; ++k) {
+    float factor = 1.0f;
+    const int slice = sliceIndex[k];
+    if (slice >= 0) {
+      int valid = 0;
+      const unsigned long long mapped = compact_atten_mapped_voxel(
+          v, symmetryMode, symIds[k], zMirrors[k], nx, ny, nz, plane, &valid);
+      if (valid != 0) {
+        factor = static_cast<float>(
+                     attSlices[static_cast<unsigned long long>(slice) * nvox +
+                               mapped]) *
+                 (1.0f / static_cast<float>(kAttenUint16Scale));
+      }
+    }
+    f[k] = branchMajor[static_cast<unsigned long long>(k) * nvox + v] * factor;
+  }
+  packed[2 * v] = make_float4(f[0], f[1], f[2], f[3]);
+  packed[2 * v + 1] = make_float4(f[4], f[5], f[6], f[7]);
+}
+
+// compact_transform_backward_add_batch with the CTAC factor applied at the
+// unrotated voxel: accum[M_k(v)] += rotated[k][v] * att[slice_k * nvox +
+// M_k(v)] / 65535. Together with csrq_pack_branch8_atten this is the exact
+// adjoint of the attenuated forward (same table, same index on both sides).
+extern "C" __global__ void compact_transform_backward_add_batch_atten(
+    const float *rotatedBatch, double *accum, unsigned long long nvox,
+    int batchSize, int symmetryMode, int nx, int ny, int nz,
+    const int *symIds, const int *zMirrors, const unsigned short *attSlices,
+    const int *sliceIndex) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      nvox * static_cast<unsigned long long>(batchSize);
+  if (index >= total || nx <= 0 || ny <= 0 || nz <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / nvox);
+  const unsigned long long voxel = index % nvox;
+  const unsigned long long plane =
+      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+  int valid = 0;
+  const unsigned long long mapped = compact_atten_mapped_voxel(
+      voxel, symmetryMode, symIds[branch], zMirrors[branch], nx, ny, nz, plane,
+      &valid);
+  if (valid == 0) {
+    return;
+  }
+  float value = rotatedBatch[index];
+  if (value == 0.0f) {
+    return;
+  }
+  const int slice = sliceIndex[branch];
+  if (slice >= 0) {
+    value *= static_cast<float>(
+                 attSlices[static_cast<unsigned long long>(slice) * nvox +
+                           mapped]) *
+             (1.0f / static_cast<float>(kAttenUint16Scale));
+  }
+  atomicAdd(&accum[mapped], static_cast<double>(value));
+}
+
 // ratioPacked[row*8 + b] = value * rowWeights[fullIndex] (value alone when
 // rowWeights is null) where the (row, branch) maps to a full projection row,
 // else 0: the sensitivity value * A^T W 1 over valid rows only (value is the

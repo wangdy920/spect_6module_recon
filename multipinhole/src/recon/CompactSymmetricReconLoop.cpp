@@ -771,8 +771,12 @@ std::vector<double> runCompactSymmetricReconstruction(
             compactAttFactorPtrs.push_back(factors.empty() ? nullptr
                                                            : factors.data());
           }
-          logInfo("compact CTAC: per-bed attenuation factors fused in native "
-                  "CUDA forward/backward/sensitivity kernels.");
+          logInfo(csrqMatrices
+                      ? "compact CTAC (CSRQ): per-bed attenuation factors "
+                        "applied in the image domain per compact angle (pack "
+                        "and transform-add), SpMV kernels unchanged."
+                      : "compact CTAC: per-bed attenuation factors fused in "
+                        "native CUDA forward/backward/sensitivity kernels.");
         }
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
         std::vector<double> denom(globalNvox, 0.0);
@@ -1188,10 +1192,12 @@ std::vector<double> runCompactSymmetricReconstruction(
           const std::vector<double> *bedImageSource = &image;
 
           // The resident branch-batch input (image rotated on the device)
-          // serves any bed count and both formats, backgrounds included; CTAC
-          // and ROI-pruned matrices still take the host input path.
+          // serves any bed count and both formats, backgrounds included. CTAC
+          // stays on it for CSRQ (the factor is applied at pack time on the
+          // device); CSRB CTAC and ROI-pruned matrices still take the host
+          // input path.
           const bool residentBatchInput =
-              !debugStats && !compactHasAttenuation &&
+              !debugStats && (!compactHasAttenuation || csrqMatrices) &&
               !compactRoiPrunesMatrix &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&

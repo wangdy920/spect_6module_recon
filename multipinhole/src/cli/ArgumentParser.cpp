@@ -1702,7 +1702,9 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     }
     if (args.doCTAC) {
         std::cerr << "Error: joint dual-window reconstruction does not support "
-                     "CTAC (-ctac); the CSRQ path has no attenuation model.\n";
+                     "CTAC (-ctac) yet: mu differs per photopeak, so each "
+                     "window needs its own attenuation table (single-window "
+                     "CTAC works on both matrix formats).\n";
         return false;
     }
     return true;

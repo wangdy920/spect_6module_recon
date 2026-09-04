@@ -39,6 +39,8 @@ struct ProjDomainKernelCache {
   CUfunction csrqForwardFunction = nullptr;
   CUfunction csrqBackwardFunction = nullptr;
   CUfunction csrqPackFunction = nullptr;
+  CUfunction csrqPackAttenFunction = nullptr;
+  CUfunction compactTransformBackwardBatchAttenFunction = nullptr;
   CUfunction csrqUnitRatioFunction = nullptr;
   CUfunction compactUnitRatioBatchFunction = nullptr;
   CUfunction compactBsremCurvatureFunction = nullptr;
@@ -89,6 +91,9 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.csrqForwardFunction != nullptr &&
       g_projDomainKernelCache.csrqBackwardFunction != nullptr &&
       g_projDomainKernelCache.csrqPackFunction != nullptr &&
+      g_projDomainKernelCache.csrqPackAttenFunction != nullptr &&
+      g_projDomainKernelCache.compactTransformBackwardBatchAttenFunction !=
+          nullptr &&
       g_projDomainKernelCache.csrqUnitRatioFunction != nullptr &&
       g_projDomainKernelCache.compactUnitRatioBatchFunction != nullptr &&
       g_projDomainKernelCache.compactBsremCurvatureFunction != nullptr &&
@@ -129,6 +134,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.csrqForwardFunction = nullptr;
     g_projDomainKernelCache.csrqBackwardFunction = nullptr;
     g_projDomainKernelCache.csrqPackFunction = nullptr;
+    g_projDomainKernelCache.csrqPackAttenFunction = nullptr;
+    g_projDomainKernelCache.compactTransformBackwardBatchAttenFunction = nullptr;
     g_projDomainKernelCache.csrqUnitRatioFunction = nullptr;
     g_projDomainKernelCache.compactUnitRatioBatchFunction = nullptr;
     g_projDomainKernelCache.compactBsremCurvatureFunction = nullptr;
@@ -196,6 +203,13 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqPackFunction,
       g_projDomainKernelCache.module, "csrq_pack_branch8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.csrqPackAttenFunction,
+      g_projDomainKernelCache.module, "csrq_pack_branch8_atten"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactTransformBackwardBatchAttenFunction,
+      g_projDomainKernelCache.module,
+      "compact_transform_backward_add_batch_atten"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqUnitRatioFunction,
       g_projDomainKernelCache.module, "csrq_unit_ratio_k8"));
@@ -945,6 +959,86 @@ void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
       g_projDomainKernelCache.csrqPackFunction, gridFor(count, blockSize), 1,
       1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
       nullptr));
+}
+
+void launchCsrqPackBranch8AttenKernel(
+    const float *branchMajor, const uint16_t *attSlices, const int *dSliceIndex,
+    float *packed, size_t nvox,
+    const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (nvox == 0) {
+    return;
+  }
+  if (attSlices == nullptr || dSliceIndex == nullptr || dSymIds == nullptr ||
+      dZMirrors == nullptr) {
+    throw std::runtime_error(
+        "CSRQ attenuated pack launch needs the factor slices and branch tables.");
+  }
+  CUdeviceptr in = devPtr(branchMajor);
+  CUdeviceptr att = devPtr(attSlices);
+  CUdeviceptr slices = devPtr(dSliceIndex);
+  CUdeviceptr out = devPtr(packed);
+  CUdeviceptr symIds = devPtr(dSymIds);
+  CUdeviceptr zMirrors = devPtr(dZMirrors);
+  unsigned long long count = static_cast<unsigned long long>(nvox);
+  void *args[] = {&in,
+                  &att,
+                  &slices,
+                  &out,
+                  &count,
+                  const_cast<int *>(&commonParams.symmetryMode),
+                  const_cast<int *>(&commonParams.nx),
+                  const_cast<int *>(&commonParams.ny),
+                  const_cast<int *>(&commonParams.nz),
+                  &symIds,
+                  &zMirrors};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.csrqPackAttenFunction, gridFor(count, blockSize),
+      1, 1, blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args,
+      nullptr));
+}
+
+void launchCompactTransformBackwardAddBatchAttenKernel(
+    const float *rotatedBatch, double *accum, size_t nvox, int batchSize,
+    const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, const uint16_t *attSlices, const int *dSliceIndex,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (nvox == 0 || batchSize <= 0) {
+    return;
+  }
+  if (attSlices == nullptr || dSliceIndex == nullptr) {
+    throw std::runtime_error(
+        "attenuated transform-add launch needs the factor slices.");
+  }
+  CUdeviceptr rotatedPtr = devPtr(rotatedBatch);
+  CUdeviceptr accumPtr = devPtr(accum);
+  CUdeviceptr symIdsPtr = devPtr(dSymIds);
+  CUdeviceptr zMirrorsPtr = devPtr(dZMirrors);
+  CUdeviceptr att = devPtr(attSlices);
+  CUdeviceptr slices = devPtr(dSliceIndex);
+  unsigned long long voxelCount = static_cast<unsigned long long>(nvox);
+  unsigned long long total =
+      voxelCount * static_cast<unsigned long long>(batchSize);
+  void *args[] = {&rotatedPtr,
+                  &accumPtr,
+                  &voxelCount,
+                  &batchSize,
+                  const_cast<int *>(&commonParams.symmetryMode),
+                  const_cast<int *>(&commonParams.nx),
+                  const_cast<int *>(&commonParams.ny),
+                  const_cast<int *>(&commonParams.nz),
+                  &symIdsPtr,
+                  &zMirrorsPtr,
+                  &att,
+                  &slices};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactTransformBackwardBatchAttenFunction,
+      gridFor(total, blockSize), 1, 1, blockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
 void launchCompactUnitRatioBatchKernel(

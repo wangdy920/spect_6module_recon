@@ -3124,8 +3124,11 @@ public:
   // Forward + ratio + backward of matrix matrixIndex for beds
   // [0, bedCount) of the refreshed branch batch ([bed][branch][voxel]),
   // chunk-outer so a streamed chunk crosses PCIe once per pass. Bed b
-  // accumulates weight * A^T(p_b / (weight * A x_b + background_b)) into
+  // accumulates weight * H_b^T(p_b / (weight * H_b x_b + background_b)) into
   // accumulator accumulatorBase + b; projection cache slot cacheSlotBase + b.
+  // bedAttFactors (null, or one table per bed of attCount uint16) makes
+  // H_b = A att_b: the chunk is then walked one compact angle at a time with
+  // the factor applied at pack time and after the backward scatter.
   void csrqRunNumer(int matrixIndex, int bedCount, int branchCount,
                     const cuda::CompactDeviceRatioParams &commonRatioParams,
                     const cuda::CompactDeviceTransformParams &commonTransformParams,
@@ -3135,7 +3138,8 @@ public:
                     size_t fullProjectionCount, double weight,
                     int accumulatorBase, int cacheSlotBase,
                     cuda::CompactDeviceRatioTiming *ratioTimingOut,
-                    cuda::CompactDeviceBackwardTiming *backwardTimingOut) {
+                    cuda::CompactDeviceBackwardTiming *backwardTimingOut,
+                    const uint16_t *const *bedAttFactors, size_t attCount) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
@@ -3145,6 +3149,12 @@ public:
         accumulatorBase + bedCount > kCompactDeviceBackwardMaxAccumulators ||
         cacheSlotBase + bedCount > kCompactProjectionSlots) {
       throw std::runtime_error("CSRQ numerator bed/slot range out of range.");
+    }
+    bool hasAtten = false;
+    if (bedAttFactors != nullptr) {
+      for (int bed = 0; bed < bedCount; ++bed) {
+        hasAtten = hasAtten || bedAttFactors[bed] != nullptr;
+      }
     }
     if (commonRatioParams.symmetryMode != 45 &&
         commonRatioParams.symmetryMode != 90) {
@@ -3183,38 +3193,84 @@ public:
     csrqEnsureBranchMetadataLocked(symIds, zMirrors);
     ensureProjDomainKernelsLoaded();
 
+    // Timer slots: one per (chunk, bed) pass, or per (chunk, bed, compact
+    // angle) launch group on the attenuated path.
+    const size_t maxAngles =
+        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
     const size_t passes = matrix.shapes.size() * static_cast<size_t>(bedCount);
-    csrqEnsureTimersLocked(passes);
+    const size_t timerSlots = passes * maxAngles;
+    csrqEnsureTimersLocked(timerSlots);
     size_t pass = 0;
+    size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
                      static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      const int angles =
+          hasAtten ? csrqPrepareAttenSliceIndexLocked(chunk, commonRatioParams)
+                   : 0;
       for (int bed = 0; bed < bedCount; ++bed, ++pass) {
         const float *bedInput =
             dBatchInput_.get() +
             static_cast<size_t>(bed) * static_cast<size_t>(kCsrqK) * nvox;
-        launchCsrqPackBranch8Kernel(bedInput, dCsrqX_.get(), nvox);
+        const uint16_t *bedAtt =
+            hasAtten ? bedAttFactors[bed] : nullptr;
+        if (bedAtt == nullptr) {
+          launchCsrqPackBranch8Kernel(bedInput, dCsrqX_.get(), nvox);
 
-        // Forward and Poisson ratio in one kernel: the row's eight branch
-        // sums never leave the block.
-        csrqForwardTimers_[pass].recordStart(nullptr);
-        launchCsrqForwardRatioK8Kernel(
-            chunk.ptrs(), dCsrqX_.get(), ratio, dProjections[bed],
-            dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
-            dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
-        csrqForwardTimers_[pass].recordStop(nullptr);
+          // Forward and Poisson ratio in one kernel: the row's eight branch
+          // sums never leave the block.
+          const size_t t = usedTimers++;
+          csrqForwardTimers_[t].recordStart(nullptr);
+          launchCsrqForwardRatioK8Kernel(
+              chunk.ptrs(), dCsrqX_.get(), ratio, dProjections[bed],
+              dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
+              dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
+          csrqForwardTimers_[t].recordStop(nullptr);
 
-        csrqBackwardTimers_[pass].recordStart(nullptr);
-        csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
-                                accums[bed]->get());
-        csrqBackwardTimers_[pass].recordStop(nullptr);
+          csrqBackwardTimers_[t].recordStart(nullptr);
+          csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+                                  accums[bed]->get());
+          csrqBackwardTimers_[t].recordStop(nullptr);
+          continue;
+        }
+        // CTAC: stage this bed's factor slices for the chunk, then one
+        // compact angle at a time so each row group sees its own factors.
+        csrqStageAttenSlicesLocked(bedAtt, attCount, commonRatioParams, nvox);
+        const int rpa = commonRatioParams.compactRaysPerAngle;
+        for (int i = 0; i < angles; ++i) {
+          const int rowBase = i * rpa;
+          const CsrqDeviceChunkPtrs rows = csrqRowRange(chunk, rowBase, rpa);
+          const int *dSlice = dCsrqSliceIndex_.get() + i * kCsrqK;
+          cuda::CompactDeviceRatioParams angleParams = ratioParams;
+          angleParams.compactRowBase = chunk.compactRowBase + rowBase;
+          float *angleRatio = ratio + static_cast<size_t>(rowBase) * kCsrqK;
+          const size_t t = usedTimers++;
+          csrqForwardTimers_[t].recordStart(nullptr);
+          launchCsrqPackBranch8AttenKernel(
+              bedInput, dCsrqAttSlices_.get(), dSlice, dCsrqX_.get(), nvox,
+              commonTransformParams, dBatchSymIds_.get(),
+              dBatchZMirrors_.get());
+          launchCsrqForwardRatioK8Kernel(
+              rows, dCsrqX_.get(), angleRatio, dProjections[bed],
+              dBackgrounds[bed], fullProjectionCount, weight, angleParams,
+              dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
+          csrqForwardTimers_[t].recordStop(nullptr);
+
+          csrqBackwardTimers_[t].recordStart(nullptr);
+          csrqAttenBackwardAngleLocked(rows, angleRatio, nvox,
+                                       commonTransformParams, dSlice,
+                                       accums[bed]->get());
+          csrqBackwardTimers_[t].recordStop(nullptr);
+        }
       }
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    const double forwardSeconds = accumulateTimedCudaPairs(csrqForwardTimers_, passes);
-    const double backwardSeconds = accumulateTimedCudaPairs(csrqBackwardTimers_, passes);
+    const double forwardSeconds =
+        accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers);
+    const double backwardSeconds =
+        accumulateTimedCudaPairs(csrqBackwardTimers_, usedTimers);
     noteCudaCsrqForward(forwardSeconds, passes);
     noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
     if (ratioTimingOut != nullptr) {
@@ -3229,9 +3285,10 @@ public:
     }
   }
 
-  // weight * A^T W 1 of matrix matrixIndex restricted to (row, branch) pairs
+  // weight * H^T W 1 of matrix matrixIndex restricted to (row, branch) pairs
   // with a full projection counterpart, added to accumulatorIndex. rowWeights
-  // (one per full projection row) may be null for W = 1.
+  // (one per full projection row) may be null for W = 1; attFactors (one
+  // bed's full-angle table, attCount uint16) may be null for H = A.
   void csrqRunSensitivity(
       int matrixIndex, int branchCount, double weight,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
@@ -3239,7 +3296,8 @@ public:
       const int *symIds, const int *zMirrors, int accumulatorIndex,
       const double *rowWeights, size_t rowWeightCount,
       size_t fullProjectionCount,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut) {
+      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
+      const uint16_t *attFactors, size_t attCount) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
@@ -3263,26 +3321,48 @@ public:
     csrqEnsureBranchMetadataLocked(symIds, zMirrors);
     ensureProjDomainKernelsLoaded();
 
+    const bool hasAtten = attFactors != nullptr;
+    const size_t maxAngles =
+        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
     const size_t passes = matrix.shapes.size();
-    csrqEnsureTimersLocked(passes);
-    size_t pass = 0;
+    csrqEnsureTimersLocked(passes * maxAngles);
+    size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
                      static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      // The unit ratio covers the whole chunk in either mode.
       launchCsrqUnitRatioK8Kernel(ratio, static_cast<float>(weight),
                                   dRowWeights, fullProjectionCount, ratioParams,
                                   dBatchSymIds_.get(), dBatchZMirrors_.get(),
                                   chunk.rows);
-      csrqBackwardTimers_[pass].recordStart(nullptr);
-      csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
-                              accum.get());
-      csrqBackwardTimers_[pass].recordStop(nullptr);
-      ++pass;
+      if (!hasAtten) {
+        const size_t t = usedTimers++;
+        csrqBackwardTimers_[t].recordStart(nullptr);
+        csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+                                accum.get());
+        csrqBackwardTimers_[t].recordStop(nullptr);
+        return;
+      }
+      const int angles = csrqPrepareAttenSliceIndexLocked(chunk, commonRatioParams);
+      csrqStageAttenSlicesLocked(attFactors, attCount, commonRatioParams, nvox);
+      const int rpa = commonRatioParams.compactRaysPerAngle;
+      for (int i = 0; i < angles; ++i) {
+        const int rowBase = i * rpa;
+        const size_t t = usedTimers++;
+        csrqBackwardTimers_[t].recordStart(nullptr);
+        csrqAttenBackwardAngleLocked(
+            csrqRowRange(chunk, rowBase, rpa),
+            ratio + static_cast<size_t>(rowBase) * kCsrqK, nvox,
+            commonTransformParams, dCsrqSliceIndex_.get() + i * kCsrqK,
+            accum.get());
+        csrqBackwardTimers_[t].recordStop(nullptr);
+      }
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    const double backwardSeconds = accumulateTimedCudaPairs(csrqBackwardTimers_, passes);
+    const double backwardSeconds =
+        accumulateTimedCudaPairs(csrqBackwardTimers_, usedTimers);
     noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
     if (backwardTimingOut != nullptr) {
       backwardTimingOut->backwardSeconds += backwardSeconds;
@@ -3292,8 +3372,15 @@ public:
   // Forward projection of matrix matrixIndex over the single-bed branch
   // batch (8 * nvox floats refreshed by refreshCompactBranchBatchInput);
   // hostYhatPacked receives [compactRow][branch] for every compact row.
+  // With attFactors (one full-angle table) the projection is H x = A att x,
+  // per compact angle like the numerator; the params / branch tables are
+  // required then.
   void csrqRunForward(int matrixIndex, int branchCount, float *hostYhatPacked,
-                      size_t count) {
+                      size_t count,
+                      const cuda::CompactDeviceRatioParams *attenRatioParams,
+                      const cuda::CompactDeviceTransformParams *attenTransformParams,
+                      const int *symIds, const int *zMirrors,
+                      const uint16_t *attFactors, size_t attCount) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
@@ -3308,23 +3395,55 @@ public:
       throw std::runtime_error(
           "CSRQ forward requires a refreshed single-bed branch batch input.");
     }
+    const bool hasAtten = attFactors != nullptr;
+    if (hasAtten && (attenRatioParams == nullptr ||
+                     attenTransformParams == nullptr || symIds == nullptr ||
+                     zMirrors == nullptr)) {
+      throw std::runtime_error(
+          "CSRQ attenuated forward needs the angle/branch parameters.");
+    }
     ensureProjDomainKernelsLoaded();
-    launchCsrqPackBranch8Kernel(dBatchInput_.get(), dCsrqX_.get(), nvox);
+    if (hasAtten) {
+      csrqEnsureBranchMetadataLocked(symIds, zMirrors);
+    } else {
+      launchCsrqPackBranch8Kernel(dBatchInput_.get(), dCsrqX_.get(), nvox);
+    }
 
+    const size_t maxAngles =
+        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, *attenRatioParams) : 1u;
     const size_t passes = matrix.shapes.size();
-    csrqEnsureTimersLocked(passes);
-    size_t pass = 0;
+    csrqEnsureTimersLocked(passes * maxAngles);
+    size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
-      csrqForwardTimers_[pass].recordStart(nullptr);
-      launchCsrqForwardK8Kernel(
-          chunk.ptrs(), dCsrqX_.get(),
-          dCsrqRatio_.get() + static_cast<size_t>(chunk.compactRowBase) * kCsrqK);
-      csrqForwardTimers_[pass].recordStop(nullptr);
-      ++pass;
+      float *out =
+          dCsrqRatio_.get() + static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      if (!hasAtten) {
+        const size_t t = usedTimers++;
+        csrqForwardTimers_[t].recordStart(nullptr);
+        launchCsrqForwardK8Kernel(chunk.ptrs(), dCsrqX_.get(), out);
+        csrqForwardTimers_[t].recordStop(nullptr);
+        return;
+      }
+      const int angles = csrqPrepareAttenSliceIndexLocked(chunk, *attenRatioParams);
+      csrqStageAttenSlicesLocked(attFactors, attCount, *attenRatioParams, nvox);
+      const int rpa = attenRatioParams->compactRaysPerAngle;
+      for (int i = 0; i < angles; ++i) {
+        const int rowBase = i * rpa;
+        const size_t t = usedTimers++;
+        csrqForwardTimers_[t].recordStart(nullptr);
+        launchCsrqPackBranch8AttenKernel(
+            dBatchInput_.get(), dCsrqAttSlices_.get(),
+            dCsrqSliceIndex_.get() + i * kCsrqK, dCsrqX_.get(), nvox,
+            *attenTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
+        launchCsrqForwardK8Kernel(csrqRowRange(chunk, rowBase, rpa),
+                                  dCsrqX_.get(),
+                                  out + static_cast<size_t>(rowBase) * kCsrqK);
+        csrqForwardTimers_[t].recordStop(nullptr);
+      }
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    noteCudaCsrqForward(accumulateTimedCudaPairs(csrqForwardTimers_, passes),
-                        passes);
+    noteCudaCsrqForward(
+        accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers), passes);
 
     const auto outputStart = std::chrono::steady_clock::now();
     dCsrqRatio_.copyToHost(hostYhatPacked, count);
@@ -3464,11 +3583,174 @@ private:
     dCsrqX_.reset();
     dCsrqY_.reset();
     dCsrqRatio_.reset();
+    dCsrqAttSlices_.reset();
+    dCsrqSliceIndex_.reset();
+    csrqSliceIndexHost_.clear();
+    csrqSliceFullAngles_.clear();
+    csrqSliceChunkRowBase_ = -1;
+    csrqSliceChunkRows_ = -1;
     csrqForwardTimers_.clear();
     csrqBackwardTimers_.clear();
     for (auto &used : csrqSlotUsed_) {
       used = false;
     }
+  }
+
+  // ---- CSRQ CTAC (attenuation factorised out of the nnz loop) -------------
+  // h_ij = a_ij * att[fullAngle(i, branch), M_branch(j)]: the factor depends on
+  // the row's full angle and the unrotated voxel only, so the passes below
+  // walk a chunk one compact angle at a time and apply it in the image domain
+  // (csrq_pack_branch8_atten before the forward, the attenuated transform-add
+  // after the backward). The SpMV kernels themselves are untouched.
+
+  // Host mirror of compact_atten_full_angle for the first row of a compact
+  // angle; -1 when the branch has no full angle there (SYM_45Z edges).
+  static int csrqAttenFullAngle(const cuda::CompactDeviceRatioParams &p,
+                                int compactAngle, int symId) {
+    int fullAngle = 0;
+    if (p.symmetryMode == 45) {
+      const int q = p.fullNumAngles / 8;
+      if ((symId & 1) == 0) {
+        if (compactAngle >= q) return -1;
+        fullAngle = symId * q + compactAngle;
+      } else {
+        if (compactAngle <= 0) return -1;
+        fullAngle = symId * q + (q - compactAngle);
+      }
+    } else {
+      fullAngle = compactAngle + symId * p.compactNumAngles;
+    }
+    if (fullAngle < 0 || fullAngle >= p.fullNumAngles) return -1;
+    return fullAngle;
+  }
+
+  // Number of whole compact angles in a chunk (chunks are cut on angle
+  // boundaries by the converter; anything else cannot be attenuated per angle).
+  static int csrqAnglesInChunk(const CsrqDeviceChunk &chunk,
+                               const cuda::CompactDeviceRatioParams &p) {
+    if (p.compactRaysPerAngle <= 0 || chunk.rows % p.compactRaysPerAngle != 0 ||
+        chunk.compactRowBase % p.compactRaysPerAngle != 0) {
+      throw std::runtime_error(
+          "CSRQ CTAC requires chunks made of whole compact angles.");
+    }
+    return chunk.rows / p.compactRaysPerAngle;
+  }
+
+  static size_t csrqMaxAnglesPerChunkLocked(
+      const CsrqResidentMatrix &matrix,
+      const cuda::CompactDeviceRatioParams &p) {
+    if (p.compactRaysPerAngle <= 0) {
+      throw std::runtime_error("CSRQ CTAC requires compactRaysPerAngle > 0.");
+    }
+    size_t maxAngles = 1;
+    for (const auto &shape : matrix.shapes) {
+      maxAngles = std::max(
+          maxAngles, static_cast<size_t>(shape.rows / p.compactRaysPerAngle));
+    }
+    return maxAngles;
+  }
+
+  // Builds the (compact angle, branch) -> slice table of a chunk and the list
+  // of distinct full angles it needs; uploads the table. Returns the angle
+  // count. Cached by chunk identity (row base, rows).
+  int csrqPrepareAttenSliceIndexLocked(
+      const CsrqDeviceChunk &chunk, const cuda::CompactDeviceRatioParams &p) {
+    const int angles = csrqAnglesInChunk(chunk, p);
+    if (csrqSliceChunkRowBase_ == chunk.compactRowBase &&
+        csrqSliceChunkRows_ == chunk.rows && !csrqSliceIndexHost_.empty()) {
+      return angles;
+    }
+    const int firstAngle = chunk.compactRowBase / p.compactRaysPerAngle;
+    csrqSliceFullAngles_.clear();
+    csrqSliceIndexHost_.assign(static_cast<size_t>(angles) * kCsrqK, -1);
+    for (int i = 0; i < angles; ++i) {
+      for (int k = 0; k < kCsrqK; ++k) {
+        const int fullAngle =
+            csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
+        if (fullAngle < 0) continue;
+        auto it = std::find(csrqSliceFullAngles_.begin(),
+                            csrqSliceFullAngles_.end(), fullAngle);
+        if (it == csrqSliceFullAngles_.end()) {
+          csrqSliceFullAngles_.push_back(fullAngle);
+          it = csrqSliceFullAngles_.end() - 1;
+        }
+        csrqSliceIndexHost_[static_cast<size_t>(i) * kCsrqK + k] =
+            static_cast<int>(it - csrqSliceFullAngles_.begin());
+      }
+    }
+    dCsrqSliceIndex_.copyFromHost(csrqSliceIndexHost_.data(),
+                                  csrqSliceIndexHost_.size());
+    csrqSliceChunkRowBase_ = chunk.compactRowBase;
+    csrqSliceChunkRows_ = chunk.rows;
+    return angles;
+  }
+
+  // Copies the factor slices listed by csrqPrepareAttenSliceIndexLocked from
+  // the bed's host table ([fullAngle][nvox] uint16) to the device, contiguous
+  // full-angle runs in one copy each. Synchronous from pageable memory; the
+  // whole table crosses PCIe once per bed per pass (P3 overlaps this).
+  void csrqStageAttenSlicesLocked(const uint16_t *attFactors, size_t attCount,
+                                  const cuda::CompactDeviceRatioParams &p,
+                                  size_t nvox) {
+    if (attFactors == nullptr ||
+        attCount != static_cast<size_t>(p.fullNumAngles) * nvox) {
+      throw std::runtime_error(
+          "CSRQ CTAC table must hold fullNumAngles * voxels uint16 factors.");
+    }
+    const size_t sliceCount = csrqSliceFullAngles_.size();
+    if (sliceCount == 0) {
+      return;
+    }
+    dCsrqAttSlices_.allocate(sliceCount * nvox);
+    const auto start = std::chrono::steady_clock::now();
+    size_t begin = 0;
+    while (begin < sliceCount) {
+      size_t end = begin + 1;
+      while (end < sliceCount &&
+             csrqSliceFullAngles_[end] == csrqSliceFullAngles_[end - 1] + 1) {
+        ++end;
+      }
+      CUDA_CHECK(cudaMemcpy(
+          dCsrqAttSlices_.get() + begin * nvox,
+          attFactors + static_cast<size_t>(csrqSliceFullAngles_[begin]) * nvox,
+          (end - begin) * nvox * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      begin = end;
+    }
+    noteCudaCompactInputH2D(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count());
+  }
+
+  // Rows [rowBase, rowBase + rows) of a chunk as a chunk view of their own:
+  // the row pointer arrays are absolute within the chunk, so offsetting them
+  // is enough (runs / values stay whole).
+  static CsrqDeviceChunkPtrs csrqRowRange(const CsrqDeviceChunk &chunk,
+                                          int rowBase, int rows) {
+    CsrqDeviceChunkPtrs p = chunk.ptrs();
+    p.rowNnzPtr += rowBase;
+    p.rowRunPtr += rowBase;
+    p.rowMax += rowBase;
+    p.rows = rows;
+    return p;
+  }
+
+  // Attenuated backward of one compact angle's rows into accum:
+  // scatter -> [8][nvox], then transform-add with the branch's factor slice.
+  void csrqAttenBackwardAngleLocked(const CsrqDeviceChunkPtrs &rows,
+                                    const float *ratio, size_t nvox,
+                                    const cuda::CompactDeviceTransformParams &tp,
+                                    const int *dSliceIndex, double *accum) {
+    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
+                               nullptr));
+    for (int kFirst = 0; kFirst < kCsrqK;
+         kFirst += kCsrqBackwardBranchesPerPass) {
+      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
+      launchCsrqBackwardK8Kernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
+                                 kCount);
+    }
+    launchCompactTransformBackwardAddBatchAttenKernel(
+        dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
+        dBatchZMirrors_.get(), dCsrqAttSlices_.get(), dSliceIndex);
   }
 
   size_t csrqMaxRowsLocked() const {
@@ -3650,6 +3932,9 @@ private:
       dBatchZMirrors_.copyFromHost(zMirrors, count);
       batchSymIdsHost_.assign(symIds, symIds + count);
       batchZMirrorsHost_.assign(zMirrors, zMirrors + count);
+      // The CTAC slice table depends on the branch symmetry ids.
+      csrqSliceChunkRowBase_ = -1;
+      csrqSliceChunkRows_ = -1;
     }
   }
 
@@ -3758,6 +4043,16 @@ private:
   std::vector<TimedCudaStagePair> csrqForwardTimers_;
   std::vector<TimedCudaStagePair> csrqBackwardTimers_;
   std::chrono::steady_clock::time_point csrqWarmupStart_{};
+  // CSRQ CTAC staging for the current (chunk, bed): the factor slices of every
+  // full angle the chunk's compact angles reach ([slice][nvox] uint16, a few
+  // hundred MB instead of the 2.3 GB table) and the per-(compact angle,
+  // branch) slice ids ([anglesInChunk][8], -1 = branch has no full angle).
+  DeviceArray<uint16_t> dCsrqAttSlices_;
+  DeviceArray<int> dCsrqSliceIndex_;
+  std::vector<int> csrqSliceIndexHost_;
+  std::vector<int> csrqSliceFullAngles_;
+  int csrqSliceChunkRowBase_ = -1;
+  int csrqSliceChunkRows_ = -1;
   DeviceBuffer dBuffer_;
   // Compact CTAC: resident attenuation table plus explicit debug/reference
   // baked-values scratch. Default CTAC uses fused kernels above.

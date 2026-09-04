@@ -758,15 +758,6 @@ int csrqProjectionSlot(int channel, int bed) {
   return channel * spect::core::kMaxBeds + bed;
 }
 
-void requireCsrqSupportedInputs(const uint16_t *attFactors, const char *what) {
-  if (attFactors != nullptr) {
-    throw std::runtime_error(
-        std::string("CSRQ compact matrix does not support CTAC attenuation "
-                    "in ") +
-        what + "; use the CSRB directory.");
-  }
-}
-
 struct CompactBranchDescriptor {
   int symId = 0;
   bool zMirror = false;
@@ -983,10 +974,12 @@ void requireCompleteForwardProjectionCoverage(
 }
 
 // CSRQ numerator for 1..kMaxBeds beds and 1..kCsrqMaxMatrices windows:
-// every window of every bed accumulates weight_k * A_k^T(p_k / mean_k) into
+// every window of every bed accumulates weight_k * H_k^T(p_k / mean_k) into
 // the bed's device accumulator. fullProjections / fullBackgrounds are
 // indexed [channel * bedCount + bed]; the CSRQ projection cache slot is
-// channel * kMaxBeds + bed. Channels are already validated and warm.
+// channel * kMaxBeds + bed. attFactors (null or one full-angle table per bed)
+// turns A into H = A att_bed on the device, per compact angle. Channels are
+// already validated and warm.
 bool runCsrqMlemNumerMultiBed(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta,
@@ -994,9 +987,8 @@ bool runCsrqMlemNumerMultiBed(
     const double *const *fullBackgrounds,
     const double *const *smoothedImages, int bedCount, int threads,
     double *const *numers, CompactSymmetricStageTiming *timing,
-    const uint16_t *attFactors, bool refreshProjectionInputs,
+    const uint16_t *const *attFactors, bool refreshProjectionInputs,
     bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
-  requireCsrqSupportedInputs(attFactors, "the numerator");
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
@@ -1080,7 +1072,9 @@ bool runCsrqMlemNumerMultiBed(
                           channelProjections, channelBackgrounds,
                           fullProjectionCount, channels[channel].weight, 0,
                           csrqProjectionSlot(static_cast<int>(channel), 0),
-                          &deviceTiming, &backwardTiming)) {
+                          &deviceTiming, &backwardTiming, attFactors,
+                          attFactors == nullptr ? 0
+                                                : compactAttenTableCount(meta))) {
       return false;
     }
     if (timing) {
@@ -1122,7 +1116,6 @@ bool computePoissonSensitivityCUDA(
   std::fill(denom, denom + nvox, 0.0);
 
   if (isCsrqChannelSet(channels)) {
-    requireCsrqSupportedInputs(attFactors, "the sensitivity");
     std::vector<int> symIds;
     std::vector<int> zMirrors;
     fillBranchSymmetryTables(branches, symIds, zMirrors);
@@ -1137,7 +1130,8 @@ bool computePoissonSensitivityCUDA(
               makeCompactDeviceRatioParams(meta, 0, 0, false),
               makeCompactDeviceTransformParams(meta, 0, false), symIds.data(),
               zMirrors.data(), 0, fullProjectionCount, rowWeights,
-              &backwardTiming)) {
+              &backwardTiming, attFactors,
+              attFactors == nullptr ? 0 : compactAttenTableCount(meta))) {
         return false;
       }
       if (timing) {
@@ -1394,7 +1388,6 @@ bool computeCompactChunkForwardProjectionCUDA(
   std::vector<uint8_t> coverage(fullRows, 0);
 
   if (isCsrqDirectory(chunks)) {
-    requireCsrqSupportedInputs(attFactors, "the forward projection");
     const int matrixIndex = csrqMatrixIndexOf(chunks);
     const auto branches = enumerateCompactBranches(meta);
     std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
@@ -1410,8 +1403,19 @@ bool computeCompactChunkForwardProjectionCUDA(
     }
     const size_t compactRows = static_cast<size_t>(chunks.totalRows());
     std::vector<float> yhatPacked(compactRows * branches.size(), 0.0f);
+    std::vector<int> symIds;
+    std::vector<int> zMirrors;
+    fillBranchSymmetryTables(branches, symIds, zMirrors);
+    const CompactDeviceRatioParams commonRatio =
+        makeCompactDeviceRatioParams(meta, 0, 0, false);
+    const CompactDeviceTransformParams commonTransform =
+        makeCompactDeviceTransformParams(meta, 0, false);
     if (!csrqRunForwardCUDA(matrixIndex, static_cast<int>(branches.size()),
-                            yhatPacked.data(), yhatPacked.size())) {
+                            yhatPacked.data(), yhatPacked.size(), &commonRatio,
+                            &commonTransform, symIds.data(), zMirrors.data(),
+                            attFactors,
+                            attFactors == nullptr ? 0
+                                                  : compactAttenTableCount(meta))) {
       return false;
     }
     // Packed [compactRow][branch] -> one full projection row per valid pair,
@@ -1553,7 +1557,7 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     return runCsrqMlemNumerMultiBed(
         channels, meta, fullProjections, hasBackground ? fullBackgrounds : nullptr,
         smoothedImages, bedCount, threads, numers, timing,
-        hasAtten ? attFactors[0] : nullptr, refreshProjectionInputs,
+        hasAtten ? attFactors : nullptr, refreshProjectionInputs,
         branchBatchInputPrepared, downloadBackwardOutputs);
   }
 

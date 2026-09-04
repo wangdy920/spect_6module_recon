@@ -635,6 +635,176 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   std::filesystem::remove_all(root);
 }
 
+// CTAC on the CSRQ path: H = A att with the u16 full-angle table applied per
+// compact angle in the image domain (pack / transform-add) must match the
+// CSRB reference that multiplies the factor inside the nnz loop, for the
+// sensitivity, the single-bed numerator, the forward projection and a
+// two-bed numerator with per-bed tables (host input and resident batch). The
+// adjoint identity <H x, y> = <x, H^T y> is checked on the CSRQ path itself.
+TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
+  spect::io::CompactSymmetryMetadata meta;
+  meta.Nx = 16;
+  meta.Ny = 16;
+  meta.Nz = 4;
+  meta.totalVoxels = 16 * 16 * 4;
+  meta.fullNumAngles = 24;
+  meta.compactNumAngles = 6;
+  meta.detNx = 4;
+  meta.detNz = 4;
+  meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8;
+  meta.totalRows = 48;
+  meta.symCode = 90;
+  meta.symmetryOrder = 4;
+
+  std::mt19937 rng(20260904u);
+  std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels;
+  src.rowPtr.push_back(0u);
+  for (int row = 0; row < src.rows; ++row) {
+    uint32_t pos = static_cast<uint32_t>(rng() % 5);
+    while (pos + 4u < static_cast<uint32_t>(src.cols)) {
+      const uint32_t len = 1u + rng() % 4u;
+      for (uint32_t k = 0; k < len; ++k) {
+        src.colIdx.push_back(pos + k);
+        src.values.push_back(valueDist(rng));
+      }
+      pos += len + 1u + rng() % 3u;
+    }
+    src.rowPtr.push_back(static_cast<uint32_t>(src.colIdx.size()));
+  }
+  // Two chunks of three compact angles each so the per-angle walk crosses a
+  // chunk boundary and the slice table is rebuilt per chunk.
+  const auto pair = makeMatrixPair("spect_csrq_ctac_test", meta, src, 2);
+  ASSERT_EQ(pair.csrq.chunks().size(), 2u);
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  const size_t attCount = static_cast<size_t>(meta.fullNumAngles) * nvox;
+  // Two distinct tables (one per bed), strictly inside (0, 1) and varying
+  // with both the angle and the voxel so a wrong angle or voxel mapping
+  // cannot pass.
+  std::vector<uint16_t> att0(attCount), att1(attCount);
+  std::uniform_int_distribution<int> attDist(9000, 64000);
+  for (size_t i = 0; i < attCount; ++i) {
+    att0[i] = static_cast<uint16_t>(attDist(rng));
+    att1[i] = static_cast<uint16_t>(attDist(rng));
+  }
+  std::vector<double> image0(nvox), image1(nvox), proj0(fullRows), proj1(fullRows);
+  for (size_t i = 0; i < nvox; ++i) {
+    image0[i] = 0.5 + 0.37 * std::sin(0.11 * static_cast<double>(i));
+    image1[i] = 0.8 + 0.25 * std::cos(0.07 * static_cast<double>(i));
+  }
+  for (size_t i = 0; i < fullRows; ++i) {
+    proj0[i] = 1.0 + 0.01 * static_cast<double>(i % 97);
+    proj1[i] = 2.0 + 0.02 * static_cast<double>(i % 89);
+  }
+
+  struct Outputs {
+    std::vector<double> denom, numer, forward;
+    std::vector<std::vector<double>> twoBed, twoBedResident;
+  };
+  auto runAll = [&](const spect::io::CompactChunkCSRDirectory &chunks,
+                    Outputs &out, bool residentBatch) {
+    out.denom.assign(nvox, 0.0);
+    ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+        chunks, meta, 1, out.denom.data(), nullptr, att0.data()));
+    out.numer.assign(nvox, 0.0);
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+        chunks, meta, proj0.data(), nullptr, image0.data(), 1, out.numer.data(),
+        false, nullptr, att0.data()));
+    out.forward.assign(fullRows, 0.0);
+    ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+        chunks, meta, image0.data(), 1, out.forward.data(), att0.data()));
+
+    const double *imagePtrs[2] = {image0.data(), image1.data()};
+    const double *projPtrs[2] = {proj0.data(), proj1.data()};
+    const uint16_t *attPtrs[2] = {att0.data(), att1.data()};
+    out.twoBed.assign(2, std::vector<double>(nvox, 0.0));
+    double *numerPtrs[2] = {out.twoBed[0].data(), out.twoBed[1].data()};
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, imagePtrs, 2, 1, numerPtrs, false,
+        nullptr, attPtrs));
+    if (!residentBatch) {
+      return;
+    }
+    std::vector<double> globalImage(2 * nvox);
+    std::copy(image0.begin(), image0.end(), globalImage.begin());
+    std::copy(image1.begin(), image1.end(),
+              globalImage.begin() + static_cast<ptrdiff_t>(nvox));
+    const int bedZStarts[2] = {0, meta.Nz};
+    ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+        meta, globalImage.data(), globalImage.size(), 2 * meta.Nz, bedZStarts,
+        2, false));
+    out.twoBedResident.assign(2, std::vector<double>(nvox, 0.0));
+    double *residentPtrs[2] = {out.twoBedResident[0].data(),
+                               out.twoBedResident[1].data()};
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, nullptr, 2, 1, residentPtrs, false,
+        nullptr, attPtrs, true, true, true));
+  };
+
+  // CSRB's resident batch path has no attenuation variant (CTAC takes the
+  // host-input per-branch kernels there), so the CSRQ resident result is
+  // compared against the CSRB host-input result.
+  Outputs ref;
+  runAll(pair.csrb, ref, false);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  Outputs got;
+  runAll(pair.csrq, got, true);
+
+  const double tol = 1e-5;
+  EXPECT_LE(relL2(got.denom, ref.denom), tol) << "CTAC sensitivity";
+  EXPECT_LE(relL2(got.numer, ref.numer), tol) << "CTAC single-bed numerator";
+  EXPECT_LE(relL2(got.forward, ref.forward), tol) << "CTAC forward projection";
+  EXPECT_LE(relL2(got.twoBed[0], ref.twoBed[0]), tol) << "CTAC two-bed 0";
+  EXPECT_LE(relL2(got.twoBed[1], ref.twoBed[1]), tol) << "CTAC two-bed 1";
+  EXPECT_LE(relL2(got.twoBedResident[0], ref.twoBed[0]), tol)
+      << "CTAC resident two-bed 0";
+  EXPECT_LE(relL2(got.twoBedResident[1], ref.twoBed[1]), tol)
+      << "CTAC resident two-bed 1";
+  EXPECT_GT(*std::max_element(got.denom.begin(), got.denom.end()), 0.0);
+
+  // The tables must matter: the same runs without attenuation differ.
+  std::vector<double> denomPlain(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+      pair.csrq, meta, 1, denomPlain.data(), nullptr, nullptr));
+  EXPECT_GT(relL2(got.denom, denomPlain), 1e-2)
+      << "attenuation must change the sensitivity";
+  // Per-bed tables must be distinct in the result too.
+  EXPECT_GT(relL2(got.twoBed[1], got.twoBed[0]), 1e-2);
+
+  // Adjoint: forward projection gives H x; the numerator with p = y * (H 1)
+  // and image 1 gives H^T y (rows with H 1 = 0 have p = 0 and contribute 0).
+  std::vector<double> ones(nvox, 1.0);
+  std::vector<double> hOnes(fullRows, 0.0);
+  ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+      pair.csrq, meta, ones.data(), 1, hOnes.data(), att0.data()));
+  std::vector<double> y(fullRows);
+  for (size_t i = 0; i < fullRows; ++i)
+    y[i] = 0.3 + 0.7 * std::sin(0.05 * static_cast<double>(i)) *
+                     std::sin(0.05 * static_cast<double>(i));
+  std::vector<double> pAdj(fullRows);
+  for (size_t i = 0; i < fullRows; ++i)
+    pAdj[i] = y[i] * hOnes[i];
+  std::vector<double> hTy(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      pair.csrq, meta, pAdj.data(), nullptr, ones.data(), 1, hTy.data(), false,
+      nullptr, att0.data()));
+  double lhs = 0.0;
+  for (size_t i = 0; i < fullRows; ++i)
+    lhs += got.forward[i] * y[i];
+  double rhs = 0.0;
+  for (size_t j = 0; j < nvox; ++j)
+    rhs += image0[j] * hTy[j];
+  EXPECT_GT(lhs, 0.0);
+  EXPECT_LE(std::abs(lhs - rhs) / std::abs(lhs), 1e-5) << "adjoint identity";
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(pair.csrqDir.parent_path());
+}
+
 // One resident BSREM-II + RDP iteration on the device (two beds, CSRB
 // production format) against the host oracle: host numerator / sensitivity
 // through the same projector, RDP gradient through the host volume-ops entry,
