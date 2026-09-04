@@ -999,13 +999,67 @@ __device__ __forceinline__ unsigned int csrq_load_tile(
   return total;
 }
 
-// yPacked[row*8 + k] = sum_t v_t * xPacked[col_t*8 + k]. Value decode matches
+// Same row -> full projection mapping as compute_compact_ratio_chunk_batch.
+__device__ __forceinline__ int csrq_full_projection_index(
+    int compactRow, int symmetryMode, int compactRaysPerAngle,
+    int compactNumAngles, int detNx, int detNz, int compactDetZ,
+    int fullNumAngles, int fullRaysPerAngle, int symId, int zMirror,
+    unsigned long long *fullIndex) {
+  const int compactAngle = compactRow / compactRaysPerAngle;
+  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  const int ix = rr % detNx;
+  const int izCompact = rr / detNx;
+  int fullAngle = 0;
+  if (symmetryMode == 45) {
+    const int q = fullNumAngles / 8;
+    if ((symId & 1) == 0) {
+      if (compactAngle >= q) return 0;
+      fullAngle = symId * q + compactAngle;
+    } else {
+      if (compactAngle <= 0) return 0;
+      fullAngle = symId * q + (q - compactAngle);
+    }
+  } else {
+    if (compactAngle < 0 || compactAngle >= compactNumAngles) return 0;
+    fullAngle = compactAngle + symId * compactNumAngles;
+  }
+  int izFull = izCompact;
+  if (zMirror != 0) {
+    izFull = detNz - 1 - izCompact;
+    if (izFull < compactDetZ) return 0;
+  }
+  if (fullAngle < 0 || fullAngle >= fullNumAngles || izFull < 0 ||
+      izFull >= detNz) {
+    return 0;
+  }
+  *fullIndex = static_cast<unsigned long long>(fullAngle) *
+                   static_cast<unsigned long long>(fullRaysPerAngle) +
+               static_cast<unsigned long long>(izFull) *
+                   static_cast<unsigned long long>(detNx) +
+               static_cast<unsigned long long>(ix);
+  return 1;
+}
+
+// yhat[row*8 + k] = sum_t v_t * xPacked[col_t*8 + k]. Value decode matches
 // tools/convert_csrb_to_csrq.py dequantize_u16_sqrt bit for bit (fp32).
+//
+// ratioMode == 0 stores yhat. ratioMode == 1 stores the Poisson ratio
+//   scale * projection[fullIndex] / max(scale * yhat + background, eps)
+// for the (row, branch) pairs that map to a full projection row and 0 for the
+// others, straight from the reduced sums (the ratio inputs are ignored in
+// mode 0). scale is the window weight of a joint multi-window model
+// (mean = scale * A x + background); scale = 1 and no background is the plain
+// MLEM ratio. fullBackground may be null.
 extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *xPacked, float *yPacked,
-    int rows) {
+    int rows, int ratioMode, const double *fullProjection,
+    const double *fullBackground, unsigned long long fullProjectionCount,
+    double scale, int symmetryMode, int compactRowBase,
+    int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
+    int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
+    const int *symIds, const int *zMirrors, double eps) {
   __shared__ CsrqTile s;
   __shared__ float sRed[CSRQ_BLOCK / 32][CSRQ_K];
   const int row = static_cast<int>(blockIdx.x);
@@ -1059,7 +1113,30 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
   if (threadIdx.x < CSRQ_K) {
     float sum = 0.0f;
     for (int w = 0; w < CSRQ_BLOCK / 32; ++w) sum += sRed[w][threadIdx.x];
-    yPacked[static_cast<size_t>(row) * CSRQ_K + threadIdx.x] = sum;
+    const size_t out = static_cast<size_t>(row) * CSRQ_K + threadIdx.x;
+    if (ratioMode == 0) {
+      yPacked[out] = sum;
+      return;
+    }
+    const int b = static_cast<int>(threadIdx.x);
+    unsigned long long fullIndex = 0;
+    float ratio = 0.0f;
+    if (csrq_full_projection_index(compactRowBase + row, symmetryMode,
+                                   compactRaysPerAngle, compactNumAngles,
+                                   detNx, detNz, compactDetZ, fullNumAngles,
+                                   fullRaysPerAngle, symIds[b], zMirrors[b],
+                                   &fullIndex) &&
+        fullIndex < fullProjectionCount) {
+      double denom = scale * static_cast<double>(sum);
+      if (fullBackground != nullptr) {
+        denom += fullBackground[fullIndex];
+      }
+      if (denom < eps) {
+        denom = eps;
+      }
+      ratio = static_cast<float>(scale * fullProjection[fullIndex] / denom);
+    }
+    yPacked[out] = ratio;
   }
 }
 
@@ -1173,89 +1250,6 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                   branchMajor[5 * nvox + v],
                                   branchMajor[6 * nvox + v],
                                   branchMajor[7 * nvox + v]);
-}
-
-// Same row -> full projection mapping as compute_compact_ratio_chunk_batch.
-__device__ __forceinline__ int csrq_full_projection_index(
-    int compactRow, int symmetryMode, int compactRaysPerAngle,
-    int compactNumAngles, int detNx, int detNz, int compactDetZ,
-    int fullNumAngles, int fullRaysPerAngle, int symId, int zMirror,
-    unsigned long long *fullIndex) {
-  const int compactAngle = compactRow / compactRaysPerAngle;
-  const int rr = compactRow - compactAngle * compactRaysPerAngle;
-  const int ix = rr % detNx;
-  const int izCompact = rr / detNx;
-  int fullAngle = 0;
-  if (symmetryMode == 45) {
-    const int q = fullNumAngles / 8;
-    if ((symId & 1) == 0) {
-      if (compactAngle >= q) return 0;
-      fullAngle = symId * q + compactAngle;
-    } else {
-      if (compactAngle <= 0) return 0;
-      fullAngle = symId * q + (q - compactAngle);
-    }
-  } else {
-    if (compactAngle < 0 || compactAngle >= compactNumAngles) return 0;
-    fullAngle = compactAngle + symId * compactNumAngles;
-  }
-  int izFull = izCompact;
-  if (zMirror != 0) {
-    izFull = detNz - 1 - izCompact;
-    if (izFull < compactDetZ) return 0;
-  }
-  if (fullAngle < 0 || fullAngle >= fullNumAngles || izFull < 0 ||
-      izFull >= detNz) {
-    return 0;
-  }
-  *fullIndex = static_cast<unsigned long long>(fullAngle) *
-                   static_cast<unsigned long long>(fullRaysPerAngle) +
-               static_cast<unsigned long long>(izFull) *
-                   static_cast<unsigned long long>(detNx) +
-               static_cast<unsigned long long>(ix);
-  return 1;
-}
-
-// In place: yhatPacked[row*8 + b] ->
-//   scale * projection[fullIndex] / max(scale * yhat + background, eps),
-// 0 where the (row, branch) has no full projection counterpart. scale is the
-// window weight of a joint multi-window MLEM (mean = scale * A x + background);
-// with scale = 1 and no background this is the plain MLEM ratio.
-extern "C" __global__ void csrq_ratio_k8(
-    float *yhatPacked, const double *fullProjection,
-    const double *fullBackground, unsigned long long fullProjectionCount,
-    double scale, int symmetryMode, int compactRowBase,
-    int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
-    int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
-    const int *symIds, const int *zMirrors, int rows, double eps) {
-  const unsigned long long index =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const unsigned long long total =
-      static_cast<unsigned long long>(rows) * CSRQ_K;
-  if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
-    return;
-  }
-  const int row = static_cast<int>(index / CSRQ_K);
-  const int b = static_cast<int>(index % CSRQ_K);
-  unsigned long long fullIndex = 0;
-  if (!csrq_full_projection_index(compactRowBase + row, symmetryMode,
-                                  compactRaysPerAngle, compactNumAngles, detNx,
-                                  detNz, compactDetZ, fullNumAngles,
-                                  fullRaysPerAngle, symIds[b], zMirrors[b],
-                                  &fullIndex) ||
-      fullIndex >= fullProjectionCount) {
-    yhatPacked[index] = 0.0f;
-    return;
-  }
-  double denom = scale * static_cast<double>(yhatPacked[index]);
-  if (fullBackground != nullptr) {
-    denom += fullBackground[fullIndex];
-  }
-  if (denom < eps) {
-    denom = eps;
-  }
-  yhatPacked[index] =
-      static_cast<float>(scale * fullProjection[fullIndex] / denom);
 }
 
 // ratioPacked[row*8 + b] = value where the (row, branch) maps to a full

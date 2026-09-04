@@ -121,9 +121,20 @@ struct CsrqDeviceChunkPtrs {
   int rows = 0;
 };
 
+// yPacked[row][8] = A x for the eight branches (prediction output).
 void launchCsrqForwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
                                const float *xPacked, float *yPacked,
                                cudaStream_t stream = nullptr);
+
+// Same kernel, ratio mode: ratioPacked[row][8] =
+//   scale * p / max(scale * A x + background, eps), 0 where the (row, branch)
+// has no full projection row. fullBackground may be null.
+void launchCsrqForwardRatioK8Kernel(
+    const CsrqDeviceChunkPtrs &chunk, const float *xPacked, float *ratioPacked,
+    const double *fullProjection, const double *fullBackground,
+    size_t fullProjectionCount, double scale,
+    const cuda::CompactDeviceRatioParams &params, const int *dSymIds,
+    const int *dZMirrors, double eps, cudaStream_t stream = nullptr);
 
 // ratioPacked is [row][8]; yBranch is branch-major [8][nvox] (the layout
 // launchCompactTransformBackwardAddBatchKernel consumes). Only branches
@@ -144,15 +155,6 @@ constexpr int kCsrqBackwardBranchesPerPass = 2;
 
 void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
                                  size_t nvox, cudaStream_t stream = nullptr);
-
-// In place: yhat -> scale * p / max(scale * yhat + background, eps);
-// fullBackground may be null.
-void launchCsrqRatioK8Kernel(float *yhatPacked, const double *fullProjection,
-                             const double *fullBackground,
-                             size_t fullProjectionCount, double scale,
-                             const cuda::CompactDeviceRatioParams &params,
-                             const int *dSymIds, const int *dZMirrors, int rows,
-                             double eps, cudaStream_t stream = nullptr);
 
 // ratio = value where the (row, branch) has a full projection row, else 0.
 void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,

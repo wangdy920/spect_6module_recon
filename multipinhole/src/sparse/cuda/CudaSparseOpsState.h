@@ -3287,16 +3287,14 @@ public:
             static_cast<size_t>(bed) * static_cast<size_t>(kCsrqK) * nvox;
         launchCsrqPackBranch8Kernel(bedInput, dCsrqX_.get(), nvox);
 
+        // Forward and Poisson ratio in one kernel: the row's eight branch
+        // sums never leave the block.
         csrqForwardTimers_[pass].recordStart(nullptr);
-        launchCsrqForwardK8Kernel(chunk.ptrs(), dCsrqX_.get(), ratio);
+        launchCsrqForwardRatioK8Kernel(
+            chunk.ptrs(), dCsrqX_.get(), ratio, dProjections[bed],
+            dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
+            dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
         csrqForwardTimers_[pass].recordStop(nullptr);
-
-        csrqRatioTimers_[pass].recordStart(nullptr);
-        launchCsrqRatioK8Kernel(ratio, dProjections[bed], dBackgrounds[bed],
-                                fullProjectionCount, weight, ratioParams,
-                                dBatchSymIds_.get(), dBatchZMirrors_.get(),
-                                chunk.rows, 1e-10);
-        csrqRatioTimers_[pass].recordStop(nullptr);
 
         csrqBackwardTimers_[pass].recordStart(nullptr);
         csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
@@ -3306,14 +3304,12 @@ public:
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const double forwardSeconds = accumulateTimedCudaPairs(csrqForwardTimers_, passes);
-    const double ratioSeconds = accumulateTimedCudaPairs(csrqRatioTimers_, passes);
     const double backwardSeconds = accumulateTimedCudaPairs(csrqBackwardTimers_, passes);
     noteCudaCsrqForward(forwardSeconds, passes);
-    noteCudaRatio(ratioSeconds, passes);
     noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
     if (ratioTimingOut != nullptr) {
+      // The ratio is fused into the forward kernel; report it there.
       ratioTimingOut->forwardSeconds += forwardSeconds;
-      ratioTimingOut->ratioSeconds += ratioSeconds;
       ratioTimingOut->backwardSeconds += backwardSeconds;
     }
     if (backwardTimingOut != nullptr) {
@@ -4433,7 +4429,6 @@ private:
     dCsrqY_.reset();
     dCsrqRatio_.reset();
     csrqForwardTimers_.clear();
-    csrqRatioTimers_.clear();
     csrqBackwardTimers_.clear();
     for (auto &used : csrqSlotUsed_) {
       used = false;
@@ -4489,7 +4484,6 @@ private:
       }
     };
     grow(csrqForwardTimers_);
-    grow(csrqRatioTimers_);
     grow(csrqBackwardTimers_);
   }
 
@@ -4713,7 +4707,6 @@ private:
   std::array<bool, kCsrqStreamSlots> csrqSlotUsed_{};
   // Per-(chunk, bed) stage timers reused across passes.
   std::vector<TimedCudaStagePair> csrqForwardTimers_;
-  std::vector<TimedCudaStagePair> csrqRatioTimers_;
   std::vector<TimedCudaStagePair> csrqBackwardTimers_;
   std::chrono::steady_clock::time_point csrqWarmupStart_{};
   DeviceBuffer dBuffer_;
