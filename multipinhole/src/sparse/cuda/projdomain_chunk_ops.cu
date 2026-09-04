@@ -30,21 +30,6 @@ extern "C" __device__ __forceinline__ int mirror_index(int idx, int size) {
   return idx;
 }
 
-extern "C" __global__ void compute_ratio_chunk(
-    const float *yhat, const float *projections, unsigned long long projOffset,
-    float *ratio, unsigned long long count, float eps) {
-  const unsigned long long index =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= count) {
-    return;
-  }
-  float denom = yhat[index];
-  if (denom < eps) {
-    denom = eps;
-  }
-  ratio[index] = projections[projOffset + index] / denom;
-}
-
 // Poisson ratio r = p / max(yhat + b, eps) for one symmetry branch of a compact
 // chunk. fullBackground (additive scatter estimate, same layout as the
 // measurement) may be null; the check is per row, not per nnz.

@@ -164,14 +164,6 @@ bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
-bool compactDeviceRatioSpmvTFloatCUDA(const io::CSRView& matrix,
-                                      const float* x,
-                                      const double* fullProjection,
-                                      size_t fullProjectionCount,
-                                      const CompactDeviceRatioParams& params,
-                                      float* y,
-                                      CompactDeviceRatioTiming* timing = nullptr,
-                                      int cacheSlot = 0);
 /// Batched compact device-ratio + device-backward accumulator path. The input
 /// refreshed by refreshCompactBranchBatchInputCUDA is ordered bed-major, with
 /// branchCount columns per bed; each bed keeps its own projection and backward

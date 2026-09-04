@@ -20,7 +20,6 @@ namespace {
 
 struct ProjDomainKernelCache {
   CUmodule module = nullptr;
-  CUfunction ratioFunction = nullptr;
   CUfunction compactRatioFunction = nullptr;
   CUfunction compactRatioBatchFunction = nullptr;
   CUfunction compactGatherBedFunction = nullptr;
@@ -69,8 +68,7 @@ void ensureProjDomainKernelsLoaded() {
   CUDA_CHECK(cudaGetDeviceProperties(&props, device));
 
   std::lock_guard<std::mutex> lock(g_projDomainKernelCache.mutex);
-  if (g_projDomainKernelCache.ratioFunction != nullptr &&
-      g_projDomainKernelCache.compactRatioFunction != nullptr &&
+  if (g_projDomainKernelCache.compactRatioFunction != nullptr &&
       g_projDomainKernelCache.compactRatioBatchFunction != nullptr &&
       g_projDomainKernelCache.compactGatherBedFunction != nullptr &&
       g_projDomainKernelCache.compactConvertDoubleToFloatFunction != nullptr &&
@@ -108,7 +106,6 @@ void ensureProjDomainKernelsLoaded() {
   if (g_projDomainKernelCache.module != nullptr) {
     SPECT_CUDRV_CHECK(cuModuleUnload(g_projDomainKernelCache.module));
     g_projDomainKernelCache.module = nullptr;
-    g_projDomainKernelCache.ratioFunction = nullptr;
     g_projDomainKernelCache.compactRatioFunction = nullptr;
     g_projDomainKernelCache.compactRatioBatchFunction = nullptr;
     g_projDomainKernelCache.compactGatherBedFunction = nullptr;
@@ -134,9 +131,6 @@ void ensureProjDomainKernelsLoaded() {
 
   cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
                            spect_fatbin_projdomain_size, "projdomain_chunk_ops");
-  SPECT_CUDRV_CHECK(cuModuleGetFunction(
-      &g_projDomainKernelCache.ratioFunction, g_projDomainKernelCache.module,
-      "compute_ratio_chunk"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactRatioFunction,
       g_projDomainKernelCache.module, "compute_compact_ratio_chunk"));
@@ -205,30 +199,6 @@ void ensureProjDomainKernelsLoaded() {
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
-}
-
-void launchProjDomainRatioKernel(const float *yhat, const float *projections,
-                                 size_t projectionOffset, float *ratio,
-                                 size_t count, float eps,
-                                 cudaStream_t stream) {
-  ensureProjDomainKernelsLoaded();
-  if (count == 0) {
-    return;
-  }
-  CUdeviceptr yhatPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(yhat));
-  CUdeviceptr projPtr =
-      reinterpret_cast<CUdeviceptr>(const_cast<float *>(projections));
-  CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratio);
-  unsigned long long offset = static_cast<unsigned long long>(projectionOffset);
-  unsigned long long total = static_cast<unsigned long long>(count);
-  void *args[] = {&yhatPtr, &projPtr, &offset, &ratioPtr, &total, &eps};
-    const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
-  const unsigned int gridSize =
-      static_cast<unsigned int>((count + blockSize - 1) / blockSize);
-  SPECT_CUDRV_CHECK(cuLaunchKernel(g_projDomainKernelCache.ratioFunction,
-                                   gridSize, 1, 1, blockSize, 1, 1, 0,
-                                   reinterpret_cast<CUstream>(stream),
-                                   args, nullptr));
 }
 
 void launchCompactRatioKernel(

@@ -15,11 +15,6 @@ namespace spect {
 
 void ensureProjDomainKernelsLoaded();
 
-void launchProjDomainRatioKernel(const float *yhat, const float *projections,
-                                 size_t projectionOffset, float *ratio,
-                                 size_t count, float eps,
-                                 cudaStream_t stream = nullptr);
-
 // fullBackground: device additive background (same layout as fullProjection)
 // or nullptr for none.
 void launchCompactRatioKernel(

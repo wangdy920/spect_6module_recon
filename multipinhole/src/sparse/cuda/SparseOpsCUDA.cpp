@@ -283,19 +283,6 @@ bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
   return true;
 }
 
-bool compactDeviceRatioSpmvTFloatCUDA(
-    const io::CSRView &matrix, const float *x, const double *fullProjection,
-    size_t fullProjectionCount, const cuda::CompactDeviceRatioParams &params,
-    float *y, cuda::CompactDeviceRatioTiming *timing, int cacheSlot) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().executeCompactDeviceRatioSpmvTFloat(
-      matrix, x, fullProjection, fullProjectionCount, params, y, timing,
-      cacheSlot);
-  return true;
-}
-
 bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRView &matrix, const double *const *fullProjections,
     size_t fullProjectionCount,
