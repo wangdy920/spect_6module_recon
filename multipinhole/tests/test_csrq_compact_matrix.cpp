@@ -635,6 +635,100 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   std::filesystem::remove_all(root);
 }
 
+// Residency planner retry: when the second window's matrix reports "does not
+// fit even streamed" after the first was made resident, the first is demoted
+// to streamed and the second retried; the joint result must be unchanged.
+TEST_F(CsrqCompactMatrixTest, DemotesResidentMatrixWhenSecondDoesNotFit) {
+  spect::io::CompactSymmetryMetadata meta;
+  meta.Nx = 16;
+  meta.Ny = 16;
+  meta.Nz = 2;
+  meta.totalVoxels = 16 * 16 * 2;
+  meta.fullNumAngles = 12;
+  meta.compactNumAngles = 3;
+  meta.detNx = 4;
+  meta.detNz = 4;
+  meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8;
+  meta.totalRows = 24;
+  meta.symCode = 90;
+  meta.symmetryOrder = 4;
+
+  std::mt19937 rng(31u);
+  std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels;
+  src.rowPtr.push_back(0u);
+  for (int row = 0; row < src.rows; ++row) {
+    uint32_t pos = static_cast<uint32_t>(rng() % 5);
+    while (pos + 4u < static_cast<uint32_t>(src.cols)) {
+      const uint32_t len = 1u + rng() % 4u;
+      for (uint32_t k = 0; k < len; ++k) {
+        src.colIdx.push_back(pos + k);
+        src.values.push_back(valueDist(rng));
+      }
+      pos += len + 1u + rng() % 3u;
+    }
+    src.rowPtr.push_back(static_cast<uint32_t>(src.colIdx.size()));
+  }
+  const auto root =
+      std::filesystem::temp_directory_path() / "spect_csrq_demote_test";
+  std::filesystem::remove_all(root);
+  const auto dirA = root / "a";
+  const auto dirB = root / "b";
+  std::filesystem::create_directories(dirA);
+  std::filesystem::create_directories(dirB);
+  writeCsrq(dirA / "chunk_000.csrq", src, 0, meta.compactNumAngles);
+  writeCsrq(dirB / "chunk_000.csrq", src, 0, meta.compactNumAngles);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunksA =
+      spect::io::openCompactChunkCSRDirectory(dirA.string(), dirMeta, 0);
+  const auto chunksB =
+      spect::io::openCompactChunkCSRDirectory(dirB.string(), dirMeta, 0);
+  std::vector<spect::cuda::CompactMatrixChannel> channels(2);
+  channels[0].chunks = &chunksA;
+  channels[0].weight = 0.4;
+  channels[1].chunks = &chunksB;
+  channels[1].weight = 0.6;
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+
+  // Reference: both resident (nothing fails).
+  std::vector<double> denomRef(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+      channels, meta, 1, denomRef.data(), nullptr, nullptr));
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+
+  // The second automatic warmup fails; the planner must demote the first
+  // matrix to streamed and retry the second.
+  spect::cuda::setCsrqWarmupFitFailuresForTestsCUDA(/*skip=*/1, /*count=*/1);
+  testing::internal::CaptureStderr();
+  std::vector<double> denom(nvox, 0.0);
+  const bool ok = spect::cuda::computePoissonSensitivityCUDA(
+      channels, meta, 1, denom.data(), nullptr, nullptr);
+  const std::string log = testing::internal::GetCapturedStderr();
+  spect::cuda::setCsrqWarmupFitFailuresForTestsCUDA(0, 0);
+  ASSERT_TRUE(ok) << log;
+  EXPECT_NE(log.find("demoting 1 resident matrix"), std::string::npos) << log;
+  EXPECT_NE(log.find("streaming forced"), std::string::npos) << log;
+  EXPECT_TRUE(spect::cuda::csrqResidentCUDA(0));
+  EXPECT_TRUE(spect::cuda::csrqResidentCUDA(1));
+  EXPECT_LE(relL2(denom, denomRef), 1e-6) << "joint sensitivity after retry";
+  EXPECT_GT(*std::max_element(denom.begin(), denom.end()), 0.0);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+
+  // Without an earlier resident matrix to demote the failure is fatal.
+  spect::cuda::setCsrqWarmupFitFailuresForTestsCUDA(/*skip=*/0, /*count=*/1);
+  std::vector<double> denomFail(nvox, 0.0);
+  EXPECT_THROW(spect::cuda::computePoissonSensitivityCUDA(
+                   channels, meta, 1, denomFail.data(), nullptr, nullptr),
+               spect::cuda::CsrqDeviceMemoryError);
+  spect::cuda::setCsrqWarmupFitFailuresForTestsCUDA(0, 0);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(root);
+}
+
 // CTAC on the CSRQ path: H = A att with the u16 full-angle table applied per
 // compact angle in the image domain (pack / transform-add) must match the
 // CSRB reference that multiplies the factor inside the nnz loop, for the

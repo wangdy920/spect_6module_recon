@@ -444,6 +444,8 @@ struct CsrqResidentLease {
 };
 
 std::atomic<bool> g_csrqForceStreaming{false};
+std::atomic<int> g_csrqTestFitSkips{0};
+std::atomic<int> g_csrqTestFitFailures{0};
 
 bool isCsrqDirectory(const spect::io::CompactChunkCSRDirectory &chunks) {
   return chunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
@@ -484,9 +486,18 @@ void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
     shapes.push_back(shape);
   }
   bool streamed = false;
+  const bool forced = forceStreamed || g_csrqForceStreaming.load();
+  if (!forced && g_csrqTestFitFailures.load() > 0) {
+    if (g_csrqTestFitSkips.load() > 0) {
+      g_csrqTestFitSkips.fetch_sub(1);
+    } else {
+      g_csrqTestFitFailures.fetch_sub(1);
+      throw CsrqDeviceMemoryError(
+          "CSRQ matrix does not fit on the device even streamed (test hook).");
+    }
+  }
   if (!csrqWarmupBeginCUDA(matrixIndex, chunks.cols(), shapes,
-                           kCsrqResidentDeviceReserveBytes,
-                           forceStreamed || g_csrqForceStreaming.load(),
+                           kCsrqResidentDeviceReserveBytes, forced,
                            &streamed)) {
     throw std::runtime_error(
         "CSRQ compact matrix requires the CUDA sparse backend.");
@@ -711,9 +722,17 @@ std::vector<int> csrqChannelMatrixIndices(
   return indices;
 }
 
+// Loads every channel's matrix. The residency plan is advisory: under WDDM
+// cudaMemGetInfo can overstate the free memory (another process's
+// allocations are not always visible), so a matrix planned resident may leave
+// too little room for the next one. When a later matrix does not fit even
+// streamed, the matrices this call already made resident are demoted to
+// streamed (re-read from their directories into pinned memory) and the
+// failed one is retried with the freed memory, instead of aborting the run.
 void warmCompactChunks(const std::vector<CompactMatrixChannel> &channels) {
   const std::vector<int> slots = csrqChannelMatrixIndices(channels);
-  const std::vector<bool> streamed = planCsrqStreaming(channels, slots);
+  std::vector<bool> streamed = planCsrqStreaming(channels, slots);
+  std::vector<size_t> warmedHere;
   for (size_t index = 0; index < channels.size(); ++index) {
     const auto &chunks = *channels[index].chunks;
     if (!isCsrqDirectory(chunks)) {
@@ -734,7 +753,37 @@ void warmCompactChunks(const std::vector<CompactMatrixChannel> &channels) {
       }
       continue;
     }
-    warmCsrqResident(chunks, slots[index], streamed[index]);
+    if (csrqResidentCUDA(slots[index])) {
+      continue;
+    }
+    try {
+      warmCsrqResident(chunks, slots[index], streamed[index]);
+    } catch (const CsrqDeviceMemoryError &ex) {
+      std::vector<size_t> residentEarlier;
+      for (size_t earlier : warmedHere) {
+        if (!streamed[earlier]) {
+          residentEarlier.push_back(earlier);
+        }
+      }
+      if (residentEarlier.empty()) {
+        throw;
+      }
+      std::cerr << "[NOTE] " << ex.what()
+                << "\n[NOTE] CSRQ residency: demoting "
+                << residentEarlier.size()
+                << " resident matrix(es) loaded by this call to streamed and "
+                   "retrying (the free-memory estimate under WDDM can be "
+                   "optimistic).\n";
+      for (size_t earlier : residentEarlier) {
+        streamed[earlier] = true;
+        // Drop the lease so the matrix is reloaded (the warmup begin frees
+        // its resident chunks) instead of being reported as already warm.
+        channels[earlier].chunks->setAcceleratorLease(nullptr);
+        warmCsrqResident(*channels[earlier].chunks, slots[earlier], true);
+      }
+      warmCsrqResident(chunks, slots[index], false);
+    }
+    warmedHere.push_back(index);
   }
 }
 
@@ -1278,6 +1327,11 @@ bool prepareChannelExecutionCUDA(
 }
 
 void setCsrqForceStreamingCUDA(bool force) { g_csrqForceStreaming.store(force); }
+
+void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count) {
+  g_csrqTestFitSkips.store(std::max(0, skip));
+  g_csrqTestFitFailures.store(std::max(0, count));
+}
 
 bool csrqForceStreamingCUDA() { return g_csrqForceStreaming.load(); }
 

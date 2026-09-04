@@ -86,6 +86,11 @@ bool prepareChannelExecutionCUDA(
 // after the call.
 void setCsrqForceStreamingCUDA(bool force);
 bool csrqForceStreamingCUDA();
+// Test hook: after `skip` automatic (not forced-streamed) CSRQ warmups, the
+// next `count` of them report "does not fit even streamed", exercising the
+// demote-and-retry path of the residency planner without depending on the
+// device's free memory. (0, 0) disables the hook.
+void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count);
 
 
 // --- Single-directory forms -------------------------------------------------

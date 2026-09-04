@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace spect {
@@ -264,6 +265,13 @@ struct CsrqChunkShape {
     uint64_t nnz = 0;
     uint64_t runCount = 0;
     int compactRowBase = 0;
+};
+/// Thrown by csrqWarmupBeginCUDA when the matrix does not fit on the device
+/// even streamed (two chunk slots + scratch + reserve exceed the free memory).
+/// The driver may then demote an earlier resident matrix to streamed and
+/// retry instead of aborting.
+struct CsrqDeviceMemoryError : public std::runtime_error {
+    using std::runtime_error::runtime_error;
 };
 /// Announces the matrix; *streamed reports whether it will be streamed
 /// rather than resident (forceStreamed skips the fit test). Drops whatever

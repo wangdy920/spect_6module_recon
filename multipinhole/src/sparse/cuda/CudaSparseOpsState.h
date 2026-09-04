@@ -233,6 +233,24 @@ public:
   DeviceArray(const DeviceArray &) = delete;
   DeviceArray &operator=(const DeviceArray &) = delete;
 
+  DeviceArray(DeviceArray &&other) noexcept
+      : ptr_(other.ptr_), size_(other.size_) {
+    other.ptr_ = nullptr;
+    other.size_ = 0;
+  }
+  DeviceArray &operator=(DeviceArray &&other) noexcept {
+    if (this != &other) {
+      if (ptr_ != nullptr) {
+        cudaFree(ptr_);
+      }
+      ptr_ = other.ptr_;
+      size_ = other.size_;
+      other.ptr_ = nullptr;
+      other.size_ = 0;
+    }
+    return *this;
+  }
+
   T *get() const { return ptr_; }
   size_t size() const { return size_; }
 
@@ -393,6 +411,22 @@ private:
     size_t nnz = 0;
     size_t runCount = 0;
   };
+  // CTAC plan of one matrix (see csrqEnsureAttenPlanLocked): per chunk the
+  // compact angle count, the offset of its [angle][8] slice-id table inside
+  // dSliceIndex and the distinct full angles it reaches, in slice order.
+  struct CsrqAttenPlan {
+    bool valid = false;
+    int symmetryMode = 0;
+    int compactRaysPerAngle = 0;
+    int compactNumAngles = 0;
+    int fullNumAngles = 0;
+    std::vector<int> symIds;
+    std::vector<int> chunkAngles;
+    std::vector<size_t> chunkSliceIndexOffset;
+    std::vector<std::vector<int>> chunkFullAngles;
+    size_t maxSlices = 0;
+    DeviceArray<int> dSliceIndex;
+  };
   // One energy window's matrix. Resident: chunks[i] holds chunk i. Streamed:
   // chunks holds kCsrqStreamSlots device slots sized to the largest chunk and
   // host[i] the pinned copy of chunk i.
@@ -406,7 +440,15 @@ private:
     int cols = 0;
     size_t totalRows = 0;
     uint64_t bytes = 0;
+    CsrqAttenPlan attenPlan;
   };
+  // A caller-owned CTAC table page-locked for asynchronous slice copies.
+  struct CsrqPinnedHostTable {
+    const void *ptr = nullptr;
+    size_t bytes = 0;
+    bool pinned = false;
+  };
+  static constexpr int kCsrqAttSlots = 2;
 
 public:
   void executeSpMVFloat(const io::CSRView &matrix, const float *x, float *y,
@@ -3024,7 +3066,8 @@ public:
                 << kCsrqStreamSlots << " chunk slots of "
                 << (maxChunkBytes / kMiB) << " MiB from pinned host memory.\n";
     } else {
-      throw std::runtime_error(
+      target = CsrqResidentMatrix{};
+      throw cuda::CsrqDeviceMemoryError(
           "CSRQ matrix does not fit on the device even streamed: two chunk "
           "slots " + std::to_string(2 * maxChunkBytes / kMiB) +
           " MiB + scratch " + std::to_string(scratchBytes / kMiB) +
@@ -3195,6 +3238,8 @@ public:
 
     // Timer slots: one per (chunk, bed) pass, or per (chunk, bed, compact
     // angle) launch group on the attenuated path.
+    const CsrqAttenPlan *plan =
+        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
     const size_t maxAngles =
         hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
     const size_t passes = matrix.shapes.size() * static_cast<size_t>(bedCount);
@@ -3202,14 +3247,11 @@ public:
     csrqEnsureTimersLocked(timerSlots);
     size_t pass = 0;
     size_t usedTimers = 0;
-    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
                      static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
-      const int angles =
-          hasAtten ? csrqPrepareAttenSliceIndexLocked(chunk, commonRatioParams)
-                   : 0;
       for (int bed = 0; bed < bedCount; ++bed, ++pass) {
         const float *bedInput =
             dBatchInput_.get() +
@@ -3235,21 +3277,27 @@ public:
           csrqBackwardTimers_[t].recordStop(nullptr);
           continue;
         }
-        // CTAC: stage this bed's factor slices for the chunk, then one
-        // compact angle at a time so each row group sees its own factors.
-        csrqStageAttenSlicesLocked(bedAtt, attCount, commonRatioParams, nvox);
+        // CTAC: stage this bed's factor slices for the chunk (overlapping the
+        // previous pair's kernels), then one compact angle at a time so each
+        // row group sees its own factors.
+        const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, bedAtt,
+                                                    attCount, nvox);
+        const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+        const int *dSliceIndex =
+            plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
+        const int angles = plan->chunkAngles[chunkIndex];
         const int rpa = commonRatioParams.compactRaysPerAngle;
         for (int i = 0; i < angles; ++i) {
           const int rowBase = i * rpa;
           const CsrqDeviceChunkPtrs rows = csrqRowRange(chunk, rowBase, rpa);
-          const int *dSlice = dCsrqSliceIndex_.get() + i * kCsrqK;
+          const int *dSlice = dSliceIndex + i * kCsrqK;
           cuda::CompactDeviceRatioParams angleParams = ratioParams;
           angleParams.compactRowBase = chunk.compactRowBase + rowBase;
           float *angleRatio = ratio + static_cast<size_t>(rowBase) * kCsrqK;
           const size_t t = usedTimers++;
           csrqForwardTimers_[t].recordStart(nullptr);
           launchCsrqPackBranch8AttenKernel(
-              bedInput, dCsrqAttSlices_.get(), dSlice, dCsrqX_.get(), nvox,
+              bedInput, dSlices, dSlice, dCsrqX_.get(), nvox,
               commonTransformParams, dBatchSymIds_.get(),
               dBatchZMirrors_.get());
           launchCsrqForwardRatioK8Kernel(
@@ -3260,10 +3308,11 @@ public:
 
           csrqBackwardTimers_[t].recordStart(nullptr);
           csrqAttenBackwardAngleLocked(rows, angleRatio, nvox,
-                                       commonTransformParams, dSlice,
+                                       commonTransformParams, dSlices, dSlice,
                                        accums[bed]->get());
           csrqBackwardTimers_[t].recordStop(nullptr);
         }
+        csrqReleaseAttenSlotLocked(slot);
       }
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
@@ -3322,12 +3371,14 @@ public:
     ensureProjDomainKernelsLoaded();
 
     const bool hasAtten = attFactors != nullptr;
+    const CsrqAttenPlan *plan =
+        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
     const size_t maxAngles =
         hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
     const size_t passes = matrix.shapes.size();
     csrqEnsureTimersLocked(passes * maxAngles);
     size_t usedTimers = 0;
-    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
@@ -3345,8 +3396,12 @@ public:
         csrqBackwardTimers_[t].recordStop(nullptr);
         return;
       }
-      const int angles = csrqPrepareAttenSliceIndexLocked(chunk, commonRatioParams);
-      csrqStageAttenSlicesLocked(attFactors, attCount, commonRatioParams, nvox);
+      const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, attFactors,
+                                                  attCount, nvox);
+      const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+      const int *dSliceIndex =
+          plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
+      const int angles = plan->chunkAngles[chunkIndex];
       const int rpa = commonRatioParams.compactRaysPerAngle;
       for (int i = 0; i < angles; ++i) {
         const int rowBase = i * rpa;
@@ -3355,10 +3410,11 @@ public:
         csrqAttenBackwardAngleLocked(
             csrqRowRange(chunk, rowBase, rpa),
             ratio + static_cast<size_t>(rowBase) * kCsrqK, nvox,
-            commonTransformParams, dCsrqSliceIndex_.get() + i * kCsrqK,
+            commonTransformParams, dSlices, dSliceIndex + i * kCsrqK,
             accum.get());
         csrqBackwardTimers_[t].recordStop(nullptr);
       }
+      csrqReleaseAttenSlotLocked(slot);
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const double backwardSeconds =
@@ -3409,12 +3465,14 @@ public:
       launchCsrqPackBranch8Kernel(dBatchInput_.get(), dCsrqX_.get(), nvox);
     }
 
+    const CsrqAttenPlan *plan =
+        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, *attenRatioParams) : nullptr;
     const size_t maxAngles =
         hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, *attenRatioParams) : 1u;
     const size_t passes = matrix.shapes.size();
     csrqEnsureTimersLocked(passes * maxAngles);
     size_t usedTimers = 0;
-    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t) {
+    csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       float *out =
           dCsrqRatio_.get() + static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
       if (!hasAtten) {
@@ -3424,22 +3482,27 @@ public:
         csrqForwardTimers_[t].recordStop(nullptr);
         return;
       }
-      const int angles = csrqPrepareAttenSliceIndexLocked(chunk, *attenRatioParams);
-      csrqStageAttenSlicesLocked(attFactors, attCount, *attenRatioParams, nvox);
+      const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, attFactors,
+                                                  attCount, nvox);
+      const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+      const int *dSliceIndex =
+          plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
+      const int angles = plan->chunkAngles[chunkIndex];
       const int rpa = attenRatioParams->compactRaysPerAngle;
       for (int i = 0; i < angles; ++i) {
         const int rowBase = i * rpa;
         const size_t t = usedTimers++;
         csrqForwardTimers_[t].recordStart(nullptr);
         launchCsrqPackBranch8AttenKernel(
-            dBatchInput_.get(), dCsrqAttSlices_.get(),
-            dCsrqSliceIndex_.get() + i * kCsrqK, dCsrqX_.get(), nvox,
-            *attenTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get());
+            dBatchInput_.get(), dSlices, dSliceIndex + i * kCsrqK,
+            dCsrqX_.get(), nvox, *attenTransformParams, dBatchSymIds_.get(),
+            dBatchZMirrors_.get());
         launchCsrqForwardK8Kernel(csrqRowRange(chunk, rowBase, rpa),
                                   dCsrqX_.get(),
                                   out + static_cast<size_t>(rowBase) * kCsrqK);
         csrqForwardTimers_[t].recordStop(nullptr);
       }
+      csrqReleaseAttenSlotLocked(slot);
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     noteCudaCsrqForward(
@@ -3579,16 +3642,25 @@ private:
   }
 
   void releaseCsrqResidentLocked() {
+    // Pending slice uploads must finish before their pinned sources are
+    // unregistered and the slots freed.
+    if (std::any_of(csrqAttSlotUsed_.begin(), csrqAttSlotUsed_.end(),
+                    [](bool used) { return used; })) {
+      CUDA_CHECK(cudaStreamSynchronize(csrqUploadStream_.get()));
+      CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    }
     csrqMatrices_.clear();
     dCsrqX_.reset();
     dCsrqY_.reset();
     dCsrqRatio_.reset();
-    dCsrqAttSlices_.reset();
-    dCsrqSliceIndex_.reset();
-    csrqSliceIndexHost_.clear();
-    csrqSliceFullAngles_.clear();
-    csrqSliceChunkRowBase_ = -1;
-    csrqSliceChunkRows_ = -1;
+    for (auto &slices : dCsrqAttSlices_) {
+      slices.reset();
+    }
+    for (auto &used : csrqAttSlotUsed_) {
+      used = false;
+    }
+    csrqAttNextSlot_ = 0;
+    csrqReleasePinnedTablesLocked();
     csrqForwardTimers_.clear();
     csrqBackwardTimers_.clear();
     for (auto &used : csrqSlotUsed_) {
@@ -3624,18 +3696,6 @@ private:
     return fullAngle;
   }
 
-  // Number of whole compact angles in a chunk (chunks are cut on angle
-  // boundaries by the converter; anything else cannot be attenuated per angle).
-  static int csrqAnglesInChunk(const CsrqDeviceChunk &chunk,
-                               const cuda::CompactDeviceRatioParams &p) {
-    if (p.compactRaysPerAngle <= 0 || chunk.rows % p.compactRaysPerAngle != 0 ||
-        chunk.compactRowBase % p.compactRaysPerAngle != 0) {
-      throw std::runtime_error(
-          "CSRQ CTAC requires chunks made of whole compact angles.");
-    }
-    return chunk.rows / p.compactRaysPerAngle;
-  }
-
   static size_t csrqMaxAnglesPerChunkLocked(
       const CsrqResidentMatrix &matrix,
       const cuda::CompactDeviceRatioParams &p) {
@@ -3650,75 +3710,180 @@ private:
     return maxAngles;
   }
 
-  // Builds the (compact angle, branch) -> slice table of a chunk and the list
-  // of distinct full angles it needs; uploads the table. Returns the angle
-  // count. Cached by chunk identity (row base, rows).
-  int csrqPrepareAttenSliceIndexLocked(
-      const CsrqDeviceChunk &chunk, const cuda::CompactDeviceRatioParams &p) {
-    const int angles = csrqAnglesInChunk(chunk, p);
-    if (csrqSliceChunkRowBase_ == chunk.compactRowBase &&
-        csrqSliceChunkRows_ == chunk.rows && !csrqSliceIndexHost_.empty()) {
-      return angles;
+  // Per-matrix CTAC plan: for every chunk the (compact angle, branch) -> slice
+  // table and the distinct full angles it reaches (slice order). Built from
+  // the announced chunk shapes and the current branch ids, uploaded once, so
+  // no synchronous copy sits between the launches of a pass. Rebuilt when the
+  // geometry parameters or the branch ids change.
+  const CsrqAttenPlan &csrqEnsureAttenPlanLocked(
+      CsrqResidentMatrix &matrix, const cuda::CompactDeviceRatioParams &p) {
+    CsrqAttenPlan &plan = matrix.attenPlan;
+    if (plan.valid && plan.symmetryMode == p.symmetryMode &&
+        plan.compactRaysPerAngle == p.compactRaysPerAngle &&
+        plan.compactNumAngles == p.compactNumAngles &&
+        plan.fullNumAngles == p.fullNumAngles &&
+        plan.symIds == batchSymIdsHost_) {
+      return plan;
     }
-    const int firstAngle = chunk.compactRowBase / p.compactRaysPerAngle;
-    csrqSliceFullAngles_.clear();
-    csrqSliceIndexHost_.assign(static_cast<size_t>(angles) * kCsrqK, -1);
-    for (int i = 0; i < angles; ++i) {
-      for (int k = 0; k < kCsrqK; ++k) {
-        const int fullAngle =
-            csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
-        if (fullAngle < 0) continue;
-        auto it = std::find(csrqSliceFullAngles_.begin(),
-                            csrqSliceFullAngles_.end(), fullAngle);
-        if (it == csrqSliceFullAngles_.end()) {
-          csrqSliceFullAngles_.push_back(fullAngle);
-          it = csrqSliceFullAngles_.end() - 1;
-        }
-        csrqSliceIndexHost_[static_cast<size_t>(i) * kCsrqK + k] =
-            static_cast<int>(it - csrqSliceFullAngles_.begin());
+    if (p.compactRaysPerAngle <= 0) {
+      throw std::runtime_error("CSRQ CTAC requires compactRaysPerAngle > 0.");
+    }
+    plan = CsrqAttenPlan{};
+    plan.symmetryMode = p.symmetryMode;
+    plan.compactRaysPerAngle = p.compactRaysPerAngle;
+    plan.compactNumAngles = p.compactNumAngles;
+    plan.fullNumAngles = p.fullNumAngles;
+    plan.symIds = batchSymIdsHost_;
+    std::vector<int> sliceIndex;
+    for (const auto &shape : matrix.shapes) {
+      if (shape.rows % p.compactRaysPerAngle != 0 ||
+          shape.compactRowBase % p.compactRaysPerAngle != 0) {
+        throw std::runtime_error(
+            "CSRQ CTAC requires chunks made of whole compact angles.");
       }
+      const int angles = shape.rows / p.compactRaysPerAngle;
+      const int firstAngle = shape.compactRowBase / p.compactRaysPerAngle;
+      plan.chunkAngles.push_back(angles);
+      plan.chunkSliceIndexOffset.push_back(sliceIndex.size());
+      std::vector<int> fullAngles;
+      for (int i = 0; i < angles; ++i) {
+        for (int k = 0; k < kCsrqK; ++k) {
+          const int fullAngle =
+              csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
+          int slice = -1;
+          if (fullAngle >= 0) {
+            auto it = std::find(fullAngles.begin(), fullAngles.end(), fullAngle);
+            if (it == fullAngles.end()) {
+              fullAngles.push_back(fullAngle);
+              it = fullAngles.end() - 1;
+            }
+            slice = static_cast<int>(it - fullAngles.begin());
+          }
+          sliceIndex.push_back(slice);
+        }
+      }
+      plan.maxSlices = std::max(plan.maxSlices, fullAngles.size());
+      plan.chunkFullAngles.push_back(std::move(fullAngles));
     }
-    dCsrqSliceIndex_.copyFromHost(csrqSliceIndexHost_.data(),
-                                  csrqSliceIndexHost_.size());
-    csrqSliceChunkRowBase_ = chunk.compactRowBase;
-    csrqSliceChunkRows_ = chunk.rows;
-    return angles;
+    plan.dSliceIndex.copyFromHost(sliceIndex.data(), sliceIndex.size());
+    plan.valid = true;
+    return plan;
   }
 
-  // Copies the factor slices listed by csrqPrepareAttenSliceIndexLocked from
-  // the bed's host table ([fullAngle][nvox] uint16) to the device, contiguous
-  // full-angle runs in one copy each. Synchronous from pageable memory; the
-  // whole table crosses PCIe once per bed per pass (P3 overlaps this).
-  void csrqStageAttenSlicesLocked(const uint16_t *attFactors, size_t attCount,
-                                  const cuda::CompactDeviceRatioParams &p,
-                                  size_t nvox) {
+  // Page-locks a caller-owned factor table once (cached by pointer) so its
+  // slices can be copied asynchronously. Returns false when registration is
+  // refused (the table is then copied synchronously). Registrations are
+  // released in releaseCsrqResidentLocked, i.e. before the caller frees the
+  // tables at the end of a reconstruction.
+  bool csrqEnsureHostTablePinnedLocked(const uint16_t *table, size_t bytes) {
+    for (const auto &entry : csrqPinnedTables_) {
+      if (entry.ptr == table && entry.bytes == bytes) {
+        return entry.pinned;
+      }
+    }
+    CsrqPinnedHostTable entry;
+    entry.ptr = table;
+    entry.bytes = bytes;
+    const auto start = std::chrono::steady_clock::now();
+    const cudaError_t status = cudaHostRegister(
+        const_cast<uint16_t *>(table), bytes, cudaHostRegisterPortable);
+    if (status == cudaSuccess) {
+      entry.pinned = true;
+      const double seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+              .count();
+      if (bytes >= (64ull << 20)) {
+        std::cerr << "[NOTE] CSRQ CTAC: page-locked a " << (bytes >> 20)
+                  << " MiB attenuation table in " << seconds
+                  << " s (slices now stream asynchronously).\n";
+      }
+    } else {
+      (void)cudaGetLastError();
+      entry.pinned = false;
+      std::cerr << "[NOTE] CSRQ CTAC: could not page-lock a " << (bytes >> 20)
+                << " MiB attenuation table (" << cudaGetErrorString(status)
+                << "); its slices are copied synchronously.\n";
+    }
+    csrqPinnedTables_.push_back(entry);
+    return entry.pinned;
+  }
+
+  void csrqReleasePinnedTablesLocked() {
+    for (const auto &entry : csrqPinnedTables_) {
+      if (entry.pinned) {
+        (void)cudaHostUnregister(const_cast<void *>(entry.ptr));
+        (void)cudaGetLastError();
+      }
+    }
+    csrqPinnedTables_.clear();
+  }
+
+  // Stages the factor slices chunk chunkIndex needs from one bed's table
+  // ([fullAngle][nvox] uint16) into one of kCsrqAttSlots device slots and
+  // returns the slot. Pinned tables go through the upload stream, double
+  // buffered against the compute of the previous (chunk, bed): the copy for
+  // this pair overlaps the kernels of the last one and the slot is refilled
+  // only after those kernels released it (csrqAttFree_). The default stream
+  // waits for the slot's ready event before its first launch. Contiguous
+  // full-angle runs are copied in one piece each.
+  int csrqStageAttenSlicesLocked(const CsrqAttenPlan &plan, size_t chunkIndex,
+                                 const uint16_t *attFactors, size_t attCount,
+                                 size_t nvox) {
     if (attFactors == nullptr ||
-        attCount != static_cast<size_t>(p.fullNumAngles) * nvox) {
+        attCount != static_cast<size_t>(plan.fullNumAngles) * nvox) {
       throw std::runtime_error(
           "CSRQ CTAC table must hold fullNumAngles * voxels uint16 factors.");
     }
-    const size_t sliceCount = csrqSliceFullAngles_.size();
-    if (sliceCount == 0) {
-      return;
+    const std::vector<int> &fullAngles = plan.chunkFullAngles[chunkIndex];
+    const int slot = csrqAttNextSlot_;
+    csrqAttNextSlot_ = (slot + 1) % kCsrqAttSlots;
+    DeviceArray<uint16_t> &dSlices = dCsrqAttSlices_[slot];
+    dSlices.allocate(std::max<size_t>(plan.maxSlices, 1u) * nvox);
+    if (fullAngles.empty()) {
+      csrqAttSlotUsed_[slot] = true;
+      return slot;
     }
-    dCsrqAttSlices_.allocate(sliceCount * nvox);
+    const bool pinned =
+        csrqEnsureHostTablePinnedLocked(attFactors, attCount * sizeof(uint16_t));
+    cudaStream_t upload = csrqUploadStream_.get();
+    if (pinned && csrqAttSlotUsed_[slot]) {
+      csrqAttFree_[slot].wait(upload);
+    }
     const auto start = std::chrono::steady_clock::now();
     size_t begin = 0;
-    while (begin < sliceCount) {
+    while (begin < fullAngles.size()) {
       size_t end = begin + 1;
-      while (end < sliceCount &&
-             csrqSliceFullAngles_[end] == csrqSliceFullAngles_[end - 1] + 1) {
+      while (end < fullAngles.size() &&
+             fullAngles[end] == fullAngles[end - 1] + 1) {
         ++end;
       }
-      CUDA_CHECK(cudaMemcpy(
-          dCsrqAttSlices_.get() + begin * nvox,
-          attFactors + static_cast<size_t>(csrqSliceFullAngles_[begin]) * nvox,
-          (end - begin) * nvox * sizeof(uint16_t), cudaMemcpyHostToDevice));
+      const size_t bytes = (end - begin) * nvox * sizeof(uint16_t);
+      const uint16_t *src =
+          attFactors + static_cast<size_t>(fullAngles[begin]) * nvox;
+      uint16_t *dst = dSlices.get() + begin * nvox;
+      if (pinned) {
+        CUDA_CHECK(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice,
+                                   upload));
+      } else {
+        CUDA_CHECK(cudaMemcpy(dst, src, bytes, cudaMemcpyHostToDevice));
+      }
       begin = end;
+    }
+    if (pinned) {
+      csrqAttReady_[slot].record(upload);
+      csrqAttReady_[slot].wait(nullptr);
     }
     noteCudaCompactInputH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
             .count());
+    csrqAttSlotUsed_[slot] = true;
+    return slot;
+  }
+
+  // Marks the slot's slices as consumed by everything enqueued so far on the
+  // default stream (the upload stream waits on this before refilling it).
+  void csrqReleaseAttenSlotLocked(int slot) {
+    csrqAttFree_[slot].record(nullptr);
   }
 
   // Rows [rowBase, rowBase + rows) of a chunk as a chunk view of their own:
@@ -3739,6 +3904,7 @@ private:
   void csrqAttenBackwardAngleLocked(const CsrqDeviceChunkPtrs &rows,
                                     const float *ratio, size_t nvox,
                                     const cuda::CompactDeviceTransformParams &tp,
+                                    const uint16_t *dSlices,
                                     const int *dSliceIndex, double *accum) {
     CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
                                nullptr));
@@ -3750,7 +3916,7 @@ private:
     }
     launchCompactTransformBackwardAddBatchAttenKernel(
         dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
-        dBatchZMirrors_.get(), dCsrqAttSlices_.get(), dSliceIndex);
+        dBatchZMirrors_.get(), dSlices, dSliceIndex);
   }
 
   size_t csrqMaxRowsLocked() const {
@@ -3932,9 +4098,6 @@ private:
       dBatchZMirrors_.copyFromHost(zMirrors, count);
       batchSymIdsHost_.assign(symIds, symIds + count);
       batchZMirrorsHost_.assign(zMirrors, zMirrors + count);
-      // The CTAC slice table depends on the branch symmetry ids.
-      csrqSliceChunkRowBase_ = -1;
-      csrqSliceChunkRows_ = -1;
     }
   }
 
@@ -4043,16 +4206,17 @@ private:
   std::vector<TimedCudaStagePair> csrqForwardTimers_;
   std::vector<TimedCudaStagePair> csrqBackwardTimers_;
   std::chrono::steady_clock::time_point csrqWarmupStart_{};
-  // CSRQ CTAC staging for the current (chunk, bed): the factor slices of every
-  // full angle the chunk's compact angles reach ([slice][nvox] uint16, a few
-  // hundred MB instead of the 2.3 GB table) and the per-(compact angle,
-  // branch) slice ids ([anglesInChunk][8], -1 = branch has no full angle).
-  DeviceArray<uint16_t> dCsrqAttSlices_;
-  DeviceArray<int> dCsrqSliceIndex_;
-  std::vector<int> csrqSliceIndexHost_;
-  std::vector<int> csrqSliceFullAngles_;
-  int csrqSliceChunkRowBase_ = -1;
-  int csrqSliceChunkRows_ = -1;
+  // CSRQ CTAC staging: two device slots holding the factor slices of the
+  // full angles one chunk reaches ([slice][nvox] uint16, a few hundred MB
+  // instead of the 2.3 GB table), filled on the upload stream and handed
+  // over with ready/free events like the streamed matrix chunks; the
+  // caller-owned tables are page-locked once for that.
+  std::array<DeviceArray<uint16_t>, kCsrqAttSlots> dCsrqAttSlices_;
+  std::array<CudaEventGuard, kCsrqAttSlots> csrqAttReady_;
+  std::array<CudaEventGuard, kCsrqAttSlots> csrqAttFree_;
+  std::array<bool, kCsrqAttSlots> csrqAttSlotUsed_{};
+  int csrqAttNextSlot_ = 0;
+  std::vector<CsrqPinnedHostTable> csrqPinnedTables_;
   DeviceBuffer dBuffer_;
   // Compact CTAC: resident attenuation table plus explicit debug/reference
   // baked-values scratch. Default CTAC uses fused kernels above.
