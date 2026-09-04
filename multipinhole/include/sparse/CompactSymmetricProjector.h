@@ -34,6 +34,12 @@ struct CompactSymmetricStageTiming {
 struct CompactMatrixChannel {
   const spect::io::CompactChunkCSRDirectory *chunks = nullptr;
   double weight = 1.0;
+  /// CTAC energy scaling: the per-bed factor table att (computed at the mu
+  /// map's energy) enters this window as att^attenPower, with attenPower =
+  /// mu_water(E_window) / mu_water(E_map) (1 = table used as is). Exact
+  /// under the water-scaled mu model shared by auto-mu and the HU->mu
+  /// pipeline, since att = exp(-integral mu).
+  double attenPower = 1.0;
 };
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
@@ -145,11 +151,13 @@ bool runCompactChunkMlemNumerCUDA(
     const uint16_t *attFactors = nullptr,
     bool refreshProjectionInput = true);
 
+// attenPower: CTAC energy exponent of this window (see
+// CompactMatrixChannel::attenPower); values other than 1 need the CSRQ path.
 bool computeCompactChunkForwardProjectionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta,
     const double *smoothedImage, int threads, double *fullExpected,
-    const uint16_t *attFactors = nullptr);
+    const uint16_t *attFactors = nullptr, double attenPower = 1.0);
 
 // attFactors: optional per-bed pointer array (bedCount entries); each entry
 // may be nullptr for "no attenuation for this bed".

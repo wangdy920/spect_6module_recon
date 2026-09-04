@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "core/AttenuationCoefficients.h"
 #include "ctac/CTACOps.h"
 
 #include <cmath>
@@ -17,6 +18,34 @@ double factorAt(const std::vector<uint16_t> &factors, size_t voxels, int angle,
 }
 
 } // namespace
+
+// The nuclide presets are the log-log interpolation of the NIST water table
+// at their photopeaks (Tc-99m keeps its historical validated value), and the
+// energy ratio used for per-window CTAC scaling follows from the same table.
+TEST(CTACOpsTest, WaterMuLookupReproducesPresetsAndScalesWithEnergy) {
+  double mu = 0.0;
+  for (const char *key : {"i123", "in111171", "in111245", "lu177", "i131"}) {
+    const auto *preset = spect::core::waterAttenuationPreset(key);
+    ASSERT_NE(preset, nullptr) << key;
+    ASSERT_TRUE(spect::core::waterMuPerMMAtEnergyKeV(preset->energyKeV, mu));
+    EXPECT_NEAR(mu, preset->muPerMM, 1e-9) << key;
+  }
+  ASSERT_TRUE(spect::core::waterMuPerMMAtEnergyKeV(140.5, mu));
+  EXPECT_NEAR(mu, 0.01536, 2e-5);  // interpolated; preset keeps 0.0152
+  ASSERT_TRUE(spect::core::waterMuPerMMAtEnergyKeV(112.9, mu));
+  EXPECT_NEAR(mu, 0.016438, 2e-5);
+  // Table knots are reproduced exactly (mu/rho in cm^2/g -> mm^-1).
+  ASSERT_TRUE(spect::core::waterMuPerMMAtEnergyKeV(200.0, mu));
+  EXPECT_NEAR(mu, 0.01370, 1e-12);
+  double ratio = 0.0;
+  ASSERT_TRUE(spect::core::waterMuEnergyRatio(112.9, 208.4, ratio));
+  EXPECT_NEAR(ratio, 0.016438 / 0.013500970784546906, 2e-3);
+  EXPECT_GT(ratio, 1.2);
+  ASSERT_TRUE(spect::core::waterMuEnergyRatio(208.4, 208.4, ratio));
+  EXPECT_DOUBLE_EQ(ratio, 1.0);
+  EXPECT_FALSE(spect::core::waterMuPerMMAtEnergyKeV(10.0, mu));
+  EXPECT_FALSE(spect::core::waterMuPerMMAtEnergyKeV(1500.0, mu));
+}
 
 TEST(CTACOpsTest, ComputeAttenFactorsZeroMuAllOnes) {
   const int nx = 2;

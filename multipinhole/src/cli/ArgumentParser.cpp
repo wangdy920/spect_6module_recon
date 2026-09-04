@@ -992,6 +992,34 @@ void ArgumentParser::registerHandlers() {
         return true;
     }, {"-ctacAutoMuValue"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.ctacMapEnergyKeV =
+            std::stod(ArgumentParser::getRequiredArg(i, argc, argv, "-ctacMapEnergy"));
+        if (!(a.ctacMapEnergyKeV > 0.0)) {
+            std::cerr << "Error: -ctacMapEnergy (keV) must be positive.\n";
+            return false;
+        }
+        return true;
+    }, {"-ctacMapEnergy"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const std::string raw =
+            ArgumentParser::getRequiredArg(i, argc, argv, "-ctacWindowEnergies");
+        a.ctacWindowEnergiesKeV.clear();
+        for (const std::string& item : split(raw, ',')) {
+            if (item.empty()) continue;
+            const double keV = std::stod(item);
+            if (!(keV > 0.0)) {
+                std::cerr << "Error: -ctacWindowEnergies entries (keV) must be positive.\n";
+                return false;
+            }
+            a.ctacWindowEnergiesKeV.push_back(keV);
+        }
+        if (a.ctacWindowEnergiesKeV.empty()) {
+            std::cerr << "Error: -ctacWindowEnergies needs at least one energy.\n";
+            return false;
+        }
+        return true;
+    }, {"-ctacWindowEnergies"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string value = ArgumentParser::getRequiredArg(i, argc, argv, "-ctacRotSign");
         if (value == "1" || value == "+1" || value == "cw") {
             a.ctacRotSign = 1;
@@ -1151,6 +1179,18 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             cfg.getDouble("CTAC", "auto_mu_value", a.ctacAutoMuValue);
         a.ctacAutoMuValueExplicit = true;
         a.ctacAutoMuValueSource = "manual";
+    }
+    if (cfg.hasKey("CTAC", "mu_map_energy_kev"))
+        a.ctacMapEnergyKeV =
+            cfg.getDouble("CTAC", "mu_map_energy_kev", a.ctacMapEnergyKeV);
+    const std::string windowEnergies =
+        cfg.getString("CTAC", "window_energies_kev");
+    if (!windowEnergies.empty()) {
+        a.ctacWindowEnergiesKeV.clear();
+        for (auto& p : split(windowEnergies, ',')) {
+            if (!p.empty())
+                a.ctacWindowEnergiesKeV.push_back(std::stod(p));
+        }
     }
 
     // IO
@@ -1664,6 +1704,37 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
     // likelihood toward whichever window the matrices happen to favour).
     const bool hasProj2 = !args.projPath2.empty() || !args.projPaths2.empty();
     const bool hasBProj2 = !args.bProjPath2.empty() || !args.bProjPaths2.empty();
+    // CTAC energy scaling: the factor table is computed at the mu map's energy
+    // and raised to mu_w(E_k)/mu_w(E_map) per window. Both energies must be
+    // inside the water table when given.
+    const size_t windowCount = args.dualWindow() ? 2u : 1u;
+    if (!args.ctacWindowEnergiesKeV.empty()) {
+        if (args.ctacWindowEnergiesKeV.size() != windowCount) {
+            std::cerr << "Error: -ctacWindowEnergies lists " << args.ctacWindowEnergiesKeV.size()
+                      << " energies for " << windowCount << " window(s).\n";
+            return false;
+        }
+        double mu = 0.0;
+        for (double keV : args.ctacWindowEnergiesKeV) {
+            if (!spect::core::waterMuPerMMAtEnergyKeV(keV, mu)) {
+                std::cerr << "Error: -ctacWindowEnergies " << keV
+                          << " keV is outside the water attenuation table (20-1000 keV).\n";
+                return false;
+            }
+        }
+        if (args.ctacMapEnergyKeV > 0.0 &&
+            !spect::core::waterMuPerMMAtEnergyKeV(args.ctacMapEnergyKeV, mu)) {
+            std::cerr << "Error: -ctacMapEnergy " << args.ctacMapEnergyKeV
+                      << " keV is outside the water attenuation table (20-1000 keV).\n";
+            return false;
+        }
+        if (args.ctacMapEnergyKeV <= 0.0 &&
+            spect::core::waterAttenuationPreset(args.ctacAutoMuNuclide) == nullptr) {
+            std::cerr << "Error: -ctacWindowEnergies needs the mu map's energy: give "
+                         "-ctacMapEnergy <keV> or a known [CTAC] auto_mu_nuclide.\n";
+            return false;
+        }
+    }
     if (!args.dualWindow()) {
         if (hasProj2 || hasBProj2 || !args.energyWindowWeights.empty()) {
             std::cerr << "Error: -df2/-dfList2, -bProj2/-bProjList2 and "
@@ -1700,11 +1771,11 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
                      "the matrices are per emitted photon.\n";
         return false;
     }
-    if (args.doCTAC) {
-        std::cerr << "Error: joint dual-window reconstruction does not support "
-                     "CTAC (-ctac) yet: mu differs per photopeak, so each "
-                     "window needs its own attenuation table (single-window "
-                     "CTAC works on both matrix formats).\n";
+    if (args.doCTAC && args.ctacWindowEnergiesKeV.size() != 2) {
+        std::cerr << "Error: joint dual-window CTAC needs -ctacWindowEnergies "
+                     "<keV1,keV2> (photopeak of each window, e.g. Lu-177 "
+                     "208.4,112.9): mu differs per photopeak and the factor "
+                     "table is scaled per window as att^(mu_w(E_k)/mu_w(E_map)).\n";
         return false;
     }
     return true;
@@ -2117,7 +2188,19 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[CTAC]\n";
     std::cout << "auto_mu_nuclide = " << a.ctacAutoMuNuclide << "\n";
     std::cout << "auto_mu_value   = " << a.ctacAutoMuValue << "\n";
-    std::cout << "auto_mu_source  = " << a.ctacAutoMuValueSource << "\n\n";
+    std::cout << "auto_mu_source  = " << a.ctacAutoMuValueSource << "\n";
+    std::cout << "mu_map_energy_kev = "
+              << (a.ctacMapEnergyKeV > 0.0 ? std::to_string(a.ctacMapEnergyKeV)
+                                            : std::string("(nuclide preset)"))
+              << "\n";
+    std::cout << "window_energies_kev = ";
+    if (a.ctacWindowEnergiesKeV.empty()) {
+        std::cout << "(none: table used as is)";
+    } else {
+        for (size_t k = 0; k < a.ctacWindowEnergiesKeV.size(); ++k)
+            std::cout << (k ? "," : "") << a.ctacWindowEnergiesKeV[k];
+    }
+    std::cout << "\n\n";
 
     std::cout << "[Mask]\n";
     std::cout << "use_cylinder   = " << (a.useCylindricalMask ? "true" : "false") << "\n";
@@ -2318,7 +2401,12 @@ void ArgumentParser::printUsage() {
     std::cout << "                            mutually exclusive with -attMap; generated map saved as *_automu)\n";
     std::cout << "  -ctacAutoMuThresh <f>     Relative threshold vs P99.9 activity (default 0.05)\n";
     std::cout << "  -ctacAutoMuValue <mu>     Debug override for auto-mu body fill, mm^-1\n";
-    std::cout << "                            Default comes from [CTAC] auto_mu_nuclide (Tc99m => 0.0152)\n\n";
+    std::cout << "                            Default comes from [CTAC] auto_mu_nuclide (Tc99m => 0.0152)\n";
+    std::cout << "  -ctacMapEnergy <keV>      Photon energy the mu map / auto-mu value refers to\n";
+    std::cout << "                            (default: the auto_mu_nuclide preset energy)\n";
+    std::cout << "  -ctacWindowEnergies <keV,...>  Photopeak energy per window; the CTAC factor table\n";
+    std::cout << "                            is scaled per window as att^(mu_w(E_k)/mu_w(E_map)) (water\n";
+    std::cout << "                            NIST table). Required for dual-window CTAC, e.g. 208.4,112.9\n\n";
 
     std::cout << "=== Masking ===\n";
     std::cout << "  -cyl <diam,height>        Cylindrical mask (mm)\n";

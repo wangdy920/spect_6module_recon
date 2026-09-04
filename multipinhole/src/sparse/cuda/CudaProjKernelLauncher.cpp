@@ -965,7 +965,7 @@ void launchCsrqPackBranch8AttenKernel(
     const float *branchMajor, const uint16_t *attSlices, const int *dSliceIndex,
     float *packed, size_t nvox,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
-    const int *dZMirrors, cudaStream_t stream) {
+    const int *dZMirrors, float power, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (nvox == 0) {
     return;
@@ -974,6 +974,9 @@ void launchCsrqPackBranch8AttenKernel(
       dZMirrors == nullptr) {
     throw std::runtime_error(
         "CSRQ attenuated pack launch needs the factor slices and branch tables.");
+  }
+  if (!(power > 0.0f)) {
+    throw std::runtime_error("CTAC energy exponent must be positive.");
   }
   CUdeviceptr in = devPtr(branchMajor);
   CUdeviceptr att = devPtr(attSlices);
@@ -992,7 +995,8 @@ void launchCsrqPackBranch8AttenKernel(
                   const_cast<int *>(&commonParams.ny),
                   const_cast<int *>(&commonParams.nz),
                   &symIds,
-                  &zMirrors};
+                  &zMirrors,
+                  &power};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.csrqPackAttenFunction, gridFor(count, blockSize),
@@ -1004,7 +1008,7 @@ void launchCompactTransformBackwardAddBatchAttenKernel(
     const float *rotatedBatch, double *accum, size_t nvox, int batchSize,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
     const int *dZMirrors, const uint16_t *attSlices, const int *dSliceIndex,
-    cudaStream_t stream) {
+    float power, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (nvox == 0 || batchSize <= 0) {
     return;
@@ -1012,6 +1016,9 @@ void launchCompactTransformBackwardAddBatchAttenKernel(
   if (attSlices == nullptr || dSliceIndex == nullptr) {
     throw std::runtime_error(
         "attenuated transform-add launch needs the factor slices.");
+  }
+  if (!(power > 0.0f)) {
+    throw std::runtime_error("CTAC energy exponent must be positive.");
   }
   CUdeviceptr rotatedPtr = devPtr(rotatedBatch);
   CUdeviceptr accumPtr = devPtr(accum);
@@ -1033,7 +1040,8 @@ void launchCompactTransformBackwardAddBatchAttenKernel(
                   &symIdsPtr,
                   &zMirrorsPtr,
                   &att,
-                  &slices};
+                  &slices,
+                  &power};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactTransformBackwardBatchAttenFunction,

@@ -1123,7 +1123,8 @@ bool runCsrqMlemNumerMultiBed(
                           csrqProjectionSlot(static_cast<int>(channel), 0),
                           &deviceTiming, &backwardTiming, attFactors,
                           attFactors == nullptr ? 0
-                                                : compactAttenTableCount(meta))) {
+                                                : compactAttenTableCount(meta),
+                          channels[channel].attenPower)) {
       return false;
     }
     if (timing) {
@@ -1180,7 +1181,8 @@ bool computePoissonSensitivityCUDA(
               makeCompactDeviceTransformParams(meta, 0, false), symIds.data(),
               zMirrors.data(), 0, fullProjectionCount, rowWeights,
               &backwardTiming, attFactors,
-              attFactors == nullptr ? 0 : compactAttenTableCount(meta))) {
+              attFactors == nullptr ? 0 : compactAttenTableCount(meta),
+              channels[channel].attenPower)) {
         return false;
       }
       if (timing) {
@@ -1420,7 +1422,7 @@ bool computeCompactChunkForwardProjectionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,
     const spect::io::CompactSymmetryMetadata &meta,
     const double *smoothedImage, int threads, double *fullExpected,
-    const uint16_t *attFactors) {
+    const uint16_t *attFactors, double attenPower) {
   if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
       chunks.cols() != meta.totalVoxels) {
     throw std::runtime_error(
@@ -1469,7 +1471,8 @@ bool computeCompactChunkForwardProjectionCUDA(
                             &commonTransform, symIds.data(), zMirrors.data(),
                             attFactors,
                             attFactors == nullptr ? 0
-                                                  : compactAttenTableCount(meta))) {
+                                                  : compactAttenTableCount(meta),
+                            attenPower)) {
       return false;
     }
     // Packed [compactRow][branch] -> one full projection row per valid pair,
@@ -1503,6 +1506,10 @@ bool computeCompactChunkForwardProjectionCUDA(
     return true;
   }
 
+  if (attFactors != nullptr && attenPower != 1.0) {
+    throw std::runtime_error(
+        "CTAC energy scaling (att^power) is only available on the CSRQ path.");
+  }
   std::vector<float> imgRot(nvox, 0.0f);
   std::vector<float> y;
   for (const auto &branch : enumerateCompactBranches(meta)) {

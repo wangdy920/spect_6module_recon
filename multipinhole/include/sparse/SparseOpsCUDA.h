@@ -295,8 +295,10 @@ bool csrqResidentCUDA(int matrixIndex);
 /// the projection in slot cacheSlotBase + b. commonRatioParams.compactRowBase
 /// is replaced per chunk. H_b = A without CTAC; with bedAttFactors (one
 /// full-angle uint16 table of attCount entries per bed, entries may be null)
-/// H_b = A att_b, the factor being applied in the image domain per compact
-/// angle (pack / transform-add), never inside the nnz loop.
+/// H_b = A att_b^attPower, the factor being applied in the image domain per
+/// compact angle (pack / transform-add), never inside the nnz loop. attPower
+/// = mu_w(E_window)/mu_w(E_map) rescales the table to the window's energy
+/// (1 = as stored).
 bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       const CompactDeviceRatioParams& commonRatioParams,
                       const CompactDeviceTransformParams& commonTransformParams,
@@ -308,11 +310,11 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       CompactDeviceRatioTiming* ratioTiming = nullptr,
                       CompactDeviceBackwardTiming* backwardTiming = nullptr,
                       const uint16_t* const* bedAttFactors = nullptr,
-                      size_t attCount = 0);
+                      size_t attCount = 0, double attPower = 1.0);
 /// weight * H^T W 1 over rows with a valid full projection counterpart.
 /// rowWeights (fullProjectionCount doubles: detector masks, censoring,
 /// efficiency) may be nullptr for W = 1; attFactors (one bed's full-angle
-/// table) may be nullptr for H = A.
+/// table) may be nullptr for H = A, otherwise H = A att^attPower.
 bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             const CompactDeviceRatioParams& commonRatioParams,
                             const CompactDeviceTransformParams& commonTransformParams,
@@ -321,17 +323,18 @@ bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             const double* rowWeights = nullptr,
                             CompactDeviceBackwardTiming* backwardTiming = nullptr,
                             const uint16_t* attFactors = nullptr,
-                            size_t attCount = 0);
+                            size_t attCount = 0, double attPower = 1.0);
 /// Forward projection of one window over the refreshed single-bed branch
 /// batch; hostYhatPacked receives [compactRow][branch] floats (rows * 8).
-/// With attFactors the projection is H x = A att x and the angle / branch
-/// parameters are required.
+/// With attFactors the projection is H x = A att^attPower x and the angle /
+/// branch parameters are required.
 bool csrqRunForwardCUDA(int matrixIndex, int branchCount,
                         float* hostYhatPacked, size_t count,
                         const CompactDeviceRatioParams* attenRatioParams = nullptr,
                         const CompactDeviceTransformParams* attenTransformParams = nullptr,
                         const int* symIds = nullptr, const int* zMirrors = nullptr,
-                        const uint16_t* attFactors = nullptr, size_t attCount = 0);
+                        const uint16_t* attFactors = nullptr, size_t attCount = 0,
+                        double attPower = 1.0);
 }
 
 } // namespace spect

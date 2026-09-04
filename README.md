@@ -70,7 +70,7 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
-| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window MLEM (MB-JR): a second energy window with its own CSRQ matrix and projections shares the activity estimate in one Poisson likelihood, `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. The second window lists the same beds as the first; `-energyWeights` (window mean scale, e.g. Lu-177 branching `0.0617,0.1036` for per-photon matrices) is required; CTAC is not supported; both matrices must be CSRQ. Two channels naming the same directory share one resident copy. |
+| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window MLEM (MB-JR): a second energy window with its own CSRQ matrix and projections shares the activity estimate in one Poisson likelihood, `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. The second window lists the same beds as the first; `-energyWeights` (window mean scale, e.g. Lu-177 branching `0.0617,0.1036` for per-photon matrices) is required; with `-ctac` add `-ctacWindowEnergies <keV1,keV2>` (per-window attenuation from one μ table); both matrices must be CSRQ. Two channels naming the same directory share one resident copy. |
 | `-csrqResidency <auto|streamed>` | CSRQ device residency (INI `[SystemMatrix] csrq_residency`). `auto` keeps each matrix resident when it fits and streams it from pinned host memory otherwise; `streamed` always streams (two 1–1.6 GiB chunk slots per matrix), for GPUs shared with other work. |
 | `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default. |
@@ -164,8 +164,12 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   kernels), so the 2.3 GB per bed per iteration of table traffic is mostly
   hidden behind compute. Everything else
   (MLEM/BSREM, PSF, masks, multi-bed, weighted sensitivity, bad detectors) is
-  unchanged. Joint dual-window runs still reject `-ctac` (one μ table per
-  photopeak is not implemented).
+  unchanged. Joint dual-window CTAC uses the same table for both windows
+  with a per-window energy exponent: `-ctacWindowEnergies 208.4,112.9`
+  (Lu-177) scales the factor as `att^(μ_w(E_k)/μ_w(E_map))` from the NIST
+  water table, `-ctacMapEnergy` names the μ-map's energy (default: the
+  `[CTAC] auto_mu_nuclide` preset). Exact for the water-scaled μ model that
+  auto-mu and `prepare_ct_mu_map.py` produce; bone is scaled like water.
 - Same-input numerics vs the fp32 CSRB run on the frozen Derenzo workload:
   image relL2 `1.5e-6` at MLEM it200, denom relL2 `8e-7`; 5-bed mouse MLEM
   it50 relL2 `6.2e-7` (gate `1e-5`). Measured on this host (RTX 4070 Ti

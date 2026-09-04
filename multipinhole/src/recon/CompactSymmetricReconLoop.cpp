@@ -3,6 +3,7 @@
 #include "recon/BedOffsets.h"
 #include "recon/BsremUpdate.h"
 #include "recon/ProjectionOps.h"
+#include "core/AttenuationCoefficients.h"
 #include "core/Masks.h"
 #include "core/ReconLimits.h"
 #include "sparse/CompactSymmetricProjector.h"
@@ -425,7 +426,8 @@ std::string buildCompactDenomCacheManifest(
     const spect::filters::PSFKernels *psfKernels,
     const spect::io::CompactChunkCSRDirectory *compactChunks2 = nullptr,
     const std::vector<double> *sensRowWeights = nullptr,
-    const std::vector<std::vector<uint16_t>> *bedAttenFactors = nullptr) {
+    const std::vector<std::vector<uint16_t>> *bedAttenFactors = nullptr,
+    const std::vector<double> *ctacAttenPowers = nullptr) {
   std::ostringstream oss;
   oss << std::setprecision(17);
   oss << "cache_schema=compact_global_denom_v4_portable_stat_identity\n";
@@ -494,6 +496,16 @@ std::string buildCompactDenomCacheManifest(
       oss << "ctac_table_" << bed << '=' << table.size() << ':' << std::hex
           << fnv1a64Words(table.data(), table.size() * sizeof(uint16_t))
           << std::dec << '\n';
+    }
+    // Per-window energy exponent att^power (emitted only when some window is
+    // rescaled, so unscaled CTAC caches keep matching).
+    if (ctacAttenPowers != nullptr &&
+        std::any_of(ctacAttenPowers->begin(), ctacAttenPowers->end(),
+                    [](double p) { return p != 1.0; })) {
+      oss << "ctac_atten_powers=";
+      for (size_t k = 0; k < ctacAttenPowers->size(); ++k)
+        oss << (k ? "," : "") << (*ctacAttenPowers)[k];
+      oss << '\n';
     }
   }
   // Final sensitivity row weights W (censoring x efficiency x detector mask),
@@ -737,6 +749,51 @@ std::vector<double> runCompactSymmetricReconstruction(
     anyBackground = anyBackground || (background != nullptr && !background->empty());
   const bool csrqMatrices =
       compactChunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
+  // CTAC energy scaling: the factor table is computed once at the mu map's
+  // energy; window k uses att^(mu_w(E_k)/mu_w(E_map)). Without window
+  // energies every window uses the table as is (the pre-existing behaviour).
+  double ctacMapEnergyKeV = 0.0;
+  if (args.doCTAC && !args.ctacWindowEnergiesKeV.empty()) {
+    ctacMapEnergyKeV = args.ctacMapEnergyKeV;
+    if (ctacMapEnergyKeV <= 0.0) {
+      const auto *preset =
+          spect::core::waterAttenuationPreset(args.ctacAutoMuNuclide);
+      if (preset == nullptr) {
+        throw std::runtime_error(
+            "CTAC window energies need the mu map's energy (-ctacMapEnergy or "
+            "a known [CTAC] auto_mu_nuclide).");
+      }
+      ctacMapEnergyKeV = preset->energyKeV;
+    }
+    if (args.ctacWindowEnergiesKeV.size() != channelCount) {
+      throw std::runtime_error(
+          "CTAC window energies must list one energy per energy window.");
+    }
+    std::ostringstream powers;
+    for (size_t k = 0; k < channelCount; ++k) {
+      double ratio = 1.0;
+      if (!spect::core::waterMuEnergyRatio(args.ctacWindowEnergiesKeV[k],
+                                           ctacMapEnergyKeV, ratio)) {
+        throw std::runtime_error(
+            "CTAC window/map energy outside the water attenuation table.");
+      }
+      channels[k].attenPower = ratio;
+      powers << (k ? ", " : "") << "window " << k << ": "
+             << args.ctacWindowEnergiesKeV[k] << " keV -> att^" << ratio;
+    }
+    if (!csrqMatrices) {
+      bool scaled = false;
+      for (const auto &channel : channels)
+        scaled = scaled || channel.attenPower != 1.0;
+      if (scaled) {
+        throw std::runtime_error(
+            "CTAC energy scaling (window energy != mu map energy) is only "
+            "available on the CSRQ path.");
+      }
+    }
+    logInfo("CTAC energy scaling: mu map at " +
+            std::to_string(ctacMapEnergyKeV) + " keV; " + powers.str() + ".");
+  }
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
   spect::cuda::setCsrqForceStreamingCUDA(args.csrqResidency == "streamed");
 #endif
@@ -929,11 +986,15 @@ std::vector<double> runCompactSymmetricReconstruction(
         std::filesystem::path compactDenomCachePath =
             resolveCompactDenomCacheMhdPath(args);
         std::string compactDenomManifest;
+        std::vector<double> ctacAttenPowers;
+        for (const auto &channel : channels)
+          ctacAttenPowers.push_back(channel.attenPower);
         compactDenomManifest = buildCompactDenomCacheManifest(
             args, geometry, compactMeta, compactMetaPath, compactChunks,
             bedZStarts, psfPtr, ctx.compactChunks2,
             useWeightedSensitivity ? &detZSensWeights : nullptr,
-            compactHasAttenuation ? &opts.bedAttenFactors : nullptr);
+            compactHasAttenuation ? &opts.bedAttenFactors : nullptr,
+            compactHasAttenuation ? &ctacAttenPowers : nullptr);
         if (compactDenomCachePath.empty()) {
           compactDenomCachePath =
               autoCompactDenomCachePath(args, compactDenomManifest);
@@ -1641,7 +1702,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 spect::cuda::computeCompactChunkForwardProjectionCUDA(
                     *channels[channel].chunks, compactMeta,
                     localImageForProjection, opts.threads, expected.data(),
-                    bedAttenuation);
+                    bedAttenuation, channels[channel].attenPower);
             if (!forwardOk) {
               throw std::runtime_error(
                   "compact projection residual diagnostic requires CUDA "

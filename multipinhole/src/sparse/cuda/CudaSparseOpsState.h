@@ -3170,8 +3170,9 @@ public:
   // accumulates weight * H_b^T(p_b / (weight * H_b x_b + background_b)) into
   // accumulator accumulatorBase + b; projection cache slot cacheSlotBase + b.
   // bedAttFactors (null, or one table per bed of attCount uint16) makes
-  // H_b = A att_b: the chunk is then walked one compact angle at a time with
-  // the factor applied at pack time and after the backward scatter.
+  // H_b = A att_b^attPower: the chunk is then walked one compact angle at a
+  // time with the factor applied at pack time and after the backward scatter
+  // (attPower rescales the table to this window's photon energy).
   void csrqRunNumer(int matrixIndex, int bedCount, int branchCount,
                     const cuda::CompactDeviceRatioParams &commonRatioParams,
                     const cuda::CompactDeviceTransformParams &commonTransformParams,
@@ -3182,11 +3183,13 @@ public:
                     int accumulatorBase, int cacheSlotBase,
                     cuda::CompactDeviceRatioTiming *ratioTimingOut,
                     cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-                    const uint16_t *const *bedAttFactors, size_t attCount) {
+                    const uint16_t *const *bedAttFactors, size_t attCount,
+                    double attPower) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
+    const float power = csrqCheckedAttPower(attPower);
     if (bedCount <= 0 || bedCount > spect::core::kMaxBeds ||
         accumulatorBase < 0 || cacheSlotBase < 0 ||
         accumulatorBase + bedCount > kCompactDeviceBackwardMaxAccumulators ||
@@ -3299,7 +3302,7 @@ public:
           launchCsrqPackBranch8AttenKernel(
               bedInput, dSlices, dSlice, dCsrqX_.get(), nvox,
               commonTransformParams, dBatchSymIds_.get(),
-              dBatchZMirrors_.get());
+              dBatchZMirrors_.get(), power);
           launchCsrqForwardRatioK8Kernel(
               rows, dCsrqX_.get(), angleRatio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, angleParams,
@@ -3309,7 +3312,7 @@ public:
           csrqBackwardTimers_[t].recordStart(nullptr);
           csrqAttenBackwardAngleLocked(rows, angleRatio, nvox,
                                        commonTransformParams, dSlices, dSlice,
-                                       accums[bed]->get());
+                                       power, accums[bed]->get());
           csrqBackwardTimers_[t].recordStop(nullptr);
         }
         csrqReleaseAttenSlotLocked(slot);
@@ -3337,7 +3340,8 @@ public:
   // weight * H^T W 1 of matrix matrixIndex restricted to (row, branch) pairs
   // with a full projection counterpart, added to accumulatorIndex. rowWeights
   // (one per full projection row) may be null for W = 1; attFactors (one
-  // bed's full-angle table, attCount uint16) may be null for H = A.
+  // bed's full-angle table, attCount uint16) may be null for H = A, otherwise
+  // H = A att^attPower.
   void csrqRunSensitivity(
       int matrixIndex, int branchCount, double weight,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
@@ -3346,11 +3350,12 @@ public:
       const double *rowWeights, size_t rowWeightCount,
       size_t fullProjectionCount,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      const uint16_t *attFactors, size_t attCount) {
+      const uint16_t *attFactors, size_t attCount, double attPower) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
+    const float power = csrqCheckedAttPower(attPower);
     if (rowWeights != nullptr && rowWeightCount != fullProjectionCount) {
       throw std::runtime_error(
           "CSRQ sensitivity row weights must hold one value per full row.");
@@ -3410,7 +3415,7 @@ public:
         csrqAttenBackwardAngleLocked(
             csrqRowRange(chunk, rowBase, rpa),
             ratio + static_cast<size_t>(rowBase) * kCsrqK, nvox,
-            commonTransformParams, dSlices, dSliceIndex + i * kCsrqK,
+            commonTransformParams, dSlices, dSliceIndex + i * kCsrqK, power,
             accum.get());
         csrqBackwardTimers_[t].recordStop(nullptr);
       }
@@ -3436,11 +3441,13 @@ public:
                       const cuda::CompactDeviceRatioParams *attenRatioParams,
                       const cuda::CompactDeviceTransformParams *attenTransformParams,
                       const int *symIds, const int *zMirrors,
-                      const uint16_t *attFactors, size_t attCount) {
+                      const uint16_t *attFactors, size_t attCount,
+                      double attPower) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
+    const float power = csrqCheckedAttPower(attPower);
     if (hostYhatPacked == nullptr ||
         count != matrix.totalRows * static_cast<size_t>(kCsrqK)) {
       throw std::runtime_error(
@@ -3496,7 +3503,7 @@ public:
         launchCsrqPackBranch8AttenKernel(
             dBatchInput_.get(), dSlices, dSliceIndex + i * kCsrqK,
             dCsrqX_.get(), nvox, *attenTransformParams, dBatchSymIds_.get(),
-            dBatchZMirrors_.get());
+            dBatchZMirrors_.get(), power);
         launchCsrqForwardK8Kernel(csrqRowRange(chunk, rowBase, rpa),
                                   dCsrqX_.get(),
                                   out + static_cast<size_t>(rowBase) * kCsrqK);
@@ -3900,12 +3907,14 @@ private:
   }
 
   // Attenuated backward of one compact angle's rows into accum:
-  // scatter -> [8][nvox], then transform-add with the branch's factor slice.
+  // scatter -> [8][nvox], then transform-add with the branch's factor slice
+  // raised to the window's energy exponent.
   void csrqAttenBackwardAngleLocked(const CsrqDeviceChunkPtrs &rows,
                                     const float *ratio, size_t nvox,
                                     const cuda::CompactDeviceTransformParams &tp,
                                     const uint16_t *dSlices,
-                                    const int *dSliceIndex, double *accum) {
+                                    const int *dSliceIndex, float attPower,
+                                    double *accum) {
     CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
                                nullptr));
     for (int kFirst = 0; kFirst < kCsrqK;
@@ -3916,7 +3925,15 @@ private:
     }
     launchCompactTransformBackwardAddBatchAttenKernel(
         dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
-        dBatchZMirrors_.get(), dSlices, dSliceIndex);
+        dBatchZMirrors_.get(), dSlices, dSliceIndex, attPower);
+  }
+
+  static float csrqCheckedAttPower(double attPower) {
+    if (!(attPower > 0.0) || !std::isfinite(attPower)) {
+      throw std::runtime_error(
+          "CSRQ CTAC energy exponent must be a positive finite number.");
+    }
+    return static_cast<float>(attPower);
   }
 
   size_t csrqMaxRowsLocked() const {

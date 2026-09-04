@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "core/AttenuationCoefficients.h"
 #include "cuda/CudaConfig.h"
 #include "filters/cuda/VolumeOpsCUDA.h"
 #include "io/CompactChunkCSR.h"
@@ -897,6 +898,134 @@ TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   EXPECT_LE(std::abs(lhs - rhs) / std::abs(lhs), 1e-5) << "adjoint identity";
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   std::filesystem::remove_all(pair.csrqDir.parent_path());
+}
+
+// Per-window CTAC energy scaling: a channel with attenPower s must equal the
+// unscaled channel run on the pre-powered table att^s (quantized to u16), for
+// sensitivity and numerator, single window and as the second window of a
+// joint two-window model with per-window exponents. Tolerance covers the u16
+// quantization of the pre-powered reference table (factor-level ~1e-4 at the
+// smallest factors, averaged over the rows).
+TEST_F(CsrqCompactMatrixTest, CtacEnergyExponentMatchesPrePoweredTable) {
+  spect::io::CompactSymmetryMetadata meta;
+  meta.Nx = 16;
+  meta.Ny = 16;
+  meta.Nz = 2;
+  meta.totalVoxels = 16 * 16 * 2;
+  meta.fullNumAngles = 12;
+  meta.compactNumAngles = 3;
+  meta.detNx = 4;
+  meta.detNz = 4;
+  meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8;
+  meta.totalRows = 24;
+  meta.symCode = 90;
+  meta.symmetryOrder = 4;
+
+  std::mt19937 rng(4242u);
+  std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels;
+  src.rowPtr.push_back(0u);
+  for (int row = 0; row < src.rows; ++row) {
+    uint32_t pos = static_cast<uint32_t>(rng() % 5);
+    while (pos + 4u < static_cast<uint32_t>(src.cols)) {
+      const uint32_t len = 1u + rng() % 4u;
+      for (uint32_t k = 0; k < len; ++k) {
+        src.colIdx.push_back(pos + k);
+        src.values.push_back(valueDist(rng));
+      }
+      pos += len + 1u + rng() % 3u;
+    }
+    src.rowPtr.push_back(static_cast<uint32_t>(src.colIdx.size()));
+  }
+  const auto root =
+      std::filesystem::temp_directory_path() / "spect_csrq_ctac_power_test";
+  std::filesystem::remove_all(root);
+  const auto dirA = root / "a";
+  const auto dirB = root / "b";
+  std::filesystem::create_directories(dirA);
+  std::filesystem::create_directories(dirB);
+  writeCsrq(dirA / "chunk_000.csrq", src, 0, meta.compactNumAngles);
+  writeCsrq(dirB / "chunk_000.csrq", src, 0, meta.compactNumAngles);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunksA =
+      spect::io::openCompactChunkCSRDirectory(dirA.string(), dirMeta, 0);
+  const auto chunksB =
+      spect::io::openCompactChunkCSRDirectory(dirB.string(), dirMeta, 0);
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  const size_t attCount = static_cast<size_t>(meta.fullNumAngles) * nvox;
+  // Lu-177: table at 208.4 keV, second window 112.9 keV.
+  double power = 0.0;
+  ASSERT_TRUE(spect::core::waterMuEnergyRatio(112.9, 208.4, power));
+  std::vector<uint16_t> att(attCount), attPowered(attCount);
+  std::uniform_int_distribution<int> attDist(9000, 64000);
+  for (size_t i = 0; i < attCount; ++i) {
+    att[i] = static_cast<uint16_t>(attDist(rng));
+    const double a = static_cast<double>(att[i]) / 65535.0;
+    attPowered[i] = static_cast<uint16_t>(
+        std::clamp(std::rint(std::pow(a, power) * 65535.0), 0.0, 65535.0));
+  }
+  std::vector<double> image(nvox), proj(fullRows);
+  for (size_t i = 0; i < nvox; ++i)
+    image[i] = 0.6 + 0.3 * std::sin(0.13 * static_cast<double>(i));
+  for (size_t i = 0; i < fullRows; ++i)
+    proj[i] = 1.0 + 0.01 * static_cast<double>(i % 53);
+
+  auto sensitivity = [&](const std::vector<spect::cuda::CompactMatrixChannel> &ch,
+                         const uint16_t *table, std::vector<double> &out) {
+    out.assign(nvox, 0.0);
+    ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(ch, meta, 1, out.data(),
+                                                            nullptr, table));
+  };
+  auto numerator = [&](const std::vector<spect::cuda::CompactMatrixChannel> &ch,
+                       const uint16_t *table, std::vector<double> &out) {
+    out.assign(nvox, 0.0);
+    std::vector<const double *> projections(ch.size(), proj.data());
+    const double *images[1] = {image.data()};
+    double *numers[1] = {out.data()};
+    const uint16_t *tables[1] = {table};
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+        ch, meta, projections.data(), nullptr, images, 1, 1, numers, false,
+        nullptr, tables));
+  };
+
+  const double tol = 2e-4;
+  // References on the pre-powered table with power 1.
+  std::vector<spect::cuda::CompactMatrixChannel> plain = {{&chunksA, 1.0, 1.0}};
+  std::vector<double> denomRef, numerRef, denomUnscaled;
+  sensitivity(plain, attPowered.data(), denomRef);
+  numerator(plain, attPowered.data(), numerRef);
+  sensitivity(plain, att.data(), denomUnscaled);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+
+  std::vector<spect::cuda::CompactMatrixChannel> scaled = {{&chunksA, 1.0, power}};
+  std::vector<double> denom, numer;
+  sensitivity(scaled, att.data(), denom);
+  numerator(scaled, att.data(), numer);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  EXPECT_LE(relL2(denom, denomRef), tol) << "att^power sensitivity";
+  EXPECT_LE(relL2(numer, numerRef), tol) << "att^power numerator";
+  EXPECT_GT(relL2(denom, denomUnscaled), 1e-2) << "exponent must act";
+
+  // Joint two windows: A at the table energy, B at 112.9 keV, weights w1/w2.
+  const double w1 = 0.1036;
+  const double w2 = 0.0617;
+  std::vector<spect::cuda::CompactMatrixChannel> joint = {{&chunksA, w1, 1.0},
+                                                          {&chunksB, w2, power}};
+  std::vector<double> denomJoint;
+  sensitivity(joint, att.data(), denomJoint);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::vector<double> expected(nvox);
+  for (size_t i = 0; i < nvox; ++i)
+    expected[i] = w1 * denomUnscaled[i] + w2 * denomRef[i];
+  EXPECT_LE(relL2(denomJoint, expected), tol) << "joint per-window exponents";
+  EXPECT_GT(*std::max_element(denomJoint.begin(), denomJoint.end()), 0.0);
+  std::filesystem::remove_all(root);
 }
 
 // One resident BSREM-II + RDP iteration on the device (two beds, CSRB

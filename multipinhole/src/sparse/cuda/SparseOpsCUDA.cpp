@@ -402,7 +402,8 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       int accumulatorBase, int cacheSlotBase,
                       CompactDeviceRatioTiming *ratioTiming,
                       CompactDeviceBackwardTiming *backwardTiming,
-                      const uint16_t *const *bedAttFactors, size_t attCount) {
+                      const uint16_t *const *bedAttFactors, size_t attCount,
+                      double attPower) {
   if (!isCudaAvailable()) {
     return false;
   }
@@ -411,7 +412,7 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                            zMirrors, fullProjections, fullBackgrounds,
                            fullProjectionCount, weight, accumulatorBase,
                            cacheSlotBase, ratioTiming, backwardTiming,
-                           bedAttFactors, attCount);
+                           bedAttFactors, attCount, attPower);
   return true;
 }
 
@@ -422,7 +423,7 @@ bool csrqRunSensitivityCUDA(
     const int *symIds, const int *zMirrors, int accumulatorIndex,
     size_t fullProjectionCount, const double *rowWeights,
     CompactDeviceBackwardTiming *backwardTiming, const uint16_t *attFactors,
-    size_t attCount) {
+    size_t attCount, double attPower) {
   if (!isCudaAvailable()) {
     return false;
   }
@@ -430,7 +431,7 @@ bool csrqRunSensitivityCUDA(
       matrixIndex, branchCount, weight, commonRatioParams,
       commonTransformParams, symIds, zMirrors, accumulatorIndex, rowWeights,
       rowWeights == nullptr ? 0 : fullProjectionCount, fullProjectionCount,
-      backwardTiming, attFactors, attCount);
+      backwardTiming, attFactors, attCount, attPower);
   return true;
 }
 
@@ -439,13 +440,14 @@ bool csrqRunForwardCUDA(int matrixIndex, int branchCount,
                         const CompactDeviceRatioParams *attenRatioParams,
                         const CompactDeviceTransformParams *attenTransformParams,
                         const int *symIds, const int *zMirrors,
-                        const uint16_t *attFactors, size_t attCount) {
+                        const uint16_t *attFactors, size_t attCount,
+                        double attPower) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().csrqRunForward(matrixIndex, branchCount, hostYhatPacked, count,
                              attenRatioParams, attenTransformParams, symIds,
-                             zMirrors, attFactors, attCount);
+                             zMirrors, attFactors, attCount, attPower);
   return true;
 }
 
@@ -644,7 +646,7 @@ bool csrqRunNumerCUDA(int, int, int, const CompactDeviceRatioParams &,
                       const double *const *, size_t, double, int, int,
                       CompactDeviceRatioTiming *,
                       CompactDeviceBackwardTiming *, const uint16_t *const *,
-                      size_t) {
+                      size_t, double) {
   return false;
 }
 
@@ -653,14 +655,14 @@ bool csrqRunSensitivityCUDA(int, int, double,
                             const CompactDeviceTransformParams &, const int *,
                             const int *, int, size_t, const double *,
                             CompactDeviceBackwardTiming *, const uint16_t *,
-                            size_t) {
+                            size_t, double) {
   return false;
 }
 
 bool csrqRunForwardCUDA(int, int, float *, size_t,
                         const CompactDeviceRatioParams *,
                         const CompactDeviceTransformParams *, const int *,
-                        const int *, const uint16_t *, size_t) {
+                        const int *, const uint16_t *, size_t, double) {
   return false;
 }
 

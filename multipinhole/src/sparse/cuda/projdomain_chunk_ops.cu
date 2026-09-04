@@ -1394,10 +1394,21 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                   branchMajor[7 * nvox + v]);
 }
 
+// Decoded CTAC factor with the per-window energy exponent: att^power, where
+// att is the u16 table value / 65535 (power 1 = the table itself; power =
+// mu_w(E_window)/mu_w(E_map) rescales the line integral to another photon
+// energy under the water-scaled mu model, since att = exp(-integral mu)).
+__device__ __forceinline__ float compact_atten_decode(unsigned short q,
+                                                      float power) {
+  const float att =
+      static_cast<float>(q) * (1.0f / static_cast<float>(kAttenUint16Scale));
+  return power == 1.0f ? att : __powf(att, power);
+}
+
 // CTAC pack for one compact angle: packed[v][k] = branchMajor[k*nvox + v] *
-// att[slice_k * nvox + M_k(v)] / 65535, where M_k maps the rotated voxel v of
-// branch k back to the unrotated frame (compact_atten_mapped_voxel) and
-// slice_k = sliceIndex[k] is the staged factor slice of the branch's full
+// (att[slice_k * nvox + M_k(v)] / 65535)^power, where M_k maps the rotated
+// voxel v of branch k back to the unrotated frame (compact_atten_mapped_voxel)
+// and slice_k = sliceIndex[k] is the staged factor slice of the branch's full
 // angle (-1: the branch has no full angle at this compact angle -> factor 1,
 // exactly like compact_atten_factor). Same algebra as compact_atten_fused_spmv,
 // applied once per voxel in the image domain instead of once per nnz.
@@ -1405,7 +1416,7 @@ extern "C" __global__ void csrq_pack_branch8_atten(
     const float *branchMajor, const unsigned short *attSlices,
     const int *sliceIndex, float4 *packed, unsigned long long nvox,
     int symmetryMode, int nx, int ny, int nz, const int *symIds,
-    const int *zMirrors) {
+    const int *zMirrors, float power) {
   const unsigned long long v =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (v >= nvox) {
@@ -1423,10 +1434,9 @@ extern "C" __global__ void csrq_pack_branch8_atten(
       const unsigned long long mapped = compact_atten_mapped_voxel(
           v, symmetryMode, symIds[k], zMirrors[k], nx, ny, nz, plane, &valid);
       if (valid != 0) {
-        factor = static_cast<float>(
-                     attSlices[static_cast<unsigned long long>(slice) * nvox +
-                               mapped]) *
-                 (1.0f / static_cast<float>(kAttenUint16Scale));
+        factor = compact_atten_decode(
+            attSlices[static_cast<unsigned long long>(slice) * nvox + mapped],
+            power);
       }
     }
     f[k] = branchMajor[static_cast<unsigned long long>(k) * nvox + v] * factor;
@@ -1436,14 +1446,15 @@ extern "C" __global__ void csrq_pack_branch8_atten(
 }
 
 // compact_transform_backward_add_batch with the CTAC factor applied at the
-// unrotated voxel: accum[M_k(v)] += rotated[k][v] * att[slice_k * nvox +
-// M_k(v)] / 65535. Together with csrq_pack_branch8_atten this is the exact
-// adjoint of the attenuated forward (same table, same index on both sides).
+// unrotated voxel: accum[M_k(v)] += rotated[k][v] * (att[slice_k * nvox +
+// M_k(v)] / 65535)^power. Together with csrq_pack_branch8_atten this is the
+// exact adjoint of the attenuated forward (same table, same index, same
+// exponent on both sides).
 extern "C" __global__ void compact_transform_backward_add_batch_atten(
     const float *rotatedBatch, double *accum, unsigned long long nvox,
     int batchSize, int symmetryMode, int nx, int ny, int nz,
     const int *symIds, const int *zMirrors, const unsigned short *attSlices,
-    const int *sliceIndex) {
+    const int *sliceIndex, float power) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -1468,10 +1479,9 @@ extern "C" __global__ void compact_transform_backward_add_batch_atten(
   }
   const int slice = sliceIndex[branch];
   if (slice >= 0) {
-    value *= static_cast<float>(
-                 attSlices[static_cast<unsigned long long>(slice) * nvox +
-                           mapped]) *
-             (1.0f / static_cast<float>(kAttenUint16Scale));
+    value *= compact_atten_decode(
+        attSlices[static_cast<unsigned long long>(slice) * nvox + mapped],
+        power);
   }
   atomicAdd(&accum[mapped], static_cast<double>(value));
 }

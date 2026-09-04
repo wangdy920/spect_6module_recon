@@ -227,6 +227,8 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 | `-ctacAutoMu <vol>` | 从早期重建体自动生成水 mu-map；与 `-attMap` 二选一 |
 | `-ctacAutoMuThresh <f>` | auto-mu 阈值，相对 P99.9，范围 `(0,1)`，默认 0.05 |
 | `-ctacAutoMuValue <mu>` | 调试覆盖 body fill mu，单位 `mm^-1`；默认由 `[CTAC] auto_mu_nuclide` 查表 |
+| `-ctacMapEnergy <keV>` | μ 图（或 auto-mu 填充值）对应的光子能量；默认取 `auto_mu_nuclide` 预设能量（INI `[CTAC] mu_map_energy_kev`） |
+| `-ctacWindowEnergies <keV,...>` | 每个能窗的光电峰能量；衰减表按 `att^(μ_w(E_k)/μ_w(E_map))`（NIST 液态水表 log-log 插值）逐窗缩放。双窗 `-ctac` 必填，如 Lu-177 `208.4,112.9`；仅 CSRQ 路径支持指数 ≠ 1（INI `[CTAC] window_energies_kev`） |
 | `-cyl <diam,height>` / `-cylMask <diam,height>` | 圆柱掩码，单位 mm |
 | `-cylc <cx,cy,cz>` / `-cylCenter <cx,cy,cz>` | 圆柱中心，1-based voxel |
 | `-maskFromAtt <threshold>` | 从 mu-map 生成 body mask |

@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include "filters/PSFConfig.h"
+#include "core/AttenuationCoefficients.h"
 #include "core/BedPathUtils.h"
 #include "pipeline/RunLogger.h"
 #include "regularizer/RegConfig.h"
@@ -448,6 +449,25 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("attenuation_map_path", args.attMapPath);
   json.string("attenuation_map_z_layout",
               args.attMapPath.empty() ? "" : "local_matrix_z");
+  if (args.doCTAC && !args.ctacWindowEnergiesKeV.empty()) {
+    // Table energy: explicit, else the auto_mu_nuclide preset (0 = unknown).
+    double mapEnergy = args.ctacMapEnergyKeV;
+    if (mapEnergy <= 0.0) {
+      const auto *preset =
+          spect::core::waterAttenuationPreset(args.ctacAutoMuNuclide);
+      mapEnergy = preset ? preset->energyKeV : 0.0;
+    }
+    json.number("ctac_mu_map_energy_kev", mapEnergy);
+    json.numberVector("ctac_window_energies_kev", args.ctacWindowEnergiesKeV);
+    std::vector<double> powers;
+    for (double keV : args.ctacWindowEnergiesKeV) {
+      double ratio = 1.0;
+      if (mapEnergy > 0.0)
+        spect::core::waterMuEnergyRatio(keV, mapEnergy, ratio);
+      powers.push_back(ratio);
+    }
+    json.numberVector("ctac_atten_powers", powers);
+  }
   json.string("regularizer_ct_path", args.regCtPath);
   json.string("regularizer_ct_z_layout",
               args.regCtPath.empty() ? "" : "reconstruction_storage_z");

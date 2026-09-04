@@ -8,6 +8,30 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Dual-window CTAC via per-window energy scaling of one factor table. Under
+  the water-scaled mu model shared by auto-mu and the HU->mu pipeline
+  (mu = mu_water(E) * body), the attenuation factor at another photon energy
+  is att(E) = att(E_map)^(mu_w(E)/mu_w(E_map)), so one line-integral table per
+  bed serves every window: the CSRQ pack / transform-add kernels raise the
+  u16 factor to the window's exponent (`CompactMatrixChannel::attenPower`),
+  and no second table set is generated or held (5 beds x 2 windows would have
+  been 22.8 GB). `core/AttenuationCoefficients.h` gained the NIST XCOM liquid
+  water table with log-log interpolation (`waterMuPerMMAtEnergyKeV`,
+  `waterMuEnergyRatio`; the existing nuclide presets are its values at their
+  photopeaks). New options `-ctacWindowEnergies <keV,...>` (INI `[CTAC]
+  window_energies_kev`, one per window; required for dual-window `-ctac`,
+  e.g. Lu-177 `208.4,112.9` -> exponents 1 and 1.2176) and `-ctacMapEnergy
+  <keV>` (INI `mu_map_energy_kev`, default: the `auto_mu_nuclide` preset
+  energy). Exponents enter the denominator cache identity and the run
+  manifest (`ctac_mu_map_energy_kev`, `ctac_window_energies_kev`,
+  `ctac_atten_powers`). Gates: unit tests (lookup reproduces the presets to
+  1e-9; a channel with exponent s equals the unscaled channel on the
+  pre-powered table to 2e-4, single and joint); Lu-177 pair with a water
+  cylinder mu-map runs end to end (dual same-matrix window equals the single
+  window exactly up to the expected 2x scale, 1-NCC 1e-15). Bone is scaled
+  like water in this model (a two-material variant would need a second
+  line-integral table). Energy scaling is CSRQ-only; CSRB CTAC rejects an
+  exponent other than 1.
 - CSRQ residency and CTAC streaming (P3 of the Poisson data-term design).
   The per-bed CTAC factor tables are page-locked once (`cudaHostRegister`,
   0.08 s for 2.2 GB; synchronous fallback when registration is refused) and

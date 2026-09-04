@@ -167,14 +167,16 @@ void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
                                  size_t nvox, cudaStream_t stream = nullptr);
 
 // CTAC variant for one compact angle: packed[v][k] = branchMajor[k][v] *
-// attSlices[sliceIndex[k]][M_k(v)] / 65535 (factor 1 where sliceIndex[k] < 0).
-// attSlices holds the staged full-angle factor slices ([slice][nvox] uint16);
-// sliceIndex points at the eight per-branch slice ids of this compact angle.
+// (attSlices[sliceIndex[k]][M_k(v)] / 65535)^power (factor 1 where
+// sliceIndex[k] < 0). attSlices holds the staged full-angle factor slices
+// ([slice][nvox] uint16); sliceIndex points at the eight per-branch slice ids
+// of this compact angle; power rescales the table to the window's photon
+// energy (1 = as stored).
 void launchCsrqPackBranch8AttenKernel(
     const float *branchMajor, const uint16_t *attSlices, const int *dSliceIndex,
     float *packed, size_t nvox,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
-    const int *dZMirrors, cudaStream_t stream = nullptr);
+    const int *dZMirrors, float power = 1.0f, cudaStream_t stream = nullptr);
 
 // launchCompactTransformBackwardAddBatchKernel with the CTAC factor applied at
 // the unrotated voxel (adjoint of launchCsrqPackBranch8AttenKernel).
@@ -182,7 +184,7 @@ void launchCompactTransformBackwardAddBatchAttenKernel(
     const float *rotatedBatch, double *accum, size_t nvox, int batchSize,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
     const int *dZMirrors, const uint16_t *attSlices, const int *dSliceIndex,
-    cudaStream_t stream = nullptr);
+    float power = 1.0f, cudaStream_t stream = nullptr);
 
 // ratio = value * rowWeights[fullIndex] (value alone when rowWeights is null)
 // where the (row, branch) has a full projection row, else 0.

@@ -109,6 +109,13 @@ struct ReconArgs {
     std::string ctacAutoMuNuclide = "Tc99m"; ///< Water mu lookup key
     bool ctacAutoMuValueExplicit = false; ///< true when mu was manually set
     std::string ctacAutoMuValueSource = "Tc99m";
+    /// Photon energy (keV) the supplied mu map / auto-mu fill value refers to.
+    /// 0 = derive from the auto_mu_nuclide preset. With window energies the
+    /// CTAC factor table is scaled per window as att^(mu_w(E_k)/mu_w(E_map)).
+    double ctacMapEnergyKeV = 0.0;
+    /// Photopeak energy (keV) of each energy window (one per matrix). Empty =
+    /// no scaling (the table is used at the map energy for every window).
+    std::vector<double> ctacWindowEnergiesKeV;
 
     // ========== Attenuation & CT guidance ==========
     std::string attMapPath;               ///< Attenuation map file

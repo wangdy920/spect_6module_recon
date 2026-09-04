@@ -201,6 +201,11 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 
 每个 P 步单独提交、单独跑 §6 对应门；P0 完成前不开始 P1，P2 依赖 P0 的 ratio/行权重契约。
 
+## 7.1 后续（2026-09-04 晚，用户："1、2、3 都可继续"）
+
+- **双窗 CTAC（原开放项 2）— 完成。** 不做逐光电峰 μ 表：现有两条 μ 图分支（auto-mu 水膜、`prepare_ct_mu_map.py` 的 HU 转换）都是 μ = μ_water(E)·body 的单材料模型，能量只以标量进入，故 att(E) = att(E_map)^(μ_w(E)/μ_w(E_map))。一张逐床表服务所有能窗（5 床双窗省下 22.8 GB 主机表与第二次线积分），指数在 `csrq_pack_branch8_atten` / `compact_transform_backward_add_batch_atten` 内用 `__powf` 施加（指数为 1 时跳过）。NIST XCOM 液态水表进 `core/AttenuationCoefficients.h`（核素预设本就是它的插值）。CLI `-ctacWindowEnergies`、`-ctacMapEnergy`；分母缓存与 run manifest 记录指数。局限：骨按水缩放；精确到骨需第二张"骨过量"线积分表（att = exp(−a_k L_w − b_k L_b)），主机内存与两套表相同，只在 ≥3 窗时才划算，未做。
+- **CSRB 侧移植（原开放项 1）与 sm_120 向量原子（原开放项 3）**：见下方各自条目。
+
 ## 8. 一句话
 
 把 `Projector → MLEM numerator → MLEM update` 改成 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II) → Penalty (None | RDP)`；投影核每种格式只留一个实例，CTAC 放到 pack 与收口两个小核里，背景与行权重放进 ratio，优化器与先验合成一个 stencil 核。CSRB 的 SpMV 核本体全程不动。
