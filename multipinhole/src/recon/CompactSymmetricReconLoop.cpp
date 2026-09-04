@@ -747,8 +747,6 @@ std::vector<double> runCompactSymmetricReconstruction(
   bool anyBackground = false;
   for (const auto *background : channelBackgrounds)
     anyBackground = anyBackground || (background != nullptr && !background->empty());
-  const bool csrqMatrices =
-      compactChunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
   // CTAC energy scaling: the factor table is computed once at the mu map's
   // energy; window k uses att^(mu_w(E_k)/mu_w(E_map)). Without window
   // energies every window uses the table as is (the pre-existing behaviour).
@@ -780,16 +778,6 @@ std::vector<double> runCompactSymmetricReconstruction(
       channels[k].attenPower = ratio;
       powers << (k ? ", " : "") << "window " << k << ": "
              << args.ctacWindowEnergiesKeV[k] << " keV -> att^" << ratio;
-    }
-    if (!csrqMatrices) {
-      bool scaled = false;
-      for (const auto &channel : channels)
-        scaled = scaled || channel.attenPower != 1.0;
-      if (scaled) {
-        throw std::runtime_error(
-            "CTAC energy scaling (window energy != mu map energy) is only "
-            "available on the CSRQ path.");
-      }
     }
     logInfo("CTAC energy scaling: mu map at " +
             std::to_string(ctacMapEnergyKeV) + " keV; " + powers.str() + ".");
@@ -828,12 +816,10 @@ std::vector<double> runCompactSymmetricReconstruction(
             compactAttFactorPtrs.push_back(factors.empty() ? nullptr
                                                            : factors.data());
           }
-          logInfo(csrqMatrices
-                      ? "compact CTAC (CSRQ): per-bed attenuation factors "
-                        "applied in the image domain per compact angle (pack "
-                        "and transform-add), SpMV kernels unchanged."
-                      : "compact CTAC: per-bed attenuation factors fused in "
-                        "native CUDA forward/backward/sensitivity kernels.");
+          logInfo("compact CTAC: per-bed attenuation factors applied in the "
+                  "image domain per compact angle (branch-batch scale before "
+                  "the forward, transform-add after the backward); the SpMV "
+                  "kernels are the plain ones.");
         }
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
         std::vector<double> denom(globalNvox, 0.0);
@@ -1253,13 +1239,11 @@ std::vector<double> runCompactSymmetricReconstruction(
           const std::vector<double> *bedImageSource = &image;
 
           // The resident branch-batch input (image rotated on the device)
-          // serves any bed count and both formats, backgrounds included. CTAC
-          // stays on it for CSRQ (the factor is applied at pack time on the
-          // device); CSRB CTAC and ROI-pruned matrices still take the host
-          // input path.
+          // serves any bed count and both formats, backgrounds and CTAC
+          // included (the factor is applied on the device per compact angle);
+          // ROI-pruned matrices still take the host input path.
           const bool residentBatchInput =
-              !debugStats && (!compactHasAttenuation || csrqMatrices) &&
-              !compactRoiPrunesMatrix &&
+              !debugStats && !compactRoiPrunesMatrix &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
               spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(

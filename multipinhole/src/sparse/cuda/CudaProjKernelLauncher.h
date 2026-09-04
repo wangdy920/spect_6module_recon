@@ -79,23 +79,14 @@ void launchCompactTransformBackwardAddBatchKernel(
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
     const int *dZMirrors, cudaStream_t stream = nullptr);
 
-void launchCompactBakeAttenKernel(const float *values, const int32_t *rowPtr,
-                                  const int32_t *colIdx, const uint16_t *att,
-                                  float *baked, int rows,
-                                  const cuda::CompactAttenBakeParams &params,
-                                  cudaStream_t stream = nullptr);
-
-void launchCompactAttenFusedForwardKernel(
-    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
-    const uint16_t *att, const float *x, float *y, int rows,
-    const cuda::CompactAttenBakeParams &params,
-    cudaStream_t stream = nullptr);
-
-void launchCompactAttenFusedBackwardKernel(
-    const float *values, const int32_t *rowPtr, const int32_t *colIdx,
-    const uint16_t *att, const float *x, float *y, int rows,
-    const cuda::CompactAttenBakeParams &params,
-    cudaStream_t stream = nullptr);
+// CTAC pre-scaling of a branch-major batch (CSRB layout, batchSize dense
+// columns of nvox): out[k][v] = in[k][v] * (attSlices[sliceIndex[k]][M_k(v)]
+// / 65535)^power (factor 1 where sliceIndex[k] < 0).
+void launchCompactBranchBatchAttenScaleKernel(
+    const float *branchMajor, const uint16_t *attSlices, const int *dSliceIndex,
+    float *out, size_t nvox, int batchSize,
+    const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, float power, cudaStream_t stream = nullptr);
 
 void launchCompactPackColPairToFloat2Kernel(const float *x0, const float *x1,
                                             float *xPair, int cols,

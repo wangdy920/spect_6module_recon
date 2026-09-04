@@ -146,15 +146,9 @@ HostCSRData convertCSR(const io::CSRView &matrix);
 
 void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
                               int rowEnd, int threads, HostCSRData &host);
-void buildAttenuatedContiguousSubsetCSR(
-  const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-  int numAngles, int rowBegin, int rowEnd, int threads, HostCSRData &host);
 void buildSubsetCSR(const io::CSRView &matrix,
                     const std::vector<int> &subset_rows, int threads,
                     HostCSRData &host);
-void buildAttenuatedCSR(const io::CSRView &matrix,
-                        const std::vector<uint16_t> &atten, int numAngles,
-                        int threads, HostCSRData &host);
 
 } // namespace spect
 

@@ -3,8 +3,6 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
-#include "core/AttenuationConstants.h"
-
 #include <algorithm>
 #include <atomic>
 #include <limits>
@@ -183,49 +181,7 @@ void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
   host.nnz = static_cast<int64_t>(nnz);
 }
 
-void buildAttenuatedContiguousSubsetCSR(
-    const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-    int numAngles, int rowBegin, int rowEnd, int threads, HostCSRData &host) {
-  if (numAngles <= 0) {
-    throw std::runtime_error(
-        "CUDA attenuation chunk builder requires numAngles > 0.");
-  }
-  const size_t voxels = static_cast<size_t>(matrix.cols);
-  if (atten.size() != static_cast<size_t>(numAngles) * voxels) {
-    throw std::runtime_error(
-        "CUDA attenuation chunk builder received an attenuation table with invalid size.");
-  }
 
-  buildContiguousSubsetCSR(matrix, rowBegin, rowEnd, threads, host);
-  if (host.nnz == 0) {
-    return;
-  }
-
-  const size_t rows = static_cast<size_t>(rowEnd - rowBegin);
-  const size_t raysPerAngle =
-      static_cast<size_t>(matrix.rows) / static_cast<size_t>(numAngles);
-  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
-
-  for (size_t localRow = 0; localRow < rows; ++localRow) {
-    int angle = 0;
-    if (raysPerAngle > 0) {
-      angle = static_cast<int>((static_cast<size_t>(rowBegin) + localRow) /
-                               raysPerAngle);
-    }
-    if (angle >= numAngles) {
-      angle = numAngles - 1;
-    }
-    const uint16_t *attPtr =
-        atten.data() + static_cast<size_t>(angle) * voxels;
-    const size_t r0 = static_cast<size_t>(host.rowPtr[localRow]);
-    const size_t r1 = static_cast<size_t>(host.rowPtr[localRow + 1]);
-    for (size_t index = r0; index < r1; ++index) {
-      host.values[index] *=
-          static_cast<float>(attPtr[static_cast<size_t>(host.colIdx[index])]) *
-          invScale;
-    }
-  }
-}
 
 void buildSubsetCSR(const io::CSRView &matrix,
                     const std::vector<int> &subset_rows, int threads,
@@ -309,49 +265,7 @@ void buildSubsetCSR(const io::CSRView &matrix,
   host.nnz = static_cast<int64_t>(host.colIdx.size());
 }
 
-void buildAttenuatedCSR(const io::CSRView &matrix,
-                        const std::vector<uint16_t> &atten, int numAngles,
-                        int threads, HostCSRData &host) {
-  if (!matrix.valid()) {
-    throw std::runtime_error(
-        "Invalid io::CSRView passed to CUDA attenuation sparse backend.");
-  }
-  if (numAngles <= 0) {
-    throw std::runtime_error(
-        "CUDA attenuation sparse backend requires numAngles > 0.");
-  }
 
-  host = convertCSR(matrix);
-  const size_t voxels = static_cast<size_t>(matrix.cols);
-  if (atten.size() != static_cast<size_t>(numAngles) * voxels) {
-    throw std::runtime_error(
-        "CUDA attenuation sparse backend received an attenuation table with invalid size.");
-  }
-
-  const size_t raysPerAngle = static_cast<size_t>(matrix.rows) /
-                              static_cast<size_t>(numAngles);
-  const float invScale = 1.0f / static_cast<float>(kAttenUint16Scale);
-  const int parallelThreads =
-      getHostParallelThreads(threads, static_cast<uint64_t>(matrix.rows));
-#pragma omp parallel for schedule(static) if(parallelThreads > 1) num_threads(parallelThreads)
-  for (int row = 0; row < matrix.rows; ++row) {
-    int angle = 0;
-    if (raysPerAngle > 0) {
-      angle = static_cast<int>(static_cast<size_t>(row) / raysPerAngle);
-    }
-    if (angle >= numAngles) {
-      angle = numAngles - 1;
-    }
-    const uint16_t *attPtr =
-        atten.data() + static_cast<size_t>(angle) * voxels;
-    const size_t r0 = static_cast<size_t>(matrix.row_ptr[row]);
-    const size_t r1 = static_cast<size_t>(matrix.row_ptr[row + 1]);
-    for (size_t t = r0; t < r1; ++t) {
-      host.values[t] *= static_cast<float>(attPtr[matrix.col_idx[t]]) *
-                        invScale;
-    }
-  }
-}
 
 } // namespace spect
 

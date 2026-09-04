@@ -730,12 +730,109 @@ TEST_F(CsrqCompactMatrixTest, DemotesResidentMatrixWhenSecondDoesNotFit) {
   std::filesystem::remove_all(root);
 }
 
-// CTAC on the CSRQ path: H = A att with the u16 full-angle table applied per
-// compact angle in the image domain (pack / transform-add) must match the
-// CSRB reference that multiplies the factor inside the nnz loop, for the
-// sensitivity, the single-bed numerator, the forward projection and a
-// two-bed numerator with per-bed tables (host input and resident batch). The
-// adjoint identity <H x, y> = <x, H^T y> is checked on the CSRQ path itself.
+// Host oracle of the CTAC model h_ij = a_ij * att[fullAngle(i, k)][M_k(j)]
+// on a compact matrix: forward projection H x (full rows), sensitivity H^T 1
+// and numerator H^T(p / (H x)), summed over the symmetry branches exactly as
+// the projector does (double precision, no quantisation of the products).
+struct HostCtacOracle {
+  const spect::io::CompactSymmetryMetadata &meta;
+  const HostCsr &csr;  // the dequantized compact matrix (all chunks)
+  const std::vector<uint16_t> &att;
+
+  double factor(int fullAngle, size_t unrotated) const {
+    return static_cast<double>(
+               att[static_cast<size_t>(fullAngle) * meta.totalVoxels + unrotated]) /
+           65535.0;
+  }
+  // For every (row, branch) with a full projection row: calls fn(row, fullIndex,
+  // fullAngle, symId, zMirror).
+  template <typename Fn> void forEachRowBranch(Fn &&fn) const {
+    for (int symId = 0; symId < meta.xySymmetryCount(); ++symId) {
+      for (int zb = 0; zb < meta.zBranchCount(); ++zb) {
+        const bool zMirror = zb != 0;
+        for (int row = 0; row < csr.rows; ++row) {
+          uint64_t fullIndex = 0;
+          if (!spect::io::fullProjectionIndexFromCompactRow(meta, row, symId,
+                                                            zMirror, fullIndex))
+            continue;
+          fn(row, static_cast<size_t>(fullIndex),
+             static_cast<int>(fullIndex / meta.fullRaysPerAngle()), symId,
+             zMirror);
+        }
+      }
+    }
+  }
+  size_t unrotated(uint32_t col, int symId, bool zMirror) const {
+    return spect::io::mapCompactVoxelIndex(col, meta.Nx, meta.Ny, meta.Nz, symId,
+                                           zMirror);
+  }
+  std::vector<double> forward(const std::vector<double> &image) const {
+    std::vector<double> out(static_cast<size_t>(meta.fullRows()), 0.0);
+    forEachRowBranch([&](int row, size_t fullIndex, int angle, int symId,
+                         bool zMirror) {
+      double sum = 0.0;
+      for (uint32_t t = csr.rowPtr[row]; t < csr.rowPtr[row + 1]; ++t) {
+        const size_t u = unrotated(csr.colIdx[t], symId, zMirror);
+        sum += csr.values[t] * factor(angle, u) * image[u];
+      }
+      out[fullIndex] = sum;
+    });
+    return out;
+  }
+  // H^T r for a full-row vector r.
+  std::vector<double> backward(const std::vector<double> &r) const {
+    std::vector<double> out(static_cast<size_t>(meta.totalVoxels), 0.0);
+    forEachRowBranch([&](int row, size_t fullIndex, int angle, int symId,
+                         bool zMirror) {
+      const double ri = r[fullIndex];
+      if (ri == 0.0) return;
+      for (uint32_t t = csr.rowPtr[row]; t < csr.rowPtr[row + 1]; ++t) {
+        const size_t u = unrotated(csr.colIdx[t], symId, zMirror);
+        out[u] += csr.values[t] * factor(angle, u) * ri;
+      }
+    });
+    return out;
+  }
+  std::vector<double> sensitivity() const {
+    return backward(std::vector<double>(static_cast<size_t>(meta.fullRows()), 1.0));
+  }
+  std::vector<double> numerator(const std::vector<double> &proj,
+                                const std::vector<double> &image) const {
+    const std::vector<double> yhat = forward(image);
+    std::vector<double> ratio(yhat.size(), 0.0);
+    for (size_t i = 0; i < yhat.size(); ++i)
+      ratio[i] = proj[i] / std::max(yhat[i], 1e-10);
+    return backward(ratio);
+  }
+};
+
+// The dequantized compact matrix a CSRB reference directory encodes, as one
+// host CSR over all chunks (rows in compact order).
+HostCsr readHostCsr(const spect::io::CompactChunkCSRDirectory &csrb) {
+  HostCsr out;
+  out.cols = csrb.cols();
+  out.rowPtr.push_back(0u);
+  for (size_t c = 0; c < csrb.chunks().size(); ++c) {
+    const auto chunk = csrb.loadChunk(c);
+    const spect::io::CSRView view = chunk->view();
+    const uint32_t base = out.rowPtr.back();
+    for (int row = 0; row < view.rows; ++row) {
+      out.rowPtr.push_back(base + view.row_ptr[row + 1]);
+    }
+    out.colIdx.insert(out.colIdx.end(), view.col_idx, view.col_idx + view.nnz);
+    out.values.insert(out.values.end(), view.val, view.val + view.nnz);
+    out.rows += view.rows;
+  }
+  return out;
+}
+
+// CTAC with the u16 full-angle table factorised out of the nnz loop (per
+// compact angle: branch batch scaled before the forward, scattered outputs
+// scaled after the backward) on both formats against the host oracle of the
+// original per-nnz model: sensitivity, single-bed numerator, forward
+// projection and a two-bed numerator with per-bed tables (host input and
+// resident batch). The adjoint identity <H x, y> = <x, H^T y> is checked on
+// the device paths themselves.
 TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   spect::io::CompactSymmetryMetadata meta;
   meta.Nx = 16;
@@ -841,26 +938,39 @@ TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
         nullptr, attPtrs, true, true, true));
   };
 
-  // CSRB's resident batch path has no attenuation variant (CTAC takes the
-  // host-input per-branch kernels there), so the CSRQ resident result is
-  // compared against the CSRB host-input result.
+  // Host oracle on the dequantized matrix both directories encode.
+  const HostCsr decoded = readHostCsr(pair.csrb);
+  ASSERT_EQ(decoded.rows, meta.totalRows);
+  const HostCtacOracle oracle0{meta, decoded, att0};
+  const HostCtacOracle oracle1{meta, decoded, att1};
   Outputs ref;
-  runAll(pair.csrb, ref, false);
-  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
-  Outputs got;
-  runAll(pair.csrq, got, true);
+  ref.denom = oracle0.sensitivity();
+  ref.numer = oracle0.numerator(proj0, image0);
+  ref.forward = oracle0.forward(image0);
+  ref.twoBed = {oracle0.numerator(proj0, image0), oracle1.numerator(proj1, image1)};
 
   const double tol = 1e-5;
-  EXPECT_LE(relL2(got.denom, ref.denom), tol) << "CTAC sensitivity";
-  EXPECT_LE(relL2(got.numer, ref.numer), tol) << "CTAC single-bed numerator";
-  EXPECT_LE(relL2(got.forward, ref.forward), tol) << "CTAC forward projection";
-  EXPECT_LE(relL2(got.twoBed[0], ref.twoBed[0]), tol) << "CTAC two-bed 0";
-  EXPECT_LE(relL2(got.twoBed[1], ref.twoBed[1]), tol) << "CTAC two-bed 1";
-  EXPECT_LE(relL2(got.twoBedResident[0], ref.twoBed[0]), tol)
-      << "CTAC resident two-bed 0";
-  EXPECT_LE(relL2(got.twoBedResident[1], ref.twoBed[1]), tol)
-      << "CTAC resident two-bed 1";
-  EXPECT_GT(*std::max_element(got.denom.begin(), got.denom.end()), 0.0);
+  auto expectMatches = [&](const Outputs &got, const char *format) {
+    EXPECT_LE(relL2(got.denom, ref.denom), tol) << format << " CTAC sensitivity";
+    EXPECT_LE(relL2(got.numer, ref.numer), tol)
+        << format << " CTAC single-bed numerator";
+    EXPECT_LE(relL2(got.forward, ref.forward), tol)
+        << format << " CTAC forward projection";
+    EXPECT_LE(relL2(got.twoBed[0], ref.twoBed[0]), tol) << format << " two-bed 0";
+    EXPECT_LE(relL2(got.twoBed[1], ref.twoBed[1]), tol) << format << " two-bed 1";
+    EXPECT_LE(relL2(got.twoBedResident[0], ref.twoBed[0]), tol)
+        << format << " resident two-bed 0";
+    EXPECT_LE(relL2(got.twoBedResident[1], ref.twoBed[1]), tol)
+        << format << " resident two-bed 1";
+    EXPECT_GT(*std::max_element(got.denom.begin(), got.denom.end()), 0.0);
+  };
+  Outputs gotCsrb;
+  runAll(pair.csrb, gotCsrb, true);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  expectMatches(gotCsrb, "CSRB");
+  Outputs got;
+  runAll(pair.csrq, got, true);
+  expectMatches(got, "CSRQ");
 
   // The tables must matter: the same runs without attenuation differ.
   std::vector<double> denomPlain(nvox, 0.0);

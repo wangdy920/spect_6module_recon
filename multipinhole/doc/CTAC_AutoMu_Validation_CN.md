@@ -158,3 +158,35 @@ Performance summary：
 
 Decision：`keep` fused CTAC as default. Baked reference remains explicit
 debug/parity only; it is not viable as default on this 260601 CTAC gate.
+
+## 2026-09-04 因子分解 CTAC（fused 核与 baked 参考路径删除）
+
+改动：衰减因子不再在 nnz 循环里查表。`h_ij = a_ij · att[fullAngle(i,k), M_k(j)]`
+只依赖行的全角度与未旋转体素，所以两种矩阵格式都按 compact 角度逐个处理：
+分支批输入先乘上该分支全角度的因子切片（CSRB `compact_branch_batch_atten_scale`，
+CSRQ `csrq_pack_branch8_atten`），反投散射结果在收口时乘同一因子
+（`compact_transform_backward_add_batch_atten`），SpMV 核就是无 CTAC 时的核
+（CSRB 用 packed-K 行核 + cuSPARSE 转置，按角度的行子区间）。每床只暂存 chunk
+触及的 60 个全角度切片（0.38 GB，双缓冲、页锁定源表、与计算重叠），不再每床驻留
+2.3 GB 整表。逐窗能量指数 `att^(μ_w(E_k)/μ_w(E_map))` 在同一处施加
+（`-ctacWindowEnergies`）。删除：`compact_bake_atten_values`、
+`compact_atten_fused_spmv/spmvt`、`compactAttenSpmv[T]FloatCUDA`、
+`compactDeviceRatioAttenSpmvTAccumulateFloatCUDA`、`CompactAttenBakeParams`、
+`SPECT_COMPACT_CTAC_BAKED_REFERENCE` 与 `dAttenTable_` 逐床驻留表，以及
+CudaChunkCache 里只剩自引用的 prepared/attenuated 主机 chunk 缓存。
+
+Gate：
+
+- 单元测试 `CsrqCompactMatrixTest.CtacFactorisationMatchesCsrbAndIsAdjoint`：
+  CSRB 与 CSRQ 都对照独立的主机 oracle（逐 nnz 模型、双精度），灵敏度 / 分子 /
+  前投 / 两床（主机输入与常驻批）relL2 ≤ 1e-5，伴随恒等式 ≤ 1e-5。
+- 真实数据（MDP 小鼠 Tc-99m，Bed2–3，`prepare_ct_mu_map.py` 真实 CT μ 图）：新
+  CSRB 路径 vs 旧 fused 路径 MLEM it5/10/15/20 relL2 8.9e-8 / 1.3e-7 / 1.0e-7 /
+  **1.2e-7**，分母在新路径重算；CSRQ 同一对照 1.4e-7。
+- 时间（两床）：CSRB CTAC 44 s/iter → **2.35 s/iter**（核 fwd 10.0 + bwd 15.0 +
+  收口 1.4 s / 20 迭代，与无 CTAC 的 CSRB 相当）；CSRQ CTAC 0.60 s/iter。
+- CSRB 生产守护（Derenzo MLEM it50，无 CTAC）relL2 1.15e-7 vs fp32 参考，分母重算
+  vs 缓存 1.6e-8，同 873 936 非零。
+
+日志口径：CTAC path 现在打印
+`compact CTAC: per-bed attenuation factors applied in the image domain per compact angle (branch-batch scale before the forward, transform-add after the backward); the SpMV kernels are the plain ones.`

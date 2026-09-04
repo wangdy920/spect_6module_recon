@@ -49,7 +49,34 @@ set(SPECT_RECON_VERSION_STRING "${_spect_ver_ymd}+${SPECT_RECON_GIT_HASH}")
 set(SPECT_RECON_CHANGELOG_PATH "${CMAKE_SOURCE_DIR}/CHANGELOG.md")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${SPECT_RECON_CHANGELOG_PATH}")
-file(READ "${SPECT_RECON_CHANGELOG_PATH}" SPECT_RECON_CHANGELOG)
+file(READ "${SPECT_RECON_CHANGELOG_PATH}" _spect_changelog_text)
+# MSVC caps a single string literal at 16380 bytes (C2026); emit the changelog
+# as adjacent raw literals split at line boundaries (so multibyte UTF-8 text is
+# never cut) and let the compiler concatenate them.
+string(LENGTH "${_spect_changelog_text}" _spect_changelog_total)
+set(SPECT_RECON_CHANGELOG_LITERALS "")
+set(_spect_pos 0)
+while(_spect_pos LESS _spect_changelog_total)
+  math(EXPR _spect_remaining "${_spect_changelog_total} - ${_spect_pos}")
+  if(_spect_remaining GREATER 8000)
+    string(SUBSTRING "${_spect_changelog_text}" ${_spect_pos} 8000 _spect_candidate)
+    string(FIND "${_spect_candidate}" "\n" _spect_cut REVERSE)
+    if(_spect_cut LESS 1)
+      set(_spect_take 8000)
+    else()
+      math(EXPR _spect_take "${_spect_cut} + 1")
+    endif()
+  else()
+    set(_spect_take ${_spect_remaining})
+  endif()
+  string(SUBSTRING "${_spect_changelog_text}" ${_spect_pos} ${_spect_take} _spect_chunk)
+  if(NOT SPECT_RECON_CHANGELOG_LITERALS STREQUAL "")
+    string(APPEND SPECT_RECON_CHANGELOG_LITERALS "\n      ")
+  endif()
+  string(APPEND SPECT_RECON_CHANGELOG_LITERALS
+    "R\"SPECT_CHANGELOG(${_spect_chunk})SPECT_CHANGELOG\"")
+  math(EXPR _spect_pos "${_spect_pos} + ${_spect_take}")
+endwhile()
 set(SPECT_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 configure_file(
   "${SPECT_RECON_SOURCE_DIR}/cmake/Version.h.in"

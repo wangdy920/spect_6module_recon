@@ -498,167 +498,322 @@ public:
     }
   }
 
-  void executeCompactAttenSpMVFloat(const io::CSRView &matrix,
-                                    const uint16_t *attFactors,
-                                    size_t attCount,
-                                    const cuda::CompactAttenBakeParams &params,
-                                    const float *x, float *y,
-                                    cusparseOperation_t operation,
-                                    int cacheSlot) {
+  // ---- CSRB CTAC (factorised, per compact angle) ---------------------------
+  // Same algebra as the CSRQ passes: H = A att^power, the factor applied to
+  // the branch batch before the forward (compact_branch_batch_atten_scale)
+  // and to the scattered branch outputs after the backward
+  // (compact_transform_backward_add_batch_atten), one compact angle at a
+  // time. Each angle's rows are addressed as a sub-CSR (zero-based row
+  // pointers built once per chunk, colIdx / values offset by the angle's
+  // first nnz) so cuSPARSE runs unchanged on them. Only the factor slices a
+  // chunk reaches are staged (shared double-buffered slots with CSRQ).
+
+  // Numerator: bed b accumulates H_b^T(p_b / (H_b x_b + bg_b)) into
+  // accumulator accumulatorBaseIndex + b from the refreshed branch batch.
+  void executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat(
+      const io::CSRView &matrix, const double *const *fullProjections,
+      size_t fullProjectionCount,
+      const cuda::CompactDeviceRatioParams &commonRatioParams,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const int *symIds, const int *zMirrors, int branchCount, int bedCount,
+      const uint16_t *const *bedAttFactors, size_t attCount, double attPower,
+      cuda::CompactDeviceRatioTiming *ratioTimingOut,
+      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
+      int accumulatorBaseIndex, int cacheSlotBase) {
     ensureCudaRuntimeAvailable();
-
     std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
-      throw std::runtime_error("compact attenuation cache slot out of range.");
-    }
-    const size_t slot = static_cast<size_t>(cacheSlot);
-    if (params.symmetryMode != 45 && params.symmetryMode != 90) {
+    if (branchCount <= 0 || bedCount <= 0 || fullProjections == nullptr ||
+        bedAttFactors == nullptr) {
       throw std::runtime_error(
-          "compact fused CTAC SpMV requires symmetryMode 45 or 90.");
+          "compact attenuated bed-branch batch requires positive branch/bed "
+          "counts, projections and attenuation tables.");
     }
-    if (attFactors == nullptr || attCount == 0) {
+    if (accumulatorBaseIndex < 0 || cacheSlotBase < 0 ||
+        accumulatorBaseIndex + bedCount > spect::core::kMaxBeds ||
+        cacheSlotBase + bedCount > spect::core::kMaxBeds) {
+      throw std::runtime_error("compact bed-branch batch slots out of range.");
+    }
+    if (commonRatioParams.symmetryMode != 45 &&
+        commonRatioParams.symmetryMode != 90) {
       throw std::runtime_error(
-          "compact fused CTAC SpMV received an empty factor table.");
+          "compact bed-branch batch requires symmetryMode 45 or 90.");
     }
+    const float power = csrqCheckedAttPower(attPower);
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-
-    // Upload the full-angle attenuation table once per bed slot; cache by host
-    // pointer so repeated branches/chunks for the same bed reuse it.
-    auto &dAtten = dAttenTable_[slot];
-    if (attenTableHostPtr_[slot] != attFactors ||
-        attenTableCount_[slot] != attCount) {
-      dAtten.copyFromHost(attFactors, attCount);
-      attenTableHostPtr_[slot] = attFactors;
-      attenTableCount_[slot] = attCount;
-      bakedValid_[slot] = false;
-    }
-    if (compactCtacBakedReferenceEnabled()) {
-      const bool bakeHit =
-          bakedValid_[slot] && bakedMatrixKey_[slot] == cached.key &&
-          bakedRowPtrDev_[slot] == static_cast<const void *>(cached.dRowPtr.get()) &&
-          bakedColIdxDev_[slot] == static_cast<const void *>(cached.dColIdx.get()) &&
-          bakedAttPtr_[slot] == static_cast<const void *>(attFactors) &&
-          bakedParams_[slot].symmetryMode == params.symmetryMode &&
-          bakedParams_[slot].compactRowBase == params.compactRowBase &&
-          bakedParams_[slot].symId == params.symId &&
-          bakedParams_[slot].zMirror == params.zMirror;
-      if (!bakeHit) {
-        auto &dBaked = dBakedValues_[slot];
-        dBaked.allocate(static_cast<size_t>(cached.nnz));
-        launchCompactBakeAttenKernel(
-            cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-            dAtten.get(), dBaked.get(),
-            static_cast<int>(cached.rows), params, computeStream_.get());
-        auto &bakedMat = bakedMat_[slot];
-        bakedMat.create(cached.rows, cached.cols, cached.nnz,
-                        cached.dRowPtr.get(), cached.dColIdx.get(),
-                        dBaked.get());
-        bakedBufferSizeValid_[slot] = {};
-        bakedMatrixKey_[slot] = cached.key;
-        bakedRowPtrDev_[slot] = cached.dRowPtr.get();
-        bakedColIdxDev_[slot] = cached.dColIdx.get();
-        bakedAttPtr_[slot] = attFactors;
-        bakedParams_[slot] = params;
-        bakedValid_[slot] = true;
-        CUDA_CHECK(cudaStreamSynchronize(computeStream_.get()));
+    const int64_t cols = cached.cols;
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t accumSlot =
+          compactBackwardAccumulatorSlot(accumulatorBaseIndex + bed);
+      if (compactBackwardAccumSize_[accumSlot] != static_cast<size_t>(cols) ||
+          dCompactBackwardAccum_[accumSlot].get() == nullptr) {
+        throw std::runtime_error(
+            "compact bed-branch accumulator does not match matrix columns.");
       }
+      ensureCompactFullProjectionUploaded(fullProjections[bed],
+                                          fullProjectionCount,
+                                          cacheSlotBase + bed);
+    }
+    const size_t expectedInputCount = static_cast<size_t>(cols) *
+                                      static_cast<size_t>(branchCount) *
+                                      static_cast<size_t>(bedCount);
+    if (compactBatchInputCount_ != expectedInputCount ||
+        dBatchInput_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact branch-batch input was not refreshed for this pass.");
+    }
+    ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
+    ensureProjDomainKernelsLoaded();
+    const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
+        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+    const int rpa = commonRatioParams.compactRaysPerAngle;
+    const size_t nvox = static_cast<size_t>(cols);
+    dCsrbAttenBatch_.allocate(nvox * static_cast<size_t>(branchCount));
+    dBatchOutput_.allocate(static_cast<size_t>(rpa) *
+                           static_cast<size_t>(branchCount));
+    dFullBatchOutput_.allocate(nvox * static_cast<size_t>(branchCount));
+    CsrbAngleMatrices angleMats = csrbCreateAngleMatricesLocked(cached, chunk);
 
-      const int64_t inputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
-                                    ? cached.rows
-                                    : cached.cols;
-      const int64_t outputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
-                                     ? cached.cols
-                                     : cached.rows;
-      const bool backward = operation == CUSPARSE_OPERATION_TRANSPOSE;
+    const size_t stages =
+        static_cast<size_t>(bedCount) * static_cast<size_t>(chunk.angles);
+    csrbEnsureAttenTimersLocked(stages);
+    size_t stage = 0;
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const int slot = stageAttenSlicesLocked(
+          chunk.fullAngles, chunk.fullAngles.size(), chunk.fullNumAngles,
+          bedAttFactors[bed], attCount, nvox);
+      const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+      const float *bedInput =
+          dBatchInput_.get() +
+          static_cast<size_t>(bed) * static_cast<size_t>(branchCount) * nvox;
+      const double *dProjection =
+          dCompactProjectionInput_[static_cast<size_t>(cacheSlotBase + bed)]
+              .get();
+      const double *dBackground = compactBackgroundDeviceLocked(cacheSlotBase + bed);
+      double *accum =
+          dCompactBackwardAccum_[compactBackwardAccumulatorSlot(
+                                     accumulatorBaseIndex + bed)]
+              .get();
+      for (int i = 0; i < chunk.angles; ++i, ++stage) {
+        const int *dSlice = chunk.dSliceIndex.get() + i * branchCount;
+        cuda::CompactDeviceRatioParams angleParams = commonRatioParams;
+        angleParams.compactRowBase = commonRatioParams.compactRowBase + i * rpa;
 
-      const auto stageStart = std::chrono::steady_clock::now();
-      stageInputH2D(x, static_cast<size_t>(inputSize));
-      noteCudaCompactInputH2D(
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        stageStart)
-              .count());
-      dOutput_.allocate(static_cast<size_t>(outputSize));
+        csrbAttenForwardTimers_[stage].recordStart(nullptr);
+        launchCompactBranchBatchAttenScaleKernel(
+            bedInput, dSlices, dSlice, dCsrbAttenBatch_.get(), nvox,
+            branchCount, commonTransformParams, dBatchSymIds_.get(),
+            dBatchZMirrors_.get(), power);
+        csrbAngleSpMVLocked(angleMats, cached, chunk, i,
+                            CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            dCsrbAttenBatch_.get(), nvox, dBatchOutput_.get(),
+                            static_cast<size_t>(rpa), static_cast<size_t>(rpa),
+                            branchCount, dFullBatchOutput_.get());
+        launchCompactRatioBatchKernel(
+            dBatchOutput_.get(), dProjection, dBackground, fullProjectionCount,
+            angleParams, dBatchSymIds_.get(), dBatchZMirrors_.get(),
+            branchCount, dBatchOutput_.get(), static_cast<size_t>(rpa), 1e-10);
+        csrbAttenForwardTimers_[stage].recordStop(nullptr);
 
-      CuSparseVecGuard vecX;
-      CuSparseVecGuard vecY;
-      vecX.create(inputSize, dInput_.get());
-      vecY.create(outputSize, dOutput_.get());
-      TimedCudaStagePair deviceTiming;
-      deviceTiming.recordStart(nullptr);
-      const size_t bufferIndex = spmvBufferIndex(operation);
-      executeSpMVDescriptorLocked(bakedMat_[slot].get(),
-                                  bakedBufferSizes_[slot][bufferIndex],
-                                  bakedBufferSizeValid_[slot][bufferIndex],
-                                  operation, vecX.get(), vecY.get(), 0.0f,
-                                  backward);
-      deviceTiming.recordStop(nullptr);
-      const auto outputStart = std::chrono::steady_clock::now();
-      stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
-      const double outputSeconds =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        outputStart)
-              .count();
-      noteCudaCompactOutputD2H(outputSeconds,
-                               static_cast<size_t>(outputSize) * sizeof(float),
-                               backward);
-      const double deviceSeconds = deviceTiming.elapsedSeconds();
-      if (backward) {
-        noteCudaCusparseBackward(deviceSeconds, 1);
-      } else {
-        noteCudaCusparseForward(deviceSeconds, 1);
+        csrbAttenBackwardTimers_[stage].recordStart(nullptr);
+        csrbAngleSpMVLocked(angleMats, cached, chunk, i,
+                            CUSPARSE_OPERATION_TRANSPOSE, dBatchOutput_.get(),
+                            static_cast<size_t>(rpa), dFullBatchOutput_.get(),
+                            nvox, nvox, branchCount, nullptr);
+        csrbAttenBackwardTimers_[stage].recordStop(nullptr);
+
+        csrbAttenTransformTimers_[stage].recordStart(nullptr);
+        launchCompactTransformBackwardAddBatchAttenKernel(
+            dFullBatchOutput_.get(), accum, nvox, branchCount,
+            commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get(),
+            dSlices, dSlice, power);
+        csrbAttenTransformTimers_[stage].recordStop(nullptr);
       }
-      return;
+      csrqReleaseAttenSlotLocked(slot);
     }
-
-    const int64_t inputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
-                                  ? cached.rows
-                                  : cached.cols;
-    const int64_t outputSize = (operation == CUSPARSE_OPERATION_TRANSPOSE)
-                                   ? cached.cols
-                                   : cached.rows;
-    const bool backward = operation == CUSPARSE_OPERATION_TRANSPOSE;
-
-    const auto stageStart = std::chrono::steady_clock::now();
-    stageInputH2D(x, static_cast<size_t>(inputSize));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      stageStart)
-            .count());
-    dOutput_.allocate(static_cast<size_t>(outputSize));
-    if (backward && outputSize > 0) {
-      CUDA_CHECK(cudaMemset(dOutput_.get(), 0,
-                            static_cast<size_t>(outputSize) * sizeof(float)));
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    const size_t calls = stages * static_cast<size_t>(branchCount);
+    const double forwardSeconds =
+        accumulateTimedCudaPairs(csrbAttenForwardTimers_, stages);
+    const double backwardSeconds =
+        accumulateTimedCudaPairs(csrbAttenBackwardTimers_, stages);
+    const double transformSeconds =
+        accumulateTimedCudaPairs(csrbAttenTransformTimers_, stages);
+    noteCudaCusparseForward(forwardSeconds, calls);
+    noteCudaCusparseBackward(backwardSeconds, calls);
+    noteCudaTransformBackward(transformSeconds, calls);
+    if (ratioTimingOut != nullptr) {
+      ratioTimingOut->forwardSeconds += forwardSeconds;
+      ratioTimingOut->backwardSeconds += backwardSeconds;
     }
-
-    TimedCudaStagePair deviceTiming;
-    deviceTiming.recordStart(nullptr);
-    if (backward) {
-      launchCompactAttenFusedBackwardKernel(
-          cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-          dAtten.get(), dInput_.get(), dOutput_.get(),
-          static_cast<int>(cached.rows), params);
-    } else {
-      launchCompactAttenFusedForwardKernel(
-          cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-          dAtten.get(), dInput_.get(), dOutput_.get(),
-          static_cast<int>(cached.rows), params);
+    if (backwardTimingOut != nullptr) {
+      backwardTimingOut->backwardSeconds += backwardSeconds;
+      backwardTimingOut->transformBackwardSeconds += transformSeconds;
     }
-    deviceTiming.recordStop(nullptr);
+  }
+
+  // Sensitivity: H^T W 1 of one chunk for one bed's table, added to
+  // accumulatorIndex (rowWeights may be null for W = 1).
+  void executeCompactSensitivityBranchBatchAttenSpmvTAccumulateFloat(
+      const io::CSRView &matrix,
+      const cuda::CompactDeviceRatioParams &commonRatioParams,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const int *symIds, const int *zMirrors, int branchCount,
+      const uint16_t *attFactors, size_t attCount, double attPower,
+      const double *rowWeights, size_t fullProjectionCount,
+      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
+      int accumulatorIndex) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (branchCount <= 0 || attFactors == nullptr || fullProjectionCount == 0) {
+      throw std::runtime_error(
+          "compact attenuated sensitivity needs branches, a table and the full "
+          "projection row count.");
+    }
+    if (commonRatioParams.symmetryMode != 45 &&
+        commonRatioParams.symmetryMode != 90) {
+      throw std::runtime_error(
+          "compact attenuated sensitivity requires symmetryMode 45 or 90.");
+    }
+    const float power = csrqCheckedAttPower(attPower);
+    const size_t accumSlot = compactBackwardAccumulatorSlot(accumulatorIndex);
+    DeviceArray<double> &accum = dCompactBackwardAccum_[accumSlot];
+    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
+    const int64_t cols = cached.cols;
+    if (compactBackwardAccumSize_[accumSlot] != static_cast<size_t>(cols) ||
+        accum.get() == nullptr) {
+      throw std::runtime_error(
+          "compact device accumulator does not match matrix columns.");
+    }
+    ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
+    ensureProjDomainKernelsLoaded();
+    const double *dRowWeights = ensureCompactRowWeightsUploaded(
+        rowWeights, rowWeights == nullptr ? 0 : fullProjectionCount);
+    const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
+        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+    const int rpa = commonRatioParams.compactRaysPerAngle;
+    const size_t nvox = static_cast<size_t>(cols);
+    dBatchOnes_.allocate(static_cast<size_t>(rpa) *
+                         static_cast<size_t>(branchCount));
+    dFullBatchOutput_.allocate(nvox * static_cast<size_t>(branchCount));
+    CsrbAngleMatrices angleMats = csrbCreateAngleMatricesLocked(cached, chunk);
+    const int slot = stageAttenSlicesLocked(
+        chunk.fullAngles, chunk.fullAngles.size(), chunk.fullNumAngles,
+        attFactors, attCount, nvox);
+    const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+
+    const size_t stages = static_cast<size_t>(chunk.angles);
+    csrbEnsureAttenTimersLocked(stages);
+    for (int i = 0; i < chunk.angles; ++i) {
+      const int *dSlice = chunk.dSliceIndex.get() + i * branchCount;
+      cuda::CompactDeviceRatioParams angleParams = commonRatioParams;
+      angleParams.compactRowBase = commonRatioParams.compactRowBase + i * rpa;
+      // W per (row, branch) for rows with a full projection counterpart
+      // (1 without weights), the same contract as the CSRQ unit ratio.
+      launchCompactUnitRatioBatchKernel(
+          dRowWeights, fullProjectionCount, angleParams, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), branchCount, dBatchOnes_.get(),
+          static_cast<size_t>(rpa));
+      csrbAttenBackwardTimers_[static_cast<size_t>(i)].recordStart(nullptr);
+      csrbAngleSpMVLocked(angleMats, cached, chunk, i,
+                          CUSPARSE_OPERATION_TRANSPOSE, dBatchOnes_.get(),
+                          static_cast<size_t>(rpa), dFullBatchOutput_.get(),
+                          nvox, nvox, branchCount, nullptr);
+      csrbAttenBackwardTimers_[static_cast<size_t>(i)].recordStop(nullptr);
+      csrbAttenTransformTimers_[static_cast<size_t>(i)].recordStart(nullptr);
+      launchCompactTransformBackwardAddBatchAttenKernel(
+          dFullBatchOutput_.get(), accum.get(), nvox, branchCount,
+          commonTransformParams, dBatchSymIds_.get(), dBatchZMirrors_.get(),
+          dSlices, dSlice, power);
+      csrbAttenTransformTimers_[static_cast<size_t>(i)].recordStop(nullptr);
+    }
+    csrqReleaseAttenSlotLocked(slot);
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    const double backwardSeconds =
+        accumulateTimedCudaPairs(csrbAttenBackwardTimers_, stages);
+    const double transformSeconds =
+        accumulateTimedCudaPairs(csrbAttenTransformTimers_, stages);
+    noteCudaCusparseBackward(backwardSeconds,
+                             stages * static_cast<size_t>(branchCount));
+    if (backwardTimingOut != nullptr) {
+      backwardTimingOut->backwardSeconds += backwardSeconds;
+      backwardTimingOut->transformBackwardSeconds += transformSeconds;
+    }
+  }
+
+  // Forward projection H x of one chunk over the refreshed single-bed branch
+  // batch; hostYhatBatch receives [branch][chunkRow] floats.
+  void executeCompactBranchBatchAttenForward(
+      const io::CSRView &matrix,
+      const cuda::CompactDeviceRatioParams &commonRatioParams,
+      const cuda::CompactDeviceTransformParams &commonTransformParams,
+      const int *symIds, const int *zMirrors, int branchCount,
+      const uint16_t *attFactors, size_t attCount, double attPower,
+      float *hostYhatBatch, size_t count) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (branchCount <= 0 || attFactors == nullptr || hostYhatBatch == nullptr) {
+      throw std::runtime_error(
+          "compact attenuated forward needs branches, a table and an output.");
+    }
+    const float power = csrqCheckedAttPower(attPower);
+    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
+    const int64_t cols = cached.cols;
+    const size_t nvox = static_cast<size_t>(cols);
+    if (count != static_cast<size_t>(cached.rows) *
+                     static_cast<size_t>(branchCount)) {
+      throw std::runtime_error(
+          "compact attenuated forward output must hold rows * branches floats.");
+    }
+    if (compactBatchInputCount_ != nvox * static_cast<size_t>(branchCount) ||
+        dBatchInput_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact attenuated forward requires a refreshed single-bed branch "
+          "batch input.");
+    }
+    ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
+    ensureProjDomainKernelsLoaded();
+    const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
+        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+    const int rpa = commonRatioParams.compactRaysPerAngle;
+    dCsrbAttenBatch_.allocate(nvox * static_cast<size_t>(branchCount));
+    dBatchOutput_.allocate(count);
+    dFullBatchOutput_.allocate(nvox * static_cast<size_t>(branchCount));
+    CsrbAngleMatrices angleMats = csrbCreateAngleMatricesLocked(cached, chunk);
+    const int slot = stageAttenSlicesLocked(
+        chunk.fullAngles, chunk.fullAngles.size(), chunk.fullNumAngles,
+        attFactors, attCount, nvox);
+    const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
+    const size_t stages = static_cast<size_t>(chunk.angles);
+    csrbEnsureAttenTimersLocked(stages);
+    for (int i = 0; i < chunk.angles; ++i) {
+      const int *dSlice = chunk.dSliceIndex.get() + i * branchCount;
+      csrbAttenForwardTimers_[static_cast<size_t>(i)].recordStart(nullptr);
+      launchCompactBranchBatchAttenScaleKernel(
+          dBatchInput_.get(), dSlices, dSlice, dCsrbAttenBatch_.get(), nvox,
+          branchCount, commonTransformParams, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), power);
+      // Output is [branch][chunkRow]: column b starts at b * rows, this
+      // angle's rows at + i * rpa.
+      csrbAngleSpMVLocked(
+          angleMats, cached, chunk, i, CUSPARSE_OPERATION_NON_TRANSPOSE,
+          dCsrbAttenBatch_.get(), nvox,
+          dBatchOutput_.get() + static_cast<size_t>(i) * static_cast<size_t>(rpa),
+          static_cast<size_t>(rpa), static_cast<size_t>(cached.rows), branchCount,
+          dFullBatchOutput_.get());
+      csrbAttenForwardTimers_[static_cast<size_t>(i)].recordStop(nullptr);
+    }
+    csrqReleaseAttenSlotLocked(slot);
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    noteCudaCusparseForward(
+        accumulateTimedCudaPairs(csrbAttenForwardTimers_, stages),
+        stages * static_cast<size_t>(branchCount));
     const auto outputStart = std::chrono::steady_clock::now();
-    stageOutputD2H(dOutput_, y, static_cast<size_t>(outputSize));
-    const double outputSeconds =
+    dBatchOutput_.copyToHost(hostYhatBatch, count);
+    noteCudaCompactOutputD2H(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       outputStart)
-            .count();
-    noteCudaCompactOutputD2H(outputSeconds,
-                             static_cast<size_t>(outputSize) * sizeof(float),
-                             backward);
-    const double deviceSeconds = deviceTiming.elapsedSeconds();
-    if (backward) {
-      noteCudaCusparseBackward(deviceSeconds, 1);
-    } else {
-      noteCudaCusparseForward(deviceSeconds, 1);
-    }
+            .count(),
+        count * sizeof(float), false);
   }
 
   void beginCompactDeviceBackward(size_t voxelCount, int accumulatorIndex) {
@@ -813,121 +968,6 @@ public:
     backwardTiming.recordStart(nullptr);
     executeSpMVLocked(cached, CUSPARSE_OPERATION_TRANSPOSE,
                       vecXBackward.get(), vecYBackward.get(), 0.0f);
-    backwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair transformTiming;
-    transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddKernel(
-        dFullOutput_.get(), accum.get(), accumSize, transformParams);
-    transformTiming.recordStop(nullptr);
-
-    transformTiming.synchronizeStop();
-    const double forwardSeconds = forwardTiming.elapsedSeconds();
-    const double ratioSeconds = ratioTiming.elapsedSeconds();
-    const double backwardSeconds = backwardTiming.elapsedSeconds();
-    const double transformSeconds = transformTiming.elapsedSeconds();
-    noteCudaCusparseForward(forwardSeconds, 1);
-    noteCudaRatio(ratioSeconds, 1);
-    noteCudaCusparseBackward(backwardSeconds, 1);
-    if (ratioTimingOut != nullptr) {
-      ratioTimingOut->forwardSeconds += forwardSeconds;
-      ratioTimingOut->ratioSeconds += ratioSeconds;
-      ratioTimingOut->backwardSeconds += backwardSeconds;
-    }
-    if (backwardTimingOut != nullptr) {
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-      backwardTimingOut->transformBackwardSeconds += transformSeconds;
-    }
-  }
-
-  void executeCompactDeviceRatioAttenSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const float *x, const uint16_t *attFactors,
-      size_t attCount, const cuda::CompactAttenBakeParams &attenParams,
-      const double *fullProjection, size_t fullProjectionCount,
-      const cuda::CompactDeviceRatioParams &ratioParams,
-      const cuda::CompactDeviceTransformParams &transformParams,
-      cuda::CompactDeviceRatioTiming *ratioTimingOut,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
-    ensureCudaRuntimeAvailable();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
-      throw std::runtime_error(
-          "compact device-ratio attenuation cache slot out of range.");
-    }
-    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device accumulator was not initialized.");
-    }
-    if (ratioParams.symmetryMode != 45 && ratioParams.symmetryMode != 90) {
-      throw std::runtime_error(
-          "compact device-ratio attenuation helper requires symmetryMode 45 or 90.");
-    }
-    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-    const int64_t rows = cached.rows;
-    const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device accumulator size does not match matrix columns.");
-    }
-
-    // Upload/cache the per-bed attenuation table by host pointer.
-    auto &dAtten = dAttenTable_[projectionSlot];
-    if (attenTableHostPtr_[projectionSlot] != attFactors ||
-        attenTableCount_[projectionSlot] != attCount) {
-      dAtten.copyFromHost(attFactors, attCount);
-      attenTableHostPtr_[projectionSlot] = attFactors;
-      attenTableCount_[projectionSlot] = attCount;
-      bakedValid_[projectionSlot] = false;
-    }
-
-    const auto inputStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(cols));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      inputStart)
-            .count());
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
-                                        cacheSlot);
-    ensureProjDomainKernelsLoaded();
-
-    dOutput_.allocate(static_cast<size_t>(rows));
-    dChunkInput_.allocate(static_cast<size_t>(rows));
-    dFullOutput_.allocate(static_cast<size_t>(cols));
-    if (cols > 0) {
-      CUDA_CHECK(cudaMemset(dFullOutput_.get(), 0,
-                            static_cast<size_t>(cols) * sizeof(float)));
-    }
-
-    TimedCudaStagePair forwardTiming;
-    forwardTiming.recordStart(nullptr);
-    launchCompactAttenFusedForwardKernel(
-        cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-        dAtten.get(), dInput_.get(), dOutput_.get(),
-        static_cast<int>(cached.rows), attenParams);
-    forwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair ratioTiming;
-    ratioTiming.recordStart(nullptr);
-    launchCompactRatioKernel(dOutput_.get(),
-                             dCompactProjectionInput_[projectionSlot].get(),
-                             compactBackgroundDeviceLocked(cacheSlot),
-                             fullProjectionCount, ratioParams,
-                             dChunkInput_.get(), static_cast<size_t>(rows),
-                             1e-10);
-    ratioTiming.recordStop(nullptr);
-
-    TimedCudaStagePair backwardTiming;
-    backwardTiming.recordStart(nullptr);
-    launchCompactAttenFusedBackwardKernel(
-        cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-        dAtten.get(), dChunkInput_.get(), dFullOutput_.get(),
-        static_cast<int>(cached.rows), attenParams);
     backwardTiming.recordStop(nullptr);
 
     TimedCudaStagePair transformTiming;
@@ -1240,14 +1280,6 @@ public:
   }
 
 private:
-
-  static bool compactCtacBakedReferenceEnabled() {
-    static const bool enabled = []() {
-      const char *v = std::getenv("SPECT_COMPACT_CTAC_BAKED_REFERENCE");
-      return v != nullptr && v[0] == '1';
-    }();
-    return enabled;
-  }
 
   void stageInputH2D(const float *x, size_t count) {
     pinnedInputStage_.copyFromHost(x, count);
@@ -2495,27 +2527,7 @@ private:
     transientRangeReusableReady_.fill(false);
   }
 
-  const CachedMatrix &ensureAttenuatedUploaded(const io::CSRView &matrix,
-                                               const std::vector<uint16_t> &atten,
-                                               int numAngles,
-                                               int threads) {
-    const AttenCacheKey key = makeAttenCacheKey(matrix, atten, numAngles);
-    for (size_t index = 0; index < attenCache_.size(); ++index) {
-      if (attenCacheValid_[index] && attenCacheKeys_[index] == key &&
-          attenCache_[index].matA.get() != nullptr) {
-        return attenCache_[index];
-      }
-    }
 
-    const size_t slot = nextAttenCacheSlot_;
-    nextAttenCacheSlot_ = (nextAttenCacheSlot_ + 1) % attenCache_.size();
-
-    buildAttenuatedCSR(matrix, atten, numAngles, threads, attenHostScratch_);
-    uploadHostCSR(attenHostScratch_, key.matrix, &attenCache_[slot]);
-    attenCacheKeys_[slot] = key;
-    attenCacheValid_[slot] = true;
-    return attenCache_[slot];
-  }
 
 public:
   void refreshCompactBranchBatchInput(const float *input, size_t count) {
@@ -2894,11 +2906,8 @@ public:
     dCompactRowWeights_.reset();
     for (auto &accumulator : dCompactBackwardAccum_)
       accumulator.reset();
-    for (size_t bed = 0; bed < dAttenTable_.size(); ++bed) {
-      bakedMat_[bed].reset();
-      dAttenTable_[bed].reset();
-      dBakedValues_[bed].reset();
-    }
+    csrbAttenChunks_.clear();
+    dCsrbAttenBatch_.reset();
     dBuffer_.reset();
     releaseCsrqResidentLocked();
 
@@ -2918,9 +2927,6 @@ public:
     compactRowWeightsHostKey_ = nullptr;
     compactRowWeightsCount_ = 0;
     compactBackwardAccumSize_ = {};
-    attenTableHostPtr_ = {};
-    attenTableCount_ = {};
-    bakedValid_ = {};
     batchSymIdsHost_.clear();
     batchZMirrorsHost_.clear();
     hostFloatScratch_.clear();
@@ -3717,6 +3723,43 @@ private:
     return maxAngles;
   }
 
+  // (compact angle, branch) -> slice table of one chunk of whole compact
+  // angles [rowBase, rowBase + rows) for the current branch ids, appended to
+  // sliceIndex ([angle][branchCount] ints, -1 = no full angle); the distinct
+  // full angles the chunk reaches go to fullAngles in slice order. Returns
+  // the angle count. Shared by the CSRQ and CSRB attenuated passes.
+  int buildAttenChunkSliceTableLocked(const cuda::CompactDeviceRatioParams &p,
+                                      int rowBase, int rows,
+                                      std::vector<int> &sliceIndex,
+                                      std::vector<int> &fullAngles) const {
+    if (p.compactRaysPerAngle <= 0 || rows % p.compactRaysPerAngle != 0 ||
+        rowBase % p.compactRaysPerAngle != 0) {
+      throw std::runtime_error(
+          "compact CTAC requires chunks made of whole compact angles.");
+    }
+    const int angles = rows / p.compactRaysPerAngle;
+    const int firstAngle = rowBase / p.compactRaysPerAngle;
+    const int branchCount = static_cast<int>(batchSymIdsHost_.size());
+    fullAngles.clear();
+    for (int i = 0; i < angles; ++i) {
+      for (int k = 0; k < branchCount; ++k) {
+        const int fullAngle =
+            csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
+        int slice = -1;
+        if (fullAngle >= 0) {
+          auto it = std::find(fullAngles.begin(), fullAngles.end(), fullAngle);
+          if (it == fullAngles.end()) {
+            fullAngles.push_back(fullAngle);
+            it = fullAngles.end() - 1;
+          }
+          slice = static_cast<int>(it - fullAngles.begin());
+        }
+        sliceIndex.push_back(slice);
+      }
+    }
+    return angles;
+  }
+
   // Per-matrix CTAC plan: for every chunk the (compact angle, branch) -> slice
   // table and the distinct full angles it reaches (slice order). Built from
   // the announced chunk shapes and the current branch ids, uploaded once, so
@@ -3732,9 +3775,6 @@ private:
         plan.symIds == batchSymIdsHost_) {
       return plan;
     }
-    if (p.compactRaysPerAngle <= 0) {
-      throw std::runtime_error("CSRQ CTAC requires compactRaysPerAngle > 0.");
-    }
     plan = CsrqAttenPlan{};
     plan.symmetryMode = p.symmetryMode;
     plan.compactRaysPerAngle = p.compactRaysPerAngle;
@@ -3743,38 +3783,218 @@ private:
     plan.symIds = batchSymIdsHost_;
     std::vector<int> sliceIndex;
     for (const auto &shape : matrix.shapes) {
-      if (shape.rows % p.compactRaysPerAngle != 0 ||
-          shape.compactRowBase % p.compactRaysPerAngle != 0) {
-        throw std::runtime_error(
-            "CSRQ CTAC requires chunks made of whole compact angles.");
-      }
-      const int angles = shape.rows / p.compactRaysPerAngle;
-      const int firstAngle = shape.compactRowBase / p.compactRaysPerAngle;
-      plan.chunkAngles.push_back(angles);
-      plan.chunkSliceIndexOffset.push_back(sliceIndex.size());
       std::vector<int> fullAngles;
-      for (int i = 0; i < angles; ++i) {
-        for (int k = 0; k < kCsrqK; ++k) {
-          const int fullAngle =
-              csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
-          int slice = -1;
-          if (fullAngle >= 0) {
-            auto it = std::find(fullAngles.begin(), fullAngles.end(), fullAngle);
-            if (it == fullAngles.end()) {
-              fullAngles.push_back(fullAngle);
-              it = fullAngles.end() - 1;
-            }
-            slice = static_cast<int>(it - fullAngles.begin());
-          }
-          sliceIndex.push_back(slice);
-        }
-      }
+      plan.chunkSliceIndexOffset.push_back(sliceIndex.size());
+      plan.chunkAngles.push_back(buildAttenChunkSliceTableLocked(
+          p, shape.compactRowBase, shape.rows, sliceIndex, fullAngles));
       plan.maxSlices = std::max(plan.maxSlices, fullAngles.size());
       plan.chunkFullAngles.push_back(std::move(fullAngles));
     }
     plan.dSliceIndex.copyFromHost(sliceIndex.data(), sliceIndex.size());
     plan.valid = true;
     return plan;
+  }
+
+  // CSRB counterpart for one uploaded chunk (row range [compactRowBase,
+  // compactRowBase + rows)): slice table plus, per compact angle, the
+  // zero-based sub-CSR row pointers and nnz range so cuSPARSE can address the
+  // angle's rows as a matrix of their own. Cached per chunk row base and
+  // revalidated against the chunk identity, geometry and branch ids.
+  struct CsrbAttenChunk {
+    MatrixCacheKey matrixKey;
+    int rows = 0;
+    int symmetryMode = 0;
+    int compactRaysPerAngle = 0;
+    int compactNumAngles = 0;
+    int fullNumAngles = 0;
+    std::vector<int> symIds;
+    int angles = 0;
+    std::vector<int> fullAngles;
+    std::vector<int64_t> nnzOffset;   // per angle
+    std::vector<int64_t> nnzCount;    // per angle
+    DeviceArray<int> dSliceIndex;     // [angles][branchCount]
+    DeviceArray<int32_t> dSubRowPtr;  // [angles][compactRaysPerAngle + 1]
+  };
+
+  // One cuSPARSE CSR descriptor per compact angle of a chunk (its rows as a
+  // matrix of their own), with per-descriptor SpMV buffer-size caches for the
+  // two operations. Lives for one pass; descriptors are host objects only.
+  struct CsrbAngleMatrices {
+    std::vector<std::unique_ptr<CuSparseMatGuard>> mats;
+    std::vector<std::array<size_t, 2>> bufferSizes;
+    std::vector<std::array<bool, 2>> bufferSizeValid;
+  };
+
+  CsrbAngleMatrices csrbCreateAngleMatricesLocked(const CachedMatrix &cached,
+                                                  const CsrbAttenChunk &chunk) {
+    CsrbAngleMatrices out;
+    const int rpa = chunk.compactRaysPerAngle;
+    out.mats.reserve(static_cast<size_t>(chunk.angles));
+    out.bufferSizes.assign(static_cast<size_t>(chunk.angles), {});
+    out.bufferSizeValid.assign(static_cast<size_t>(chunk.angles), {});
+    for (int i = 0; i < chunk.angles; ++i) {
+      auto mat = std::make_unique<CuSparseMatGuard>();
+      const int64_t offset = chunk.nnzOffset[static_cast<size_t>(i)];
+      mat->create(rpa, cached.cols, chunk.nnzCount[static_cast<size_t>(i)],
+                  chunk.dSubRowPtr.get() + static_cast<size_t>(i) * (rpa + 1),
+                  cached.dColIdx.get() + offset, cached.dValues.get() + offset);
+      out.mats.push_back(std::move(mat));
+    }
+    return out;
+  }
+
+  // One angle's sub-matrix applied to a column-major batch: column b of matB
+  // (bRows floats) -> column b of matC (cRows floats), overwriting matC.
+  // Forward (op=N) uses the production packed-K row kernels on the sub-range
+  // pointers (one block per row; cuSPARSE CSR_ALG2 needs ~20 ms per call on
+  // 1152 rows of ~30k nnz, the packed kernels ~0.3 ms) with a per-RHS
+  // cuSPARSE remainder; transpose is per-RHS cuSPARSE CSR_ALG2 as in the
+  // plain batch path.
+  // Column b of matC starts at matC + b * cStride (cStride >= cRows lets the
+  // forward projection write one angle's rows into a [branch][chunkRow]
+  // buffer).
+  void csrbAngleSpMVLocked(CsrbAngleMatrices &angleMats, const CachedMatrix &cached,
+                           const CsrbAttenChunk &chunk, int angle,
+                           cusparseOperation_t operation, const float *matB,
+                           size_t bRows, float *matC, size_t cRows,
+                           size_t cStride, int batchSize, float *xPackScratch) {
+    const size_t bufferIndex = spmvBufferIndex(operation);
+    const size_t a = static_cast<size_t>(angle);
+    int b = 0;
+    if (operation == CUSPARSE_OPERATION_NON_TRANSPOSE && xPackScratch != nullptr &&
+        bRows <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+      // The row kernels vectorise on t % 4 relative to the array base, so
+      // they get the chunk's own arrays and the row pointers offset by the
+      // angle's first row (absolute nnz indices); only cuSPARSE needs the
+      // zero-based copies.
+      const int rpa = chunk.compactRaysPerAngle;
+      const float *values = cached.dValues.get();
+      const int32_t *rowPtr = cached.dRowPtr.get() + a * static_cast<size_t>(rpa);
+      const int32_t *colIdx = cached.dColIdx.get();
+      const int cols = static_cast<int>(bRows);
+      const int kMem = cuda::compactPackedForwardKMem(
+          static_cast<int64_t>(bRows), batchSize, cuda::getL2CacheBytes());
+      const int tile = cuda::compactPackedForwardTile(kMem, compactSortedHint_);
+      if (tile >= 4) {
+        for (; b + 3 < batchSize; b += 4) {
+          launchCompactPackColQuadToFloat4Kernel(
+              matB + static_cast<size_t>(b) * bRows,
+              matB + static_cast<size_t>(b + 1) * bRows,
+              matB + static_cast<size_t>(b + 2) * bRows,
+              matB + static_cast<size_t>(b + 3) * bRows, xPackScratch, cols);
+          launchCompactCsrSpmvXQuadKernel(
+              values, rowPtr, colIdx, xPackScratch,
+              matC + static_cast<size_t>(b) * cStride,
+              matC + static_cast<size_t>(b + 1) * cStride,
+              matC + static_cast<size_t>(b + 2) * cStride,
+              matC + static_cast<size_t>(b + 3) * cStride, rpa);
+        }
+      }
+      if (tile >= 2) {
+        for (; b + 1 < batchSize; b += 2) {
+          launchCompactPackColPairToFloat2Kernel(
+              matB + static_cast<size_t>(b) * bRows,
+              matB + static_cast<size_t>(b + 1) * bRows, xPackScratch, cols);
+          launchCompactCsrSpmvXPairKernel(values, rowPtr, colIdx, xPackScratch,
+                                          matC + static_cast<size_t>(b) * cStride,
+                                          matC + static_cast<size_t>(b + 1) * cStride,
+                                          rpa);
+        }
+      }
+    }
+    for (; b < batchSize; ++b) {
+      CuSparseVecGuard vecX;
+      CuSparseVecGuard vecY;
+      vecX.create(static_cast<int64_t>(bRows),
+                  const_cast<float *>(matB) + static_cast<size_t>(b) * bRows);
+      vecY.create(static_cast<int64_t>(cRows),
+                  matC + static_cast<size_t>(b) * cStride);
+      executeSpMVDescriptorLocked(angleMats.mats[a]->get(),
+                                  angleMats.bufferSizes[a][bufferIndex],
+                                  angleMats.bufferSizeValid[a][bufferIndex],
+                                  operation, vecX.get(), vecY.get(), 0.0f,
+                                  operation == CUSPARSE_OPERATION_TRANSPOSE);
+    }
+  }
+
+  void ensureBranchMetadataLocked(const int *symIds, const int *zMirrors,
+                                  int branchCount) {
+    if (symIds == nullptr || zMirrors == nullptr || branchCount <= 0) {
+      throw std::runtime_error("compact branch symmetry tables are null.");
+    }
+    const size_t count = static_cast<size_t>(branchCount);
+    const bool changed =
+        batchSymIdsHost_.size() != count || batchZMirrorsHost_.size() != count ||
+        !std::equal(batchSymIdsHost_.begin(), batchSymIdsHost_.end(), symIds) ||
+        !std::equal(batchZMirrorsHost_.begin(), batchZMirrorsHost_.end(),
+                    zMirrors);
+    if (changed) {
+      dBatchSymIds_.copyFromHost(symIds, count);
+      dBatchZMirrors_.copyFromHost(zMirrors, count);
+      batchSymIdsHost_.assign(symIds, symIds + count);
+      batchZMirrorsHost_.assign(zMirrors, zMirrors + count);
+    }
+  }
+
+  void csrbEnsureAttenTimersLocked(size_t stages) {
+    auto grow = [stages](std::vector<TimedCudaStagePair> &timers) {
+      while (timers.size() < stages) {
+        timers.emplace_back();
+      }
+    };
+    grow(csrbAttenForwardTimers_);
+    grow(csrbAttenBackwardTimers_);
+    grow(csrbAttenTransformTimers_);
+  }
+
+  const CsrbAttenChunk &csrbEnsureAttenChunkLocked(
+      const io::CSRView &matrix, const CachedMatrix &cached,
+      int compactRowBase, const cuda::CompactDeviceRatioParams &p) {
+    CsrbAttenChunk &chunk = csrbAttenChunks_[compactRowBase];
+    if (chunk.rows == static_cast<int>(cached.rows) &&
+        chunk.matrixKey == cached.key && chunk.symmetryMode == p.symmetryMode &&
+        chunk.compactRaysPerAngle == p.compactRaysPerAngle &&
+        chunk.compactNumAngles == p.compactNumAngles &&
+        chunk.fullNumAngles == p.fullNumAngles &&
+        chunk.symIds == batchSymIdsHost_ && chunk.dSubRowPtr.get() != nullptr) {
+      return chunk;
+    }
+    chunk.matrixKey = cached.key;
+    chunk.rows = static_cast<int>(cached.rows);
+    chunk.symmetryMode = p.symmetryMode;
+    chunk.compactRaysPerAngle = p.compactRaysPerAngle;
+    chunk.compactNumAngles = p.compactNumAngles;
+    chunk.fullNumAngles = p.fullNumAngles;
+    chunk.symIds = batchSymIdsHost_;
+    std::vector<int> sliceIndex;
+    chunk.angles = buildAttenChunkSliceTableLocked(p, compactRowBase, chunk.rows,
+                                                   sliceIndex, chunk.fullAngles);
+    chunk.dSliceIndex.copyFromHost(sliceIndex.data(), sliceIndex.size());
+    const int rpa = p.compactRaysPerAngle;
+    std::vector<int32_t> subRowPtr(static_cast<size_t>(chunk.angles) *
+                                   (static_cast<size_t>(rpa) + 1u));
+    chunk.nnzOffset.assign(static_cast<size_t>(chunk.angles), 0);
+    chunk.nnzCount.assign(static_cast<size_t>(chunk.angles), 0);
+    for (int i = 0; i < chunk.angles; ++i) {
+      const int64_t base = matrix.row_ptr[static_cast<size_t>(i) * rpa];
+      const int64_t end = matrix.row_ptr[static_cast<size_t>(i + 1) * rpa];
+      chunk.nnzOffset[static_cast<size_t>(i)] = base;
+      chunk.nnzCount[static_cast<size_t>(i)] = end - base;
+      for (int j = 0; j <= rpa; ++j) {
+        const int64_t shifted =
+            static_cast<int64_t>(
+                matrix.row_ptr[static_cast<size_t>(i) * rpa + j]) -
+            base;
+        if (shifted < 0 || shifted > std::numeric_limits<int32_t>::max()) {
+          throw std::runtime_error(
+              "compact CTAC sub-CSR row pointer out of int32 range.");
+        }
+        subRowPtr[static_cast<size_t>(i) * (static_cast<size_t>(rpa) + 1u) +
+                  static_cast<size_t>(j)] = static_cast<int32_t>(shifted);
+      }
+    }
+    chunk.dSubRowPtr.copyFromHost(subRowPtr.data(), subRowPtr.size());
+    return chunk;
   }
 
   // Page-locks a caller-owned factor table once (cached by pointer) so its
@@ -3836,16 +4056,24 @@ private:
   int csrqStageAttenSlicesLocked(const CsrqAttenPlan &plan, size_t chunkIndex,
                                  const uint16_t *attFactors, size_t attCount,
                                  size_t nvox) {
+    return stageAttenSlicesLocked(plan.chunkFullAngles[chunkIndex],
+                                  plan.maxSlices, plan.fullNumAngles,
+                                  attFactors, attCount, nvox);
+  }
+
+  int stageAttenSlicesLocked(const std::vector<int> &fullAngles,
+                             size_t maxSlices, int fullNumAngles,
+                             const uint16_t *attFactors, size_t attCount,
+                             size_t nvox) {
     if (attFactors == nullptr ||
-        attCount != static_cast<size_t>(plan.fullNumAngles) * nvox) {
+        attCount != static_cast<size_t>(fullNumAngles) * nvox) {
       throw std::runtime_error(
-          "CSRQ CTAC table must hold fullNumAngles * voxels uint16 factors.");
+          "compact CTAC table must hold fullNumAngles * voxels uint16 factors.");
     }
-    const std::vector<int> &fullAngles = plan.chunkFullAngles[chunkIndex];
     const int slot = csrqAttNextSlot_;
     csrqAttNextSlot_ = (slot + 1) % kCsrqAttSlots;
     DeviceArray<uint16_t> &dSlices = dCsrqAttSlices_[slot];
-    dSlices.allocate(std::max<size_t>(plan.maxSlices, 1u) * nvox);
+    dSlices.allocate(std::max<size_t>(maxSlices, fullAngles.size()) * nvox);
     if (fullAngles.empty()) {
       csrqAttSlotUsed_[slot] = true;
       return slot;
@@ -4140,11 +4368,6 @@ private:
   DeviceChunkCache deviceChunkCache_;            // P3-D
   ResidentMatrixSetCache residentMatrixSetCache_;
   HostCSRData subsetHostScratch_;
-  std::array<CachedMatrix, 4> attenCache_;
-  std::array<AttenCacheKey, 4> attenCacheKeys_{};
-  std::array<bool, 4> attenCacheValid_{};
-  size_t nextAttenCacheSlot_ = 0;
-  HostCSRData attenHostScratch_;
   DeviceArray<float> dInput_;
   DeviceArray<float> dOutput_;
   DeviceArray<float> dProjectionInput_;
@@ -4234,22 +4457,16 @@ private:
   std::array<bool, kCsrqAttSlots> csrqAttSlotUsed_{};
   int csrqAttNextSlot_ = 0;
   std::vector<CsrqPinnedHostTable> csrqPinnedTables_;
+  // CSRB CTAC: per-chunk slice tables and sub-CSR row pointers, keyed by the
+  // chunk's compact row base (revalidated against the uploaded chunk).
+  std::map<int, CsrbAttenChunk> csrbAttenChunks_;
+  // CSRB CTAC scratch: attenuated [branch][voxel] batch input of one bed and
+  // per-(bed, compact angle) stage timers.
+  DeviceArray<float> dCsrbAttenBatch_;
+  std::vector<TimedCudaStagePair> csrbAttenForwardTimers_;
+  std::vector<TimedCudaStagePair> csrbAttenBackwardTimers_;
+  std::vector<TimedCudaStagePair> csrbAttenTransformTimers_;
   DeviceBuffer dBuffer_;
-  // Compact CTAC: resident attenuation table plus explicit debug/reference
-  // baked-values scratch. Default CTAC uses fused kernels above.
-  std::array<DeviceArray<uint16_t>, spect::core::kMaxBeds> dAttenTable_;
-  std::array<const void *, spect::core::kMaxBeds> attenTableHostPtr_{};
-  std::array<size_t, spect::core::kMaxBeds> attenTableCount_{};
-  std::array<DeviceArray<float>, spect::core::kMaxBeds> dBakedValues_;
-  std::array<CuSparseMatGuard, spect::core::kMaxBeds> bakedMat_;
-  std::array<MatrixCacheKey, spect::core::kMaxBeds> bakedMatrixKey_{};
-  std::array<cuda::CompactAttenBakeParams, spect::core::kMaxBeds> bakedParams_{};
-  std::array<const void *, spect::core::kMaxBeds> bakedAttPtr_{};
-  std::array<const void *, spect::core::kMaxBeds> bakedRowPtrDev_{};
-  std::array<const void *, spect::core::kMaxBeds> bakedColIdxDev_{};
-  std::array<bool, spect::core::kMaxBeds> bakedValid_{};
-  std::array<std::array<size_t, 2>, spect::core::kMaxBeds> bakedBufferSizes_{};
-  std::array<std::array<bool, 2>, spect::core::kMaxBeds> bakedBufferSizeValid_{};
   CudaStreamGuard computeStream_;
   std::array<CudaStreamGuard, kTransientRangeSlotCount> transientUploadStreams_;
   std::vector<void *> compactHostPins_;

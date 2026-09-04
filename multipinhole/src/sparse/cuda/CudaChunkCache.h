@@ -95,22 +95,6 @@ struct PinnedHostCSRData {
     PinnedHostArray<float> values;
 };
 
-struct RowChunkRange {
-    int rowBegin = 0;
-    int rowEnd = 0;
-};
-
-struct PreparedChunkedHostCSR {
-    std::vector<RowChunkRange> ranges;
-    std::vector<PinnedHostCSRData> chunks;
-    std::vector<uint64_t> chunkBytes;
-    std::vector<uint64_t> touchStamps;
-    std::vector<uint8_t> ready;
-    uint64_t residentBytes = 0;
-    uint64_t maxResidentBytes = 0;
-    uint64_t nextTouchStamp = 1;
-};
-
 struct MatrixCacheKey {
     const void *rowPtr = nullptr;
     const void *colIdx = nullptr;
@@ -145,65 +129,6 @@ struct RangeCacheKey {
     bool operator==(const RangeCacheKey &other) const {
         return matrix == other.matrix && rowBegin == other.rowBegin &&
                      rowEnd == other.rowEnd;
-    }
-};
-
-struct ChunkRangeCacheKey {
-    MatrixCacheKey matrix;
-    uint64_t nnzBudget = 0;
-
-    bool operator==(const ChunkRangeCacheKey &other) const {
-        return matrix == other.matrix && nnzBudget == other.nnzBudget;
-    }
-};
-
-struct PreparedChunkRangeCacheKey {
-    ChunkRangeCacheKey range;
-    uint64_t hostCacheBudgetBytes = 0;
-
-    bool operator==(const PreparedChunkRangeCacheKey &other) const {
-        return range == other.range;
-    }
-};
-
-struct PreparedChunkedHostCSRCacheEntry {
-    PreparedChunkRangeCacheKey key;
-    PreparedChunkedHostCSR prepared;
-};
-
-struct AttenChunkRangeCacheKey {
-    ChunkRangeCacheKey range;
-    const uint16_t *atten = nullptr;
-    int numAngles = 0;
-
-    bool operator==(const AttenChunkRangeCacheKey &other) const {
-        return range == other.range && atten == other.atten &&
-                     numAngles == other.numAngles;
-    }
-};
-
-struct PreparedAttenChunkRangeCacheKey {
-    AttenChunkRangeCacheKey range;
-    uint64_t hostCacheBudgetBytes = 0;
-
-    bool operator==(const PreparedAttenChunkRangeCacheKey &other) const {
-        return range == other.range;
-    }
-};
-
-struct PreparedAttenChunkedHostCSRCacheEntry {
-    PreparedAttenChunkRangeCacheKey key;
-    PreparedChunkedHostCSR prepared;
-};
-
-struct AttenCacheKey {
-    MatrixCacheKey matrix;
-    const uint16_t *atten = nullptr;
-    int numAngles = 0;
-
-    bool operator==(const AttenCacheKey &other) const {
-        return matrix == other.matrix && atten == other.atten &&
-                     numAngles == other.numAngles;
     }
 };
 
@@ -275,66 +200,19 @@ void noteCudaCompactProjectionH2D(double seconds, size_t bytes);
 void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward);
 
 uint64_t selectPreparedChunkHostCacheBudgetCapBytes();
-uint64_t splitPreparedChunkHostCacheBudgetBytes(uint64_t totalBudgetBytes,
-                                                size_t activePreparedCaches);
-uint64_t selectPreparedChunkHostCacheBudgetBytes(
-    size_t activePreparedCaches = 1);
-uint64_t selectPreparedChunkHostCacheBudgetBytes(
-    const io::CSRView &matrix, size_t activePreparedCaches = 1);
 
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
 SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
                                   const std::vector<int> &subset_rows);
-AttenCacheKey makeAttenCacheKey(const io::CSRView &matrix,
-                                const std::vector<uint16_t> &atten,
-                                int numAngles);
 RangeCacheKey makeRangeCacheKey(const io::CSRView &matrix, int rowBegin,
                                 int rowEnd);
-ChunkRangeCacheKey makeChunkRangeCacheKey(const io::CSRView &matrix,
-                                          uint64_t nnzBudget);
-PreparedChunkRangeCacheKey makePreparedChunkRangeCacheKey(
-    const io::CSRView &matrix, uint64_t nnzBudget,
-    uint64_t hostCacheBudgetBytes);
-AttenChunkRangeCacheKey makeAttenChunkRangeCacheKey(
-    const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-    int numAngles, uint64_t nnzBudget);
-PreparedAttenChunkRangeCacheKey makePreparedAttenChunkRangeCacheKey(
-    const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-    int numAngles, uint64_t nnzBudget, uint64_t hostCacheBudgetBytes);
 
-bool needsWholeMatrixChunking(const io::CSRView &matrix);
 uint64_t estimatePreparedChunkHostBytes(const io::CSRView &matrix);
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz);
-void touchPreparedChunk(PreparedChunkedHostCSR &prepared, size_t chunkIndex);
+
 void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
                               int rowEnd, int threads,
                               PinnedHostCSRData &host);
-void buildAttenuatedContiguousSubsetCSR(
-    const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-    int numAngles, int rowBegin, int rowEnd, int threads,
-    PinnedHostCSRData &host);
-std::vector<RowChunkRange> computeContiguousRowChunks(
-    const io::CSRView &matrix, uint64_t nnzBudget);
-const std::vector<RowChunkRange> &getContiguousRowChunks(
-    const io::CSRView &matrix, uint64_t nnzBudget);
-void initializePreparedChunkedHostCacheEntry(
-    PreparedChunkedHostCSR &prepared,
-    const std::vector<RowChunkRange> &ranges,
-    uint64_t maxResidentBytes);
-PreparedChunkedHostCSR *getPreparedContiguousHostChunks(
-    const io::CSRView &matrix, uint64_t nnzBudget, int threads,
-    bool eagerPrepare = false, uint64_t hostCacheBudgetBytes = 0);
-const PinnedHostCSRData &ensurePreparedContiguousHostChunk(
-    PreparedChunkedHostCSR &prepared, const io::CSRView &matrix,
-    size_t chunkIndex, int threads);
-PreparedChunkedHostCSR *getPreparedAttenuatedHostChunks(
-    const io::CSRView &matrix, const std::vector<uint16_t> &atten,
-    int numAngles, uint64_t nnzBudget, int threads,
-    bool eagerPrepare = false, uint64_t hostCacheBudgetBytes = 0);
-const PinnedHostCSRData &ensurePreparedAttenuatedHostChunk(
-    PreparedChunkedHostCSR &prepared, const io::CSRView &matrix,
-    const std::vector<uint16_t> &atten, int numAngles, size_t chunkIndex,
-    int threads);
 
 } // namespace spect
 

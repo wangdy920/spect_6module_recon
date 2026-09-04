@@ -79,23 +79,6 @@ struct CompactBsremUpdateParams {
     const double* kappa = nullptr;
 };
 
-/// Parameters for compact CTAC attenuation lookup:
-/// effective[t] = val[t] * att[fullAngle(row(t)), unrotatedVoxel(col(t))].
-/// Combines the row->full-angle mapping of CompactDeviceRatioParams with the
-/// voxel mapping of CompactDeviceTransformParams.
-struct CompactAttenBakeParams {
-    int symmetryMode = 0; // 45 or 90
-    int compactRowBase = 0;
-    int compactRaysPerAngle = 0;
-    int compactNumAngles = 0;
-    int fullNumAngles = 0;
-    int symId = 0;
-    bool zMirror = false;
-    int nx = 0;
-    int ny = 0;
-    int nz = 0;
-};
-
 } // namespace cuda
 
 
@@ -156,23 +139,6 @@ bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &matrix);
 bool releaseCompactExecutionCUDA();
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
-/// spmv/spmvT with compact CTAC factors fused into the CUDA nnz loop.
-/// attFactors is the full-angle table (fullNumAngles * nx*ny*nz uint16,
-/// scale 1/65535) in the unrotated image frame; it is uploaded once and cached
-/// by host pointer. The lookup is algebraically equivalent to the baked
-/// reference values.
-bool compactAttenSpmvFloatCUDA(const io::CSRView& matrix,
-                               const uint16_t* attFactors,
-                               size_t attCount,
-                               const CompactAttenBakeParams& params,
-                               const float* x, float* y,
-                               int cacheSlot = 0);
-bool compactAttenSpmvTFloatCUDA(const io::CSRView& matrix,
-                                const uint16_t* attFactors,
-                                size_t attCount,
-                                const CompactAttenBakeParams& params,
-                                const float* x, float* y,
-                                int cacheSlot = 0);
 bool compactDeviceBackwardBeginCUDA(size_t voxelCount,
                                     int accumulatorIndex = 0);
 bool compactDeviceBackwardSpmvTAccumulateFloatCUDA(
@@ -194,23 +160,58 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
-/// Device-ratio + device-backward accumulator path with on-the-fly CTAC
-/// attenuation. attFactors is the full-angle table (fullNumAngles * nx*ny*nz
-/// uint16) cached by host pointer per cacheSlot.
-bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+/// CSRB CTAC numerator on the branch batch: H_b = A att_b^attPower, the
+/// factor applied per compact angle in the image domain (see the CSRQ
+/// counterpart csrqRunNumerCUDA). bedAttFactors holds one full-angle uint16
+/// table (attCount entries) per bed; commonRatioParams.compactRowBase is the
+/// chunk's first compact row.
+bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     const io::CSRView& matrix,
-    const float* x,
+    const double* const* fullProjections,
+    size_t fullProjectionCount,
+    const CompactDeviceRatioParams& commonRatioParams,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int branchCount,
+    int bedCount,
+    const uint16_t* const* bedAttFactors,
+    size_t attCount,
+    double attPower = 1.0,
+    CompactDeviceRatioTiming* ratioTiming = nullptr,
+    CompactDeviceBackwardTiming* backwardTiming = nullptr);
+/// CSRB CTAC sensitivity of one chunk: H^T W 1 for one bed's table added to
+/// accumulatorIndex. fullProjectionCount is the full projection row count
+/// (row -> projection validity); rowWeights (that many doubles) may be
+/// nullptr for W = 1.
+bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView& matrix,
+    const CompactDeviceRatioParams& commonRatioParams,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int branchCount,
     const uint16_t* attFactors,
     size_t attCount,
-    const cuda::CompactAttenBakeParams& attenParams,
-    const double* fullProjection,
+    double attPower,
+    const double* rowWeights,
     size_t fullProjectionCount,
-    const CompactDeviceRatioParams& ratioParams,
-    const CompactDeviceTransformParams& transformParams,
-    CompactDeviceRatioTiming* ratioTiming = nullptr,
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
+    int accumulatorIndex = 0);
+/// CSRB CTAC forward projection of one chunk over the refreshed single-bed
+/// branch batch; hostYhatBatch receives [branch][chunkRow] floats.
+bool compactBranchBatchAttenForwardCUDA(
+    const io::CSRView& matrix,
+    const CompactDeviceRatioParams& commonRatioParams,
+    const CompactDeviceTransformParams& commonTransformParams,
+    const int* symIds,
+    const int* zMirrors,
+    int branchCount,
+    const uint16_t* attFactors,
+    size_t attCount,
+    double attPower,
+    float* hostYhatBatch,
+    size_t count);
 /// Batched compact device-ratio + device-backward accumulator path. The input
 /// refreshed by refreshCompactBranchBatchInputCUDA is ordered bed-major, with
 /// branchCount columns per bed; each bed keeps its own projection and backward
@@ -232,8 +233,8 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
 /// backward accumulator.  symIds/zMirrors describe the branch symmetry for each
 /// column.  rowWeights (one double per full projection row) may be nullptr for
 /// W = 1 (all ones, the production default); with weights, commonRatioParams
-/// supplies the row -> full projection mapping.  Only used when attenuation is
-/// not enabled; otherwise falls back to the per-branch attenuated path.
+/// supplies the row -> full projection mapping. CTAC runs use the attenuated
+/// variant above.
 bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRView& matrix,
     const CompactDeviceTransformParams& commonTransformParams,

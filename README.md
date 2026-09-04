@@ -170,6 +170,10 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   water table, `-ctacMapEnergy` names the μ-map's energy (default: the
   `[CTAC] auto_mu_nuclide` preset). Exact for the water-scaled μ model that
   auto-mu and `prepare_ct_mu_map.py` produce; bone is scaled like water.
+  The CSRB path uses the same factorised CTAC (branch batch scaled per compact
+  angle, sub-CSR row ranges through the plain kernels): MDP mouse, two beds,
+  2.35 s/iter instead of 44 s/iter with the former fused per-nnz kernels, it20
+  relL2 1.2e-7 against them.
 - Same-input numerics vs the fp32 CSRB run on the frozen Derenzo workload:
   image relL2 `1.5e-6` at MLEM it200, denom relL2 `8e-7`; 5-bed mouse MLEM
   it50 relL2 `6.2e-7` (gate `1e-5`). Measured on this host (RTX 4070 Ti

@@ -658,33 +658,9 @@ extern "C" __global__ void compact_transform_backward_add_batch(
   atomicAdd(&accum[mapped], static_cast<double>(rotatedBatch[index]));
 }
 
-extern "C" __device__ __forceinline__ int compact_atten_full_angle(
-    int symmetryMode, int compactRow, int compactRaysPerAngle,
-    int compactNumAngles, int fullNumAngles, int symId) {
-  const int compactAngle = compactRow / compactRaysPerAngle;
-  int fullAngle = 0;
-  if (symmetryMode == 45) {
-    const int q = fullNumAngles / 8;
-    if ((symId & 1) == 0) {
-      if (compactAngle >= q) {
-        return -1;
-      }
-      fullAngle = symId * q + compactAngle;
-    } else {
-      if (compactAngle <= 0) {
-        return -1;
-      }
-      fullAngle = symId * q + (q - compactAngle);
-    }
-  } else {
-    fullAngle = compactAngle + symId * compactNumAngles;
-  }
-  if (fullAngle < 0 || fullAngle >= fullNumAngles) {
-    return -1;
-  }
-  return fullAngle;
-}
-
+// Rotated/mirrored voxel index of a branch -> unrotated voxel (the CTAC table
+// frame); the row -> full angle mapping lives on the host
+// (csrqAttenFullAngle) since the factor is applied per compact angle.
 extern "C" __device__ __forceinline__ unsigned long long
 compact_atten_mapped_voxel(unsigned long long index, int symmetryMode,
                            int symId, int zMirror, int nx, int ny, int nz,
@@ -759,139 +735,6 @@ compact_atten_mapped_voxel(unsigned long long index, int symmetryMode,
          static_cast<unsigned long long>(y) *
              static_cast<unsigned long long>(nx) +
          static_cast<unsigned long long>(x);
-}
-
-extern "C" __device__ __forceinline__ float compact_atten_factor(
-    const unsigned short *att, int fullAngle, unsigned long long col,
-    int symmetryMode, int symId, int zMirror, int nx, int ny, int nz,
-    unsigned long long plane, unsigned long long nvox) {
-  if (fullAngle < 0) {
-    return 1.0f;
-  }
-  int validVoxel = 0;
-  const unsigned long long mapped = compact_atten_mapped_voxel(
-      col, symmetryMode, symId, zMirror, nx, ny, nz, plane, &validVoxel);
-  if (validVoxel == 0) {
-    return 1.0f;
-  }
-  const unsigned long long attIndex =
-      static_cast<unsigned long long>(fullAngle) * nvox + mapped;
-  return static_cast<float>(att[attIndex]) *
-         (1.0f / static_cast<float>(kAttenUint16Scale));
-}
-
-// Bake per-angle attenuation factors into compact chunk matrix values:
-// baked[t] = values[t] * att[fullAngle(row(t)) * nvox + M_b(col(t))] / 65535,
-// where M_b maps the rotated/mirrored voxel index back to the unrotated frame
-// (same mapping as compact_transform_backward_add). One block per compact row;
-// rows whose compact angle has no valid full angle (SYM_45Z edges) copy the
-// original values (their ratios are forced to zero elsewhere).
-extern "C" __global__ void compact_bake_atten_values(
-    const float *values, const int *rowPtr, const int *colIdx,
-    const unsigned short *att, float *baked, int rows, int symmetryMode,
-    int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
-    int fullNumAngles, int symId, int zMirror, int nx, int ny, int nz) {
-  const int row = static_cast<int>(blockIdx.x);
-  if (row >= rows || compactRaysPerAngle <= 0 || nx <= 0 || ny <= 0 ||
-      nz <= 0) {
-    return;
-  }
-  const int compactRow = compactRowBase + row;
-  const int fullAngle = compact_atten_full_angle(
-      symmetryMode, compactRow, compactRaysPerAngle, compactNumAngles,
-      fullNumAngles, symId);
-  const int start = rowPtr[row];
-  const int end = rowPtr[row + 1];
-  const unsigned long long plane =
-      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
-  const unsigned long long nvox = plane * static_cast<unsigned long long>(nz);
-
-  for (int t = start + static_cast<int>(threadIdx.x); t < end;
-       t += static_cast<int>(blockDim.x)) {
-    const float factor = compact_atten_factor(
-        att, fullAngle, static_cast<unsigned long long>(colIdx[t]),
-        symmetryMode, symId, zMirror, nx, ny, nz, plane, nvox);
-    baked[t] = values[t] * factor;
-  }
-}
-
-extern "C" __global__ void compact_atten_fused_spmv(
-    const float *values, const int *rowPtr, const int *colIdx,
-    const unsigned short *att, const float *x, float *y, int rows,
-    int symmetryMode, int compactRowBase, int compactRaysPerAngle,
-    int compactNumAngles, int fullNumAngles, int symId, int zMirror, int nx,
-    int ny, int nz) {
-  const int row = static_cast<int>(blockIdx.x);
-  if (row >= rows || compactRaysPerAngle <= 0 || nx <= 0 || ny <= 0 ||
-      nz <= 0) {
-    return;
-  }
-  const int compactRow = compactRowBase + row;
-  const int fullAngle = compact_atten_full_angle(
-      symmetryMode, compactRow, compactRaysPerAngle, compactNumAngles,
-      fullNumAngles, symId);
-  const int start = rowPtr[row];
-  const int end = rowPtr[row + 1];
-  const unsigned long long plane =
-      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
-  const unsigned long long nvox = plane * static_cast<unsigned long long>(nz);
-
-  float sum = 0.0f;
-  for (int t = start + static_cast<int>(threadIdx.x); t < end;
-       t += static_cast<int>(blockDim.x)) {
-    const int col = colIdx[t];
-    const float factor = compact_atten_factor(
-        att, fullAngle, static_cast<unsigned long long>(col), symmetryMode,
-        symId, zMirror, nx, ny, nz, plane, nvox);
-    sum += values[t] * factor * x[col];
-  }
-  __shared__ float partial[256];
-  partial[threadIdx.x] = sum;
-  __syncthreads();
-  for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) {
-      partial[threadIdx.x] += partial[threadIdx.x + stride];
-    }
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) {
-    y[row] = partial[0];
-  }
-}
-
-extern "C" __global__ void compact_atten_fused_spmvt(
-    const float *values, const int *rowPtr, const int *colIdx,
-    const unsigned short *att, const float *x, float *y, int rows,
-    int symmetryMode, int compactRowBase, int compactRaysPerAngle,
-    int compactNumAngles, int fullNumAngles, int symId, int zMirror, int nx,
-    int ny, int nz) {
-  const int row = static_cast<int>(blockIdx.x);
-  if (row >= rows || compactRaysPerAngle <= 0 || nx <= 0 || ny <= 0 ||
-      nz <= 0) {
-    return;
-  }
-  const float rowInput = x[row];
-  if (rowInput == 0.0f) {
-    return;
-  }
-  const int compactRow = compactRowBase + row;
-  const int fullAngle = compact_atten_full_angle(
-      symmetryMode, compactRow, compactRaysPerAngle, compactNumAngles,
-      fullNumAngles, symId);
-  const int start = rowPtr[row];
-  const int end = rowPtr[row + 1];
-  const unsigned long long plane =
-      static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
-  const unsigned long long nvox = plane * static_cast<unsigned long long>(nz);
-
-  for (int t = start + static_cast<int>(threadIdx.x); t < end;
-       t += static_cast<int>(blockDim.x)) {
-    const int col = colIdx[t];
-    const float factor = compact_atten_factor(
-        att, fullAngle, static_cast<unsigned long long>(col), symmetryMode,
-        symId, zMirror, nx, ny, nz, plane, nvox);
-    atomicAdd(&y[col], values[t] * factor * rowInput);
-  }
 }
 
 // ROW-packed 2-RHS forward CSR. Not a revival of compact_csr_spmm_col_tile4:
@@ -1409,9 +1252,9 @@ __device__ __forceinline__ float compact_atten_decode(unsigned short q,
 // (att[slice_k * nvox + M_k(v)] / 65535)^power, where M_k maps the rotated
 // voxel v of branch k back to the unrotated frame (compact_atten_mapped_voxel)
 // and slice_k = sliceIndex[k] is the staged factor slice of the branch's full
-// angle (-1: the branch has no full angle at this compact angle -> factor 1,
-// exactly like compact_atten_factor). Same algebra as compact_atten_fused_spmv,
-// applied once per voxel in the image domain instead of once per nnz.
+// angle (-1: the branch has no full angle at this compact angle -> factor 1).
+// The factor is applied once per voxel in the image domain instead of once
+// per nnz inside the SpMV.
 extern "C" __global__ void csrq_pack_branch8_atten(
     const float *branchMajor, const unsigned short *attSlices,
     const int *sliceIndex, float4 *packed, unsigned long long nvox,
@@ -1443,6 +1286,43 @@ extern "C" __global__ void csrq_pack_branch8_atten(
   }
   packed[2 * v] = make_float4(f[0], f[1], f[2], f[3]);
   packed[2 * v + 1] = make_float4(f[4], f[5], f[6], f[7]);
+}
+
+// CTAC pre-scaling of a branch-major batch (the CSRB layout, one dense column
+// per branch): out[k*nvox + v] = in[k*nvox + v] * (att[slice_k][M_k(v)] /
+// 65535)^power for k < batchSize; factor 1 where sliceIndex[k] < 0. Same
+// factor and index as csrq_pack_branch8_atten, without the [voxel][8]
+// interleave, so cuSPARSE consumes the result unchanged.
+extern "C" __global__ void compact_branch_batch_atten_scale(
+    const float *branchMajor, const unsigned short *attSlices,
+    const int *sliceIndex, float *out, unsigned long long nvox, int batchSize,
+    int symmetryMode, int nx, int ny, int nz, const int *symIds,
+    const int *zMirrors, float power) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      nvox * static_cast<unsigned long long>(batchSize);
+  if (index >= total || nx <= 0 || ny <= 0 || nz <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / nvox);
+  const unsigned long long voxel = index % nvox;
+  float factor = 1.0f;
+  const int slice = sliceIndex[branch];
+  if (slice >= 0) {
+    const unsigned long long plane =
+        static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
+    int valid = 0;
+    const unsigned long long mapped = compact_atten_mapped_voxel(
+        voxel, symmetryMode, symIds[branch], zMirrors[branch], nx, ny, nz,
+        plane, &valid);
+    if (valid != 0) {
+      factor = compact_atten_decode(
+          attSlices[static_cast<unsigned long long>(slice) * nvox + mapped],
+          power);
+    }
+  }
+  out[index] = branchMajor[index] * factor;
 }
 
 // compact_transform_backward_add_batch with the CTAC factor applied at the

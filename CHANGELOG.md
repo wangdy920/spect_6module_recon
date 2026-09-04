@@ -8,6 +8,29 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- CSRB CTAC moved to the factorised path and the fused/baked attenuation
+  kernels are gone. Both matrix formats now apply the u16 factor in the image
+  domain per compact angle: the CSRB branch batch is scaled by
+  `compact_branch_batch_atten_scale` before the forward, each angle's rows
+  are addressed as a sub-CSR (production packed-K row kernels on the chunk
+  arrays with the row pointer offset; per-RHS cuSPARSE CSR_ALG2 for the
+  transpose), and `compact_transform_backward_add_batch_atten` scales the
+  scattered outputs; only the chunk's factor slices are staged (shared
+  double-buffered slots), so no 2.3 GB table per bed stays resident. CTAC
+  runs of both formats use the resident branch-batch path (device rotation /
+  PSF / update) and the per-window energy exponent. Removed:
+  `compact_bake_atten_values`, `compact_atten_fused_spmv/spmvt`,
+  `compactAttenSpmv[T]FloatCUDA`,
+  `compactDeviceRatioAttenSpmvTAccumulateFloatCUDA`, `CompactAttenBakeParams`,
+  `SPECT_COMPACT_CTAC_BAKED_REFERENCE`, the per-bed device tables, and the
+  self-referential prepared/attenuated host chunk cache in CudaChunkCache
+  (net -550 lines). Gates: the CTAC unit test now checks CSRB and CSRQ
+  against an independent host oracle of the per-nnz model (<= 1e-5, plus the
+  adjoint identity); MDP mouse beds 2-3 (real CT mu-map) new CSRB path vs the
+  old fused path MLEM it20 relL2 1.2e-7 with the denominator recomputed;
+  CSRB Derenzo it50 guard relL2 1.15e-7. Time for two beds: 44 -> 2.35 s/iter
+  (CSRQ 0.60). The embedded changelog is now emitted as adjacent raw literals
+  so MSVC's 16 KB single-literal limit no longer breaks the build.
 - Dual-window CTAC via per-window energy scaling of one factor table. Under
   the water-scaled mu model shared by auto-mu and the HU->mu pipeline
   (mu = mu_water(E) * body), the attenuation factor at another photon energy

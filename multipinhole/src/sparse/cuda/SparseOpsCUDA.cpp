@@ -32,6 +32,7 @@
 #include <cstring>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -224,34 +225,6 @@ bool spmvTFloatCUDA(const io::CSRView &matrix, const float *x, float *y) {
   return true;
 }
 
-bool compactAttenSpmvFloatCUDA(const io::CSRView &matrix,
-                               const uint16_t *attFactors, size_t attCount,
-                               const cuda::CompactAttenBakeParams &params,
-                               const float *x, float *y, int cacheSlot) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().executeCompactAttenSpMVFloat(matrix, attFactors, attCount,
-                                           params, x, y,
-                                           CUSPARSE_OPERATION_NON_TRANSPOSE,
-                                           cacheSlot);
-  return true;
-}
-
-bool compactAttenSpmvTFloatCUDA(const io::CSRView &matrix,
-                                const uint16_t *attFactors, size_t attCount,
-                                const cuda::CompactAttenBakeParams &params,
-                                const float *x, float *y, int cacheSlot) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().executeCompactAttenSpMVFloat(matrix, attFactors, attCount,
-                                           params, x, y,
-                                           CUSPARSE_OPERATION_TRANSPOSE,
-                                           cacheSlot);
-  return true;
-}
-
 bool compactDeviceBackwardBeginCUDA(size_t voxelCount, int accumulatorIndex) {
   if (!isCudaAvailable()) {
     return false;
@@ -299,22 +272,56 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
   return true;
 }
 
-bool compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const float *x, const uint16_t *attFactors,
-    size_t attCount, const cuda::CompactAttenBakeParams &attenParams,
-    const double *fullProjection, size_t fullProjectionCount,
-    const cuda::CompactDeviceRatioParams &ratioParams,
-    const cuda::CompactDeviceTransformParams &transformParams,
+bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix, const double *const *fullProjections,
+    size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &commonRatioParams,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int branchCount, int bedCount,
+    const uint16_t *const *bedAttFactors, size_t attCount, double attPower,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
-    int cacheSlot) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming) {
   if (!isCudaAvailable()) {
     return false;
   }
-  cudaState().executeCompactDeviceRatioAttenSpmvTAccumulateFloat(
-      matrix, x, attFactors, attCount, attenParams, fullProjection,
-      fullProjectionCount, ratioParams, transformParams, ratioTiming,
-      backwardTiming, accumulatorIndex, cacheSlot);
+  cudaState().executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat(
+      matrix, fullProjections, fullProjectionCount, commonRatioParams,
+      commonTransformParams, symIds, zMirrors, branchCount, bedCount,
+      bedAttFactors, attCount, attPower, ratioTiming, backwardTiming, 0, 0);
+  return true;
+}
+
+bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView &matrix,
+    const cuda::CompactDeviceRatioParams &commonRatioParams,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int branchCount,
+    const uint16_t *attFactors, size_t attCount, double attPower,
+    const double *rowWeights, size_t fullProjectionCount,
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactSensitivityBranchBatchAttenSpmvTAccumulateFloat(
+      matrix, commonRatioParams, commonTransformParams, symIds, zMirrors,
+      branchCount, attFactors, attCount, attPower, rowWeights,
+      fullProjectionCount, backwardTiming, accumulatorIndex);
+  return true;
+}
+
+bool compactBranchBatchAttenForwardCUDA(
+    const io::CSRView &matrix,
+    const cuda::CompactDeviceRatioParams &commonRatioParams,
+    const cuda::CompactDeviceTransformParams &commonTransformParams,
+    const int *symIds, const int *zMirrors, int branchCount,
+    const uint16_t *attFactors, size_t attCount, double attPower,
+    float *hostYhatBatch, size_t count) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().executeCompactBranchBatchAttenForward(
+      matrix, commonRatioParams, commonTransformParams, symIds, zMirrors,
+      branchCount, attFactors, attCount, attPower, hostYhatBatch, count);
   return true;
 }
 
@@ -615,15 +622,28 @@ bool spmvTFloatCUDA(const io::CSRView &, const float *, float *) {
   return false;
 }
 
-bool compactAttenSpmvFloatCUDA(const io::CSRView &, const uint16_t *, size_t,
-                               const cuda::CompactAttenBakeParams &,
-                               const float *, float *) {
+bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView &, const double *const *, size_t,
+    const CompactDeviceRatioParams &, const CompactDeviceTransformParams &,
+    const int *, const int *, int, int, const uint16_t *const *, size_t, double,
+    CompactDeviceRatioTiming *, CompactDeviceBackwardTiming *) {
   return false;
 }
 
-bool compactAttenSpmvTFloatCUDA(const io::CSRView &, const uint16_t *, size_t,
-                                const cuda::CompactAttenBakeParams &,
-                                const float *, float *) {
+bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
+    const io::CSRView &, const CompactDeviceRatioParams &,
+    const CompactDeviceTransformParams &, const int *, const int *, int,
+    const uint16_t *, size_t, double, const double *, size_t,
+    CompactDeviceBackwardTiming *, int) {
+  return false;
+}
+
+bool compactBranchBatchAttenForwardCUDA(const io::CSRView &,
+                                        const CompactDeviceRatioParams &,
+                                        const CompactDeviceTransformParams &,
+                                        const int *, const int *, int,
+                                        const uint16_t *, size_t, double,
+                                        float *, size_t) {
   return false;
 }
 
