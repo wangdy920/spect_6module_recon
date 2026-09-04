@@ -188,9 +188,9 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 3. 分母改 unit 模式 + 行权重；manifest 加 W_k 与 att 表哈希（带 CTAC 也能缓存）。
 4. 删除无引用的全矩阵/子集路径。
 
-**P1 — 优化器上设备**
-5. xCurrent/xNext 双缓冲（fp64）；`bsrem_rdp_update` 核；`residentMlemEligible` 去掉算法条件，`residentBatchInput` 去掉 `bedCount > 1`。文件：新 `projdomain_image_update.cu`（或并入现有 .cu）、`CompactSymmetricReconLoop.cpp`、`BsremUpdate.h`（oracle 不变）。
-6. 测试：RDP 有限差分、BSREM oracle 逐迭代、双窗 penalty 一次。
+**P1 — 优化器上设备**（已完成，提交 `80aabd2`）
+5. ~~xCurrent/xNext 双缓冲~~ → 执行时改为两核方案：先用现有 RDP/TV 梯度核（保留 CT 引导权重逻辑）从设备图像算出 ∇R 到独立缓冲，再逐体素原位更新（`compact_bsrem_update`，逐项复刻 `applyBsremUpdate`），不需要 ping-pong；`residentUpdateEligible` 去掉算法条件，`residentBatchInput` 去掉 `bedCount > 1` 与背景项限制。
+6. 测试：BSREM oracle（单元 + Derenzo it1–5 relL2 ≤ 1.1e-8）。RDP 有限差分与双窗 penalty-once 测试留待 P2 一并补。**发现：** `algo_bsrem.conf`（δ=0.01）的迭代对 fp32 累加噪声每迭代放大 2–3×，同一二进制两次运行 it20 相差 ~1e-3，BSREM 门只能取早期迭代。
 
 **P2 — CTAC 因子分解**
 7. `pack_branch8_atten`、按角度组的 x̃/y 布局、`atten_transform_backward_add`；CSRB 与 CSRQ 两后端；表驻留进 plan；删 CSRB 旧 atten 核。前提：准备一套真实 μ 表测试数据（现仓库无 CTAC 回归数据）。

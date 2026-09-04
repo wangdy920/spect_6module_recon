@@ -8,6 +8,22 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- BSREM-II + RDP now runs on the resident device image (P1 of the Poisson
+  data-term design): the regularizer gradient is formed from the device image
+  (`computeRegGradientDeviceCUDA`, RDP/TV with the CT-guided weights), the
+  curvature surrogate and kappa map live on the device, and
+  `compact_bsrem_update` applies the same relative update as the host
+  `applyBsremUpdate` (clip [-0.9, 1], sensitivity floor, non-negativity). The
+  host update remains for `-bsremDiag`, the MLEM-equivalence debug mode and
+  in-iteration output filters. Single-bed runs (MLEM and BSREM, CSRB and CSRQ,
+  with or without background) use the resident branch-batch path as well, so
+  no per-iteration host rotation / PSF / numerator download remains on the
+  default path. Device vs host BSREM Derenzo it1–5 relL2 ≤ 1.1e-8; MLEM it50
+  relL2 5.0e-8 vs the host single-bed run. Note for regression design: with
+  `algo_bsrem.conf` (RDP delta 0.01, kappa map, clipping) the iteration
+  amplifies fp32 accumulation noise by ~2–3x per iteration, so two runs of the
+  same binary differ by ~1e-3 relL2 at it20 (5e-8 at it1); BSREM gates must
+  compare early iterations.
 - Projector contract refactor (P0 of the Poisson data-term design,
   `reports/2026-09-04-final-design-poisson-data-term.md`): the channel-form
   entry points are `accumulatePoissonBackprojectedRatioCUDA` (q) and
