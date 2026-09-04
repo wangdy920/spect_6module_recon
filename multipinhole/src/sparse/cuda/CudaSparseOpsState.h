@@ -691,6 +691,7 @@ public:
     TimedCudaStagePair ratioTiming;
     ratioTiming.recordStart(nullptr);
     launchCompactRatioKernel(dOutput_.get(), dCompactProjectionInput_[slot].get(),
+                             compactBackgroundDeviceLocked(cacheSlot),
                              fullProjectionCount, params, dChunkInput_.get(),
                              static_cast<size_t>(rows), 1e-10);
     ratioTiming.recordStop(nullptr);
@@ -865,6 +866,7 @@ public:
     ratioTiming.recordStart(nullptr);
     launchCompactRatioKernel(dOutput_.get(),
                              dCompactProjectionInput_[projectionSlot].get(),
+                             compactBackgroundDeviceLocked(cacheSlot),
                              fullProjectionCount, ratioParams,
                              dChunkInput_.get(), static_cast<size_t>(rows),
                              1e-10);
@@ -981,6 +983,7 @@ public:
     ratioTiming.recordStart(nullptr);
     launchCompactRatioKernel(dOutput_.get(),
                              dCompactProjectionInput_[projectionSlot].get(),
+                             compactBackgroundDeviceLocked(cacheSlot),
                              fullProjectionCount, ratioParams,
                              dChunkInput_.get(), static_cast<size_t>(rows),
                              1e-10);
@@ -1113,6 +1116,7 @@ public:
           dBatchOutput_.get() + offset,
           dCompactProjectionInput_[static_cast<size_t>(cacheSlotBase + bed)]
               .get(),
+          compactBackgroundDeviceLocked(cacheSlotBase + bed),
           fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
           dBatchZMirrors_.get(), branchCount, dBatchOutput_.get() + offset,
           static_cast<size_t>(rows), 1e-10);
@@ -1427,6 +1431,15 @@ private:
                                       uploadStart)
             .count(),
         count * sizeof(double));
+  }
+
+  // Device background for a projection slot, or nullptr when the last
+  // refreshCompactProjection for that slot carried none.
+  const double *compactBackgroundDeviceLocked(int cacheSlot) const {
+    const size_t slot = static_cast<size_t>(cacheSlot);
+    return compactBackgroundHostKey_[slot] != nullptr
+               ? dCompactBackgroundInput_[slot].get()
+               : nullptr;
   }
 
   void uploadDoubleAsync(DeviceArray<float> &dev, const double *src,

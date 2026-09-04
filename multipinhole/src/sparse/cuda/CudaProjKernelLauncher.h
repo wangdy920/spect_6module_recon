@@ -20,14 +20,17 @@ void launchProjDomainRatioKernel(const float *yhat, const float *projections,
                                  size_t count, float eps,
                                  cudaStream_t stream = nullptr);
 
+// fullBackground: device additive background (same layout as fullProjection)
+// or nullptr for none.
 void launchCompactRatioKernel(
-    const float *yhat, const double *fullProjection, size_t fullProjectionCount,
+    const float *yhat, const double *fullProjection,
+    const double *fullBackground, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
     double eps, cudaStream_t stream = nullptr);
 
 void launchCompactRatioBatchKernel(
     const float *yhatBatch, const double *fullProjection,
-    size_t fullProjectionCount,
+    const double *fullBackground, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
     const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
     double eps, cudaStream_t stream = nullptr);

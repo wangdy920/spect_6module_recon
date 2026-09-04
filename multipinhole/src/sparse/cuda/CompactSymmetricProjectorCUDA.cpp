@@ -892,35 +892,6 @@ void transformForward(const double *input, std::vector<double> &output,
   transformForwardInto(input, output.data(), meta, symId, zMirror, threads);
 }
 
-void transformBackwardAdd(const double *rotated, std::vector<double> &accum,
-                          const spect::io::CompactSymmetryMetadata &meta,
-                          int symId, bool zMirror, int threads) {
-  const int nx = meta.Nx;
-  const int ny = meta.Ny;
-  const int nz = meta.Nz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  const size_t nvox = plane * static_cast<size_t>(nz);
-  if (accum.size() != nvox) {
-    accum.assign(nvox, 0.0);
-  }
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(nvox); ++idx) {
-    const size_t uidx = static_cast<size_t>(idx);
-    const int iz = static_cast<int>(uidx / plane);
-    const int rem = static_cast<int>(uidx - static_cast<size_t>(iz) * plane);
-    const int iy = rem / nx;
-    const int ix = rem - iy * nx;
-    const spect::io::CompactVoxelCoord mapped =
-        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
-    accum[static_cast<size_t>(mapped.z) * plane +
-          static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
-          static_cast<size_t>(mapped.x)] += rotated[uidx];
-  }
-}
-
 void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
                           const spect::io::CompactSymmetryMetadata &meta,
                           int symId, bool zMirror, int threads) {
@@ -951,13 +922,6 @@ void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
   }
 }
 
-void transformBackwardAdd(const std::vector<double> &rotated,
-                          std::vector<double> &accum,
-                          const spect::io::CompactSymmetryMetadata &meta,
-                          int symId, bool zMirror, int threads) {
-  transformBackwardAdd(rotated.data(), accum, meta, symId, zMirror, threads);
-}
-
 void makeUnitRatioChunkFloat(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int rows, int symId, bool zMirror, std::vector<float> &ratio, int threads) {
@@ -973,34 +937,6 @@ void makeUnitRatioChunkFloat(
             fullIndex)
             ? 1.0f
             : 0.0f;
-  }
-}
-
-void makeProjectionRatioChunkFloat(const spect::io::CompactSymmetryMetadata &meta,
-                                   int compactRowBase,
-                                   const double *fullProjection,
-                                   const double *fullBackground,
-                                   const std::vector<float> &y, int symId,
-                                   bool zMirror, std::vector<float> &ratio,
-                                   int threads) {
-  ratio.resize(y.size());
-  constexpr double kEps = 1e-10;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(y.size()); ++row) {
-    uint64_t fullIndex = 0;
-    if (!spect::io::fullProjectionIndexFromCompactRow(
-            meta, compactRowBase + static_cast<int>(row), symId, zMirror,
-            fullIndex)) {
-      ratio[static_cast<size_t>(row)] = 0.0f;
-      continue;
-    }
-    const double background = fullBackground ? fullBackground[fullIndex] : 0.0;
-    const double q = std::max(
-        static_cast<double>(y[static_cast<size_t>(row)]) + background, kEps);
-    ratio[static_cast<size_t>(row)] =
-        static_cast<float>(fullProjection[fullIndex] / q);
   }
 }
 
@@ -1386,250 +1322,18 @@ bool runCompactChunkMlemNumerCUDA(
     const double *smoothedImage, int threads, double *numer,
     bool reverseChunkOrder, CompactSymmetricStageTiming *timing,
     const uint16_t *attFactors, bool refreshProjectionInput) {
-  if (chunks.totalRows() != static_cast<uint64_t>(meta.compactRows()) ||
-      chunks.cols() != meta.totalVoxels) {
-    throw std::runtime_error("compact chunk numerator matrix/metadata mismatch.");
-  }
-  if (meta.Nx != meta.Ny) {
-    throw std::runtime_error("compact chunk CUDA helper requires Nx == Ny.");
-  }
-
-  if (isCsrqDirectory(chunks)) {
-    // One CSRQ path for any bed count; the channel form owns it.
-    const double *const projections[] = {fullProjection};
-    const double *const backgrounds[] = {fullBackground};
-    const double *const images[] = {smoothedImage};
-    double *const numers[] = {numer};
-    const uint16_t *const attFactorList[] = {attFactors};
-    return accumulatePoissonBackprojectedRatioCUDA(
-        singleChannel(chunks), meta, projections,
-        fullBackground == nullptr ? nullptr : backgrounds, images, 1, threads,
-        numers, reverseChunkOrder, timing,
-        attFactors == nullptr ? nullptr : attFactorList,
-        refreshProjectionInput, false, true);
-  }
-
-  warmCompactChunks(chunks);
-  applyCompactCsrLocalityHint(chunks, meta);
-
-  const auto totalStart = Clock::now();
-  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
-  const auto branches = enumerateCompactBranches(meta);
-  const size_t chunkCount = chunks.chunks().size();
-
-  // The fused device-ratio/device-backward kernels have no attenuation
-  // semantics; CTAC forces the generic bake + spmv route.
-  const bool useDeviceBackward = attFactors == nullptr;
-  const bool useDeviceRatio =
-      fullBackground == nullptr && attFactors == nullptr;
-  const bool useBranchBatch =
-      compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
-      attFactors == nullptr && branches.size() > 1;
-  const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-  if (useDeviceRatio && refreshProjectionInput &&
-      !refreshCompactProjectionCUDA(fullProjection, fullProjectionCount)) {
-    return false;
-  }
-  std::fill(numer, numer + nvox, 0.0);
-
-  std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
-  std::vector<float> y;
-  std::vector<float> ratio;
-  std::vector<float> bpRot;
-  std::vector<double> accum;
-
-  if (useDeviceBackward) {
-    if (!compactDeviceBackwardBeginCUDA(nvox)) {
-      return false;
-    }
-  } else {
-    bpRot.assign(nvox, 0.0f);
-    accum.assign(nvox, 0.0);
-  }
-
-  for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-    const auto &branch = branches[branchIndex];
-    float *imgRot = rotatedImages.data() + branchIndex * nvox;
-    const auto stageStart = Clock::now();
-    transformForwardIntoFloat(smoothedImage, imgRot, meta, branch.symId,
-                              branch.zMirror, threads);
-    if (timing)
-      addTiming(timing->transformForwardSeconds, stageStart);
-  }
-  if (useBranchBatch &&
-      !refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
-                                          rotatedImages.size())) {
-    return false;
-  }
-  std::vector<int> branchSymIds(branches.size());
-  std::vector<int> branchZMirrors(branches.size());
-  for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-    branchSymIds[branchIndex] = branches[branchIndex].symId;
-    branchZMirrors[branchIndex] = branches[branchIndex].zMirror ? 1 : 0;
-  }
-  const double *fullProjections[] = {fullProjection};
-
-  const auto processChunk = [&](size_t chunkIndex) -> bool {
-    const auto chunk = chunks.loadChunk(chunkIndex);
-    const spect::io::CSRView view = chunk->view();
-    prefetchNextCompactChunk(chunks, chunkIndex, chunkCount, reverseChunkOrder,
-                             view);
-    const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
-    if (useBranchBatch) {
-      CompactDeviceRatioTiming deviceTiming;
-      CompactDeviceBackwardTiming backwardTiming;
-      const CompactDeviceRatioParams commonRatio =
-          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
-      const CompactDeviceTransformParams commonTransform =
-          makeCompactDeviceTransformParams(meta, 0, false);
-      const bool ok = compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
-          view, fullProjections, fullProjectionCount, commonRatio,
-          commonTransform, branchSymIds.data(), branchZMirrors.data(),
-          static_cast<int>(branches.size()), 1, &deviceTiming,
-          &backwardTiming);
-      if (!ok) {
-        return false;
-      }
-      if (timing) {
-        timing->forwardSeconds += deviceTiming.forwardSeconds;
-        timing->ratioSeconds += deviceTiming.ratioSeconds;
-        timing->backwardSeconds += deviceTiming.backwardSeconds;
-        timing->transformBackwardSeconds +=
-            backwardTiming.transformBackwardSeconds;
-      }
-      return true;
-    }
-    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-      const auto &branch = branches[branchIndex];
-      const float *imgRot = rotatedImages.data() + branchIndex * nvox;
-      if (useDeviceRatio) {
-        CompactDeviceRatioTiming deviceTiming;
-        const CompactDeviceRatioParams params = makeCompactDeviceRatioParams(
-            meta, compactRowBase, branch.symId, branch.zMirror);
-        if (useDeviceBackward) {
-          CompactDeviceBackwardTiming backwardTiming;
-          const CompactDeviceTransformParams transformParams =
-              makeCompactDeviceTransformParams(meta, branch.symId,
-                                               branch.zMirror);
-          if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
-                  view, imgRot, fullProjection, fullProjectionCount, params,
-                  transformParams, &deviceTiming, &backwardTiming)) {
-            return false;
-          }
-          if (timing) {
-            timing->forwardSeconds += deviceTiming.forwardSeconds;
-            timing->ratioSeconds += deviceTiming.ratioSeconds;
-            timing->backwardSeconds += deviceTiming.backwardSeconds;
-            timing->transformBackwardSeconds +=
-                backwardTiming.transformBackwardSeconds;
-          }
-          continue;
-        }
-        if (!compactDeviceRatioSpmvTFloatCUDA(
-                view, imgRot, fullProjection, fullProjectionCount, params,
-                bpRot.data(), &deviceTiming)) {
-          return false;
-        }
-        if (timing) {
-          timing->forwardSeconds += deviceTiming.forwardSeconds;
-          timing->ratioSeconds += deviceTiming.ratioSeconds;
-          timing->backwardSeconds += deviceTiming.backwardSeconds;
-        }
-        const auto stageStart = Clock::now();
-        transformBackwardAdd(bpRot.data(), accum, meta, branch.symId,
-                             branch.zMirror, threads);
-        if (timing)
-          addTiming(timing->transformBackwardSeconds, stageStart);
-        continue;
-      }
-      y.assign(static_cast<size_t>(view.rows), 0.0f);
-      auto stageStart = Clock::now();
-      const bool forwardOk =
-          attFactors != nullptr
-              ? compactAttenSpmvFloatCUDA(
-                    view, attFactors, compactAttenTableCount(meta),
-                    makeCompactAttenBakeParams(meta, compactRowBase,
-                                               branch.symId, branch.zMirror),
-                    imgRot, y.data())
-              : spmvFloatCUDA(view, imgRot, y.data());
-      if (!forwardOk) {
-        return false;
-      }
-      if (timing)
-        addTiming(timing->forwardSeconds, stageStart);
-
-      stageStart = Clock::now();
-      makeProjectionRatioChunkFloat(meta, compactRowBase, fullProjection,
-                                    fullBackground, y, branch.symId,
-                                    branch.zMirror, ratio, threads);
-      if (timing)
-        addTiming(timing->ratioSeconds, stageStart);
-      if (useDeviceBackward) {
-        CompactDeviceBackwardTiming deviceTiming;
-        const CompactDeviceTransformParams transformParams =
-            makeCompactDeviceTransformParams(meta, branch.symId,
-                                             branch.zMirror);
-        if (!compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-                view, ratio.data(), transformParams, &deviceTiming)) {
-          return false;
-        }
-        if (timing) {
-          timing->backwardSeconds += deviceTiming.backwardSeconds;
-          timing->transformBackwardSeconds +=
-              deviceTiming.transformBackwardSeconds;
-        }
-        continue;
-      }
-      stageStart = Clock::now();
-      std::fill(bpRot.begin(), bpRot.end(), 0.0f);
-      const bool backwardOk =
-          attFactors != nullptr
-              ? compactAttenSpmvTFloatCUDA(
-                    view, attFactors, compactAttenTableCount(meta),
-                    makeCompactAttenBakeParams(meta, compactRowBase,
-                                               branch.symId, branch.zMirror),
-                    ratio.data(), bpRot.data())
-              : spmvTFloatCUDA(view, ratio.data(), bpRot.data());
-      if (!backwardOk) {
-        return false;
-      }
-      if (timing)
-        addTiming(timing->backwardSeconds, stageStart);
-      stageStart = Clock::now();
-      transformBackwardAdd(bpRot.data(), accum, meta, branch.symId,
-                           branch.zMirror, threads);
-      if (timing)
-        addTiming(timing->transformBackwardSeconds, stageStart);
-    }
-    return true;
-  };
-
-  if (reverseChunkOrder) {
-    for (size_t chunkIndex = chunkCount; chunkIndex-- > 0;) {
-      if (!processChunk(chunkIndex)) {
-        return false;
-      }
-    }
-  } else {
-    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-      if (!processChunk(chunkIndex)) {
-        return false;
-      }
-    }
-  }
-
-  if (useDeviceBackward) {
-    if (!compactDeviceBackwardDownloadCUDA(numer, nvox)) {
-      return false;
-    }
-  } else {
-    std::copy(accum.begin(), accum.end(), numer);
-  }
-  if (timing) {
-    timing->numeratorSeconds += elapsedSeconds(totalStart);
-    ++timing->numeratorCalls;
-  }
-  return true;
+  // One-bed form of the channel path; both formats share it.
+  const double *const projections[] = {fullProjection};
+  const double *const backgrounds[] = {fullBackground};
+  const double *const images[] = {smoothedImage};
+  double *const numers[] = {numer};
+  const uint16_t *const attFactorList[] = {attFactors};
+  return accumulatePoissonBackprojectedRatioCUDA(
+      singleChannel(chunks), meta, projections,
+      fullBackground == nullptr ? nullptr : backgrounds, images, 1, threads,
+      numers, reverseChunkOrder, timing,
+      attFactors == nullptr ? nullptr : attFactorList, refreshProjectionInput,
+      false, true);
 }
 
 bool computeCompactChunkForwardProjectionCUDA(
@@ -1821,18 +1525,13 @@ bool accumulatePoissonBackprojectedRatioCUDA(
         branchBatchInputPrepared, downloadBackwardOutputs);
   }
 
+  // CSRB: one device path for any bed count. The ratio p/(A x + b) and the
+  // backward accumulation always stay on the device; CTAC only selects the
+  // attenuation-aware per-branch kernels instead of the branch batch.
   const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
-  if (bedCount == 1) {
-    if (branchBatchInputPrepared || !downloadBackwardOutputs) {
-      throw std::runtime_error(
-          "compact resident branch-batch execution requires multiple beds.");
-    }
-    return runCompactChunkMlemNumerCUDA(
-        chunks, meta, fullProjections[0],
-        fullBackgrounds == nullptr ? nullptr : fullBackgrounds[0],
-        smoothedImages[0], threads, numers[0], reverseChunkOrder, timing,
-        attFactors == nullptr ? nullptr : attFactors[0],
-        refreshProjectionInputs);
+  if (bedCount == 1 && (branchBatchInputPrepared || !downloadBackwardOutputs)) {
+    throw std::runtime_error(
+        "compact resident branch-batch execution requires multiple beds.");
   }
   applyCompactCsrLocalityHint(chunks, meta);
 
@@ -1842,22 +1541,18 @@ bool accumulatePoissonBackprojectedRatioCUDA(
   const size_t branchCount = branches.size();
   const size_t chunkCount = chunks.chunks().size();
 
-  // Keep the projection ratio and backward accumulator resident whenever the
-  // requested inputs are supported by the exact device path.
-  const bool useDeviceRatio = !hasBackground;
-  const bool useDeviceBackward = !hasAtten || useDeviceRatio;
   const bool useBranchBatch =
-      compactBranchBatchEnabled() && useDeviceRatio && useDeviceBackward &&
-      !hasAtten && branchCount > 1;
+      compactBranchBatchEnabled() && !hasAtten && branchCount > 1;
   if (branchBatchInputPrepared && !useBranchBatch) {
     throw std::runtime_error(
         "compact resident branch-batch input requires the batch CUDA path.");
   }
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-  if (useDeviceRatio && refreshProjectionInputs) {
+  if (refreshProjectionInputs) {
     for (int bed = 0; bed < bedCount; ++bed) {
-      if (!refreshCompactProjectionCUDA(fullProjections[bed],
-                                        fullProjectionCount, bed)) {
+      if (!refreshCompactProjectionCUDA(
+              fullProjections[bed], fullProjectionCount, bed,
+              fullBackgrounds == nullptr ? nullptr : fullBackgrounds[bed])) {
         return false;
       }
     }
@@ -1868,22 +1563,12 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     rotatedImages.assign(static_cast<size_t>(bedCount) * branchCount * nvox,
                          0.0f);
   }
-  std::vector<std::vector<double>> accum;
-  std::vector<float> bpRot;
-  if (!useDeviceBackward) {
-    accum.assign(static_cast<size_t>(bedCount), std::vector<double>(nvox, 0.0));
-    bpRot.assign(nvox, 0.0f);
-  }
-  std::vector<float> y;
-  std::vector<float> ratio;
 
   for (int bed = 0; bed < bedCount; ++bed) {
     if (downloadBackwardOutputs)
       std::fill(numers[bed], numers[bed] + nvox, 0.0);
-    if (useDeviceBackward) {
-      if (!compactDeviceBackwardBeginCUDA(nvox, bed)) {
-        return false;
-      }
+    if (!compactDeviceBackwardBeginCUDA(nvox, bed)) {
+      return false;
     }
     if (branchBatchInputPrepared)
       continue;
@@ -1944,135 +1629,42 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     }
     for (int bed = 0; bed < bedCount; ++bed) {
       const double *fullProjection = fullProjections[bed];
-      const double *fullBackground =
-          fullBackgrounds == nullptr ? nullptr : fullBackgrounds[bed];
-
+      const uint16_t *bedAtt = attFactors == nullptr ? nullptr : attFactors[bed];
       for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
         const auto &branch = branches[branchIndex];
         const float *imgRot =
             rotatedImages.data() +
             (static_cast<size_t>(bed) * branchCount + branchIndex) * nvox;
-        if (useDeviceRatio) {
         CompactDeviceRatioTiming deviceTiming;
+        CompactDeviceBackwardTiming backwardTiming;
         const CompactDeviceRatioParams params = makeCompactDeviceRatioParams(
             meta, compactRowBase, branch.symId, branch.zMirror);
-        if (useDeviceBackward) {
-          CompactDeviceBackwardTiming backwardTiming;
-          const CompactDeviceTransformParams transformParams =
-              makeCompactDeviceTransformParams(meta, branch.symId,
-                                               branch.zMirror);
-          const uint16_t *bedAtt =
-              attFactors == nullptr ? nullptr : attFactors[bed];
-          if (bedAtt != nullptr) {
-            if (!compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
-                    view, imgRot, bedAtt, compactAttenTableCount(meta),
-                    makeCompactAttenBakeParams(meta, compactRowBase,
-                                               branch.symId, branch.zMirror),
-                    fullProjection, fullProjectionCount, params,
-                    transformParams, &deviceTiming, &backwardTiming, bed,
-                    bed)) {
-              return false;
-            }
-          } else {
-            if (!compactDeviceRatioSpmvTAccumulateFloatCUDA(
-                    view, imgRot, fullProjection, fullProjectionCount, params,
-                    transformParams, &deviceTiming, &backwardTiming, bed,
-                    bed)) {
-              return false;
-            }
-          }
-          if (timing) {
-            timing->forwardSeconds += deviceTiming.forwardSeconds;
-            timing->ratioSeconds += deviceTiming.ratioSeconds;
-            timing->backwardSeconds += deviceTiming.backwardSeconds;
-            timing->transformBackwardSeconds +=
-                backwardTiming.transformBackwardSeconds;
-          }
-          continue;
-        }
-          if (!compactDeviceRatioSpmvTFloatCUDA(
-                  view, imgRot, fullProjection, fullProjectionCount, params,
-                  bpRot.data(), &deviceTiming, bed)) {
-            return false;
-          }
-          if (timing) {
-            timing->forwardSeconds += deviceTiming.forwardSeconds;
-            timing->ratioSeconds += deviceTiming.ratioSeconds;
-            timing->backwardSeconds += deviceTiming.backwardSeconds;
-          }
-          const auto stageStart = Clock::now();
-          std::vector<double> &bedAccum = accum[static_cast<size_t>(bed)];
-          transformBackwardAdd(bpRot.data(), bedAccum, meta, branch.symId,
-                               branch.zMirror, threads);
-          if (timing)
-            addTiming(timing->transformBackwardSeconds, stageStart);
-          continue;
-        }
-
-        const uint16_t *bedAtt =
-            attFactors == nullptr ? nullptr : attFactors[bed];
-        y.assign(static_cast<size_t>(view.rows), 0.0f);
-        auto stageStart = Clock::now();
-        const bool forwardOk =
+        const CompactDeviceTransformParams transformParams =
+            makeCompactDeviceTransformParams(meta, branch.symId,
+                                             branch.zMirror);
+        const bool ok =
             bedAtt != nullptr
-                ? compactAttenSpmvFloatCUDA(
-                      view, bedAtt, compactAttenTableCount(meta),
+                ? compactDeviceRatioAttenSpmvTAccumulateFloatCUDA(
+                      view, imgRot, bedAtt, compactAttenTableCount(meta),
                       makeCompactAttenBakeParams(meta, compactRowBase,
                                                  branch.symId, branch.zMirror),
-                      imgRot, y.data(), bed)
-                : spmvFloatCUDA(view, imgRot, y.data());
-        if (!forwardOk) {
+                      fullProjection, fullProjectionCount, params,
+                      transformParams, &deviceTiming, &backwardTiming, bed,
+                      bed)
+                : compactDeviceRatioSpmvTAccumulateFloatCUDA(
+                      view, imgRot, fullProjection, fullProjectionCount,
+                      params, transformParams, &deviceTiming, &backwardTiming,
+                      bed, bed);
+        if (!ok) {
           return false;
         }
-        if (timing)
-          addTiming(timing->forwardSeconds, stageStart);
-
-        stageStart = Clock::now();
-        makeProjectionRatioChunkFloat(meta, compactRowBase, fullProjection,
-                                      fullBackground, y, branch.symId,
-                                      branch.zMirror, ratio, threads);
-        if (timing)
-          addTiming(timing->ratioSeconds, stageStart);
-
-        if (useDeviceBackward && bedAtt == nullptr) {
-          CompactDeviceBackwardTiming deviceTiming;
-          const CompactDeviceTransformParams transformParams =
-              makeCompactDeviceTransformParams(meta, branch.symId,
-                                               branch.zMirror);
-          if (!compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-                  view, ratio.data(), transformParams, &deviceTiming, bed)) {
-            return false;
-          }
-          if (timing) {
-            timing->backwardSeconds += deviceTiming.backwardSeconds;
-            timing->transformBackwardSeconds +=
-                deviceTiming.transformBackwardSeconds;
-          }
-          continue;
+        if (timing) {
+          timing->forwardSeconds += deviceTiming.forwardSeconds;
+          timing->ratioSeconds += deviceTiming.ratioSeconds;
+          timing->backwardSeconds += deviceTiming.backwardSeconds;
+          timing->transformBackwardSeconds +=
+              backwardTiming.transformBackwardSeconds;
         }
-
-        stageStart = Clock::now();
-        std::fill(bpRot.begin(), bpRot.end(), 0.0f);
-        const bool backwardOk =
-            bedAtt != nullptr
-                ? compactAttenSpmvTFloatCUDA(
-                      view, bedAtt, compactAttenTableCount(meta),
-                      makeCompactAttenBakeParams(meta, compactRowBase,
-                                                 branch.symId, branch.zMirror),
-                      ratio.data(), bpRot.data(), bed)
-                : spmvTFloatCUDA(view, ratio.data(), bpRot.data());
-        if (!backwardOk) {
-          return false;
-        }
-        if (timing)
-          addTiming(timing->backwardSeconds, stageStart);
-
-        stageStart = Clock::now();
-        std::vector<double> &bedAccum = accum[static_cast<size_t>(bed)];
-        transformBackwardAdd(bpRot.data(), bedAccum, meta, branch.symId,
-                             branch.zMirror, threads);
-        if (timing)
-          addTiming(timing->transformBackwardSeconds, stageStart);
       }
     }
     return true;
@@ -2094,13 +1686,8 @@ bool accumulatePoissonBackprojectedRatioCUDA(
 
   if (downloadBackwardOutputs) {
     for (int bed = 0; bed < bedCount; ++bed) {
-      if (useDeviceBackward) {
-        if (!compactDeviceBackwardDownloadCUDA(numers[bed], nvox, bed)) {
-          return false;
-        }
-      } else {
-        const std::vector<double> &bedAccum = accum[static_cast<size_t>(bed)];
-        std::copy(bedAccum.begin(), bedAccum.end(), numers[bed]);
+      if (!compactDeviceBackwardDownloadCUDA(numers[bed], nvox, bed)) {
+        return false;
       }
     }
   }

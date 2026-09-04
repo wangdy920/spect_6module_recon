@@ -232,7 +232,8 @@ void launchProjDomainRatioKernel(const float *yhat, const float *projections,
 }
 
 void launchCompactRatioKernel(
-    const float *yhat, const double *fullProjection, size_t fullProjectionCount,
+    const float *yhat, const double *fullProjection,
+    const double *fullBackground, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
     double eps, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
@@ -242,6 +243,8 @@ void launchCompactRatioKernel(
   CUdeviceptr yhatPtr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(yhat));
   CUdeviceptr projectionPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullProjection));
+  CUdeviceptr backgroundPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullBackground));
   CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratio);
   unsigned long long projectionCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -249,6 +252,7 @@ void launchCompactRatioKernel(
   int zMirror = params.zMirror ? 1 : 0;
   void *args[] = {&yhatPtr,
                   &projectionPtr,
+                  &backgroundPtr,
                   &projectionCount,
                   const_cast<int *>(&params.symmetryMode),
                   const_cast<int *>(&params.compactRowBase),
@@ -432,7 +436,7 @@ void launchCompactTransformBackwardAddKernel(
 
 void launchCompactRatioBatchKernel(
     const float *yhatBatch, const double *fullProjection,
-    size_t fullProjectionCount,
+    const double *fullBackground, size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
     const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
     double eps, cudaStream_t stream) {
@@ -444,6 +448,8 @@ void launchCompactRatioBatchKernel(
       reinterpret_cast<CUdeviceptr>(const_cast<float *>(yhatBatch));
   CUdeviceptr projectionPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullProjection));
+  CUdeviceptr backgroundPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(fullBackground));
   CUdeviceptr symIdsPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dSymIds));
   CUdeviceptr zMirrorsPtr =
@@ -456,6 +462,7 @@ void launchCompactRatioBatchKernel(
       rowCount * static_cast<unsigned long long>(batchSize);
   void *args[] = {&yhatPtr,
                   &projectionPtr,
+                  &backgroundPtr,
                   &projectionCount,
                   const_cast<int *>(&commonParams.symmetryMode),
                   const_cast<int *>(&commonParams.compactRowBase),

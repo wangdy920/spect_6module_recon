@@ -45,8 +45,12 @@ extern "C" __global__ void compute_ratio_chunk(
   ratio[index] = projections[projOffset + index] / denom;
 }
 
+// Poisson ratio r = p / max(yhat + b, eps) for one symmetry branch of a compact
+// chunk. fullBackground (additive scatter estimate, same layout as the
+// measurement) may be null; the check is per row, not per nnz.
 extern "C" __global__ void compute_compact_ratio_chunk(
     const float *yhat, const double *fullProjection,
+    const double *fullBackground,
     unsigned long long fullProjectionCount, int symmetryMode,
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
@@ -108,6 +112,9 @@ extern "C" __global__ void compute_compact_ratio_chunk(
     return;
   }
   double denom = static_cast<double>(yhat[index]);
+  if (fullBackground != nullptr) {
+    denom += fullBackground[fullIndex];
+  }
   if (denom < eps) {
     denom = eps;
   }
@@ -116,6 +123,7 @@ extern "C" __global__ void compute_compact_ratio_chunk(
 
 extern "C" __global__ void compute_compact_ratio_chunk_batch(
     const float *yhatBatch, const double *fullProjection,
+    const double *fullBackground,
     unsigned long long fullProjectionCount, int symmetryMode,
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
@@ -186,6 +194,9 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     return;
   }
   double denom = static_cast<double>(yhatBatch[index]);
+  if (fullBackground != nullptr) {
+    denom += fullBackground[fullIndex];
+  }
   if (denom < eps) {
     denom = eps;
   }
