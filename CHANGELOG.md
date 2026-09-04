@@ -8,6 +8,25 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Projector contract refactor (P0 of the Poisson data-term design,
+  `reports/2026-09-04-final-design-poisson-data-term.md`): the channel-form
+  entry points are `accumulatePoissonBackprojectedRatioCUDA` (q) and
+  `computePoissonSensitivityCUDA` (S); single-directory names remain as thin
+  wrappers. CSRB: the additive background (`-bProj`) is now folded into the
+  device ratio kernels, so background runs stay on the device branch-batch
+  path (the host ratio round trip is gone; 113 keV `-bProj` output relL2
+  3.9e-8 vs the old path) and one device numerator serves any bed count
+  (single-bed CTAC now uses the fused attenuation kernels). CSRQ: the Poisson
+  ratio is computed in the forward kernel's row epilogue (`csrq_ratio_k8`
+  removed). Sensitivity with detector masks / detZ censoring / efficiency
+  weights is computed directly as `A^T W 1` through weighted unit-ratio kernels
+  in both formats instead of the synthesized `A^T((A1*W)/A1)` route
+  (denominator relL2 2.4e-8 vs the old route, same zero pattern); the
+  denominator cache manifest hashes the final row weights and the CTAC tables,
+  so CTAC runs use the auto cache too. Unreferenced full-matrix / subset CUDA
+  paths (chunked whole-matrix SpMV, full-subset EM/BSREM, generic ratio kernel)
+  are removed (~1200 lines). Derenzo CSRB MLEM it50 relL2 1.2e-7 vs the
+  2026-09-02 fp32 reference; suite 278 pass.
 - Experimental (CSRB stays the production path): joint dual-window MLEM
   (MB-JR, Phys. Med. Biol. 2025 doi 10.1088/1361-6560/ae2ce0) on the CSRQ
   path: `-chunkCSRDir2` + `-df2/-dfList2`

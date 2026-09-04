@@ -103,9 +103,11 @@ launchBsremRdpUpdate(xCur, q, S, mask, rdpParams, bsremParams, xNext);     // �
 ### 4.1 一种 ratio 语义，两处实现
 
 ```
-r_i = W_i · p_i / (s·ŷ_i + b_i)        b、W 为可选指针，按行判空（每行一次，不在 nnz 循环内）
+r_i = p_i / (s·ŷ_i + b_i)              b 为可选指针，按行判空（每行一次，不在 nnz 循环内）
 unit:  r_i = W_i                        用于 S = Hᵀ W 1
 ```
+
+（执行时修正：W 只进入 S，不乘进 q 的 ratio——这是现有生产语义，坏探测器/censoring 的测量值在 MainProgram 已置零，归一化效率是 denominator-only；P0 保持该语义以便回归位级可比。）
 
 - CSRQ：把 ratio 并进 `csrq_forward_k8` 的行尾（warp 归约出 8 个分支的 ŷ 后直接写 r），`csrq_ratio_k8` / `csrq_unit_ratio_k8` 退化为同一核的 `mode` 参数；需要输出前向投影（`computeCompactChunkForwardProjectionCUDA`、残差 CSV）时走 `storePrediction` 实例。收益主要是删掉一条调用链，不是速度（ratio 现总计 0.012 s / 50 迭代）。
 - CSRB：`compute_compact_ratio_chunk` 与 `_batch` 版加 `background` 与 `rowWeights` 指针。之后 `useDeviceRatio = !hasBackground` 恒为真，`makeProjectionRatioChunkFloat` 及整条 host-ratio 分支删除；`spmvFloatCUDA → 下载 → CPU → 上传` 不再出现在 numer 路径。
