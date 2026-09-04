@@ -41,6 +41,7 @@ struct ProjDomainKernelCache {
   CUfunction csrqBackwardFunction = nullptr;
   CUfunction csrqPackFunction = nullptr;
   CUfunction csrqUnitRatioFunction = nullptr;
+  CUfunction compactUnitRatioBatchFunction = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -89,6 +90,7 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.csrqBackwardFunction != nullptr &&
       g_projDomainKernelCache.csrqPackFunction != nullptr &&
       g_projDomainKernelCache.csrqUnitRatioFunction != nullptr &&
+      g_projDomainKernelCache.compactUnitRatioBatchFunction != nullptr &&
       g_projDomainKernelCache.device == device &&
       g_projDomainKernelCache.computeMajor == props.major &&
       g_projDomainKernelCache.computeMinor == props.minor) {
@@ -127,6 +129,7 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.csrqBackwardFunction = nullptr;
     g_projDomainKernelCache.csrqPackFunction = nullptr;
     g_projDomainKernelCache.csrqUnitRatioFunction = nullptr;
+    g_projDomainKernelCache.compactUnitRatioBatchFunction = nullptr;
   }
 
   cuda::loadEmbeddedFatbin(&g_projDomainKernelCache.module, spect_fatbin_projdomain,
@@ -196,6 +199,9 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqUnitRatioFunction,
       g_projDomainKernelCache.module, "csrq_unit_ratio_k8"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactUnitRatioBatchFunction,
+      g_projDomainKernelCache.module, "compact_unit_ratio_chunk_batch"));
   g_projDomainKernelCache.device = device;
   g_projDomainKernelCache.computeMajor = props.major;
   g_projDomainKernelCache.computeMinor = props.minor;
@@ -891,7 +897,50 @@ void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
       nullptr));
 }
 
+void launchCompactUnitRatioBatchKernel(
+    const double *rowWeights, size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
+    cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows == 0 || batchSize <= 0) {
+    return;
+  }
+  CUdeviceptr weights = devPtr(rowWeights);
+  CUdeviceptr symIds = devPtr(dSymIds);
+  CUdeviceptr zMirrors = devPtr(dZMirrors);
+  CUdeviceptr ratio = devPtr(ratioBatch);
+  unsigned long long projCount =
+      static_cast<unsigned long long>(fullProjectionCount);
+  unsigned long long rowCount = static_cast<unsigned long long>(rows);
+  void *args[] = {&weights,
+                  &projCount,
+                  const_cast<int *>(&commonParams.symmetryMode),
+                  const_cast<int *>(&commonParams.compactRowBase),
+                  const_cast<int *>(&commonParams.compactRaysPerAngle),
+                  const_cast<int *>(&commonParams.compactNumAngles),
+                  const_cast<int *>(&commonParams.detNx),
+                  const_cast<int *>(&commonParams.detNz),
+                  const_cast<int *>(&commonParams.compactDetZ),
+                  const_cast<int *>(&commonParams.fullNumAngles),
+                  const_cast<int *>(&commonParams.fullRaysPerAngle),
+                  &symIds,
+                  &zMirrors,
+                  &batchSize,
+                  &ratio,
+                  &rowCount};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  const unsigned long long total =
+      rowCount * static_cast<unsigned long long>(batchSize);
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactUnitRatioBatchFunction,
+      gridFor(total, blockSize), 1, 1, blockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
 void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
+                                 const double *rowWeights,
+                                 size_t fullProjectionCount,
                                  const cuda::CompactDeviceRatioParams &params,
                                  const int *dSymIds, const int *dZMirrors,
                                  int rows, cudaStream_t stream) {
@@ -900,10 +949,15 @@ void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
     return;
   }
   CUdeviceptr ratio = devPtr(ratioPacked);
+  CUdeviceptr weights = devPtr(rowWeights);
   CUdeviceptr symIds = devPtr(dSymIds);
   CUdeviceptr zMirrors = devPtr(dZMirrors);
+  unsigned long long projCount =
+      static_cast<unsigned long long>(fullProjectionCount);
   void *args[] = {&ratio,
                   &value,
+                  &weights,
+                  &projCount,
                   const_cast<int *>(&params.symmetryMode),
                   const_cast<int *>(&params.compactRowBase),
                   const_cast<int *>(&params.compactRaysPerAngle),

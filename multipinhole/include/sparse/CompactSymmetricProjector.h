@@ -45,12 +45,17 @@ struct CompactMatrixChannel {
 // with H_k = w_k A_k. The data gradient is q - S. Nothing below knows which
 // optimizer or penalty will use the result.
 
-// S: joint sensitivity over all channels.
+// S: joint sensitivity over all channels, S = sum_k w_k A_k^T W 1.
+// rowWeights (optional, meta.fullRows() doubles indexed like the measured
+// projection) carries the per-row sensitivity weights: detector masks and
+// detZ censoring as 0/1, normalization efficiency as 1/c. nullptr means W = 1.
+// Measured bins are never scaled by W; censoring zeroes them upstream.
 bool computePoissonSensitivityCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing = nullptr,
-    const uint16_t *attFactors = nullptr);
+    const uint16_t *attFactors = nullptr,
+    const double *rowWeights = nullptr);
 
 // q: joint backprojected ratio per bed.
 // fullProjections / fullBackgrounds are indexed [channel * bedCount + bed]

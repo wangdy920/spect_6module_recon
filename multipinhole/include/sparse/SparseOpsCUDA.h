@@ -188,11 +188,13 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     int bedCount,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
     CompactDeviceBackwardTiming* backwardTiming = nullptr);
-/// Branch-batch compact sensitivity accumulator path.  Computes A^T * 1 for all
+/// Branch-batch compact sensitivity accumulator path.  Computes A^T W 1 for all
 /// symmetry branches in one SpMM call and scatters the results into the device
 /// backward accumulator.  symIds/zMirrors describe the branch symmetry for each
-/// column.  Only used when attenuation is not enabled; otherwise falls back to
-/// the per-branch attenuated path.
+/// column.  rowWeights (one double per full projection row) may be nullptr for
+/// W = 1 (all ones, the production default); with weights, commonRatioParams
+/// supplies the row -> full projection mapping.  Only used when attenuation is
+/// not enabled; otherwise falls back to the per-branch attenuated path.
 bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRView& matrix,
     const CompactDeviceTransformParams& commonTransformParams,
@@ -201,7 +203,10 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     int batchSize,
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
-    int cacheSlot = 0);
+    int cacheSlot = 0,
+    const CompactDeviceRatioParams* commonRatioParams = nullptr,
+    const double* rowWeights = nullptr,
+    size_t rowWeightCount = 0);
 
 // --- CSRQ matrices (CompactChunkFormat::CsrqRunU16) ------------------------
 // Each energy window's matrix is loaded once into device slot matrixIndex
@@ -253,12 +258,15 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       int accumulatorBase, int cacheSlotBase,
                       CompactDeviceRatioTiming* ratioTiming = nullptr,
                       CompactDeviceBackwardTiming* backwardTiming = nullptr);
-/// weight * A^T 1 over rows with a valid full projection counterpart.
+/// weight * A^T W 1 over rows with a valid full projection counterpart.
+/// rowWeights (fullProjectionCount doubles: detector masks, censoring,
+/// efficiency) may be nullptr for W = 1.
 bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             const CompactDeviceRatioParams& commonRatioParams,
                             const CompactDeviceTransformParams& commonTransformParams,
                             const int* symIds, const int* zMirrors,
-                            int accumulatorIndex,
+                            int accumulatorIndex, size_t fullProjectionCount,
+                            const double* rowWeights = nullptr,
                             CompactDeviceBackwardTiming* backwardTiming = nullptr);
 /// Forward projection of one window over the refreshed single-bed branch
 /// batch; hostYhatPacked receives [compactRow][branch] floats (rows * 8).

@@ -156,11 +156,22 @@ constexpr int kCsrqBackwardBranchesPerPass = 2;
 void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
                                  size_t nvox, cudaStream_t stream = nullptr);
 
-// ratio = value where the (row, branch) has a full projection row, else 0.
+// ratio = value * rowWeights[fullIndex] (value alone when rowWeights is null)
+// where the (row, branch) has a full projection row, else 0.
 void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
+                                 const double *rowWeights,
+                                 size_t fullProjectionCount,
                                  const cuda::CompactDeviceRatioParams &params,
                                  const int *dSymIds, const int *dZMirrors,
                                  int rows, cudaStream_t stream = nullptr);
+
+// CSRB branch-batch sensitivity input: ratioBatch[branch*rows + row] =
+// rowWeights[fullIndex] (1 when null) for valid (row, branch), else 0.
+void launchCompactUnitRatioBatchKernel(
+    const double *rowWeights, size_t fullProjectionCount,
+    const cuda::CompactDeviceRatioParams &commonParams, const int *dSymIds,
+    const int *dZMirrors, int batchSize, float *ratioBatch, size_t rows,
+    cudaStream_t stream = nullptr);
 
 } // namespace spect
 

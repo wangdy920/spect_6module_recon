@@ -1171,7 +1171,9 @@ public:
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const int *symIds, const int *zMirrors, int batchSize,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
+      int accumulatorIndex, int cacheSlot,
+      const cuda::CompactDeviceRatioParams *commonRatioParams,
+      const double *rowWeights, size_t rowWeightCount) {
     ensureCudaRuntimeAvailable();
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1214,7 +1216,22 @@ public:
     const size_t batchedRows = static_cast<size_t>(rows) *
                                static_cast<size_t>(batchSize);
     dBatchOnes_.allocate(batchedRows);
-    {
+    const double *dRowWeights =
+        ensureCompactRowWeightsUploaded(rowWeights, rowWeightCount);
+    if (dRowWeights != nullptr) {
+      // S = A^T W 1: the batch input carries W per (row, branch), 0 for rows
+      // without a full projection counterpart.
+      if (commonRatioParams == nullptr) {
+        throw std::runtime_error(
+            "compact weighted sensitivity needs the row -> projection mapping.");
+      }
+      launchCompactUnitRatioBatchKernel(
+          dRowWeights, rowWeightCount, *commonRatioParams, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), batchSize, dBatchOnes_.get(),
+          static_cast<size_t>(rows));
+    } else {
+      // Unweighted: all ones, the production default (kept as is so the
+      // cached denominators stay bit-identical).
       std::vector<float> ones(batchedRows, 1.0f);
       dBatchOnes_.copyFromHost(ones.data(), batchedRows);
     }
@@ -1431,6 +1448,23 @@ private:
                                       uploadStart)
             .count(),
         count * sizeof(double));
+  }
+
+  // Sensitivity row weights W (detector masks, censoring, efficiency), one
+  // per full projection row; uploaded once per host pointer. Returns nullptr
+  // for "no weights".
+  const double *ensureCompactRowWeightsUploaded(const double *rowWeights,
+                                                size_t count) {
+    if (rowWeights == nullptr || count == 0) {
+      return nullptr;
+    }
+    if (compactRowWeightsHostKey_ != rowWeights ||
+        compactRowWeightsCount_ != count || dCompactRowWeights_.get() == nullptr) {
+      dCompactRowWeights_.copyFromHost(rowWeights, count);
+      compactRowWeightsHostKey_ = rowWeights;
+      compactRowWeightsCount_ = count;
+    }
+    return dCompactRowWeights_.get();
   }
 
   // Device background for a projection slot, or nullptr when the last
@@ -2945,6 +2979,7 @@ public:
       projection.reset();
     for (auto &background : dCompactBackgroundInput_)
       background.reset();
+    dCompactRowWeights_.reset();
     for (auto &accumulator : dCompactBackwardAccum_)
       accumulator.reset();
     for (size_t bed = 0; bed < dAttenTable_.size(); ++bed) {
@@ -2965,6 +3000,8 @@ public:
     compactProjectionCount_ = {};
     compactBackgroundHostKey_ = {};
     compactBackgroundCount_ = {};
+    compactRowWeightsHostKey_ = nullptr;
+    compactRowWeightsCount_ = 0;
     compactBackwardAccumSize_ = {};
     attenTableHostPtr_ = {};
     attenTableCount_ = {};
@@ -3319,18 +3356,27 @@ public:
     }
   }
 
-  // weight * A^T 1 of matrix matrixIndex restricted to (row, branch) pairs
-  // with a full projection counterpart, added to accumulatorIndex.
+  // weight * A^T W 1 of matrix matrixIndex restricted to (row, branch) pairs
+  // with a full projection counterpart, added to accumulatorIndex. rowWeights
+  // (one per full projection row) may be null for W = 1.
   void csrqRunSensitivity(
       int matrixIndex, int branchCount, double weight,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const int *symIds, const int *zMirrors, int accumulatorIndex,
+      const double *rowWeights, size_t rowWeightCount,
+      size_t fullProjectionCount,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
+    if (rowWeights != nullptr && rowWeightCount != fullProjectionCount) {
+      throw std::runtime_error(
+          "CSRQ sensitivity row weights must hold one value per full row.");
+    }
+    const double *dRowWeights =
+        ensureCompactRowWeightsUploaded(rowWeights, rowWeightCount);
     if (commonRatioParams.symmetryMode != 45 &&
         commonRatioParams.symmetryMode != 90) {
       throw std::runtime_error(
@@ -3352,7 +3398,8 @@ public:
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
                      static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
-      launchCsrqUnitRatioK8Kernel(ratio, static_cast<float>(weight), ratioParams,
+      launchCsrqUnitRatioK8Kernel(ratio, static_cast<float>(weight),
+                                  dRowWeights, fullProjectionCount, ratioParams,
                                   dBatchSymIds_.get(), dBatchZMirrors_.get(),
                                   chunk.rows);
       csrqBackwardTimers_[pass].recordStart(nullptr);
@@ -4683,11 +4730,16 @@ private:
   std::array<const double *, kCompactProjectionSlots> compactProjectionHostKey_{};
   std::array<size_t, kCompactProjectionSlots> compactProjectionCount_{};
   // Per-window background (scatter estimate) next to each projection slot;
-  // only the CSRQ ratio kernel consumes it.
+  // both formats' ratio kernels add it to the forward estimate.
   std::array<DeviceArray<double>, kCompactProjectionSlots>
       dCompactBackgroundInput_;
   std::array<const double *, kCompactProjectionSlots> compactBackgroundHostKey_{};
   std::array<size_t, kCompactProjectionSlots> compactBackgroundCount_{};
+  // Sensitivity row weights (one per full projection row), shared by all
+  // channels of a run.
+  DeviceArray<double> dCompactRowWeights_;
+  const double *compactRowWeightsHostKey_ = nullptr;
+  size_t compactRowWeightsCount_ = 0;
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
   // CSRQ scratch shared by all resident matrices: dCsrqX_ is the [voxel][8]

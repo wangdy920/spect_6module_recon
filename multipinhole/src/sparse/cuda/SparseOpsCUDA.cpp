@@ -319,13 +319,15 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
     const cuda::CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int batchSize,
     cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
-    int cacheSlot) {
+    int cacheSlot, const cuda::CompactDeviceRatioParams *commonRatioParams,
+    const double *rowWeights, size_t rowWeightCount) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactSensitivityBranchBatchSpmvTAccumulateFloat(
       matrix, commonTransformParams, symIds, zMirrors, batchSize,
-      backwardTiming, accumulatorIndex, cacheSlot);
+      backwardTiming, accumulatorIndex, cacheSlot, commonRatioParams,
+      rowWeights, rowWeightCount);
   return true;
 }
 
@@ -394,14 +396,16 @@ bool csrqRunSensitivityCUDA(
     const CompactDeviceRatioParams &commonRatioParams,
     const CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int accumulatorIndex,
+    size_t fullProjectionCount, const double *rowWeights,
     CompactDeviceBackwardTiming *backwardTiming) {
   if (!isCudaAvailable()) {
     return false;
   }
-  cudaState().csrqRunSensitivity(matrixIndex, branchCount, weight,
-                                 commonRatioParams, commonTransformParams,
-                                 symIds, zMirrors, accumulatorIndex,
-                                 backwardTiming);
+  cudaState().csrqRunSensitivity(
+      matrixIndex, branchCount, weight, commonRatioParams,
+      commonTransformParams, symIds, zMirrors, accumulatorIndex, rowWeights,
+      rowWeights == nullptr ? 0 : fullProjectionCount, fullProjectionCount,
+      backwardTiming);
   return true;
 }
 
@@ -602,7 +606,8 @@ bool csrqRunNumerCUDA(int, int, int, const CompactDeviceRatioParams &,
 bool csrqRunSensitivityCUDA(int, int, double,
                             const CompactDeviceRatioParams &,
                             const CompactDeviceTransformParams &, const int *,
-                            const int *, int, CompactDeviceBackwardTiming *) {
+                            const int *, int, size_t, const double *,
+                            CompactDeviceBackwardTiming *) {
   return false;
 }
 

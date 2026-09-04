@@ -922,21 +922,27 @@ void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
   }
 }
 
+// Host sensitivity input for one branch: rowWeights[fullIndex] (1 when null)
+// where the row maps to a full projection row, else 0.
 void makeUnitRatioChunkFloat(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
-    int rows, int symId, bool zMirror, std::vector<float> &ratio, int threads) {
+    int rows, int symId, bool zMirror, const double *rowWeights,
+    std::vector<float> &ratio, int threads) {
   ratio.resize(static_cast<size_t>(rows));
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
 #endif
   for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(rows); ++row) {
     uint64_t fullIndex = 0;
-    ratio[static_cast<size_t>(row)] =
-        spect::io::fullProjectionIndexFromCompactRow(
+    float value = 0.0f;
+    if (spect::io::fullProjectionIndexFromCompactRow(
             meta, compactRowBase + static_cast<int>(row), symId, zMirror,
-            fullIndex)
-            ? 1.0f
-            : 0.0f;
+            fullIndex)) {
+      value = rowWeights == nullptr
+                  ? 1.0f
+                  : static_cast<float>(rowWeights[fullIndex]);
+    }
+    ratio[static_cast<size_t>(row)] = value;
   }
 }
 
@@ -1104,12 +1110,14 @@ bool runCsrqMlemNumerMultiBed(
 bool computePoissonSensitivityCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
-    CompactSymmetricStageTiming *timing, const uint16_t *attFactors) {
+    CompactSymmetricStageTiming *timing, const uint16_t *attFactors,
+    const double *rowWeights) {
   validateChannels(channels, meta, "sensitivity");
   warmCompactChunks(channels);
 
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
   const auto branches = enumerateCompactBranches(meta);
   std::fill(denom, denom + nvox, 0.0);
 
@@ -1128,7 +1136,8 @@ bool computePoissonSensitivityCUDA(
               static_cast<int>(branches.size()), channels[channel].weight,
               makeCompactDeviceRatioParams(meta, 0, 0, false),
               makeCompactDeviceTransformParams(meta, 0, false), symIds.data(),
-              zMirrors.data(), 0, &backwardTiming)) {
+              zMirrors.data(), 0, fullProjectionCount, rowWeights,
+              &backwardTiming)) {
         return false;
       }
       if (timing) {
@@ -1180,9 +1189,13 @@ bool computePoissonSensitivityCUDA(
         symIds[b] = branches[b].symId;
         zMirrors[b] = branches[b].zMirror ? 1 : 0;
       }
+      const CompactDeviceRatioParams commonRatio =
+          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
       const bool ok = compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
           view, commonTransform, symIds.data(), zMirrors.data(),
-          static_cast<int>(branches.size()), &backwardTiming, 0, 0);
+          static_cast<int>(branches.size()), &backwardTiming, 0, 0,
+          &commonRatio, rowWeights,
+          rowWeights == nullptr ? 0 : fullProjectionCount);
       if (!ok) {
         return false;
       }
@@ -1197,7 +1210,8 @@ bool computePoissonSensitivityCUDA(
       const auto &branch = branches[branchIndex];
       auto stageStart = Clock::now();
       makeUnitRatioChunkFloat(meta, compactRowBase, chunk->info.rows,
-                              branch.symId, branch.zMirror, ratio, threads);
+                              branch.symId, branch.zMirror, rowWeights, ratio,
+                              threads);
       if (timing)
         addTiming(timing->ratioSeconds, stageStart);
       stageStart = Clock::now();

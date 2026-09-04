@@ -204,6 +204,85 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
       static_cast<float>(fullProjection[fullIndex] / denom);
 }
 
+// Sensitivity input for the branch batch: ratioBatch[branch*rows + row] =
+// rowWeights[fullIndex] (1 when rowWeights is null) where the (row, branch)
+// maps to a full projection row, else 0. S = A^T W 1 then falls out of the
+// ordinary batched backward.
+extern "C" __global__ void compact_unit_ratio_chunk_batch(
+    const double *rowWeights, unsigned long long fullProjectionCount,
+    int symmetryMode, int compactRowBase, int compactRaysPerAngle,
+    int compactNumAngles, int detNx, int detNz, int compactDetZ,
+    int fullNumAngles, int fullRaysPerAngle, const int *symIds,
+    const int *zMirrors, int batchSize, float *ratioBatch,
+    unsigned long long rows) {
+  const unsigned long long index =
+      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const unsigned long long total =
+      rows * static_cast<unsigned long long>(batchSize);
+  if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
+    return;
+  }
+  const int branch = static_cast<int>(index / rows);
+  const unsigned long long rowInBranch = index % rows;
+  const int symId = symIds[branch];
+  const int zMirror = zMirrors[branch];
+
+  const int compactRow = compactRowBase + static_cast<int>(rowInBranch);
+  const int compactAngle = compactRow / compactRaysPerAngle;
+  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  const int ix = rr % detNx;
+  const int izCompact = rr / detNx;
+  bool valid = true;
+  int fullAngle = 0;
+  if (symmetryMode == 45) {
+    const int q = fullNumAngles / 8;
+    if ((symId & 1) == 0) {
+      if (compactAngle >= q) {
+        valid = false;
+      } else {
+        fullAngle = symId * q + compactAngle;
+      }
+    } else {
+      if (compactAngle <= 0) {
+        valid = false;
+      } else {
+        fullAngle = symId * q + (q - compactAngle);
+      }
+    }
+  } else {
+    if (compactAngle < 0 || compactAngle >= compactNumAngles) {
+      valid = false;
+    } else {
+      fullAngle = compactAngle + symId * compactNumAngles;
+    }
+  }
+  int izFull = izCompact;
+  if (zMirror != 0) {
+    izFull = detNz - 1 - izCompact;
+    if (izFull < compactDetZ) {
+      valid = false;
+    }
+  }
+  if (!valid || fullAngle < 0 || fullAngle >= fullNumAngles || izFull < 0 ||
+      izFull >= detNz) {
+    ratioBatch[index] = 0.0f;
+    return;
+  }
+  const unsigned long long fullIndex =
+      static_cast<unsigned long long>(fullAngle) *
+          static_cast<unsigned long long>(fullRaysPerAngle) +
+      static_cast<unsigned long long>(izFull) *
+          static_cast<unsigned long long>(detNx) +
+      static_cast<unsigned long long>(ix);
+  if (fullIndex >= fullProjectionCount) {
+    ratioBatch[index] = 0.0f;
+    return;
+  }
+  ratioBatch[index] = rowWeights == nullptr
+                          ? 1.0f
+                          : static_cast<float>(rowWeights[fullIndex]);
+}
+
 extern "C" __global__ void compact_gather_bed_double_to_float(
     const double *globalImage, unsigned long long globalCount,
     float *bedImage, int nx, int ny, int nz, int globalNz, int zStart,
@@ -1252,14 +1331,17 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
                                   branchMajor[7 * nvox + v]);
 }
 
-// ratioPacked[row*8 + b] = value where the (row, branch) maps to a full
-// projection row, else 0: the sensitivity value * A^T 1 over valid rows only
-// (value is the window weight of a joint multi-window MLEM, 1 otherwise).
+// ratioPacked[row*8 + b] = value * rowWeights[fullIndex] (value alone when
+// rowWeights is null) where the (row, branch) maps to a full projection row,
+// else 0: the sensitivity value * A^T W 1 over valid rows only (value is the
+// window weight of a joint multi-window model, 1 otherwise; W carries detector
+// masks and efficiency weights).
 extern "C" __global__ void csrq_unit_ratio_k8(
-    float *ratioPacked, float value, int symmetryMode, int compactRowBase,
-    int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
-    int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
-    const int *symIds, const int *zMirrors, int rows) {
+    float *ratioPacked, float value, const double *rowWeights,
+    unsigned long long fullProjectionCount, int symmetryMode,
+    int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
+    int detNx, int detNz, int compactDetZ, int fullNumAngles,
+    int fullRaysPerAngle, const int *symIds, const int *zMirrors, int rows) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -1270,12 +1352,17 @@ extern "C" __global__ void csrq_unit_ratio_k8(
   const int row = static_cast<int>(index / CSRQ_K);
   const int b = static_cast<int>(index % CSRQ_K);
   unsigned long long fullIndex = 0;
-  ratioPacked[index] =
-      csrq_full_projection_index(compactRowBase + row, symmetryMode,
+  float out = 0.0f;
+  if (csrq_full_projection_index(compactRowBase + row, symmetryMode,
                                  compactRaysPerAngle, compactNumAngles, detNx,
                                  detNz, compactDetZ, fullNumAngles,
                                  fullRaysPerAngle, symIds[b], zMirrors[b],
-                                 &fullIndex)
-          ? value
-          : 0.0f;
+                                 &fullIndex) &&
+      fullIndex < fullProjectionCount) {
+    out = rowWeights == nullptr
+              ? value
+              : static_cast<float>(static_cast<double>(value) *
+                                   rowWeights[fullIndex]);
+  }
+  ratioPacked[index] = out;
 }

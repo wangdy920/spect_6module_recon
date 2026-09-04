@@ -291,6 +291,50 @@ void expectCsrqMatchesCsrb(const MatrixPair &pair,
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   EXPECT_FALSE(spect::cuda::csrqResidentCUDA(0));
 
+  // Weighted sensitivity S = A^T W 1 (detector masks / efficiency weights):
+  // the CSRB direct path against the synthesized route it replaced,
+  // A^T((A 1 * W) / (A 1)), then CSRQ against CSRB.
+  std::vector<double> rowWeights(fullRows);
+  for (size_t i = 0; i < fullRows; ++i) {
+    rowWeights[i] =
+        (i % 13 == 0) ? 0.0 : 0.5 + 0.01 * static_cast<double>(i % 50);
+  }
+  auto weightedSensitivity =
+      [&](const spect::io::CompactChunkCSRDirectory &chunks,
+          std::vector<double> &weighted) {
+        weighted.assign(nvox, 0.0);
+        const std::vector<spect::cuda::CompactMatrixChannel> single = {
+            {&chunks, 1.0}};
+        ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+            single, meta, 1, weighted.data(), nullptr, nullptr,
+            rowWeights.data()));
+      };
+  std::vector<double> weightedRef;
+  {
+    std::vector<double> ones(nvox, 1.0);
+    std::vector<double> forwardOnes(fullRows, 0.0);
+    ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+        pair.csrb, meta, ones.data(), 1, forwardOnes.data(), nullptr));
+    for (size_t i = 0; i < fullRows; ++i)
+      forwardOnes[i] *= rowWeights[i];
+    weightedRef.assign(nvox, 0.0);
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+        pair.csrb, meta, forwardOnes.data(), nullptr, ones.data(), 1,
+        weightedRef.data()));
+  }
+  std::vector<double> weightedCsrb, weightedCsrq;
+  weightedSensitivity(pair.csrb, weightedCsrb);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  weightedSensitivity(pair.csrq, weightedCsrq);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  EXPECT_LE(relL2(weightedCsrb, weightedRef), tol)
+      << "CSRB weighted sensitivity vs synthesized route";
+  EXPECT_LE(relL2(weightedCsrq, weightedCsrb), tol)
+      << "CSRQ weighted sensitivity";
+  EXPECT_GT(*std::max_element(weightedCsrb.begin(), weightedCsrb.end()), 0.0);
+  EXPECT_GT(relL2(weightedCsrb, denomRef), 1e-3)
+      << "weights must change the sensitivity";
+
   EXPECT_LE(relL2(denom, denomRef), tol) << "sensitivity";
   EXPECT_LE(relL2(numer, numerRef), tol) << "single-bed numerator";
   EXPECT_LE(relL2(forward, forwardRef), tol) << "forward projection";
