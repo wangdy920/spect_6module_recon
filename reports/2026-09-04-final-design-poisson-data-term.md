@@ -414,7 +414,7 @@ CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它
 
 冻结对照 A 为已接受 pin 的 `20260905+6a3e59b`（exe SHA-256 `ccca6af6ac216e88e48ad40f8c4721882221d3c603ce86cf20c7894eef88674a`），B 为本次修复。沿用 §7.6 Lu208 CSRB、正常小鼠五床、全部配置和输入身份，原 primary relL2 ≤1e-5、核心目标120／下限180 s；1e-7 是此前纯锁页移植的额外守护，本次不把不同 host/device 数值路径强定为位等价。
 
-验证顺序：完整构建／CTest；默认五床各五次预热，确认 B 路径；实际缩小直径／高度、相邻较小 float 尺寸及偏心 ROI 的短程行为检查；A-B／B-A／A-B 三组 MLEM50、每次600 s、自动完整缓存和42 GiB空闲预检，另记录整命令和内存。短程数值仅作诊断，最终图像门用50次保护端点；若50次数值失败，不采纳并保留最小失败证据。独立短 Nsight 仅用于核出现与成本变化，不进入性能门。该 guard 也服务 CTAC，另复用既有真实两床 CSRB CTAC20 保护端点（每5次保存比较、relL2≤1e-5、每次600 s），检查共享调用方，不作另一性能比较。证据目录 `recon_out/lu208_resident_roi_20260905/`。执行 `exploring`、证据 `preliminary`、采纳 `pending`；先完成此机制的修复和复验，再依据结果决定下一项。
+验证顺序：完整构建／CTest；默认五床各五次预热，确认 B 路径；实际缩小直径／高度、相邻较小 float 尺寸及偏心 ROI 的短程行为检查；A-B／B-A／A-B 三组 MLEM50、每次600 s、自动完整缓存和42 GiB空闲预检，另记录整命令和内存。短程数值仅作诊断，最终图像门用50次保护端点；若50次数值失败，不采纳并保留最小失败证据。独立短 Nsight 仅用于核出现与成本变化，不进入性能门。该 guard 也服务 CTAC，另复用既有真实两床 CSRB CTAC20 保护端点（每5次保存比较、relL2≤1e-5、每次600 s），检查共享调用方，不作另一性能比较。证据目录 `recon_out/lu208_resident_roi_20260905/`。本机制完成后才开始§7.8的独立候选，结果如下。
 
 修复代码 `0ddc6ab`，执行 `completed`、本机同输入证据 `validated`、采纳 `merged`。完整构建通过，CTest284通过／4原有跳过／0失败；实际运行的四项 ROI 边界（直径／高度各小一个 float 刻度、35.7/65.7 mm、偏心）全部保持 host 路径，对旧版最大 relL2 **4.2468e-8**。默认全视野为 device input/update，五次预热 relL2 **3.1021e-8**。双方邻接库和实际加载的 CUDA／CRT／OpenMP 库哈希一致。
 
@@ -430,13 +430,33 @@ CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它
 
 证据目录的 `summary.json`、`edge_checks.json`、`profile_B/analysis.json`、`csrb_ctac20/validation.json` 和 `runtime_hashes.json`／`candidate_loaded_runtime.json` 支持以上结论；原命令、输出和复核脚本保留。固定0ddc6ab exe在 `recon_out/lu208_resident_roi_20260905/frozen_binary/SPECT_recon.exe`，SHA-256 `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`，作为下一机制的独立对照；exe备份仍需配套已验证runtime布局。
 
-## 7.8 2026-09-05 零计数 pair 的分子正向候选
+## 7.8 2026-09-05 零计数 pair 分子正向优化与复验
 
 用户在§7.7执行期间再次要求“继续”。ROI机制已完成独立配对及CTAC回归，以下只考察§7.6已量出的零计数工作：当前默认K=2，raw五床约62.38%的nnz加权pair两路p均为0；正向仍约占GPU核时间35%。对合法有限输入，p=0对应的分子ratio为0，不需要该行Ax；灵敏度S仍保留所有原始行。
 
 最小候选复用 `compute_compact_ratio_chunk_batch` 的现有行映射，在同一 `dBatchOutput_` 中暂存0/1投影活跃标记；packed-2分子核仅在两路标记均为0时提前退出，其余计算／舍入／反投不变。原ratio随后覆盖该缓冲；无新增矩阵、长期mask缓存、CUDA模块或配置。独立forward、CTAC、sensitivity和其它K保持原语义，CTAC调用显式使用普通packed-2行为。现有非有限S／图像检查保留。
 
-冻结基线A为§7.7的 `20260905+0ddc6ab`（SHA `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`），B为零pair候选；沿用相同Lu208五床／生产配置／MLEM50／denom hit／完整默认主机缓存，relL2≤1e-5，核心目标120 s／下限180 s，新增复杂度要求三组配对中位核心收益≥5%。每次600 s，不并行占用GPU；5次预热为诊断，50次为保护端点。先完整构建／CTest（密集、两路均零、仅一路零的独立dense oracle及既有forward／S／CTAC测试），再A-B／B-A／A-B三组；另用短Nsight观察正向成本与额外活跃标记成本，复跑现有CTAC20保护端点以核对共享launcher未改变该路径。达到数值与收益门才保留；不重新打开已拒转置／SpMM／精度变体。证据目录 `recon_out/lu208_zero_pair_20260905/`；执行 `exploring`、证据 `preliminary`、采纳 `pending`。
+冻结基线A为§7.7的 `20260905+0ddc6ab`（SHA `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`），B为零pair候选；沿用相同Lu208五床／生产配置／MLEM50／denom hit／完整默认主机缓存，relL2≤1e-5，核心目标120 s／下限180 s，新增复杂度要求三组配对中位核心收益≥5%。每次600 s，不并行占用GPU；5次预热为诊断，50次为保护端点。先完整构建／CTest（密集、两路均零、仅一路零的独立dense oracle及既有forward／S／CTAC测试），再A-B／B-A／A-B三组；另用短Nsight观察正向成本与额外活跃标记成本，复跑现有CTAC20保护端点以核对共享launcher未改变该路径。达到数值与收益门才保留；不重新打开已拒转置／SpMM／精度变体。证据目录 `recon_out/lu208_zero_pair_20260905/`；本轮执行 `completed`、本机同输入证据 `validated`、源码采纳 `merged`。
+
+候选源码 `cfffea5`，生产代码净增28行（新增36行、删除或替换8行），既有dense-oracle用例增加15行覆盖两路均零／任一路非零／稠密行，未增加测试框架或矩阵副本。Release及sm86/89/120 fatbin完整构建通过，CTest **284通过／4既有跳过／0失败**。测试EXE为 `20260905+cfffea5`，SHA-256 `69fb2d2851854136fe2823cc1db085114807d1d114922ee3fdb40068a181a5ec`；11个配套runtime payload和10个实际加载模块与A哈希一致。预热B的device input/update检查通过，5次图像relL2为3.1033e-8。
+
+| 三组 MLEM50 | A：ROI修复0ddc6ab / s | B：零pair cfffea5 / s | 核心减少 | primary relL2 |
+|---|---:|---:|---:|---:|
+| A → B | 181.066 | 144.843 | 20.01% | 6.9892e-8 |
+| B → A | 180.897 | 144.821 | 19.94% | 5.4396e-8 |
+| A → B | 181.016 | 145.079 | 19.85% | 5.1809e-8 |
+
+核心中位数 **181.016 → 144.843 s**，配对收益中位数 **19.94%≥5%**；所有primary relL2≤1e-5。整命令中位数 **215.666 → 179.964 s（−16.55%）**，新版整命令179.877–180.820 s，process-exit观察中位数182.165 s另记。按既定的**核心**计时口径，**180 s门槛通过，120 s目标未通过**；整命令并非三次都小于180 s，不与核心口径混用。三次A核心范围180.897–181.066 s，B为144.821–145.079 s。
+
+资源没有新增长期矩阵或mask：主机工作集峰值中位数 **33.468464 → 33.468494 GiB**（差32 KiB），迭代期RSS33.212963→33.212872 GiB、私有提交46.242027→46.234936 GiB；进程专用显存双方均 **12.733677 GiB**。六次均为完整默认主机缓存、denom hit；输入哈希、矩阵清单及有效输入manifest不变，拟合床增益仍作为输出量单独记录，旧RC30个payload哈希不变。系统CPU占用中位数A9.8%、B9.6%。
+
+独立5次Nsight支持机制归因，profile绝对耗时不进入配对门：同为600次packed-2正向核，累计 **6.20344 → 2.40070 s（−61.30%）**；150次新增活跃标记仅 **0.000628 s**，150次实际ratio为0.001905 s。反投核仍1200次、11.59143 s（前一阶段profile为11.40624 s）；分母没有因零计数裁剪。按原“首个forward到最后transform-add”窗口，五段分子18.38511→15.15852 s；将新增标记准备计入后为 **15.15907 s**。此时kernel活跃14.12754 s、H2D5.43543 s，其中4.68886 s与kernel重叠；kernel/copy均空闲0.28496 s（1.88%）。不能将并行区间相加，也不能把正向的61.30%减少当成整轮收益。
+
+profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。共享launcher的真实两床CSRB CTAC20回归通过，it5/10/15/20最大relL2 **6.1629e-8≤1e-5**，输入与矩阵不变。证据为 `summary.json`、`integration_verification.json`、`profile_B/analysis.json`、`csrb_ctac20/validation.json`、`runtime_hashes.json` 和 `loaded_runtime_{A,B}.json`。固定EXE保存在同目录 `frozen_binary/SPECT_recon.exe`，仍需既有已验证runtime布局；CUDA helper fatbin内嵌EXE，本轮必要部署差量只有EXE，未重打包既有RC。
+
+剩余方向按本次新时间线更新：**主反投核已占分子GPU核活跃时间约82.05%**；pack、标记/ratio、transform-add合计约0.84%，一般性融合和主机提交简化仍不足以支撑≥5%项目。H2D未与kernel重叠约0.747 s/五次（窗口的4.92%）是当前可见成本，但现有两槽与上传依赖仍须保留。要从144.843 s继续到120 s还需约24.843 s、17.15%的核心减少；最小下一步是对既有真实反投chunk/RHS采集硬件计数，区分原子冲突、访存与库调度，再定义有依据的候选。本轮止于已验证零pair优化，不重开已拒SpMM、旧转置、三块常驻、FP16或用CSRQ替代CSRB门。
+
+复核现有配对数据：`python recon_out/lu208_zero_pair_20260905/experiment.py summarize`；复核时间线：`python recon_out/lu208_zero_pair_20260905/analyze_profile.py`。复跑使用新的隔离输出目录，复制该目录的测量/顺序驱动及gate_dry_run输入描述，冻结两版EXE身份后运行 `run_when_ready.py`；不要覆盖本轮原始输出。§7.7与§7.8各有独立A/B，不能跨轮相除声称严格配对累计收益。
 
 ## 8. 当前实现摘要
 

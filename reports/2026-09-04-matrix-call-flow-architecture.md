@@ -3,7 +3,7 @@
 适用范围：`test_data/6module` 三组生产矩阵（Tc99m 141 keV、Lu-177 208 keV ZFOLD、Lu-177 113 keV）及其 CSRQ 转换副本。
 状态约定：**CSRB = 生产路径、受保护基线；CSRQ = 实验路径**（用户决定，2026-09-03）。
 
-下文历史耗时来自 RTX 4070 Ti SUPER（16 GB，WDDM），床数按各行标注；`s/iter = iteration_core_s / 迭代数`。2026-09-05 起正式门改为 Lu-177 208 keV CSRB + 正常小鼠五床，当前结果以最终设计报告 §7.6 为准，不能和旧矩阵／单床时间直接比较。
+下文历史耗时来自 RTX 4070 Ti SUPER（16 GB，WDDM），床数按各行标注；`s/iter = iteration_core_s / 迭代数`。2026-09-05 起正式门改为 Lu-177 208 keV CSRB + 正常小鼠五床，当前结果以最终设计报告 §7.6–7.8 为准，不能和旧矩阵／单床时间直接比较。
 
 ## 1. 三组矩阵的静态属性
 
@@ -55,7 +55,7 @@ flowchart TD
     HCOK --> LOOPC
     HCNO --> LOOPC
     LOOPC["for chunk（顺序每迭代反转）<br/>loadChunk + prefetchNextCompactChunk"] --> B{"CTAC?"}
-    B -->|"无 CTAC（背景项已在设备 ratio 核内，P0.2）"| BB["compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA<br/>设备 ratio + packed forward K=2<br/>+ 8 分支 SpMVᵀ + 设备 transform-add<br/>多床：床 × 分支 一次批处理"]
+    B -->|"无 CTAC（背景项已在设备 ratio 核内，P0.2）"| BB["compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA<br/>p!=0标记 → packed forward K=2（两路p均零时跳过）<br/>→ 设备 ratio + 8 分支 SpMVᵀ + 设备 transform-add<br/>多床：床 × 分支 一次批处理"]
     B -->|"CTAC（2026-09-04 起）"| AT["compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA<br/>按 compact 角度：分支批 × att^power → packed-K 行核（子区间）<br/>→ ratio → 逐 RHS SpMVᵀ（子 CSR）→ transform-add × att^power<br/>只暂存 chunk 触及的 60 个因子切片（双缓冲）"]
     BB --> DL["compactDeviceBackwardDownloadCUDA → numer<br/>（常驻路径：留在设备，finishCompactResident{Mlem,Bsrem}IterationCUDA）"]
     AT --> DL
@@ -68,6 +68,9 @@ flowchart TD
 新门锁页配对核心中位数 **284.278 → 191.092 s / 50 次**，三组减少27.47%–33.43%。随后定位到 `6a3e59b` 的五床默认输入／更新走host：1e-6 mm容差小于float32 spacing对36/66 mm extent的舍入误差；完整列支持检查确认实际mask外引用为0。
 
 **`0ddc6ab` 已修复该资格误判**，在既有判断处将extent对齐到ROI参数float精度，实际mask保持不变。默认五床和真实两床CTAC现在均为device input/update，实际缩小／偏心ROI仍为host；日志明确给出所选路径。此次独立配对核心中位数 **193.601 → 181.209 s**，整命令245.582→215.926 s，最大primary relL2 1.3645e-7；120/180 s仍未通过。GPU稀疏核成本基本不变，主要省去迭代间主机往返。两阶段结果不能跨轮相除作为严格配对收益；详见最终设计§7.6–7.7。
+
+
+**`cfffea5` 已通过零计数pair分子优化门**：复用ratio核的既有投影行映射在原输出缓冲准备p!=0标记，packed-2仅在两路都为0时省去Ax，随后ratio覆盖；独立forward、CTAC、灵敏度S不做此裁剪。三组核心中位数 **181.016 → 144.843 s**，配对中位收益19.94%，最大primary relL2 6.9892e-8；整命令215.666→179.964 s。**核心180 s门槛已过，120 s目标未过**。主机峰值约33.46849 GiB、专用显存12.733677 GiB，基本不变。5次Nsight正向6.20344→2.40070 s，标记准备0.000628 s；当前主反投核约占分子GPU核活跃时间82.05%，小核合计约0.84%。CTAC20最大relL2 6.1629e-8通过；完整证据与后续边界见最终设计§7.8。
 
 历史实测（P0 之前的同一 exe `build/metadata-compat`，单床 MLEM；表中 host-ratio 路径已删除，数值不代表当前构建的配对性能）：
 
