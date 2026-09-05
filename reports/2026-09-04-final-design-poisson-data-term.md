@@ -283,7 +283,7 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 输入与 §7.4 相同，复用已冻结分母缓存；两次 5 迭代预热，三组 A-B / B-A / A-B 的 MLEM50 比较，记录核心／整命令／上传计时、RSS、私有提交、进程专用显存和共享负载。数值门 relL2 ≤ 1e-7；新增复杂度最低收益沿用 ≥5%，同时要求各组方向一致、内存无矩阵副本级增长。每次运行限 240 s，任一执行／所有权／数值错误即停止性能链并先修复。先检查完整／部分缓存、反复释放注册及现有数值回归；源码改动须完成构建和测试。Sampling_Approach 缺失，因此本轮仅决定局部候选是否值得保留，不能关闭正式性能或生产采纳门。旧 RC 不改；不成立则撤回候选，保留最小复现证据。
 
-**结果：局部候选值得保留，三组核心时间均减少 35.6%–37.4%；主机内存基本不变。** 执行 `completed`；本机单床速度／数值证据 `validated`；生产采纳 `pending`，代码仅保留于独立工作树，当前 RC 未替换。
+**结果：局部候选值得保留，三组核心时间均减少 35.6%–37.4%；主机内存基本不变。** 执行 `completed`；本机单床速度／数值证据 `validated`。截至本节试验结束，生产采纳 `pending`、代码仅保留于独立工作树；同日稍后用户批准合入主线并更换性能门，见 §7.6。旧 RC 仍未替换。
 
 实现只扩展原 `CompactChunkResidentCacheLease`：完整缓存的 `colIdx`／`values` 直接注册，不复制矩阵；lease 持有对应 chunk 的 `shared_ptr`，释放时先同步再解锁。部分缓存不注册，维持原路径。同步修正了 State 中已不符合当前加载器行为的 pinned-prefetch 注释。生产源码净 +45 行，既有测试文件新增 44 行生命周期检查，没有新增配置开关、设备缓存槽或数学核。
 
@@ -305,7 +305,7 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 证据目录为 `recon_out/csrb_pin_20260905/`：`contract.json`、`candidate.patch`、构建／测试日志、两个预热、两个部分缓存检查、六次 MLEM50 的 console／JSON／每秒 CSV、CTAC 保存点及 `summary.json`。候选 exe 为 `build/csrb-pin-src/build/bin/Release/SPECT_recon.exe`，版本 `20260905+df0bd45-dirty`，SHA-256 **74d60d5dae77b5003fbbccce57b116bc051021593c5eba123aeeb6a218a55d0b**；相对 `df0bd45` 的补丁 SHA-256 **040c518154d4a774d2f432b36d64b8a2a33c50898b746f7b4255060750204161**。该身份明确为试验构建，未打包为 RC。
 
-复现：现有目录只可用 `python recon_out/csrb_pin_20260905/experiment.py summarize` 重算统计与身份检查。重跑时将 `experiment.py`、`ctac_guard.py` 复制到 `recon_out` 下新的隔离目录，依次运行 `experiment.py warmups`、`experiment.py partial`、`experiment.py pairs`、`ctac_guard.py`、`experiment.py summarize`；每个运行目录拒绝覆盖。最小下一步是恢复原 Sampling_Approach 后执行正式五床 50 迭代门，或明确批准另行冻结的采纳范围；本轮不扩大到 CSRQ、现场设备或另一种格式。
+复现：现有目录只可用 `python recon_out/csrb_pin_20260905/experiment.py summarize` 重算统计与身份检查。重跑时将 `experiment.py`、`ctac_guard.py` 复制到 `recon_out` 下新的隔离目录，依次运行 `experiment.py warmups`、`experiment.py partial`、`experiment.py pairs`、`ctac_guard.py`、`experiment.py summarize`；每个运行目录拒绝覆盖。试验结束时提出的原 Sampling／另行冻结采纳范围下一步，已由 §7.6 用户决定解决；本轮不扩大到 CSRQ、现场设备或另一种格式。
 
 ## 7.6 2026-09-05 Lu-177 208 keV 五床新性能门与后续审查
 
@@ -313,9 +313,100 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 五床输入冻结为 `E:/Xiang_Project/SPECT/6Module/experiments/recon_param_study/pre/mouse_normal_lu/Bed1..5.bin`（2026-08-27 正常小鼠，既有 2026-09-03 预处理）。来源记录显示这些计数合并了 113/208 两窗；用作计算性能和前后数值一致性负载，不解释为单 208 keV 窗定量验证。保持生产 INI／algo_mlem、MLEM50:50、vb1、PSF sieve/castor 1.3 mm、denom hit、无 CTAC／背景项／正则／迭代内滤波，床顺序及 16.8 mm 步长固定。延续核心目标 120 s／下限 180 s、后续新增复杂度最低 5% 收益和 relL2 1e-5；此次锁页移植另守护 1e-7。全量主机缓存必须由默认自动预算实际满足，记录空闲 RAM 与显存，不强行扩大预算。
 
+计时边界保持源码原定义：`iteration_core_s` 是分子调用、更新、正则梯度与迭代 Butterworth 等主机计时区间的累加，并非整个迭代循环墙钟。输入准备调用和逐轮 `observeCompactMemory()` 在这些区间之外；异步 GPU 工作可能由后续同步承担，不能把差值直接解释成某个核的耗时。整命令和到进程退出的外部观察时间同时保留。
+
 执行范围：合入已验证的唯一锁页实现，更新既有性能门驱动，完整构建和聚焦回归；用旧 RC `0510e4f` 与主线候选各 5 次预热后按 A-B / B-A / A-B 重复 MLEM50，记录主机／显存与阶段时间，每次限 600 s。预热失败则先修复，不能更换为单床或另一矩阵。分析 kernel 融合、路径合并和分支简化时，以新五床热路径和单独短程分析结果为依据，不把带分析开销的时间混入正式门，也不重新打开已拒算法／精度变体。
 
-执行 `exploring`；锁页采纳 `approved, integrating`；新门性能与剩余方向证据待完成。证据目录 `recon_out/lu208_5bed_gate_20260905/`；旧 RC 和 §7.5 独立候选原样保留。
+锁页实现与新门驱动已提交为 `6a3e59b`，主线 Release 身份为 `20260905+6a3e59b`。完整构建通过，CTest **284 通过、4 原有跳过、0 失败**（共 288）；保留原有 LNK4098 告警。初次 CMake 配置停在 vcpkg 安装阶段，停止本次自有配置进程后以已安装依赖 `-DVCPKG_MANIFEST_INSTALL=OFF` 完成配置与构建，没有更换依赖版本。
+
+**执行 `completed`；同输入性能／数值证据 `validated`；锁页主线采纳 `merged`。新门目标 120 s 和下限 180 s 均未达到。** 初次预检发现另一个 CASToR 作业占用约 19 GiB、空闲约 28 GiB，未启动重建。默认完整缓存需矩阵 32.78 GiB + 8 GiB 保留；等待约 24.5 分钟至至少 42 GiB 空闲且无其它重建后自动接续，没有终止外部作业或扩大预算。两次预热通过（A/B 五次核心 28.923/20.980 s、relL2 5.650e-8），全部 B 日志确认 6 块锁页与 packed-K=2。生产配置五床在内部以 non-overlapping reconNz=1100 处理，16.8 mm 步长及 center66/cosine10 作用于最终输出拼接，primary 为 100×100×290、MET_DOUBLE。
+
+### 正式配对结果与身份
+
+| 配对执行顺序 | A：0510e4f 核心 / s | B：6a3e59b 核心 / s | 核心减少 | primary relL2 |
+|---|---:|---:|---:|---:|
+| A → B | 284.278 | 191.092 | 32.78% | 8.8022e-8 |
+| B → A | 262.664 | 190.517 | 27.47% | 7.2588e-8 |
+| A → B | 290.992 | 193.726 | 33.43% | 6.3136e-8 |
+
+| 指标（三次中位数，括号为范围） | A：未锁页 | B：已锁页 |
+|---|---:|---:|
+| 50 次核心 / s | 284.278（262.664–290.992） | **191.092（190.517–193.726）** |
+| 整命令 / s | 339.994（311.848–341.748） | **242.402（239.372–246.875）** |
+| 到进程退出的观察时间 / s | 343.349 | 245.220 |
+| 矩阵／分母准备 / s | 31.835 | 33.174 |
+| OS 主机工作集峰值 / GiB | 34.157276 | 34.157070 |
+| 迭代期私有提交 / GiB | 46.809700 | 46.808697 |
+| 迭代期进程专用显存 / GiB | 12.296329 | 12.360626 |
+
+锁页的五床核心时间减少 **27.5%–33.4%**；整命令中位数减少 **28.70%**。没有第二份矩阵主机副本：RSS 峰值基本相同；进程专用显存计数增加约 **65.84 MiB**。Windows RSS、私有提交与专用显存各自统计，整卡 NVML 值保留在原记录中，不当成本进程显存。系统 CPU 中位利用率按运行顺序为 31.5/11.4/11.8/11.7/31.5/28.9%，整卡 GPU 中位利用率均为 100%；三个配对结果全部保留，不以最快样本替代中位数，也未从三组样本估计稳定置信区间。
+
+所有正式运行 denom hit，最大 primary relL2 **8.8022e-8 ≤ 1e-7**。配置／五床／预处理来源／分母哈希、矩阵文件身份、有效 matrix/projection/algorithm/multibed 输入字段一致，旧 RC 的 30 个 payload 哈希不变。首次汇总把 `multibed.fitted_bed_gains` 也当输入要求位相同而停止；源码 `RunManifest.cpp` 在最终 SaveVolume 上重新拟合该字段，它属于派生输出。保留首次日志，修正比较分类后只重算汇总，逐运行保留 gain，未重跑或更改图像容差。
+
+证据目录 `recon_out/lu208_5bed_gate_20260905/`：`contract.json`、`summary.json`、逐运行 CSV／日志／manifest、`integration_verification.json`、`experiment.py` 与 `measurement.py`。可用 `python recon_out/lu208_5bed_gate_20260905/experiment.py summarize` 复核已完成结果；新的实际测量须复制脚本到新的隔离目录，运行目录拒绝覆盖。既有门驱动 `tools/run_220_mlem_perf_gate.py` 已更换为该矩阵和五床，文件名保留以兼容已有入口。
+
+新基线 exe 为 `build/verify-vs/bin/Release/SPECT_recon.exe`，版本 **20260905+6a3e59b**，SHA-256 `ccca6af6ac216e88e48ad40f8c4721882221d3c603ce86cf20c7894eef88674a`；同哈希备份在证据目录 `frozen_binary/SPECT_recon.exe`。备份仅含 exe，使用时仍依赖经验证的 runtime／fatbin 布局；本轮未重新发布 RC，旧 RC 和 §7.5 独立候选保持原样。
+
+### 独立五次 Nsight 时间线：主要成本是稀疏乘法
+
+正式配对后，单独运行 B 的同配置五次诊断，profile primary 对预热 B 的 relL2 **3.1062e-8**。`profile_B/trace.nsys-rep`、`trace.sqlite`、`analysis.json` 与可复核脚本 `analyze.py` 保留原始时间线；这次运行含分析开销，不进入正式性能统计。
+
+| GPU 核（五次诊断） | 启动次数 | 核执行总和 / s |
+|---|---:|---:|
+| cuSPARSE `csrmv_v3_transpose_kernel` | 1,200 | **11.38637** |
+| packed-2 `compact_csr_spmv_xpair` | 600 | **6.15649** |
+| 反变换 `compact_transform_backward_add_batch` | 150 | 0.08642 |
+| pack `compact_pack_colpair_to_float2` | 600 | 0.02826 |
+| cuSPARSE partition | 1,200 | 0.01609 |
+| ratio `compute_compact_ratio_chunk_batch` | 150 | 0.00188 |
+
+以每次首个 packed forward 到末个 transform-add 为分子窗口，五段合计墙钟 **18.29231 s**，GPU kernel 活跃 **17.67519 s**。H2D 活跃 **5.38127 s**，其中 **5.04667 s（93.78%）**与核重叠，只有 0.33460 s 不重叠；kernel 和 copy 均未运行的间隙为 **0.28252 s（1.54%）**。这个窗口不含迭代更新和最前面的输入准备，不能替换 `iteration_core_s`；连同四段迭代间隙的宽窗口为 20.52272 s，其中 GPU 空闲 2.24340 s。
+
+因此 pin 的主机 upload-call 中位计时 **94.620 → 0.430 s** 不能说成“PCIe 传输消失”；实际传输仍在，短诊断证明大部分与计算重叠。GPU 核时间主要是反投约 **64%**、正向约 **35%**，ratio／pack／反变换三项合计仅约 **0.66%**。全 trace 的 `cudaEventSynchronize` 16.587 s 主要是等待上述 GPU 工作，不是可直接删掉的 CPU 开销。`cudaMemGetInfo` 9 次总共 **0.000176 s**，不支持此前“内存观测可能昂贵”的假设；移走这项查询没有性能依据。
+
+### 已定位的路径问题：默认 ROI 浮点边界误触发 host 路径
+
+源码原本允许此类无 CTAC、CASToR PSF 的单／多床驻留输入及更新；本次时间线却没有 `compact_mlem_update`、resident gather／forward-transform 核。实际运行是 **host 输入准备／更新 + 同一 GPU CSRB 分子入口**，不能按“默认五床必定 resident”解释性能。
+
+触发点为 `CompactSymmetricReconLoop.cpp::compactRoiPrunesMatrix` 的固定 `1e-6 mm` 比较。manifest 的 spacing 是 float32 的 0.3 扩成 double，即 **0.30000001192092896 mm**；120／220 体素宽度分别成为 **36.000001430511475／66.00000262260437 mm**，均超出默认 ROI 的 `36+1e-6`／`66+1e-6`，于是 `residentBatchInput` 被禁用。这是本输入上的直接判断复现，不是由计时猜原因。
+
+进一步只读扫描全部 **4,399,851,643** 个 colIdx：引用体素 **1,457,796**，默认 mask 外引用 **0**；nominal 0.3 mm、实际 spacing + 默认 36/66 mm、实际 spacing + 完整 extent 三种计算得到的离散 mask 完全相同（**2,486,880** 个体素）。证据 `resident_eligibility_diagnosis.json`、`check_roi_support.py`、`roi_support_check.json`，检查耗时 24.11 s、矩阵身份不变。该矩阵支持没有被默认 mask 额外裁剪，固定绝对容差使资格判断产生了错误的 host 分类。
+
+最小下一步是仅在现有资格判断处采用与输入 float 精度一致的尺寸比较，保留实际 mask、显式小 ROI／偏心 ROI 的 host 语义和现有 GPU 路径。先做 full-FOV／缩小／偏心边界检查，再用本五床对照核对 resident 核出现、primary relL2 与重复性能；不能直接删除 ROI guard 或修改 voxel/ROI 配置来绕过它。本轮只完成诊断及支持验证，未改这个判断，未声称 resident 路径已经通过本矩阵的 MLEM50 或能使 180 s 达标。
+
+### 原始投影零计数的描述性筛查
+
+在修改任何新核前，只读五床投影与六个 CSRB 的 row pointer；复用既有 metadata／CSRB header 读取器。metadata 与文本独立核对为 360 角度、48×48 探测面、90 个 compact 角度、24 个 compact Z 行、SYM90Z；按四个角度象限与正反 Z 半面展开，检查完整投影行覆盖为双射，row nnz 合计与 4,399,851,643 一致。这里尚未应用生产坏探测器 68 屏蔽，因此统计是原始输入的描述性上界，不能直接当执行时间或采纳结果。
+
+| 原始输入 | 零计数 bin | 非零 RHS 覆盖的 nnz 比例 | K=2 两路至少一路非零的 nnz 比例 |
+|---|---:|---:|---:|
+| Bed1 | 81.40% | 20.26% | 35.89% |
+| Bed2 | 73.97% | 28.26% | 47.32% |
+| Bed3 | 73.27% | 29.01% | 48.01% |
+| Bed4 | 81.64% | 20.45% | 35.83% |
+| Bed5 | 89.91% | 11.21% | 21.03% |
+
+推导依据是现有 `compute_compact_ratio_chunk_batch`：有限合法输入下，`p_i=0` 则 `p_i/max((Ax)_i+b_i, eps)=0`，所以该行分子不需要算 forward；**分母 sensitivity 仍必须保留该行**。在当前 K=2 的相邻 Z 镜像配对下，平均约 **62.38%** 的正向 nnz 工作属于“两路 p 都为零”的行。最小候选是在既有 packed-2 行核读取 values／colIdx 前做一次静态投影检查并直接写零；不裁剪源矩阵、不建立五套稀疏矩阵、不改变 denominator。此优化只适用于生成 ratio 的分子调用，独立 forward 输出／分母及 CTAC 调用必须保留其原语义。数据稀疏性随采集而变，这不是通用加速比例。
+
+记录 `projection_sparsity.py` / `projection_sparsity.json` 包含投影 SHA-256、原始计数、nnz 加权比例、矩阵文件身份和映射校验。该筛查只形成下一步假设；没有实现新核，也没有把 62.38% 推算成端到端收益。
+
+### 剩余方向：按本次证据排序
+
+当前实际调用链是 `CompactSymmetricReconLoop` 的 host 输入准备／PSF／更新，进入 `accumulatePoissonBackprojectedRatioCUDA` 的同一单／多床 CSRB 入口，再由 `executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat` 执行每 chunk 的 40 RHS。下表依据源码、完整矩阵支持检查、输入筛查和时间线排序；没有将未实施方案的潜力当成实测收益。
+
+| 方向 | 已有证据与最小改动位置 | 边界／最小验证 |
+|---|---|---|
+| **优先：复用已有 resident 路径** | 固定 1e-6 mm 导致默认 ROI 被误分类；完整 mask／列支持检查已排除真实裁剪。只修现有资格判断，不建立另一条路径 | 先查 full-FOV／缩小／偏心边界，再验证新门 resident trace、MLEM50 relL2 和配对 core／整命令时间。原 host 分支仍服务实际 ROI、debug 和不支持的 PSF |
+| **其次：零计数行提前退出** | `projdomain_chunk_ops.cu::compact_csr_spmv_xpair` 当前每行都遍历 nnz；五床平均 62.38% 的 K=2 加权行工作两路 p 均为零，正向约占 GPU 核时间 35%。在现有分子核入口检查；保留 K=2、原矩阵和完整分母 | 先测真实 chunk 与两路均零／单路非零／稠密计数对照，并维持非有限输入的拒绝；再跑同一五床 MLEM50 relL2 与配对性能。独立 forward 与 CTAC 分子不能被误用成相同语义 |
+| forward + ratio 融合 | 行归约后可直接计算 ratio，省中间 yhat 的写后读和独立启动；CSRQ 已有此形式。但 ratio 本身五次仅 0.00188 s，不足以单独支持 ≥5% 项目 | 保持 fp32 行和 → fp64 加背景／除法 → fp32 ratio 的原舍入点及角度／镜像映射。若作为零行检查的配套变动，仍需分开量时以区分机制 |
+| 合并五床小核启动、简化反变换 | 每 chunk ratio 五次、transform-add 五次；反变换为每 `(branch, voxel)` 一次 fp64 atomicAdd。但 transform 五次合计 0.08642 s、约 0.49% GPU 核时间 | 当前收益上限小，不新增床位 launch／gather 变体；gather 会改变求和顺序，不能当位相同重构 |
+| 重复 pack 与数据布局 | 每轮 120 次 pack，但五次仅 0.02826 s、约 0.16%。40 RHS 为 483.40 MiB，缓存另一套 packed 副本会增加相近显存 | 当前不值得换布局或增加副本；不能把床/RHS 循环移到 chunk 外导致矩阵反复上传，也不重开已拒 pack-xquad 融合 |
+| 主机提交、计时与同步 | 每 chunk 创建四组计时事件，反投逐 RHS 重建 dense-vector 描述符；分子窗口 kernel/copy 均空闲的比例仅 1.54%，大部分 EventSynchronize 是 GPU 等待 | 当前不以 Graph／事件池作为 ≥5% 项目。只在 resident 修正后的新时间线显示明显提交间隙时考虑现有 State 内的复用，必须保留上传 ready、缓冲复用和非法值检查依赖 |
+| 观测开销 | `cudaMemGetInfo` 九次总共 0.000176 s，已不支持查询开销是瓶颈的假设 | 保留现有观测口径，不通过移动计时／查询定义制造 core 达标 |
+| 路径合并、分支简化 | 单／多床与背景 ratio 已共用生产入口；CTAC 因子处理、host debug/ROI/非 CASToR PSF 回退、MLEM／BSREM 更新分别有实际语义。`hasAtten` 在 chunk 级、背景判断在 row 级，均不在逐 nnz 内层 | 小型重复参数／分支表可随触及处收敛；目前没有依据把它们作为 ≥5% 加速项目。删除活跃回退或制作多布尔模板组合会扩大验证范围 |
+| 反投算法／格式 | 40 RHS 的 cuSPARSE 反投是 GPU 核主成本（约 64%）。但它对零 ratio 的内部处理不能由调用次数推断；本次尚无证据说明究竟受 scatter 原子冲突、访存还是库调度限制 | 先以真实 chunk／RHS 的硬件计数区分机制，若获准才形成新算法合同。本轮不重开宽 SpMM、旧自定义转置、三块常驻、FP16 或 CSRQ 采纳 |
+
+CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它能减少重复启动准备开销，同时捕获期间不能同步正在捕获的流／事件；当前每块同步及缓存槽换绑需要先理清生命周期，不能只在循环外包一次 capture。[NVIDIA CUDA Graphs](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html) 对异步传输，锁页只是使主机传输具备重叠条件，实际重叠仍由 stream 和事件依赖决定。[NVIDIA Asynchronous Execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html)
 
 ## 8. 当前实现摘要
 

@@ -3,14 +3,14 @@
 适用范围：`test_data/6module` 三组生产矩阵（Tc99m 141 keV、Lu-177 208 keV ZFOLD、Lu-177 113 keV）及其 CSRQ 转换副本。
 状态约定：**CSRB = 生产路径、受保护基线；CSRQ = 实验路径**（用户决定，2026-09-03）。
 
-所有耗时均为 RTX 4070 Ti SUPER（16 GB，WDDM）、单床 `-vb 1` 的 `[PERF]` 输出；`s/iter = iteration_core_s / 迭代数`。
+下文历史耗时来自 RTX 4070 Ti SUPER（16 GB，WDDM），床数按各行标注；`s/iter = iteration_core_s / 迭代数`。2026-09-05 起正式门改为 Lu-177 208 keV CSRB + 正常小鼠五床，当前结果以最终设计报告 §7.6 为准，不能和旧矩阵／单床时间直接比较。
 
 ## 1. 三组矩阵的静态属性
 
 | 矩阵 | 目录 | CSRB 体积 | metadata | CSRQ 体积（设备端） | 备注 |
 |---|---|---|---|---|---|
 | Tc99m 141 keV | `Tc99m_sysmat/matrix_PSC_PIN26x28x25_SCALE2_141keV_120x120x220` | 24.3 GiB | 88 B | 6.9 GiB（`..._csrq`，D:） | 回归基线 |
-| Lu-177 208 keV | `Lu177_sysmat/matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD` | 33.6 GiB | 92 B（兼容提示） | 9.2 GiB（F:） | 超过 ~30 GiB 主机缓存 |
+| Lu-177 208 keV | `Lu177_sysmat/matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD` | 32.782222 GiB（2026-09-05 文件核对） | 92 B（兼容提示） | 9.2 GiB（F:，历史记录） | nnz 4,399,851,643；缓存能否覆盖取决于当次空闲 RAM |
 | Lu-177 113 keV | `Lu177_sysmat/matrix_PSC_PIN26x28x20_113keV_120x120x220/<同名子目录>` | 22.1 GiB | 92 B（兼容提示） | 6.3 GiB（F:） | 嵌套目录，需指到内层 |
 
 三者共享 v7.9 compact chunk 布局、103680 × 3 168 000 几何、6 个 chunk、K = 8 对称分支（sym90 + z 镜像）。格式差异只有 metadata 长度（88/92 B，自 4f6e569 起都接受）与 chunk 文件后缀（`.csrb` / `.csrq`）。
@@ -50,8 +50,8 @@ flowchart TD
 flowchart TD
     W["warmCompactChunks(chunks)"] --> WR["warmCompactChunkResidentDeviceCache<br/>GPU 常驻前缀 = (空闲显存 − 6 GiB 保留) 能放下的前 n 个 chunk<br/>其余 chunk 每遍 host→device 上传"]
     WR --> HC{"主机缓存预算 ≥ 矩阵?"}
-    HC -->|"是（Tc99m 24.3 / Lu-113 22.1 GiB）"| HCOK["全部 chunk 常驻主机<br/>每遍只走 PCIe"]
-    HC -->|"否（Lu-208 33.6 GiB vs ~30–33 GiB 预算）"| HCNO["持久前缀 5/6 chunk<br/>每遍从磁盘回读 ~5.6 GiB"]
+    HC -->|"是"| HCOK["全部 chunk 常驻主机<br/>lease 保持所有权并锁页注册 colIdx/values<br/>复用原上传流；释放前同步并解锁"]
+    HC -->|"否"| HCNO["部分 chunk 常驻主机，不锁页<br/>未缓存且设备槽不命中的 chunk 需回读"]
     HCOK --> LOOPC
     HCNO --> LOOPC
     LOOPC["for chunk（顺序每迭代反转）<br/>loadChunk + prefetchNextCompactChunk"] --> B{"CTAC?"}
@@ -62,6 +62,10 @@ flowchart TD
 ```
 
 （2026-09-04 之前的"有背景走 host ratio"和"CTAC 走逐分支 fused 核 + CPU ratio + CPU transformBackwardAdd"两条分支已删除，见 CHANGELOG。）
+
+2026-09-05 获准保留的 host pin 只扩展既有 `CompactChunkResidentCacheLease`，不复制矩阵、不增加槽。自动缓存预算是 `min(矩阵大小, 总内存−max(8 GiB, 总内存/4), 空闲内存−8 GiB)`；本机 Lu-208 完整缓存因此至少需要打开矩阵时约 **40.78 GiB** 空闲，正式测量预检取 42 GiB 留出准备余量。五床与八分支组成 40 RHS，当前该尺寸选 packed-K=2 正向及逐 RHS CSR_ALG2 反投；单／多床共用一个分子入口。
+
+新门实测核心中位数 **284.278 → 191.092 s / 50 次**，三组减少 27.47%–33.43%，仍未达到 180 s。当前版本 `6a3e59b` 的五床默认输入／更新实际走 **host 路径**：`compactRoiPrunesMatrix` 的 1e-6 mm 容差小于 float32 spacing 对完整 36/66 mm 尺寸的舍入误差。Nsight 无 resident update 核；完整 colIdx 扫描确认默认 mask 外引用为 0。图中的 resident 路径是有条件能力，不能视为本次实际执行状态；资格判断尚未修改。GPU 核主成本为 cuSPARSE 反投约 64%、packed-2 正向约 35%，小核纯融合空间有限。结果、支持检查与下一步最小修复合同见最终设计 §7.6。
 
 历史实测（P0 之前的同一 exe `build/metadata-compat`，单床 MLEM；表中 host-ratio 路径已删除，数值不代表当前构建的配对性能）：
 
@@ -74,7 +78,7 @@ flowchart TD
 | Lu-177 208 | branch-batch（无背景） | — / 7.6 s | **14.4** | `csrb_lu208_nobg_it5`；主机缓存溢出，每遍磁盘回读 |
 | Lu-177 208 | host-ratio（`-bProj`） | 145.0 s / — | **15.2** | `csrb_lu208_smoke_it5` |
 
-结论：CSRB 三组矩阵都正常重建；208 keV 的 ~15 s/iter 完全来自 33.6 GiB 矩阵超出主机缓存预算（当时空闲 RAM 37 GB → 预算 29.5–33.4 GiB，持久前缀 5/6 chunk），与背景项路径无关。空闲 RAM ≥ ~40 GB 时预期回到 ~2 s/iter 量级。
+历史诊断：三组 CSRB 均完成重建，Lu-208 日志曾显示部分主机缓存及逐遍回读。上述 ~15 s/iter 不是完整缓存的当前五床性能，也没有用受控配对证明全部时间差均由磁盘回读造成。旧记录的 33.6 GiB 大小和 ~2 s/iter 预估不再作为当前判断依据；以本节实测文件大小、当次缓存覆盖日志及新门重复测量为准。
 
 ## 4. CSRQ 实验路径（`runCsrqMlemNumerMultiBed` → `CudaSparseOpsState::csrqRunNumer`）
 
@@ -118,4 +122,4 @@ flowchart TD
 - CSRQ 双窗需要预处理产出两套窗投影 + 113 keV 的 TEW 散射估计作 `-bProj2`；`spect_preprocess_YJ` 目前只输出一个光电峰窗。窗权重（分支比 0.0617/0.1036 × 相对窗效率或标定）待用户决定。
 - 反投核 150 ms/遍的下限是 L2 原子吞吐；(angle, z-slice) shared-memory tile 两种形式实测 2× 更慢，已移除（`reports/2026-09-04-csrq-slice-backward-experiment.md`）。sm_120 向量原子代码已就位（`SPECT_CSRQ_BACKWARD_PACKED=1`，默认关），现场 RTX 5060 Ti 性能仍待测；本机 sm_89 标量退化路径约慢 4.2 倍。
 - 常驻规划在 WDDM 下偏乐观：另一进程占 3.2 GB 时 `cudaMemGetInfo` 仍报 15.1 GB 空闲（nvidia-smi 12.8 GB），`planCsrqStreaming` 于是让 208 keV 常驻，上传完 9.2 GB 后 113 keV 的两个流槽 + 2 GiB 保留放不下（`lu177_dual_auto_it50` 当时 FATAL）。**2026-09-04 P3 起**：放不下抛 `CsrqDeviceMemoryError`，`warmCompactChunks` 把本次调用已常驻的矩阵降级为流式并重试；用 4 GiB 的 torch 进程复现：208 常驻 → 113 放不下（空闲 1197 MiB）→ 208 降级流式 → 113 常驻 → 跑完 0.77 s/iter（`p2_ctac_20260904/lu177_dual_auto_hog4g_it3`）。估计本身仍乐观（降级后仍报 14.9 GB 空闲），共享 GPU 时 `-csrqResidency streamed` 可省掉一次重读。
-- 208 keV CSRB 的主机缓存溢出是既有行为；若需要在生产上更快，选项是释放主机内存、或把该矩阵改用 CSRQ 副本（体积 9.2 GiB，可 GPU 常驻）。
+- 208 keV CSRB 的部分主机缓存仍是资源限制下的既有行为。正式门必须记录其覆盖情况；CSRQ 继续是独立实验路径，不能代替新门的 CSRB 结果。
