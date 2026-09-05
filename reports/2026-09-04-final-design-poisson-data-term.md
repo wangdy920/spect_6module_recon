@@ -408,6 +408,14 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它能减少重复启动准备开销，同时捕获期间不能同步正在捕获的流／事件；当前每块同步及缓存槽换绑需要先理清生命周期，不能只在循环外包一次 capture。[NVIDIA CUDA Graphs](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html) 对异步传输，锁页只是使主机传输具备重叠条件，实际重叠仍由 stream 和事件依赖决定。[NVIDIA Asynchronous Execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html)
 
+## 7.7 2026-09-05 默认全视野 ROI 精度修复与 resident 复验
+
+用户在 §7.6 分析后要求“继续”。本轮先修已确认的 `compactRoiPrunesMatrix` 误判；仅在既有判断处将矩阵物理 extent 转回 ROI 参数的 float 精度，保留原 1e-6 mm 比较余量、实际 mask、缩小／偏心 ROI 的 host 语义。不扩展 resident 支持范围，不增加新核或配置；首轮日志记录实际 input/update 路径和 ROI 判断。
+
+冻结对照 A 为已接受 pin 的 `20260905+6a3e59b`（exe SHA-256 `ccca6af6ac216e88e48ad40f8c4721882221d3c603ce86cf20c7894eef88674a`），B 为本次修复。沿用 §7.6 Lu208 CSRB、正常小鼠五床、全部配置和输入身份，原 primary relL2 ≤1e-5、核心目标120／下限180 s；1e-7 是此前纯锁页移植的额外守护，本次不把不同 host/device 数值路径强定为位等价。
+
+验证顺序：完整构建／CTest；默认五床各五次预热，确认 B 路径；实际缩小直径／高度、相邻较小 float 尺寸及偏心 ROI 的短程行为检查；A-B／B-A／A-B 三组 MLEM50、每次600 s、自动完整缓存和42 GiB空闲预检，另记录整命令和内存。短程数值仅作诊断，最终图像门用50次保护端点；若50次数值失败，不采纳并保留最小失败证据。独立短 Nsight 仅用于核出现与成本变化，不进入性能门。证据目录 `recon_out/lu208_resident_roi_20260905/`。执行 `exploring`、证据 `preliminary`、采纳 `pending`；先完成此机制的修复和复验，再依据结果决定下一项。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。

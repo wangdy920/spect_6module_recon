@@ -837,10 +837,14 @@ std::vector<double> runCompactSymmetricReconstruction(
             !compactLocalSupportMask.empty() &&
             // ponytail: full-FOV cylinders rely on the matrix's cylindrical
             // support; add a column-support bitmap if future matrices differ.
+            // ROI dimensions are float: compare extents at the same precision.
+            // Widened float voxel sizes otherwise make 36/66 mm look pruned.
             (args.cylinderDiameterMM + 1e-6 <
-                 std::min(baseNx * spacing.dx, baseNy * spacing.dy) ||
+                 static_cast<float>(
+                     std::min(baseNx * spacing.dx, baseNy * spacing.dy)) ||
              (args.cylinderHeightMM > 0.0 &&
-              args.cylinderHeightMM + 1e-6 < baseNz * spacing.dz) ||
+              args.cylinderHeightMM + 1e-6 <
+                  static_cast<float>(baseNz * spacing.dz)) ||
              !std::isnan(args.cylCenterX) || !std::isnan(args.cylCenterY) ||
              !std::isnan(args.cylCenterZ));
         // Sieve: iteration path is identical to Operator; save points write a
@@ -1271,6 +1275,12 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           const bool residentIteration =
               residentBatchInput && residentUpdateAllowed;
+          if (it == 1) {
+            logInfo(std::string("compact iteration path: input=") +
+                    (residentBatchInput ? "device" : "host") + ", update=" +
+                    (residentIteration ? "device" : "host") +
+                    ", roi_prunes_matrix=" + (compactRoiPrunesMatrix ? "yes" : "no"));
+          }
           if (!residentIteration)
             numer.assign(globalNvox, 0.0);
 
