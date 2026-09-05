@@ -414,7 +414,21 @@ CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它
 
 冻结对照 A 为已接受 pin 的 `20260905+6a3e59b`（exe SHA-256 `ccca6af6ac216e88e48ad40f8c4721882221d3c603ce86cf20c7894eef88674a`），B 为本次修复。沿用 §7.6 Lu208 CSRB、正常小鼠五床、全部配置和输入身份，原 primary relL2 ≤1e-5、核心目标120／下限180 s；1e-7 是此前纯锁页移植的额外守护，本次不把不同 host/device 数值路径强定为位等价。
 
-验证顺序：完整构建／CTest；默认五床各五次预热，确认 B 路径；实际缩小直径／高度、相邻较小 float 尺寸及偏心 ROI 的短程行为检查；A-B／B-A／A-B 三组 MLEM50、每次600 s、自动完整缓存和42 GiB空闲预检，另记录整命令和内存。短程数值仅作诊断，最终图像门用50次保护端点；若50次数值失败，不采纳并保留最小失败证据。独立短 Nsight 仅用于核出现与成本变化，不进入性能门。证据目录 `recon_out/lu208_resident_roi_20260905/`。执行 `exploring`、证据 `preliminary`、采纳 `pending`；先完成此机制的修复和复验，再依据结果决定下一项。
+验证顺序：完整构建／CTest；默认五床各五次预热，确认 B 路径；实际缩小直径／高度、相邻较小 float 尺寸及偏心 ROI 的短程行为检查；A-B／B-A／A-B 三组 MLEM50、每次600 s、自动完整缓存和42 GiB空闲预检，另记录整命令和内存。短程数值仅作诊断，最终图像门用50次保护端点；若50次数值失败，不采纳并保留最小失败证据。独立短 Nsight 仅用于核出现与成本变化，不进入性能门。该 guard 也服务 CTAC，另复用既有真实两床 CSRB CTAC20 保护端点（每5次保存比较、relL2≤1e-5、每次600 s），检查共享调用方，不作另一性能比较。证据目录 `recon_out/lu208_resident_roi_20260905/`。执行 `exploring`、证据 `preliminary`、采纳 `pending`；先完成此机制的修复和复验，再依据结果决定下一项。
+
+修复代码 `0ddc6ab`，执行 `completed`、本机同输入证据 `validated`、采纳 `merged`。完整构建通过，CTest284通过／4原有跳过／0失败；实际运行的四项 ROI 边界（直径／高度各小一个 float 刻度、35.7/65.7 mm、偏心）全部保持 host 路径，对旧版最大 relL2 **4.2468e-8**。默认全视野为 device input/update，五次预热 relL2 **3.1021e-8**。双方邻接库和实际加载的 CUDA／CRT／OpenMP 库哈希一致。
+
+| 三组 MLEM50 | A：pin6a3e59b / s | B：ROI修复0ddc6ab / s | 核心减少 | primary relL2 |
+|---|---:|---:|---:|---:|
+| A → B | 193.294 | 181.052 | 6.33% | 1.3645e-7 |
+| B → A | 193.601 | 181.209 | 6.40% | 9.4534e-8 |
+| A → B | 195.512 | 181.476 | 7.18% | 7.0668e-8 |
+
+核心中位数 **193.601 → 181.209 s**，整命令中位数 **245.582 → 215.926 s（−12.08%）**，新版范围214.396–218.834 s；**120／180 s 均未通过**。主机工作集峰值 **34.15720 → 33.46844 GiB**（约少705 MiB），迭代期私有提交46.81232→46.23950 GiB；进程专用显存 **12.36063 → 12.73368 GiB（+382 MiB）**。这是复用既有 resident 图像/累加缓冲的资源变化，没有另存一份矩阵。所有正式运行输入／矩阵身份、有效输入 manifest、完整主机缓存与 denom hit 检查通过；旧 RC 30个payload不变。
+
+五次独立 Nsight 确认 **5 次 `compact_mlem_update`**，以及各25次 gather／forward-transform；profile图像对预热B relL2 **3.1007e-8**。稀疏核成本基本不变（反投11.40624 s、正向6.20344 s）。按与§7.6相同窗口定义，五段分子合计18.38511 s，含四段迭代间隙的跨度18.42408 s；四段间隙从先前约2.23042 s缩至 **0.03897 s**。这是省掉主机往返的时间线证据，profile绝对耗时不进入配对统计。CTAC共享调用方的真实两床CSRB20次回归通过，it5/10/15/20最大relL2 **6.1106e-8≤1e-5**，实际也进入device input/update。
+
+证据目录的 `summary.json`、`edge_checks.json`、`profile_B/analysis.json`、`csrb_ctac20/validation.json` 和 `runtime_hashes.json`／`candidate_loaded_runtime.json` 支持以上结论；原命令、输出和复核脚本保留。固定0ddc6ab exe在 `recon_out/lu208_resident_roi_20260905/frozen_binary/SPECT_recon.exe`，SHA-256 `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`，作为下一机制的独立对照；exe备份仍需配套已验证runtime布局。
 
 ## 8. 当前实现摘要
 
