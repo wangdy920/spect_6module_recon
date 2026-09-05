@@ -8,11 +8,9 @@
 
 #include <cusparse.h>
 
-#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 namespace spect {
 
@@ -130,25 +128,6 @@ public:
 private:
   cusparseDnMatDescr_t mat_ = nullptr;
 };
-
-struct HostCSRData {
-  int64_t rows = 0;
-  int64_t cols = 0;
-  int64_t nnz = 0;
-  std::vector<int32_t> rowPtr;
-  std::vector<int32_t> colIdx;
-  std::vector<float> values;
-};
-
-int getHostParallelThreads(int requestedThreads, uint64_t workItems);
-
-HostCSRData convertCSR(const io::CSRView &matrix);
-
-void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
-                              int rowEnd, int threads, HostCSRData &host);
-void buildSubsetCSR(const io::CSRView &matrix,
-                    const std::vector<int> &subset_rows, int threads,
-                    HostCSRData &host);
 
 } // namespace spect
 

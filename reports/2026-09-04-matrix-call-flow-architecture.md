@@ -42,6 +42,8 @@ flowchart TD
 
 分叉点只有两处：`CompactChunkCSRDirectory::open()` 决定 `format()`，`CompactSymmetricProjectorCUDA.cpp` 在 sensitivity / numer / forward 三个入口按 `isCsrqDirectory()` 分派。CSRB 调用方仍使用单目录签名（薄包装成单 channel），两种格式共享 Poisson 数据项接口；CSRB 设备路径已完成 P0 ratio 与 CTAC 因子分解收敛。
 
+2026-09-05 第二轮收敛：删除全矩阵／subset 入口留下的无调用转换器、行区间缓存、瞬态上传队列及其自引用 helper；生产 compact 预取仍使用独立上传流和原有缓存。投影／背景的 `[channel * bedCount + bed]` 指针表在预上传时一次建立；主机更新的分子容量跨迭代复用，后端负责写满各床分子；主机正则梯度仅在实际计算时分配，关闭 κ 图时不构造占位体积。数学核与计算顺序不变，见最终设计 §7.3 的回归记录。
+
 ## 3. CSRB 设备路径（生产，`runCompactChunkMlemNumerCUDA` / `…MultiBedCUDA`）
 
 ```mermaid

@@ -48,9 +48,7 @@ constexpr int kCsrqMaxMatrices = 2;
 // device chunk slots.
 constexpr int kCsrqBranchCount = 8;
 constexpr int kCsrqStreamSlots = 2;
-constexpr uint64_t kDeviceChunkCacheReserveBytes = 2ull * 3ull * kCudaGiB;
 
-constexpr size_t kTransientRangeSlotCount = 2;
 constexpr int kCompactDeviceBackwardMaxAccumulators = 5;
 
 // Packed-K forward: use ~60% of L2 for ROW-packed X; leave ~40% for CSR

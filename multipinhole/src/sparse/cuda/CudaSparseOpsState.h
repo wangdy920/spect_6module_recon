@@ -1340,31 +1340,6 @@ private:
     bool rowPtrStagePending = false;
   };
 
-  // P3-D: Persistent device-side chunk cache.  Keeps as many chunks as fit
-  // in VRAM across iterations so that their H2D upload can be skipped.
-  // Uses fixed-residency assignment (not LRU) to avoid sequential-access
-  // thrashing: the first N chunks that fit are permanently cached.
-  struct DeviceChunkCache {
-    std::vector<std::unique_ptr<CachedMatrix>> slots;
-    std::vector<bool> valid;
-    MatrixCacheKey matrixKey{};
-    uint64_t nnzBudget = 0;
-    size_t numCached = 0;
-    bool initialized = false;
-
-    bool isHit(size_t chunkIndex, const MatrixCacheKey &key) const {
-      return initialized && matrixKey == key &&
-             chunkIndex < valid.size() && valid[chunkIndex];
-    }
-
-    void invalidate() {
-      slots.clear();
-      valid.clear();
-      numCached = 0;
-      initialized = false;
-    }
-  };
-
   struct ResidentMatrixSetCache {
     std::vector<std::unique_ptr<CachedMatrix>> slots;
     std::vector<MatrixCacheKey> keys;
@@ -1385,19 +1360,6 @@ private:
         }
       }
       return true;
-    }
-
-    const CachedMatrix *find(const MatrixCacheKey &key) const {
-      if (!initialized) {
-        return nullptr;
-      }
-      for (size_t i = 0; i < keys.size(); ++i) {
-        if (i < valid.size() && valid[i] && keys[i] == key &&
-            i < slots.size() && slots[i] != nullptr) {
-          return slots[i].get();
-        }
-      }
-      return nullptr;
     }
 
     void invalidate() {
@@ -1631,44 +1593,6 @@ private:
     createMatA(cache);
   }
 
-  void uploadHostCSR(const HostCSRData &host, const MatrixCacheKey &key,
-                     CachedMatrix *cache) {
-    cache->key = key;
-    cache->rows = host.rows;
-    cache->cols = host.cols;
-    cache->nnz = host.nnz;
-    cache->dRowPtr.copyFromHost(host.rowPtr.data(), host.rowPtr.size());
-    cache->dColIdx.copyFromHost(host.colIdx.data(), host.colIdx.size());
-    uploadValuesAndCreateMatA(cache, host.values.data(), host.values.size());
-  }
-
-  void uploadHostCSR(const PinnedHostCSRData &host, const MatrixCacheKey &key,
-                     CachedMatrix *cache) {
-    cache->key = key;
-    cache->rows = host.rows;
-    cache->cols = host.cols;
-    cache->nnz = host.nnz;
-    cache->dRowPtr.copyFromHost(host.rowPtr.data(), host.rowPtrCount);
-    cache->dColIdx.copyFromHost(host.colIdx.data(), host.colIdxCount);
-    uploadValuesAndCreateMatA(cache, host.values.data(), host.valuesCount);
-  }
-
-  void uploadHostCSRAsync(const PinnedHostCSRData &host,
-                          const MatrixCacheKey &key, CachedMatrix *cache,
-                          cudaStream_t stream) {
-    cache->key = key;
-    cache->rows = host.rows;
-    cache->cols = host.cols;
-    cache->nnz = host.nnz;
-    cache->dRowPtr.copyFromHostAsync(host.rowPtr.data(), host.rowPtrCount,
-                                     stream);
-    cache->dColIdx.copyFromHostAsync(host.colIdx.data(), host.colIdxCount,
-                                     stream);
-    cache->dValues.copyFromHostAsync(host.values.data(), host.valuesCount,
-                                     stream);
-    createMatA(cache);
-  }
-
   void uploadIoCsrView(const io::CSRView &matrix, const MatrixCacheKey &key,
                        CachedMatrix *cache) {
     cache->prepareForUpload();
@@ -1732,31 +1656,6 @@ private:
     }
   }
 
-
-  template <typename MatrixType>
-  const CachedMatrix &ensureMatrixUploaded(const MatrixType &matrix) {
-    const MatrixCacheKey key = makeCacheKey(matrix);
-    if (cache_.key == key && cache_.matA.get() != nullptr) {
-      return cache_;
-    }
-
-    const HostCSRData host = convertCSR(matrix);
-    uploadHostCSR(host, key, &cache_);
-    return cache_;
-  }
-
-  const CachedMatrix &ensureMatrixUploaded(const io::CSRView &matrix) {
-    const MatrixCacheKey key = makeCacheKey(matrix);
-    if (const CachedMatrix *resident = residentMatrixSetCache_.find(key)) {
-      return *resident;
-    }
-    if (cache_.key == key && cache_.matA.get() != nullptr) {
-      return cache_;
-    }
-    validateIoCsrViewForUpload(matrix);
-    uploadIoCsrView(matrix, key, &cache_);
-    return cache_;
-  }
 
   CachedMatrix *findCompactFloatSlot(const MatrixCacheKey &key) {
     if (residentMatrixSetCache_.initialized) {
@@ -1848,145 +1747,6 @@ private:
             .count());
     return cache_;
   }
-
-
-  const CachedMatrix &ensureSubsetUploaded(const io::CSRView &matrix,
-                                           const std::vector<int> &subset_rows,
-                                           int threads) {
-    const SubsetCacheKey key = makeSubsetCacheKey(matrix, subset_rows);
-    for (size_t index = 0; index < subsetCache_.size(); ++index) {
-      if (subsetCacheValid_[index] && subsetCacheKeys_[index] == key &&
-          subsetCache_[index].matA.get() != nullptr) {
-        return subsetCache_[index];
-      }
-    }
-
-    const size_t slot = nextSubsetCacheSlot_;
-    nextSubsetCacheSlot_ = (nextSubsetCacheSlot_ + 1) % subsetCache_.size();
-
-    buildSubsetCSR(matrix, subset_rows, threads, subsetHostScratch_);
-    uploadHostCSR(subsetHostScratch_, key.matrix, &subsetCache_[slot]);
-    subsetCacheKeys_[slot] = key;
-    subsetCacheValid_[slot] = true;
-    return subsetCache_[slot];
-  }
-
-  const CachedMatrix &ensureStreamingRangeUploaded(const io::CSRView &matrix,
-                                                   int rowBegin, int rowEnd,
-                                                   int threads) {
-    const RangeCacheKey key = makeRangeCacheKey(matrix, rowBegin, rowEnd);
-    if (streamingRangeValid_ && streamingRangeKey_ == key &&
-        streamingRangeCache_.matA.get() != nullptr) {
-      return streamingRangeCache_;
-    }
-
-    buildContiguousSubsetCSR(matrix, rowBegin, rowEnd, threads,
-                             subsetHostScratch_);
-    uploadHostCSR(subsetHostScratch_, key.matrix, &streamingRangeCache_);
-    streamingRangeKey_ = key;
-    streamingRangeValid_ = true;
-    return streamingRangeCache_;
-  }
-
-  const CachedMatrix &
-  ensurePreparedStreamingRangeUploaded(const io::CSRView &matrix, int rowBegin,
-                                       int rowEnd,
-                                       const PinnedHostCSRData &hostChunk) {
-    const RangeCacheKey key = makeRangeCacheKey(matrix, rowBegin, rowEnd);
-    if (streamingRangeValid_ && streamingRangeKey_ == key &&
-        streamingRangeCache_.matA.get() != nullptr) {
-      return streamingRangeCache_;
-    }
-
-    uploadHostCSR(hostChunk, key.matrix, &streamingRangeCache_);
-    streamingRangeKey_ = key;
-    streamingRangeValid_ = true;
-    return streamingRangeCache_;
-  }
-
-  void queueTransientRangeUpload(size_t slot, const MatrixCacheKey &key,
-                                 const PinnedHostCSRData &hostChunk) {
-    if (slot >= transientRangeCache_.size()) {
-      throw std::runtime_error("CUDA transient range slot out of range.");
-    }
-    finalizeTransientRangeUploadTiming(slot);
-    cudaStream_t stream = transientUploadStreams_[slot].get();
-    if (transientRangeSlotUsed_[slot]) {
-      transientRangeReusable_[slot].wait(stream);
-    }
-    transientRangeUploadStart_[slot].record(stream);
-    uploadHostCSRAsync(hostChunk, key, &transientRangeCache_[slot], stream);
-    transientRangeReady_[slot].record(stream);
-    transientRangeValid_[slot] = true;
-    transientRangeSlotUsed_[slot] = true;
-    transientRangeUploadTimingPending_[slot] = true;
-    transientRangeReusableReady_[slot] = false;
-  }
-
-  const CachedMatrix &waitTransientRangeUpload(
-      size_t slot, TimedCudaStagePair *waitTiming = nullptr) {
-    if (slot >= transientRangeCache_.size()) {
-      throw std::runtime_error("CUDA transient range slot is out of range.");
-    }
-    if (!transientRangeValid_[slot]) {
-      throw std::runtime_error("CUDA transient range slot is not ready.");
-    }
-    if (waitTiming != nullptr) {
-      waitTiming->recordStart(computeStream_.get());
-    }
-    transientRangeReady_[slot].wait(computeStream_.get());
-    if (waitTiming != nullptr) {
-      waitTiming->recordStop(computeStream_.get());
-    }
-    return transientRangeCache_[slot];
-  }
-
-  void finalizeTransientRangeUploadTiming(size_t slot) {
-    if (slot >= transientRangeCache_.size() ||
-        !transientRangeUploadTimingPending_[slot]) {
-      return;
-    }
-    const cudaError_t status = cudaEventQuery(transientRangeReady_[slot].get());
-    if (status == cudaErrorNotReady) {
-      cudaGetLastError();
-      return;
-    }
-    CUDA_CHECK(status);
-    float elapsedMs = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&elapsedMs,
-                                    transientRangeUploadStart_[slot].get(),
-                                    transientRangeReady_[slot].get()));
-    noteCudaH2DChunk(static_cast<double>(elapsedMs) / 1000.0);
-    transientRangeUploadTimingPending_[slot] = false;
-  }
-
-  void waitTransientPinnedScratchReusable(size_t slot) {
-    if (slot >= transientRangeCache_.size() || !transientRangeSlotUsed_[slot]) {
-      return;
-    }
-    // The upload stream wait only orders future H2D work on that stream; it
-    // does not stop the host from overwriting the pinned staging buffer early.
-    // Reusing the slot-local pinned scratch therefore requires a host-side wait
-    // until the previous upload on that slot has actually completed.
-    CUDA_CHECK(cudaEventSynchronize(transientRangeReady_[slot].get()));
-  }
-
-  void markTransientRangeReusable(size_t slot) {
-    if (slot >= transientRangeCache_.size() || !transientRangeValid_[slot]) {
-      return;
-    }
-    finalizeTransientRangeUploadTiming(slot);
-    transientRangeReusable_[slot].record(computeStream_.get());
-    transientRangeReusableReady_[slot] = true;
-  }
-
-  void resetTransientRangeState() {
-    transientRangeValid_.fill(false);
-    transientRangeSlotUsed_.fill(false);
-    transientRangeUploadTimingPending_.fill(false);
-    transientRangeReusableReady_.fill(false);
-  }
-
 
 
 public:
@@ -2338,9 +2098,7 @@ public:
     cache_.release();
     dInput_.reset();
     dOutput_.reset();
-    dProjectionInput_.reset();
     dChunkInput_.reset();
-    dAccumOutput_.reset();
     dFullOutput_.reset();
     dBatchInput_.reset();
     dBatchOutput_.reset();
@@ -3007,9 +2765,9 @@ public:
     }
     const auto uploadStart = std::chrono::steady_clock::now();
     uploadIoCsrViewAsync(next, nextKey, target,
-                         transientUploadStreams_[0].get());
+                         compactUploadStream_.get());
     bindCompactSlotKey(target, nextKey);
-    target->compactUploadReady.record(transientUploadStreams_[0].get());
+    target->compactUploadReady.record(compactUploadStream_.get());
     target->compactUploadPending = true;
     noteCudaCompactMatrixUpload(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -3805,35 +3563,14 @@ private:
 
   CuSparseHandleGuard handle_;
   CachedMatrix cache_;
-  std::array<CachedMatrix, 4> subsetCache_;
-  std::array<SubsetCacheKey, 4> subsetCacheKeys_{};
-  std::array<bool, 4> subsetCacheValid_{};
-  size_t nextSubsetCacheSlot_ = 0;
-  CachedMatrix streamingRangeCache_;
-  RangeCacheKey streamingRangeKey_{};
-  bool streamingRangeValid_ = false;
-  std::array<CachedMatrix, kTransientRangeSlotCount> transientRangeCache_;
-  std::array<bool, kTransientRangeSlotCount> transientRangeValid_{};
-  std::array<bool, kTransientRangeSlotCount> transientRangeSlotUsed_{};
-  std::array<bool, kTransientRangeSlotCount> transientRangeReusableReady_{};
-  std::array<PinnedHostCSRData, kTransientRangeSlotCount>
-      transientRangePinnedScratch_;
-  std::array<CudaEventGuard, kTransientRangeSlotCount> transientRangeUploadStart_;
-  std::array<CudaEventGuard, kTransientRangeSlotCount> transientRangeReady_;
-  std::array<CudaEventGuard, kTransientRangeSlotCount> transientRangeReusable_;
-  std::array<bool, kTransientRangeSlotCount> transientRangeUploadTimingPending_{};
-  DeviceChunkCache deviceChunkCache_;            // P3-D
   ResidentMatrixSetCache residentMatrixSetCache_;
-  HostCSRData subsetHostScratch_;
   DeviceArray<float> dInput_;
   DeviceArray<float> dOutput_;
-  DeviceArray<float> dProjectionInput_;
   std::array<DeviceArray<double>, kCompactProjectionSlots>
       dCompactProjectionInput_;
   DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
   PinnedHostArray<float> pinnedOutputStage_;
-  DeviceArray<float> dAccumOutput_;
   DeviceArray<float> dFullOutput_;
   // Branch-batch compact-symmetric buffers (cols x batchSize / rows x batchSize).
   DeviceArray<float> dBatchInput_;
@@ -3927,7 +3664,7 @@ private:
   std::vector<TimedCudaStagePair> csrbAttenTransformTimers_;
   DeviceBuffer dBuffer_;
   CudaStreamGuard computeStream_;
-  std::array<CudaStreamGuard, kTransientRangeSlotCount> transientUploadStreams_;
+  CudaStreamGuard compactUploadStream_;
   std::mutex mutex_;
 };
 

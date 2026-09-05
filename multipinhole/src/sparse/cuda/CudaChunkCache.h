@@ -10,7 +10,6 @@
 #include "io/CompactChunkCSR.h"
 #include "sparse/SparseOpsCUDA.h"
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -21,7 +20,6 @@ namespace spect {
 constexpr uint64_t kProjDomainChunkMinNnz = cuda::kProjDomainChunkMinNnz;
 constexpr uint64_t kProjDomainChunkDefaultNnz = cuda::kProjDomainChunkDefaultNnz;
 constexpr uint64_t kProjDomainChunkMaxNnz = cuda::kProjDomainChunkMaxNnz;
-constexpr size_t kTransientRangeSlotCount = cuda::kTransientRangeSlotCount;
 
 template <typename T> class PinnedHostArray {
 public:
@@ -83,18 +81,6 @@ private:
     size_t capacity_ = 0;
 };
 
-struct PinnedHostCSRData {
-    int64_t rows = 0;
-    int64_t cols = 0;
-    int64_t nnz = 0;
-    size_t rowPtrCount = 0;
-    size_t colIdxCount = 0;
-    size_t valuesCount = 0;
-    PinnedHostArray<int32_t> rowPtr;
-    PinnedHostArray<int32_t> colIdx;
-    PinnedHostArray<float> values;
-};
-
 struct MatrixCacheKey {
     const void *rowPtr = nullptr;
     const void *colIdx = nullptr;
@@ -107,28 +93,6 @@ struct MatrixCacheKey {
         return rowPtr == other.rowPtr && colIdx == other.colIdx &&
                      values == other.values && rows == other.rows && cols == other.cols &&
                      nnz == other.nnz;
-    }
-};
-
-struct SubsetCacheKey {
-    MatrixCacheKey matrix;
-    const int *subsetRows = nullptr;
-    size_t subsetSize = 0;
-
-    bool operator==(const SubsetCacheKey &other) const {
-        return matrix == other.matrix && subsetRows == other.subsetRows &&
-                     subsetSize == other.subsetSize;
-    }
-};
-
-struct RangeCacheKey {
-    MatrixCacheKey matrix;
-    int rowBegin = 0;
-    int rowEnd = 0;
-
-    bool operator==(const RangeCacheKey &other) const {
-        return matrix == other.matrix && rowBegin == other.rowBegin &&
-                     rowEnd == other.rowEnd;
     }
 };
 
@@ -181,10 +145,6 @@ extern CudaChunkStageTimingState g_cudaChunkStageTiming;
 uint64_t recommendProjDomainChunkNnzBudget(size_t freeBytes);
 uint64_t selectCudaChunkNnzBudget();
 
-void noteCudaChunkBuild(double seconds);
-void noteCudaH2DChunk(double seconds);
-void noteCudaUploadWaitOnCompute(double seconds, size_t calls);
-void noteCudaFusedBedCycle(double seconds, size_t calls);
 void noteCudaCusparseForward(double seconds, size_t calls);
 void noteCudaCusparseForwardHost(double seconds);
 void noteCudaRatio(double seconds, size_t calls);
@@ -202,16 +162,7 @@ void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward);
 uint64_t selectPreparedChunkHostCacheBudgetCapBytes();
 
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
-SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
-                                  const std::vector<int> &subset_rows);
-RangeCacheKey makeRangeCacheKey(const io::CSRView &matrix, int rowBegin,
-                                int rowEnd);
-
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz);
-
-void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
-                              int rowEnd, int threads,
-                              PinnedHostCSRData &host);
 
 } // namespace spect
 

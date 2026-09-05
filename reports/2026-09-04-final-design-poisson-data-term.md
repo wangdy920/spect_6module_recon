@@ -230,6 +230,30 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 本地候选包固定位置为 `dist/release_candidates/SPECT_recon_rc_20260905_convergence/` 和同名 zip；以 `bin/SPECT_recon.exe --version`、`SHA256SUMS.txt` 及 `recon_out/release_convergence_20260905/release_verification.json` 绑定干净提交、包内文件与最终可执行文件 smoke。发行说明 `multipinhole/doc/RELEASE_20260905_CN.md` 随包保存未关闭的门；本轮不作 CSRQ 生产晋升或现场性能承诺。
 
+## 7.3 2026-09-05 第二轮：残留缓存与主机缓冲收敛
+
+契约：以已验证 RC `e5d376a` 为源码对照，沿现有 CLI → 准备 → 投影／更新 → 输出链审查；允许删除无调用代码、合并相同数据的生命周期，不改变数学核、精度、默认配置或 CSRB／CSRQ 地位。MLEM 同输入 relL2 ≤ 1e-7；BSREM 前五次结构回归 ≤ 1e-6，明确不替代 §6 的 1e-12 门；CTAC 沿用 ≤ 1e-5。完成同输入回归和本地 RC 后停止，不用缺失 Sampling 数据的替代测量作性能采纳。
+
+- 删除 P0 全矩阵／subset 入口撤除后留下的 `HostCSRData`、转换器、子集／行区间缓存、瞬态上传队列和自引用 helper，连同无引用的 `CudaCsrBuilder.cpp` 构建单元。实际 compact 预取仍调用 `uploadIoCsrViewAsync`，使用独立的 `compactUploadStream_`；CSRB 缓存与输入校验保留。
+- 投影／背景指针表在预上传时一次建立；主机全局／逐床分子容量跨迭代复用，逐床分子由后端写满，去掉调用层重复清零；这些暂存退出迭代作用域后释放。主机正则梯度改为空向量，首次计算由既有 CUDA wrapper 调整容量；关闭 κ 图时不再创建全 1 体积。
+- 代码及构建定义净减少 **744 行**；`CudaSparseOpsState.h` **3941 → 3678 行**。驻留路径少保留 `8 × globalNvox` 字节的主机梯度，单床 120×120×220 为 **24.17 MiB**；BSREM 关闭 κ 时另省同样大小的体积。主机路径从第二次迭代起少做 `bedCount + 1` 次分子体积申请及每床一次清零；这是源码分配／写入量分析，没有声称端到端加速或实测峰值减少。
+
+首次构建发现生产预取仍引用旧上传流数组，已保留该调用并收为一个独立流；修正后全量构建及 CTest **283 通过、4 跳过、0 失败**。4 项跳过与 §7.2 相同，LNK4098 为原有告警；CUDA 数学源码与默认配置无差异。
+
+| 回归 | 保存点最大 relL2 | 对照 |
+|---|---|---|
+| CSRB 驻留 MLEM it50 | 4.9185e-8 | e5d376a 包内 exe 已冻结的 it50，复用其分母缓存 |
+| CSRB 主机 MLEM it1–3（vb2） | 2.9718e-8 | e5d376a 同命令、同缓存 |
+| CSRB 主机 BSREM it1–5 | 1.1113e-8 | e5d376a 同命令、同缓存 |
+| CSRB 驻留 BSREM，κ off，it1–5 | 1.0469e-8 | e5d376a 同命令、同缓存 |
+| CSRQ 双窗，仅第二窗有背景，主机更新 it1–3 | 3.1931e-8 | e5d376a 同命令；同矩阵／投影复制为两窗，以投影作合成背景，仅为接口回归 |
+| CSRB CTAC，MDP 两床 it5/10/15/20 | 5.4068e-8 | 09-04 因子分解输出 |
+| CSRQ CTAC，同两床 it5/10/15/20 | 6.2355e-8 | 09-04 P3 输出 |
+
+证据在 `recon_out/convergence_buffers_20260905/`：`source.patch`、构建／CTest 日志、各组 `validation.json` 记录 exe SHA-256、配置／投影／μ 图哈希、矩阵文件大小与修改时间不变检查、完整命令及逐保存点数值。`replay.py --exe <exe> --label <新目录名> <case...>` 可复跑；`host_mlem host_bsrem resident_bsrem_no_kappa joint_background` 的基线位于 `baseline/`，其余对照路径在脚本中冻结。输入源保持只读，新的分母及输出均在隔离目录。
+
+本轮本地 RC 为 `dist/release_candidates/SPECT_recon_rc_20260905_buffers/` 及同名 zip。干净源码提交、构建／staging／包内 exe 一致性、包内哈希、三架构 fatbin、包内默认配置 smoke 与包内 exe it50 回归由 `verify_release.py` / `release_verification.json` 记录。上一轮 RC 与证据保留。Sampling、sm_120 现场性能、CSRQ 采纳及严格 BSREM 门仍按 §7.2 保持开放。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。

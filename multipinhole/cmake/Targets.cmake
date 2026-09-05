@@ -32,7 +32,6 @@ if(SPECT_BUILD_CUDA_SCAFFOLD)
   add_library(spect_sparse_cuda STATIC
     src/sparse/cuda/SparseOpsCUDA.cpp
     src/sparse/cuda/CudaChunkCache.cpp
-    src/sparse/cuda/CudaCsrBuilder.cpp
     src/sparse/cuda/CudaProjKernelLauncher.cpp
     src/sparse/cuda/CompactSymmetricProjectorCUDA.cpp
   )

@@ -1092,10 +1092,11 @@ std::vector<double> runCompactSymmetricReconstruction(
         std::vector<double> image(globalNvox, 1.0);
         if (maskPtr)
           spect::core::applyMaskInplace(image, *maskPtr);
-        std::vector<double> gradReg(globalNvox, 0.0);
+        std::vector<double> gradReg;
         std::vector<double> curvMap;
-          std::vector<double> kappaMap =
-            (args.algorithm == ReconArgs::Algorithm::BSREM)
+        std::vector<double> kappaMap =
+            (args.algorithm == ReconArgs::Algorithm::BSREM &&
+             args.bsremUseKappaMap)
               ? computeKappaMapStandard(denom, args, maskPtr)
                 : std::vector<double>();
         const bool useRegularization =
@@ -1140,6 +1141,10 @@ std::vector<double> runCompactSymmetricReconstruction(
         const bool residentUpdateAllowed =
             residentUpdateEligible && (!useRegularization || residentRegGradient);
         bool deviceCurvatureInitialized = false;
+        // Projection storage is immutable throughout the loop. Build the
+        // [channel * bedCount + bed] views once, alongside their device slots.
+        std::vector<const double *> projectionPtrs(channelCount * bedCount);
+        std::vector<const double *> backgroundPtrs(channelCount * bedCount);
         {
           // Pre-upload every window's projections and backgrounds so the
           // first numerator does not pay the H2D inside iteration_core_s;
@@ -1151,14 +1156,16 @@ std::vector<double> runCompactSymmetricReconstruction(
             for (int bed = 0; bed < bedCount; ++bed) {
               const size_t offset =
                   static_cast<size_t>(bed) * fullProjectionCount;
+              const size_t slot = channel * bedCount + bed;
               const auto *background = channelBackgrounds[channel];
+              projectionPtrs[slot] = channelProjections[channel]->data() + offset;
+              backgroundPtrs[slot] =
+                  (background == nullptr || background->empty())
+                      ? nullptr : background->data() + offset;
               if (!spect::cuda::refreshCompactProjectionCUDA(
-                      channelProjections[channel]->data() + offset,
-                      fullProjectionCount,
+                      projectionPtrs[slot], fullProjectionCount,
                       static_cast<int>(channel) * spect::core::kMaxBeds + bed,
-                      (background == nullptr || background->empty())
-                          ? nullptr
-                          : background->data() + offset)) {
+                      backgroundPtrs[slot])) {
                 throw std::runtime_error(
                     "compact projection upload requires CUDA sparse backend.");
               }
@@ -1232,12 +1239,16 @@ std::vector<double> runCompactSymmetricReconstruction(
           metricsCsv << bsremIterationMetricsCsvHeader() << '\n';
         }
 
+        {
+        // Host numerator payloads stay empty on resident iterations. Reuse
+        // capacity on host updates, then release it before final output work.
+        std::vector<double> numer;
+        std::vector<std::vector<double>> localNumers(bedCount);
+        std::vector<const double *> imagePtrs(bedCount);
+        std::vector<double *> numerPtrs(bedCount);
         for (int it = 1; it <= args.numIters; ++it) {
           logInfo("[ITER] " + std::to_string(it) + "/" +
                   std::to_string(args.numIters) + " compact");
-          std::vector<double> numer;
-          const std::vector<double> *bedImageSource = &image;
-
           // The resident branch-batch input (image rotated on the device)
           // serves any bed count and both formats, backgrounds and CTAC
           // included (the factor is applied on the device per compact angle);
@@ -1247,7 +1258,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
               spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
-                  compactMeta, bedImageSource->data(), bedImageSource->size(),
+                  compactMeta, image.data(), image.size(),
                   args.Nz, bedZStarts.data(), bedCount, bedVirtualZFlip,
                   compactPsfActive ? psfPtr : nullptr, !imageResident);
           if (imageResident && !residentBatchInput) {
@@ -1263,32 +1274,19 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (!residentIteration)
             numer.assign(globalNvox, 0.0);
 
-            std::vector<std::vector<double>> localImages(
-                static_cast<size_t>(bedCount));
-            std::vector<std::vector<double>> localUsed(
-                static_cast<size_t>(bedCount));
-            std::vector<std::vector<double>> localNumers(
-                static_cast<size_t>(bedCount));
+            std::vector<std::vector<double>> localImages(bedCount);
+            std::vector<std::vector<double>> localUsed(bedCount);
             if (!residentIteration) {
               for (auto &localNumer : localNumers)
-                localNumer.assign(baseNvox, 0.0);
+                localNumer.resize(baseNvox);
             }
-            // [channel * bedCount + bed]
-            std::vector<const double *> projectionPtrs(
-                channelCount * static_cast<size_t>(bedCount), nullptr);
-            std::vector<const double *> backgroundPtrs(
-                channelCount * static_cast<size_t>(bedCount), nullptr);
-            std::vector<const double *> imagePtrs(static_cast<size_t>(bedCount),
-                                                  nullptr);
-            std::vector<double *> numerPtrs(static_cast<size_t>(bedCount),
-                                            nullptr);
 
             for (int bed = 0; bed < bedCount; ++bed) {
               if (!residentBatchInput) {
                 const int zStart = bedZStarts[static_cast<size_t>(bed)];
                 localImages[static_cast<size_t>(bed)] =
                     spect::app::extractBedVolumeFromGlobal(
-                        *bedImageSource, baseNx, baseNy, baseNz, zStart,
+                        image, baseNx, baseNy, baseNz, zStart,
                         bedVirtualZFlip);
                 imagePtrs[static_cast<size_t>(bed)] =
                     localImages[static_cast<size_t>(bed)].data();
@@ -1319,19 +1317,6 @@ std::vector<double> runCompactSymmetricReconstruction(
                 }
               }
 
-              const size_t projectionOffset =
-                  static_cast<size_t>(bed) *
-                  static_cast<size_t>(compactMeta.fullRows());
-              for (size_t channel = 0; channel < channelCount; ++channel) {
-                const size_t slot =
-                    channel * static_cast<size_t>(bedCount) +
-                    static_cast<size_t>(bed);
-                projectionPtrs[slot] =
-                    channelProjections[channel]->data() + projectionOffset;
-                const auto *background = channelBackgrounds[channel];
-                if (background != nullptr && !background->empty())
-                  backgroundPtrs[slot] = background->data() + projectionOffset;
-              }
               if (!residentIteration) {
                 numerPtrs[static_cast<size_t>(bed)] =
                     localNumers[static_cast<size_t>(bed)].data();
@@ -1626,6 +1611,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               it % args.saveInterval == 0 && it != args.numIters) {
             saveCompactOutput(it);
           }
+        }
         }
 
         if (imageResident) {

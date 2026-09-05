@@ -3,17 +3,9 @@
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && \
     defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL) && CUDA_ENABLED
 
-#include "CudaCsrBuilder.h"
 #include "core/AttenuationConstants.h"
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <deque>
-#include <limits>
-#include <mutex>
-#include <stdexcept>
-#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -23,9 +15,6 @@
 #include <memoryapi.h>
 #endif
 
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
 
 namespace spect {
 
@@ -86,26 +75,6 @@ uint64_t selectCudaChunkNnzBudget() {
   } catch (...) {
     return kProjDomainChunkDefaultNnz;
   }
-}
-
-void noteCudaChunkBuild(double seconds) {
-  g_cudaChunkStageTiming.chunkBuildSeconds += seconds;
-  ++g_cudaChunkStageTiming.chunkBuildCalls;
-}
-
-void noteCudaH2DChunk(double seconds) {
-  g_cudaChunkStageTiming.h2dChunkSeconds += seconds;
-  ++g_cudaChunkStageTiming.h2dChunkCalls;
-}
-
-void noteCudaUploadWaitOnCompute(double seconds, size_t calls) {
-  g_cudaChunkStageTiming.uploadWaitOnComputeSeconds += seconds;
-  g_cudaChunkStageTiming.uploadWaitOnComputeCalls += calls;
-}
-
-void noteCudaFusedBedCycle(double seconds, size_t calls) {
-  g_cudaChunkStageTiming.fusedBedCycleSeconds += seconds;
-  g_cudaChunkStageTiming.fusedBedCycleCalls += calls;
 }
 
 void noteCudaCusparseForward(double seconds, size_t calls) {
@@ -232,28 +201,6 @@ MatrixCacheKey makeCacheKey(const io::CSRView &matrix) {
 }
 
 
-SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
-                                  const std::vector<int> &subset_rows) {
-  SubsetCacheKey key;
-  key.matrix = makeCacheKey(matrix);
-  key.subsetRows = subset_rows.empty() ? nullptr : subset_rows.data();
-  key.subsetSize = subset_rows.size();
-  return key;
-}
-
-
-
-RangeCacheKey makeRangeCacheKey(const io::CSRView &matrix, int rowBegin,
-                                int rowEnd) {
-  RangeCacheKey key;
-  key.matrix = makeCacheKey(matrix);
-  key.rowBegin = rowBegin;
-  key.rowEnd = rowEnd;
-  return key;
-}
-
-
-
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz) {
   if (rows <= 0 || nnz <= 0) {
     return 0;
@@ -261,75 +208,6 @@ uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz) {
   return (static_cast<uint64_t>(rows) + 1ull) * sizeof(int32_t) +
          static_cast<uint64_t>(nnz) * sizeof(int32_t) +
          static_cast<uint64_t>(nnz) * sizeof(float);
-}
-
-
-
-void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,
-                              int rowEnd, int threads,
-                              PinnedHostCSRData &host) {
-  if (rowBegin < 0 || rowEnd < rowBegin || rowEnd > matrix.rows) {
-    throw std::runtime_error(
-        "CUDA subset sparse backend received an out-of-range contiguous row block.");
-  }
-
-  host.rows = static_cast<int64_t>(rowEnd - rowBegin);
-  host.cols = matrix.cols;
-  host.nnz = 0;
-  host.rowPtrCount = static_cast<size_t>(rowEnd - rowBegin) + 1;
-  host.colIdxCount = 0;
-  host.valuesCount = 0;
-  host.rowPtr.allocate(host.rowPtrCount);
-  if (rowBegin == rowEnd) {
-    if (host.rowPtrCount > 0) {
-      host.rowPtr.data()[0] = 0;
-    }
-    return;
-  }
-
-  const uint32_t baseOffset = matrix.row_ptr[static_cast<size_t>(rowBegin)];
-  const uint32_t endOffset = matrix.row_ptr[static_cast<size_t>(rowEnd)];
-  const uint64_t nnz = static_cast<uint64_t>(endOffset) -
-                       static_cast<uint64_t>(baseOffset);
-  if (nnz > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
-    throw std::runtime_error(
-        "CUDA subset sparse backend only supports subset nnz representable as int32.");
-  }
-
-  for (int row = rowBegin; row <= rowEnd; ++row) {
-    host.rowPtr.data()[static_cast<size_t>(row - rowBegin)] =
-        static_cast<int32_t>(matrix.row_ptr[static_cast<size_t>(row)] -
-                             baseOffset);
-  }
-
-  host.colIdxCount = static_cast<size_t>(nnz);
-  host.valuesCount = static_cast<size_t>(nnz);
-  host.colIdx.allocate(host.colIdxCount);
-  host.values.allocate(host.valuesCount);
-  const int parallelThreads = getHostParallelThreads(threads, nnz);
-  std::atomic<bool> invalidColumn{false};
-#pragma omp parallel for schedule(static) if(parallelThreads > 1) num_threads(parallelThreads)
-  for (ptrdiff_t parallelOffset = 0;
-       parallelOffset < static_cast<ptrdiff_t>(nnz); ++parallelOffset) {
-    const uint64_t offset = static_cast<uint64_t>(parallelOffset);
-    const size_t sourceIndex =
-        static_cast<size_t>(baseOffset) + static_cast<size_t>(offset);
-    const uint32_t col = matrix.col_idx[sourceIndex];
-    if (col > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-      invalidColumn.store(true, std::memory_order_relaxed);
-      host.colIdx.data()[static_cast<size_t>(offset)] = 0;
-      host.values.data()[static_cast<size_t>(offset)] = 0.0f;
-      continue;
-    }
-    host.colIdx.data()[static_cast<size_t>(offset)] = static_cast<int32_t>(col);
-    host.values.data()[static_cast<size_t>(offset)] = matrix.val[sourceIndex];
-  }
-  if (invalidColumn.load(std::memory_order_relaxed)) {
-    throw std::runtime_error(
-        "CUDA sparse backend only supports column indices representable as int32.");
-  }
-
-  host.nnz = static_cast<int64_t>(nnz);
 }
 
 

@@ -8,6 +8,13 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Buffer and dead-path convergence (2026-09-05, after e5d376a): removed the
+  uncalled full/subset/range CSR conversion and upload-cache cluster. Compact
+  CSRB prefetch keeps its own single upload stream. Host gradients and disabled
+  kappa maps are allocated only when used; projection/background views are built
+  once and host numerator capacity is reused without redundant clearing.
+  Numerical kernels, production defaults and format/adoption boundaries are unchanged.
+
 - Convergence cleanup (2026-09-05): removed the rejected Phase-B transpose
   experiments and their `SPECT_COMPACT_T_SPMM` switch (`alg1`, `alg1pre`,
   `default`, `spmvpre`, `cscn`, `csrt`), including the host transpose cache,
