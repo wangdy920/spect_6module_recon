@@ -267,6 +267,50 @@ TEST_F(MultiBedCompactNumeratorTest,
   std::filesystem::remove_all(dir);
 }
 
+TEST_F(MultiBedCompactNumeratorTest, FullHostCachePinsFollowAllocationOwnership) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_host_pin_lifetime_test";
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+  auto dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+
+  for (int repeat = 0; repeat < 16; ++repeat) {
+    auto chunks = spect::io::openCompactChunkCSRDirectory(
+        dir.string(), dirMeta, 1024 * 1024);
+    auto allocation = chunks.loadChunk(0);
+    std::weak_ptr<const spect::io::CompactChunkCSRData> weak = allocation;
+    ASSERT_TRUE(spect::cuda::prepareCompactChunkExecutionCUDA(chunks));
+    auto lease = chunks.acceleratorLease();
+    chunks = {};
+    // A lease may outlive its directory. It must retain the registered memory.
+    allocation.reset();
+    ASSERT_FALSE(weak.expired());
+    allocation = weak.lock();
+    for (const void *ptr : {static_cast<const void *>(allocation->colIdxData()),
+                            static_cast<const void *>(allocation->valuesData())}) {
+      cudaPointerAttributes attributes{};
+      ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
+      EXPECT_EQ(attributes.type, cudaMemoryTypeHost);
+    }
+    ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+    lease.reset();
+    for (const void *ptr : {static_cast<const void *>(allocation->colIdxData()),
+                            static_cast<const void *>(allocation->valuesData())}) {
+      cudaPointerAttributes attributes{};
+      ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
+      EXPECT_EQ(attributes.type, cudaMemoryTypeUnregistered);
+    }
+    allocation.reset();
+    EXPECT_TRUE(weak.expired());
+  }
+  std::filesystem::remove_all(dir);
+}
+
 TEST_F(MultiBedCompactNumeratorTest, ProjectionBufferMutationRefreshesCache) {
   const auto meta = makeToySym90ZMeta();
   const auto compact = makeToyCompactCSR();

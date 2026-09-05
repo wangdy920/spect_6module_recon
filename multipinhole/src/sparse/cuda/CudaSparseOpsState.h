@@ -1719,7 +1719,8 @@ private:
   // pins are only dropped at release. A stale registration overlapping a
   // reissued allocation makes later cudaMemcpy fail with "invalid argument"
   // (seen at production scale on the 220 matrix with a 3/6-chunk host cache).
-  // The loader's own pinned prefetch path already covers bandwidth.
+  // The directory's accelerator lease owns registrations only for a complete
+  // host cache; partial-cache uploads intentionally retain pageable sources.
 
   void waitCompactSlotUpload(CachedMatrix *slot, cudaStream_t stream) {
     if (slot == nullptr || !slot->compactUploadPending) {

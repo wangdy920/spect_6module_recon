@@ -10,7 +10,7 @@
 | `collect_device_recon_diagnostics.ps1` | `bin/tools/collect_device_recon_diagnostics.ps1` | 串行启动 1–9 次设备重建，把进程树/工作集/I/O、GPU、可用内存、磁盘总线及实时负载、cache、逐次计时/中位数和完整日志汇总为一个文本文件 | 随安装包复制 |
 | `prep_compact_denom_cache.py` | `python tools/prep_compact_denom_cache.py` | 按默认 `spect_config.ini` 手动预热无 CTAC 的 1–5 床 `auto_<hash>.mhd` denom cache | 终端手动调用，不编译 |
 | `search_compact_perf.py` | `python tools/search_compact_perf.py` | 设备空闲时手动搜索 host cache / mmap / 线程 / branch-batch；中位数墙钟 + 同输入 relL2 `1e-5` | 终端手动调用，不编译 |
-| `run_220_mlem_perf_gate.py` | `python tools/run_220_mlem_perf_gate.py` | 120×120×220 五床 MLEM 50 次：`iteration_core_s` 目标 120 s / 下限 180 s，denom hit，relL2 `1e-5` | 终端手动调用，不编译 |
+| `run_220_mlem_perf_gate.py` | `python tools/run_220_mlem_perf_gate.py` | Lu-177 208 keV CSRB、正常小鼠五床 MLEM50：核心目标 120 s / 下限 180 s，denom hit，relL2 `1e-5`；2026-09-05 替代 Sampling 门，既有双窗合并计数仅用于性能／一致性 | 终端手动调用，不编译 |
 | `convert_csrb_to_csrq.py` | `python tools/convert_csrb_to_csrq.py` | 离线把 CSRB 矩阵目录转成 GPU 常驻的 CSRQ 目录（列排序 + run-length 索引 + u16 sqrt 压扩值，约 2.2 B/nnz）；`--self-check` 自检写入/解码 | 终端手动调用，不编译 |
 | `convert_csrb_values.py` | `python tools/convert_csrb_values.py` | 实验用：把 CSRB 目录做 quantize→dequantize 复制（`u16_sqrt`/`u16_row`/`fp16`/`fp24`/`identity`，可选 `--sort-cols`），用未改动的 exe 做端到端值格式验证 | 终端手动调用，不编译 |
 | `analyze_csrb_structure.py` | `python tools/analyze_csrb_structure.py` | 采样 CSRB 行统计 run 长度、列增量、值动态范围与各量化方案对 PSF 形状（RMS 半径/质心）的影响 | 终端手动调用，不编译 |

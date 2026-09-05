@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen Sampling_Approach MLEM 50-iteration performance gate.
+"""Frozen Lu-177 208 keV CSRB five-bed MLEM50 performance gate (2026-09-05).
 
 Drives the existing SPECT_recon.exe. Does not add a second reconstruction
 path. Primary metric is log [PERF] iteration_core_s (target 120 s, floor
@@ -29,13 +29,15 @@ import search_compact_perf as perf  # noqa: E402
 
 REPO_ROOT = denom.REPO_ROOT
 CANONICAL_MATRIX = (
-    REPO_ROOT / "test_data" / "6module" / "Sampling_Approach")
-DEFAULT_BEDS = (
-    REPO_ROOT / "recon_out" / "ctac_mdp_smoke_20260813" / "preproc" /
-    "20260729_mdp" / "SPECT")
-EXPECTED_XYZ = (108, 108, 160)
+    REPO_ROOT / "test_data" / "6module" / "Lu177_sysmat" /
+    "matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD")
+# Existing five-bed count vectors include both Lu windows. This is a frozen
+# performance/parity workload, not a single-photopeak quantitative endpoint.
+DEFAULT_BEDS = Path(
+    "E:/Xiang_Project/SPECT/6Module/experiments/recon_param_study/pre/mouse_normal_lu")
+EXPECTED_XYZ = (120, 120, 220)
 EXPECTED_CHUNKS = 6
-EXPECTED_NNZ = 3464432327
+EXPECTED_NNZ = 4399851643
 TARGET_ITERATION_CORE_S = 120.0
 FLOOR_ITERATION_CORE_S = 180.0
 
@@ -70,7 +72,7 @@ def default_bed_list() -> list[Path]:
     if missing:
         names = ", ".join(str(path) for path in missing)
         raise FileNotFoundError(
-            "five-bed MDP projections missing (diagnostic 1-bed cannot close "
+            "five-bed Lu-177 mouse projections missing (1-bed cannot close "
             f"this gate): {names}")
     return paths
 
@@ -220,8 +222,10 @@ Repository root examples:
 
     record: dict[str, Any] = {
         "stage": args.stage,
+        "gate_id": "lu177_208_csrb_mouse_normal_5bed_20260905",
+        "projection_scope": "existing merged 113+208 count vectors; performance and parity only",
         "question": (
-            "50 compact MLEM iterations on the 120x120x220 matrix: "
+            "50 compact MLEM iterations, Lu-177 208 keV CSRB, five mouse beds: "
             "iteration_core_s target <=120 s, floor <=180 s"),
         "exe": str(exe),
         "config": str(config),

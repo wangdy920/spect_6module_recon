@@ -39,6 +39,41 @@ struct CompactChunkResidentCacheLease {
   bool localityLogged = false;
   bool sortedHint = false;
   std::future<void> hostPreload;
+  // Retain the actual allocations until uploads finish and registrations are
+  // removed. A raw-pointer registration in the device cache outlives a chunk
+  // when the host cache is too small, leaving a stale CUDA registration.
+  std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> pinnedChunks;
+  std::vector<void *> pinnedArrays;
+
+  ~CompactChunkResidentCacheLease() {
+    if (pinnedArrays.empty())
+      return;
+    const auto sync = cudaDeviceSynchronize();
+    if (sync != cudaSuccess)
+      std::cerr << "[ERROR] compact host-pin release synchronization: "
+                << cudaGetErrorString(sync) << '\n';
+    for (void *ptr : pinnedArrays) {
+      const auto status = cudaHostUnregister(ptr);
+      if (status != cudaSuccess)
+        std::cerr << "[ERROR] compact host-pin release: "
+                  << cudaGetErrorString(status) << '\n';
+    }
+  }
+
+  void pin(const std::shared_ptr<const spect::io::CompactChunkCSRData> &chunk) {
+    // Reserve bookkeeping before registering so allocation failure cannot
+    // leave a registration untracked. No second copy of the payload is made.
+    pinnedArrays.reserve(pinnedArrays.size() + 2);
+    pinnedChunks.push_back(chunk);
+    if (chunk->info.nnz == 0)
+      return;
+    const size_t bytes = static_cast<size_t>(chunk->info.nnz) * sizeof(uint32_t);
+    for (void *ptr : {static_cast<void *>(const_cast<uint32_t *>(chunk->colIdxData())),
+                      static_cast<void *>(const_cast<float *>(chunk->valuesData()))}) {
+      CUDA_CHECK(cudaHostRegister(ptr, bytes, cudaHostRegisterPortable));
+      pinnedArrays.push_back(ptr);
+    }
+  }
 };
 
 struct CompactCsrLocalitySample {
@@ -389,6 +424,15 @@ void warmCompactChunkResidentDeviceCache(
   // iteration_core_s on the first numerator (Sampling 3-iter: 18 s vs 5 s).
   if (lease->hostPreload.valid()) {
     lease->hostPreload.get();
+  }
+  // Only register a complete host cache. Transient chunks in a partial cache
+  // keep the existing pageable upload path and cannot acquire stale pins.
+  if (hostCacheCoversMatrix) {
+    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex)
+      lease->pin(chunks.loadChunk(chunkIndex));
+    std::cerr << "[NOTE] compact host cache page-locked: "
+              << lease->pinnedChunks.size() << " chunks, "
+              << (matrixBytes / kMiB) << " MiB; registration owns chunk storage.\n";
   }
   chunks.setAcceleratorLease(lease);
 }

@@ -307,6 +307,16 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 
 复现：现有目录只可用 `python recon_out/csrb_pin_20260905/experiment.py summarize` 重算统计与身份检查。重跑时将 `experiment.py`、`ctac_guard.py` 复制到 `recon_out` 下新的隔离目录，依次运行 `experiment.py warmups`、`experiment.py partial`、`experiment.py pairs`、`ctac_guard.py`、`experiment.py summarize`；每个运行目录拒绝覆盖。最小下一步是恢复原 Sampling_Approach 后执行正式五床 50 迭代门，或明确批准另行冻结的采纳范围；本轮不扩大到 CSRQ、现场设备或另一种格式。
 
+## 7.6 2026-09-05 Lu-177 208 keV 五床新性能门与后续审查
+
+用户决定：“利用现有 lu-177 208kev 作为新的性能门，并且以5床位数据为准，这部分提升我认为可以保留”。因此 §7.5 锁页实现获准保留并合入主线；正式性能门改用 `test_data/6module/Lu177_sysmat/matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD`。当前文件核对为 120×120×220、6 chunks、nnz **4,399,851,643**、CSRB 总大小 **35,199,642,800 B / 32.782222 GiB**、92 B metadata。旧 Sampling 126.261 s 与本节不可比较，其缺失不再阻塞新门。
+
+五床输入冻结为 `E:/Xiang_Project/SPECT/6Module/experiments/recon_param_study/pre/mouse_normal_lu/Bed1..5.bin`（2026-08-27 正常小鼠，既有 2026-09-03 预处理）。来源记录显示这些计数合并了 113/208 两窗；用作计算性能和前后数值一致性负载，不解释为单 208 keV 窗定量验证。保持生产 INI／algo_mlem、MLEM50:50、vb1、PSF sieve/castor 1.3 mm、denom hit、无 CTAC／背景项／正则／迭代内滤波，床顺序及 16.8 mm 步长固定。延续核心目标 120 s／下限 180 s、后续新增复杂度最低 5% 收益和 relL2 1e-5；此次锁页移植另守护 1e-7。全量主机缓存必须由默认自动预算实际满足，记录空闲 RAM 与显存，不强行扩大预算。
+
+执行范围：合入已验证的唯一锁页实现，更新既有性能门驱动，完整构建和聚焦回归；用旧 RC `0510e4f` 与主线候选各 5 次预热后按 A-B / B-A / A-B 重复 MLEM50，记录主机／显存与阶段时间，每次限 600 s。预热失败则先修复，不能更换为单床或另一矩阵。分析 kernel 融合、路径合并和分支简化时，以新五床热路径和单独短程分析结果为依据，不把带分析开销的时间混入正式门，也不重新打开已拒算法／精度变体。
+
+执行 `exploring`；锁页采纳 `approved, integrating`；新门性能与剩余方向证据待完成。证据目录 `recon_out/lu208_5bed_gate_20260905/`；旧 RC 和 §7.5 独立候选原样保留。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。
