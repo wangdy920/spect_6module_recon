@@ -133,9 +133,6 @@ const double *compactResidentImageDeviceCUDA(size_t count);
 double *compactResidentGradientDeviceCUDA(size_t count);
 bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
                                     const io::CSRView &current);
-// csrt experiment (SPECT_COMPACT_T_SPMM=csrt): pre-derive host CSR(A^T)
-// halves for a chunk during matrix prepare. No-op in other modes.
-bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &matrix);
 bool releaseCompactExecutionCUDA();
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);

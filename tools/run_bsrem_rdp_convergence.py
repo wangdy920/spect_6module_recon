@@ -291,7 +291,6 @@ def run_arm(frozen, dataset, arm_name):
         return verify_manifest(dataset, arm_name, out_dir)
     print(f"[run ] {dataset}/{arm_name}", flush=True)
     env = dict(os.environ)
-    env["SPECT_COMPACT_T_SPMM"] = ""
     start = time.time()
     with open(log_path, "w", encoding="utf-8") as log:
         log.write(subprocess.list2cmdline(cmd) + "\n\n")

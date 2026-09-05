@@ -207,7 +207,6 @@ SubsetCacheKey makeSubsetCacheKey(const io::CSRView &matrix,
 RangeCacheKey makeRangeCacheKey(const io::CSRView &matrix, int rowBegin,
                                 int rowEnd);
 
-uint64_t estimatePreparedChunkHostBytes(const io::CSRView &matrix);
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz);
 
 void buildContiguousSubsetCSR(const io::CSRView &matrix, int rowBegin,

@@ -1,4 +1,4 @@
-# 系统矩阵调用流程与分支耗时（2026-09-04 现状）
+# 系统矩阵调用流程与分支耗时（2026-09-05 收敛现状）
 
 适用范围：`test_data/6module` 三组生产矩阵（Tc99m 141 keV、Lu-177 208 keV ZFOLD、Lu-177 113 keV）及其 CSRQ 转换副本。
 状态约定：**CSRB = 生产路径、受保护基线；CSRQ = 实验路径**（用户决定，2026-09-03）。
@@ -28,19 +28,19 @@ flowchart TD
     CSRB_META --> LOOP
     CSRQ_META --> LOOP
     LOOP["recon/CompactSymmetricReconLoop.cpp<br/>channels = [{chunks, weight}] (+ 第二窗)"] --> MANI["denom 缓存 manifest<br/>目录身份 + dual_window/matrix2/weights"]
-    MANI -->|hit| PREP["prepareCompactChunkExecutionCUDA(channels)"]
-    MANI -->|miss| SENS["computeCompactChunkSensitivityCUDA(channels)<br/>Σ_k w_k A_kᵀ1 → 保存缓存"]
+    MANI -->|hit| PREP["prepareChannelExecutionCUDA(channels)"]
+    MANI -->|miss| SENS["computePoissonSensitivityCUDA(channels)<br/>Σ_k w_k A_kᵀ1 → 保存缓存"]
     SENS --> PREP
-    PREP --> ITER["每次迭代<br/>runCompactChunkMlemNumerMultiBedCUDA(channels, …)"]
+    PREP --> ITER["每次迭代<br/>accumulatePoissonBackprojectedRatioCUDA(channels, …)"]
     ITER --> DISP{"isCsrqChannelSet?"}
     DISP -->|否| CSRB["§3 CSRB 设备路径<br/>（生产）"]
     DISP -->|是| CSRQ["§4 CSRQ 实验路径<br/>（单窗 / 双窗）"]
-    CSRB --> UPD["MLEM 更新<br/>多床 branch-batch 常驻：finishCompactResidentMlemIterationCUDA<br/>否则 host numer/denom"]
+    CSRB --> UPD["MLEM / BSREM-II 更新<br/>单/多床 branch-batch 常驻：finishCompactResidentMlem/BsremIterationCUDA<br/>不满足常驻条件时使用主机更新"]
     CSRQ --> UPD
     UPD --> OUT["输出 recon_itN.mhd/raw + run manifest"]
 ```
 
-分叉点只有两处：`CompactChunkCSRDirectory::open()` 决定 `format()`，`CompactSymmetricProjectorCUDA.cpp` 在 sensitivity / numer / forward 三个入口按 `isCsrqDirectory()` 分派。CSRB 调用方仍使用单目录签名（薄包装成单 channel），因此本轮改动没有触碰 CSRB 设备路径。
+分叉点只有两处：`CompactChunkCSRDirectory::open()` 决定 `format()`，`CompactSymmetricProjectorCUDA.cpp` 在 sensitivity / numer / forward 三个入口按 `isCsrqDirectory()` 分派。CSRB 调用方仍使用单目录签名（薄包装成单 channel），两种格式共享 Poisson 数据项接口；CSRB 设备路径已完成 P0 ratio 与 CTAC 因子分解收敛。
 
 ## 3. CSRB 设备路径（生产，`runCompactChunkMlemNumerCUDA` / `…MultiBedCUDA`）
 
@@ -61,7 +61,7 @@ flowchart TD
 
 （2026-09-04 之前的"有背景走 host ratio"和"CTAC 走逐分支 fused 核 + CPU ratio + CPU transformBackwardAdd"两条分支已删除，见 CHANGELOG。）
 
-实测（同一 exe `build/metadata-compat`，单床 MLEM）：
+历史实测（P0 之前的同一 exe `build/metadata-compat`，单床 MLEM；表中 host-ratio 路径已删除，数值不代表当前构建的配对性能）：
 
 | 矩阵 | 分支 | denom 准备（miss / hit） | s/iter | 记录 |
 |---|---|---|---|---|
@@ -85,16 +85,15 @@ flowchart TD
     CH --> CK["csrqForEachChunkLocked（chunk 外层）<br/>常驻：直接用；流式：非阻塞上传流 + ready/free 事件，<br/>每 chunk 每迭代只过 PCIe 一次"]
     CK --> BED["for bed"]
     BED --> PACK["csrq_pack_branch8<br/>8 分支旋转像 → 行内交错"]
-    PACK --> FWD["csrq_forward_k8<br/>run 解码 + u16 sqrt 反量化，8 分支同时前向<br/>Tc99m 全矩阵 44 ms"]
-    FWD --> RATIO["csrq_ratio_k8(scale=w_k, background)<br/>p_k / (w_k·A_k x + b_k)"]
-    RATIO --> BWD["csrqBackwardChunkLocked<br/>csrq_backward_k8 × 4 遍（每遍 2 分支，分支主序 [8][nvox]）<br/>+ launchCompactTransformBackwardAddBatchKernel<br/>Tc99m 全矩阵 150 ms（L2 原子吞吐下限）"]
+    PACK --> FWD["csrq_forward_k8<br/>run 解码 + u16 sqrt 反量化，8 分支同时前向<br/>行尾直接计算 p_k / (w_k·A_k x + b_k)"]
+    FWD --> BWD["csrqBackwardChunkLocked<br/>csrq_backward_k8 × 4 遍（每遍 2 分支，分支主序 [8][nvox]）<br/>+ launchCompactTransformBackwardAddBatchKernel<br/>Tc99m 全矩阵 150 ms（L2 原子吞吐下限）"]
     BWD --> ACC["按床累加到共享设备 numer<br/>各窗口写入同一累加器"]
     ACC --> NEXT{"还有 channel?"}
     NEXT -->|是| CH
-    NEXT -->|否| DL["compactDeviceBackwardDownloadCUDA<br/>或多床常驻直接进 MLEM 更新"]
+    NEXT -->|否| DL["compactDeviceBackwardDownloadCUDA<br/>或单/多床常驻直接进 MLEM / BSREM-II 更新"]
 ```
 
-分母走同一 chunk 循环：`csrqRunSensitivityCUDA(matrixIndex_k, w_k)` 用 `csrq_unit_ratio_k8` 代替 ratio 核，得到 Σ_k w_k A_kᵀ1。
+分母走同一 chunk 循环：`csrqRunSensitivityCUDA(matrixIndex_k, w_k)` 用 `csrq_unit_ratio_k8` 写入行权重，得到 Σ_k w_k H_kᵀW_k1（CTAC 由同一因子分解处理）。
 
 双窗 MLEM 形式（MB-JR，Phys. Med. Biol. 2025，MILabs VECTor）：
 `x ← x · [Σ_k w_k A_kᵀ(p_k / (w_k A_k x + b_k))] / [Σ_k w_k A_kᵀ1]`。
@@ -113,8 +112,8 @@ flowchart TD
 
 ## 5. 待办与限制
 
-- ~~CSRQ 不支持 CTAC 衰减~~ 2026-09-04 P2 起支持：因子在 pack / 收口阶段按 compact 角度施加（`csrq_pack_branch8_atten` / `compact_transform_backward_add_batch_atten`），SpMV 核不变；每 (chunk, 床) 同步上传该 chunk 触及的 60 个全角度切片（0.38 GB），表每床每迭代过一次 PCIe。MDP 小鼠两床真实 μ：vs CSRB CTAC it20 relL2 1.4e-7，1.02 s/iter（CSRB CTAC 44 s/iter，因为逐床 2.3 GB 表全部驻留 + 逐分支 fused 核；5 床时显存 15.8 GB 触发 WDDM 分页，5 min/iter）。**同日稍后**：CSRB 也改为同一因子分解形式（两床 44 → 2.35 s/iter，vs 旧 fused 路径 it20 relL2 1.2e-7），fused/baked 核与逐床驻留表删除；双窗 + CTAC 通过 `-ctacWindowEnergies` 的逐窗指数 `att^(μ_w(E_k)/μ_w(E_map))` 支持，一张表服务所有能窗。
+- ~~CSRQ 不支持 CTAC 衰减~~ 2026-09-04 P2 起支持：因子在 pack / 收口阶段按 compact 角度施加（`csrq_pack_branch8_atten` / `compact_transform_backward_add_batch_atten`），SpMV 核不变；每 (chunk, 床) 在上传流上双缓冲传输该 chunk 触及的 60 个全角度切片（0.38 GB），表每床每迭代过一次 PCIe。MDP 小鼠两床真实 μ：vs CSRB CTAC it20 relL2 1.4e-7，1.02 s/iter（CSRB CTAC 44 s/iter，因为逐床 2.3 GB 表全部驻留 + 逐分支 fused 核；5 床时显存 15.8 GB 触发 WDDM 分页，5 min/iter）。**同日稍后**：CSRB 也改为同一因子分解形式（两床 44 → 2.35 s/iter，vs 旧 fused 路径 it20 relL2 1.2e-7），fused/baked 核与逐床驻留表删除；双窗 + CTAC 通过 `-ctacWindowEnergies` 的逐窗指数 `att^(μ_w(E_k)/μ_w(E_map))` 支持，一张表服务所有能窗。
 - CSRQ 双窗需要预处理产出两套窗投影 + 113 keV 的 TEW 散射估计作 `-bProj2`；`spect_preprocess_YJ` 目前只输出一个光电峰窗。窗权重（分支比 0.0617/0.1036 × 相对窗效率或标定）待用户决定。
-- 反投核 150 ms/遍的下限是 L2 原子吞吐；(angle, z-slice) shared-memory tile 两种形式实测 2× 更慢，已移除（`reports/2026-09-04-csrq-slice-backward-experiment.md`）。唯一未试的线索是 sm_120 的 `red.global.v4.f32` 向量原子（现场 RTX 5060 Ti）。
+- 反投核 150 ms/遍的下限是 L2 原子吞吐；(angle, z-slice) shared-memory tile 两种形式实测 2× 更慢，已移除（`reports/2026-09-04-csrq-slice-backward-experiment.md`）。sm_120 向量原子代码已就位（`SPECT_CSRQ_BACKWARD_PACKED=1`，默认关），现场 RTX 5060 Ti 性能仍待测；本机 sm_89 标量退化路径约慢 4.2 倍。
 - 常驻规划在 WDDM 下偏乐观：另一进程占 3.2 GB 时 `cudaMemGetInfo` 仍报 15.1 GB 空闲（nvidia-smi 12.8 GB），`planCsrqStreaming` 于是让 208 keV 常驻，上传完 9.2 GB 后 113 keV 的两个流槽 + 2 GiB 保留放不下（`lu177_dual_auto_it50` 当时 FATAL）。**2026-09-04 P3 起**：放不下抛 `CsrqDeviceMemoryError`，`warmCompactChunks` 把本次调用已常驻的矩阵降级为流式并重试；用 4 GiB 的 torch 进程复现：208 常驻 → 113 放不下（空闲 1197 MiB）→ 208 降级流式 → 113 常驻 → 跑完 0.77 s/iter（`p2_ctac_20260904/lu177_dual_auto_hog4g_it3`）。估计本身仍乐观（降级后仍报 14.9 GB 空闲），共享 GPU 时 `-csrqResidency streamed` 可省掉一次重读。
 - 208 keV CSRB 的主机缓存溢出是既有行为；若需要在生产上更快，选项是释放主机内存、或把该矩阵改用 CSRQ 副本（体积 9.2 GiB，可 GPU 常驻）。

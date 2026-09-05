@@ -2,6 +2,10 @@
 
 This Windows x64 CUDA RC build is self-contained under `bin/`.
 
+CSRB is the production matrix path. CSRQ, joint dual-window reconstruction
+and the default-off packed backward trial remain experimental. See
+`RELEASE_NOTES.md` for this candidate's validation scope and open gates.
+
 ## Layout
 
 ```text

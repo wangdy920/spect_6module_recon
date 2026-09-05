@@ -19,7 +19,6 @@ $text -replace "recon_sections_override_cli = true", `
     "recon_sections_override_cli = false" | Set-Content $ini -Encoding UTF8
 $beds = (1..5 | ForEach-Object { "$root\recon_out\ctac_mdp_smoke_20260813\preproc\20260729_mdp\SPECT\Bed$_.bin" }) -join ";"
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
-$env:SPECT_COMPACT_T_SPMM = ""
 
 foreach ($arm in @("mlem", "bsremrdp")) {
     $out = "$root\recon_out\perf_rdpcost_${arm}_$ts"

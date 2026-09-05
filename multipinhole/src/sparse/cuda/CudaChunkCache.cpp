@@ -254,19 +254,6 @@ RangeCacheKey makeRangeCacheKey(const io::CSRView &matrix, int rowBegin,
 
 
 
-uint64_t estimatePreparedChunkHostBytes(const io::CSRView &matrix) {
-  if (!matrix.valid() || matrix.row_ptr == nullptr) {
-    return 0;
-  }
-  const uint64_t nnz =
-      static_cast<uint64_t>(matrix.row_ptr[static_cast<size_t>(matrix.rows)]);
-  const uint64_t rowPtrBytes =
-      (static_cast<uint64_t>(matrix.rows) + 1ull) * sizeof(int32_t);
-  const uint64_t colIdxBytes = nnz * sizeof(int32_t);
-  const uint64_t valuesBytes = nnz * sizeof(float);
-  return rowPtrBytes + colIdxBytes + valuesBytes;
-}
-
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz) {
   if (rows <= 0 || nnz <= 0) {
     return 0;

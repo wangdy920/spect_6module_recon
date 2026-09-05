@@ -21,7 +21,6 @@
 
 #include <array>
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
@@ -192,13 +191,6 @@ bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
   }
   cudaState().prefetchCompactFloatMatrix(next, current);
   return true;
-}
-
-bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &matrix) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  return cudaState().prepareCompactTransposeHost(matrix);
 }
 
 bool releaseCompactExecutionCUDA() {
@@ -620,10 +612,6 @@ const double *compactResidentImageDeviceCUDA(size_t) { return nullptr; }
 double *compactResidentGradientDeviceCUDA(size_t) { return nullptr; }
 
 bool prefetchCompactFloatMatrixCUDA(const io::CSRView &, const io::CSRView &) {
-  return false;
-}
-
-bool prepareCompactTransposeHostCacheCUDA(const io::CSRView &) {
   return false;
 }
 

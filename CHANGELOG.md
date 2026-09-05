@@ -8,13 +8,21 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- Convergence cleanup (2026-09-05): removed the rejected Phase-B transpose
+  experiments and their `SPECT_COMPACT_T_SPMM` switch (`alg1`, `alg1pre`,
+  `default`, `spmvpre`, `cscn`, `csrt`), including the host transpose cache,
+  its page registrations, device half slots, upload stream and warmup API.
+  The default packed-K forward / per-RHS CSR_ALG2 backward is unchanged;
+  the historical rejection evidence remains in the Phase-B report and VCS.
+  CSRB stays the production path; CSRQ and the default-off packed backward
+  trial stay experimental. No mathematical or default-configuration change.
 - Experimental packed CSRQ backward for the sm_120 vector-atomic trial
   (`SPECT_CSRQ_BACKWARD_PACKED=1`, default off): `csrq_backward_k8_packed`
   scatters all eight branches in one pass over the matrix into a `[voxel][8]`
   buffer with two `float4` atomics per nnz (native `REDG.E.ADD.F32x4` on
   sm_90+, four scalar atomics on sm_86/89), and
   `compact_transform_backward_add_packed8` consumes it (with the CTAC factor
-  and energy exponent when active). Numerically identical to the branch-major
+  and energy exponent when active). Numerically consistent with the branch-major
   default (unit tests on both the plain and the attenuated path; Derenzo CSRQ
   MLEM it10 relL2 4.3e-8). On this RTX 4070 Ti SUPER (sm_89) the scalar
   fallback is 4.2x slower per matrix pass (730 vs 175 ms), as measured for
@@ -64,8 +72,8 @@ experiment commits are intentionally omitted.
   cylinder mu-map runs end to end (dual same-matrix window equals the single
   window exactly up to the expected 2x scale, 1-NCC 1e-15). Bone is scaled
   like water in this model (a two-material variant would need a second
-  line-integral table). Energy scaling is CSRQ-only; CSRB CTAC rejects an
-  exponent other than 1.
+  line-integral table). The later CSRB factorisation port also supports the
+  per-window exponent; joint dual-window reconstruction still requires CSRQ.
 - CSRQ residency and CTAC streaming (P3 of the Poisson data-term design).
   The per-bed CTAC factor tables are page-locked once (`cudaHostRegister`,
   0.08 s for 2.2 GB; synchronous fallback when registration is refused) and

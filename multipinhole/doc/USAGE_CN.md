@@ -66,14 +66,14 @@ compact chunk 矩阵默认识别优先级：
 | `-compactDenomCache <mhd>` | 显式复用/保存一个 compact global denominator cache，优先于 `[SystemMatrix]` 的固定路径和自动目录 |
 | `-ctacFactorCacheDir <dir>` | 复用/保存 CTAC 逐床位、逐角度衰减系数表缓存；默认 `recon_out/ctac_factor_cache` |
 | `-projectionResidual [on\|off]` | 最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
-| `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector` 空列表 |
+| `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector`，当前保护配置包含探测器 68 |
 | `-attMap <path>` | 衰减图，mu 单位为 `mm^-1`；多床 MHD 必须标记 exact beds 与 `local_matrix_z` |
 
 `-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。床号随 patient/physical +Z 增加，Bed1 为最小 Z。少于五床时直接传真实连续子集（如 Bed2,3,4），不补空床；地图 MHD 的 `SPECTBeds` 必须精确相同。
 
 多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
-无 CTAC 时，程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表和 normfactor 口径，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
+有无 CTAC 均可复用分母缓存。程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表、normfactor、实际行权重、CTAC 因子表哈希及能窗指数，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
 
 ```powershell
 python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
@@ -228,7 +228,7 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 | `-ctacAutoMuThresh <f>` | auto-mu 阈值，相对 P99.9，范围 `(0,1)`，默认 0.05 |
 | `-ctacAutoMuValue <mu>` | 调试覆盖 body fill mu，单位 `mm^-1`；默认由 `[CTAC] auto_mu_nuclide` 查表 |
 | `-ctacMapEnergy <keV>` | μ 图（或 auto-mu 填充值）对应的光子能量；默认取 `auto_mu_nuclide` 预设能量（INI `[CTAC] mu_map_energy_kev`） |
-| `-ctacWindowEnergies <keV,...>` | 每个能窗的光电峰能量；衰减表按 `att^(μ_w(E_k)/μ_w(E_map))`（NIST 液态水表 log-log 插值）逐窗缩放。双窗 `-ctac` 必填，如 Lu-177 `208.4,112.9`；仅 CSRQ 路径支持指数 ≠ 1（INI `[CTAC] window_energies_kev`） |
+| `-ctacWindowEnergies <keV,...>` | 每个能窗的光电峰能量；衰减表按 `att^(μ_w(E_k)/μ_w(E_map))`（NIST 液态水表 log-log 插值）逐窗缩放。双窗 `-ctac` 必填，如 Lu-177 `208.4,112.9`；CSRB 和 CSRQ 的因子分解路径均支持能量指数；双窗联合重建仍仅限实验 CSRQ（INI `[CTAC] window_energies_kev`） |
 | `-cyl <diam,height>` / `-cylMask <diam,height>` | 圆柱掩码，单位 mm |
 | `-cylc <cx,cy,cz>` / `-cylCenter <cx,cy,cz>` | 圆柱中心，1-based voxel |
 | `-maskFromAtt <threshold>` | 从 mu-map 生成 body mask |
@@ -241,7 +241,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 ## 多床位与输出变换
 
-固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、输出 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
+固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、默认输出 `100×100×66`（`step+10`）；`-singleBedStepAligned 0` 恢复旧 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
 
 | 参数 | 说明 |
 |---|---|

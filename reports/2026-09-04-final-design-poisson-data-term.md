@@ -3,7 +3,7 @@
 目标支持范围：`MLEM` 与 `BSREM-II + RDP`，subset = 1，CTAC，Lu-177 双窗（113/208 keV）联合重建，多床。
 约束：**CSRB 是生产路径与受保护基线，CSRQ 是实验路径**（用户决定 2026-09-03）。任何一步都必须让 CSRB Derenzo MLEM 回归（`recon_out/u16sqrt_value_format_20260902/derenzo_fp32/recon_it50`，relL2 门限 1e-6，无背景/无 CTAC 时期望位一致）继续通过。
 
-本文在 GPT 5.6 PRO 方案（用户 2026-09-04 提供）的基础上，用代码事实做了修正。第 1 节是采纳/修正清单，第 2–7 节是最终方案。
+本文在 GPT 5.6 PRO 方案（用户 2026-09-04 提供）的基础上，用代码事实做了修正。第 1 节是采纳/修正清单，第 2–6 节保留设计和原验收要求；实际实现与验证状态见第 7 节，较晚的阶段记录覆盖较早的实现状态描述，原验收门不因此自动关闭。
 
 ## 1. 对 GPT 方案的采纳与修正
 
@@ -73,7 +73,7 @@ swap(xCurrent, xNext)
 PreparedReconPlan
 ├─ channels[k]: PreparedChannel
 │    { matrix backend (CSRB|CSRQ, device slot / residency), projections[bed], background[bed] | null,
-│      weight s_k, rowWeights W_k | null, attTable[bed] | null (u16, 每能量一张), attResidency }
+│      weight s_k, rowWeights W_k | null, attTable[bed] | null (u16, 能窗共享), attenPower, attResidency }
 ├─ sensitivity S（缓存 manifest = 目录身份 + dual_window + weights + W_k 哈希 + attTable 哈希 + 版本）
 ├─ optimizer:  MLEM | BSREM-II（α 调度、κ 图、曲率、clip、sMin —— 全部沿用 ReconArgs 现有字段）
 └─ penalty:    None | RDP（β, γ, 邻域权重, mask）
@@ -87,7 +87,7 @@ bool computePoissonSensitivityCUDA(channels, meta, rowWeights|null, …);       
 bool prepareChannelExecutionCUDA(channels);                                                                          //    （现 prepareCompactChunkExecutionCUDA）
 ```
 
-图像更新层（设备，fp64 图像，xCurrent 只读 / xNext 只写）：
+图像更新层的原设计（设备，fp64 图像，xCurrent 只读 / xNext 只写；P1 实际采用独立梯度缓冲后原位更新，见第 7 节）：
 
 ```cpp
 launchMlemUpdate(xCur, q, S, mask, nonneg, xNext);                         // 现 compact_mlem_update，语义不变
@@ -134,7 +134,7 @@ unit:  r_i = W_i                        用于 S = Hᵀ W 1
 | 收口 | `atten_transform_backward_add(y, attTiles) → acc` | — |
 | att tiles | 每 chunk 需要 G×8 个全角度切片 × 6.3 MB | 405 MB / chunk / 能窗 |
 
-G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到一个 wave），预计前向慢 ~1.5×；G = 8 是默认，显存紧张时降到 4。
+原预算以 G = 8、显存紧张时 G = 4 估算；这些分组未实施。实际取 G = 1，暂存约 101 MB，每次 compact 角度 1152 行，以维持反投的 L2 驻留范围，见第 7 节。
 表的驻留与矩阵一样由 plan 决定：常驻（2.28 GB / 床 / 能窗）或从 pinned 主机按 chunk 流式（每迭代每床每能窗整表过一次 PCIe，2.28 GB ≈ 0.14 s，可与计算重叠）。
 
 ### 4.3 图像更新核
@@ -190,7 +190,7 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 
 **P1 — 优化器上设备**（已完成，提交 `80aabd2`）
 5. ~~xCurrent/xNext 双缓冲~~ → 执行时改为两核方案：先用现有 RDP/TV 梯度核（保留 CT 引导权重逻辑）从设备图像算出 ∇R 到独立缓冲，再逐体素原位更新（`compact_bsrem_update`，逐项复刻 `applyBsremUpdate`），不需要 ping-pong；`residentUpdateEligible` 去掉算法条件，`residentBatchInput` 去掉 `bedCount > 1` 与背景项限制。
-6. 测试：BSREM oracle（单元 + Derenzo it1–5 relL2 ≤ 1.1e-8）。RDP 有限差分与双窗 penalty-once 测试留待 P2 一并补。**发现：** `algo_bsrem.conf`（δ=0.01）的迭代对 fp32 累加噪声每迭代放大 2–3×，同一二进制两次运行 it20 相差 ~1e-3，BSREM 门只能取早期迭代。
+6. 测试：BSREM oracle（单元 + Derenzo it1–5 relL2 ≤ 1.1e-8）。现有 `RegularizerTest` 含 RDP 有限差分检查，但不是第 6 节全部条件下的 1e-6 证明；双窗 BSREM penalty-once 专项仍未关闭。**发现：** `algo_bsrem.conf`（δ=0.01）的迭代对 fp32 累加噪声每迭代放大 2–3×，同一二进制两次运行 it20 相差 ~1e-3。早期迭代是当前已测证据，不能替代原 1e-12 门或长迭代稳定性验收。
 
 **P2 — CTAC 因子分解**（CSRQ 侧已完成，2026-09-04）
 7. ~~`pack_branch8_atten`、按角度组的 x̃/y 布局、`atten_transform_backward_add`~~ → 执行时取 **G = 1**（按 compact 角度逐个处理）：`csrq_pack_branch8_atten` 在 pack 时乘 `att[fullAngle(θ_c,k), M_k(v)]`，`compact_transform_backward_add_batch_atten` 在收口时乘同一因子；forward/backward 核只是按行子区间（1152 行）启动，核本体不变。选 G = 1 的原因：backward 的两分支 L2 驻留论证要求 y 目标 ≤ 25 MB，G > 1 会把它放大 G 倍；pack / 收口的总量与 G 无关；启动数 720/迭代/床可忽略。表驻留：每 (chunk, 床) 只暂存该 chunk 触及的 60 个全角度切片（≈0.38 GB，同步 `cudaMemcpy`，每床每迭代整表过一次 PCIe ≈ 0.25 s），未进 plan；与计算重叠留给 P3。**CSRB 侧未改**：CSRB 是受保护生产路径，其现有 CTAC 核作为参考实现保留（§6 门已用它通过）；是否用因子分解形式替换（预计 44 s/iter → ~3 s/iter，两床）留作用户决定。真实 μ 表数据：MDP 小鼠 2h（Tc-99m，CT/SPECT DICOM `dcmdata/mouse_samples/20260729_SPECT_mouse_MDP/20260729_162015`，投影 `E:\...\mdp_seam_ab_20260730\preproc_2h`），`prepare_ct_mu_map.py --profile recon220 --beds 2,3 --z-bed-flip`；Lu-177 在本机只有 CT 原始投影（`data_platform1.mhd` 是 1536×1536×720 的投影栈，不是重建体），等厂商 CT DICOM。
@@ -207,6 +207,29 @@ G = 1 时暂存回到现有的 101 MB，但前向每次只有 2304 行（不到�
 - **CSRB 侧移植（原开放项 1）— 完成。** §4.2 在 CSRB 上的形态：分支批（`[branch][voxel]`，cuSPARSE 的列主 B）用 `compact_branch_batch_atten_scale` 乘因子；每个 compact 角度的行作为子 CSR 处理——自定义 packed-K 行核直接用 chunk 数组 + 行指针偏移（绝对 nnz 下标，保持 16 B 对齐；cuSPARSE CSR_ALG2 在 1152 行 × 30k nnz 的子矩阵上要 20 ms/次，行核 0.3 ms），转置用逐 RHS cuSPARSE 在零基行指针副本上；收口复用 `compact_transform_backward_add_batch_atten`。删除 fused/baked 核、`CompactAttenBakeParams`、逐床驻留表、`SPECT_COMPACT_CTAC_BAKED_REFERENCE`，以及 CudaChunkCache 自引用的 prepared/attenuated 缓存（净 −550 行）。门：单元测试改为两格式各对独立主机 oracle；MDP 两床 vs 旧 fused 路径 it20 relL2 1.2e-7；CSRB 守护 1.15e-7；两床 44 → 2.35 s/iter。§6 表中"CSRB 现有 CTAC 路径作为参考实现保留到此项通过"至此闭合。
 - **sm_120 向量原子（原开放项 3）— 代码就位，性能待现场。** `csrq_backward_k8_packed`：一遍矩阵把 8 个分支全部散射进 `[voxel][8]`，每 nnz 两个 `float4` 原子（`csrq_atomic_add_float4`：`__CUDA_ARCH__ >= 900` 用 `atomicAdd(float4*)`，SASS 确认 sm_120 为 `REDG.E.ADD.F32x4`，sm_86/89 退化为 4 个标量 `RED.E.ADD.F32`）；消费者 `compact_transform_backward_add_packed8`（可带 CTAC 因子与能量指数）。开关 `SPECT_CSRQ_BACKWARD_PACKED=1` / `setCsrqPackedBackwardCUDA`，默认关。本机（sm_89）数值与默认分支主序路径一致（单元测试两条路径、Derenzo it10 relL2 4.3e-8），但标量退化路径每遍 730 ms vs 175 ms（与此前 715 ms 的 `[nvox][8]` 结论一致）。在 RTX 5060 Ti 上要比的是：一遍 × 2 个 16 B 向量原子 vs 四遍 × 2 个标量原子。
 
-## 8. 一句话
+## 7.2 2026-09-05 收敛与 release 准备
 
-把 `Projector → MLEM numerator → MLEM update` 改成 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II) → Penalty (None | RDP)`；投影核每种格式只留一个实例，CTAC 放到 pack 与收口两个小核里，背景与行权重放进 ratio，优化器与先验合成一个 stencil 核。CSRB 的 SpMV 核本体全程不动。
+契约：以 `a3239d7` 为本轮源码基线，保留上述数学模型、默认配置、CSRB 生产路径、CSRQ 实验路径和默认关闭的 sm_120 trial。只删除已拒变体和无调用代码、修正文档，不改变精度、迭代数或图像处理顺序。可用端点为现有 Tc99m Derenzo MLEM it50、MDP 两床真实 μ CTAC it20，以及 CSRQ packed it10。清理前后同输入 Derenzo relL2 门为 1e-7；历史 Derenzo 顶层守护门 1e-6、CTAC 门 1e-5。性能只记录，不据单次测量宣称提速。
+
+- **明确收敛项**：8 月 Phase-B 已拒的 `SPECT_COMPACT_T_SPMM` 全部变体仍在源码中。现删除开关/解析器、SpMM/preprocess/CSC/真转置旁路、真转置的主机缓存与 pin、设备半块槽、上传流、warmup API，以及无调用的 prepared-host 字节估算。保留默认 packed-K 正向与 CSR_ALG2 反投；独立 `transpose_bench` 和历史报告作为复现证据保留，旧实验代码定位到 `a3239d7`。
+- **资源与调用复查**：CTAC 的两个切片槽仍包含在 2 GiB reserve 内，没有新增一套驻留规划；共享表与 ready/free 事件路径保持不变。没有本轮实测支持的新内核优化，不扩大架构改动。
+- **正式性能门缺口**：本机当前缺失 `test_data/6module/Sampling_Approach`；现有 120×120×220 矩阵不替代它。126.261 s 是此前保护记录，本轮不更新 120 s/180 s 判定。现场 RTX 5060 Ti packed 性能和 CSRQ 生产采纳仍未关闭。
+- **验证证据**：`recon_out/release_convergence_20260905/` 保存构建/CTest 日志、冻结命令、可执行文件及输入哈希、逐项比较结果；`run_validation.py` 重放已有日志中的完整命令，仅替换 exe 与输出目录，独立设置 packed trial 环境变量。
+
+清理净减少 629 行源码/头文件/实验驱动脚本，`CudaSparseOpsState.h` 从 4514 行降到 3941 行；没有修改 CUDA kernel 源码和默认配置。删除过程一次构建发现误删了相邻 `stageInputH2D`，已恢复该函数及原 `private` 边界，之后全量构建与测试通过。
+
+| 验证 | 本轮结果 | 证据 |
+|---|---|---|
+| 清理前、清理后全量构建 + CTest | 均 283 通过、4 跳过、0 失败；原有 LNK4098 链接告警仍在 | `build_baseline.log`、`build_candidate_fixed.log`、`ctest_baseline.log`、`ctest_candidate.log` |
+| CSRB Derenzo it50 | 对本轮 a3239d7 基线 relL2 4.9903e-8；对历史 P1 输出 4.9580e-8 | `candidate/csrb_mlem50/validation.json` |
+| CSRB CTAC 两床 it20 | 对 09-04 因子分解输出 relL2 5.1716e-8；48.613 s / 20 it | `candidate/csrb_ctac20/validation.json` |
+| CSRQ CTAC 两床 it20 | 对 09-04 P3 输出 relL2 4.5466e-8；11.953 s / 20 it | `candidate/csrq_ctac20/validation.json` |
+| CSRQ packed it10 | 对 09-04 packed 输出 relL2 4.3319e-8（仅 sm_89 数值守护） | `candidate/csrq_packed10/validation.json` |
+
+上述相对路径均在 `recon_out/release_convergence_20260905/` 下。4 项跳过分别是需要显式启用的五数据集输出过滤测试、缺少本地 `260601` 的 3 项 IO 测试；不是运行失败。Derenzo 单次核心时间清理前 83.030 s、清理后 70.986 s，上传时间也从 53.546 s 变为 42.316 s；此次删除默认未启用的分支，不将该波动解释为算法或内核加速。
+
+本地候选包固定位置为 `dist/release_candidates/SPECT_recon_rc_20260905_convergence/` 和同名 zip；以 `bin/SPECT_recon.exe --version`、`SHA256SUMS.txt` 及 `recon_out/release_convergence_20260905/release_verification.json` 绑定干净提交、包内文件与最终可执行文件 smoke。发行说明 `multipinhole/doc/RELEASE_20260905_CN.md` 随包保存未关闭的门；本轮不作 CSRQ 生产晋升或现场性能承诺。
+
+## 8. 当前实现摘要
+
+`Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。

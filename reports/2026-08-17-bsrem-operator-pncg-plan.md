@@ -182,7 +182,7 @@ pageable, and pageable `cudaMemcpyAsync` blocks the host thread (12.2 s upload v
 baseline). Even with perfect hiding the PCIe floor (53.7 GB/iter ÷ 22.2 GiB/s ≈ 2.4 s/iter)
 sits just under the 2.53 s/iter baseline — theoretical ceiling ~3.5% < 5% bar. The earlier
 9–25% projection mis-modeled max(compute, copy) and assumed unreachable residency.
-50-iter gate skipped as moot. `csrt` code stays behind the default-off switch; two
+50-iter gate skipped as moot. `csrt` code was retained behind the default-off switch until the 2026-09-05 convergence cleanup; the rejected variants are now removed (historical source: `a3239d7`); two
 production-path fixes are kept (pinned rowPtr staging in `uploadIoCsrViewAsync`;
 1 MB `cudaHostRegister` threshold + csrt state cleanup in `releaseCompactExecution`,
 baseline regression-checked at 10.04 s ≈ 9.91 s).

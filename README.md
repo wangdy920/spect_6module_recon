@@ -3,11 +3,21 @@
 High-performance 3D SPECT reconstruction pipeline with C++17 modular architecture and CUDA acceleration. The project provides:
 
 - **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, and Butterworth filtering.
-- **Compact-symmetric backend**: **default matrix 260601** — `-chunkCSRDir` loads `metadata.bin` + `chunk_*.csrb` (`test_data/6module/260601`, 88B/96B metadata, Sym90Z). This is the **only** matrix input path; single-file CSRB/MAT entries have been removed.
+- **Compact-symmetric backend**: the production `-chunkCSRDir` path loads `metadata.bin` + `chunk_*.csrb` (88-byte canonical or validated 92-byte legacy metadata, Sym90Z). `260601` is the historical profile name; select the actual deployed matrix directory explicitly when it is not discoverable beside the executable. Single-file CSRB/MAT entries have been removed.
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, build-time fatbin helper kernels for PSF/RDP/TV on sm_86/89/120. Single GPU.
 - **6-module matrix generation reference**: `6module_bak_src/` holds the CUDA v4 system-matrix generator, the bedmerge reconstruction prototype, and the MAT→BIN projection tool.
 
-## Project Status (Snapshot: 2026-08-11)
+## Current optimization status (2026-09-05)
+
+The P0–P3 implementation and CSRB CTAC factorisation are in the source tree.
+CSRB remains the production path; CSRQ, dual-window reconstruction and the
+packed backward trial remain experimental. The rejected Phase-B transpose
+variants and `SPECT_COMPACT_T_SPMM` have been removed; the default sparse
+kernels and reconstruction settings are unchanged. Validation and release
+preparation are recorded in
+[the design record](reports/2026-09-04-final-design-poisson-data-term.md#72-2026-09-05-收敛与-release-准备).
+
+## Historical algorithm/output sign-off (Snapshot: 2026-08-11)
 
 - **Canonical evidence**: `reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` and local certificate `recon_out/prototype_sieve_castor_fwhm1p3_final_20260811/current_production_parity_metrics.json` record the protected `sieve + CASToR + FWHM 1.3 mm` comparison. All five frozen 50-iteration endpoints pass.
 - **Default system matrix**: 260601 compact chunk (`-chunkCSRDir` / `bin/matrix/260601` auto-discovery). B1 plain 50-iter vs `test_data/sys_260601_recon_ref/recon_iter050.img` remains signed off (`rmse/ref_mean ≈ 1.06×10⁻⁵`).
@@ -180,7 +190,8 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
   SUPER): single-bed `0.25 s/iter` (CSRB `2.6 s`), five-bed `1.13 s/iter`
   (CSRB `2.87 s`). With CTAC on a real CT μ-map (MDP mouse, two beds):
   MLEM it20 image relL2 `1.4e-7` and sensitivity relL2 `1.1e-7` vs the CSRB
-  CTAC path, at `0.60 s/iter` (CSRB CTAC `44 s/iter`).
+  CTAC path, at `0.60 s/iter` (the former CSRB CTAC was `44 s/iter`; the
+  factorised CSRB path now measures `2.35 s/iter` on this workload).
 - Residency is planned from `cudaMemGetInfo`, which under WDDM can ignore
   other processes' allocations. When a later matrix then does not fit even
   streamed, the matrices loaded resident by the same call are demoted to

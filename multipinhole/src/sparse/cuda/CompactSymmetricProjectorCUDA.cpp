@@ -351,17 +351,6 @@ void warmCompactChunkResidentDeviceCache(
   }
   residentPrefixCount =
       std::min(residentPrefixCount, chunks.chunks().size());
-  // csrt experiment: device A^T half-slots need the VRAM a resident A chunk
-  // would occupy; stream all A chunks instead (uploads hide under compute).
-  const char *tSpmmEnv = std::getenv("SPECT_COMPACT_T_SPMM");
-  const bool csrtMode =
-      tSpmmEnv != nullptr && std::strncmp(tSpmmEnv, "csrt", 4) == 0;
-  if (csrtMode) {
-    std::cerr << "[NOTE] csrt: skipping GPU resident matrix warmup to budget "
-                 "device A^T slots.\n";
-    residentPrefixCount = 0;
-  }
-
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
   loaded.reserve(residentPrefixCount);
@@ -400,20 +389,6 @@ void warmCompactChunkResidentDeviceCache(
   // iteration_core_s on the first numerator (Sampling 3-iter: 18 s vs 5 s).
   if (lease->hostPreload.valid()) {
     lease->hostPreload.get();
-  }
-  if (csrtMode) {
-    // Pre-derive host A^T halves for every chunk so the one-time transpose
-    // cost stays out of iteration_core_s.
-    const auto transposeStart = Clock::now();
-    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size();
-         ++chunkIndex) {
-      const auto chunk = chunks.loadChunk(chunkIndex);
-      cuda::prepareCompactTransposeHostCacheCUDA(chunk->view());
-    }
-    std::cerr << "[NOTE] csrt: host A^T prepare finished in "
-              << std::chrono::duration<double>(Clock::now() - transposeStart)
-                     .count()
-              << " s for " << chunks.chunks().size() << " chunks.\n";
   }
   chunks.setAcceleratorLease(lease);
 }

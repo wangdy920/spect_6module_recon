@@ -1,7 +1,7 @@
 #pragma once
 
 // NOTE: this header is included inside namespace spect by SparseOpsCUDA.cpp;
-// standard includes it needs (<atomic>, <unordered_map>) live in that TU.
+// standard includes it needs live in that TU.
 
 constexpr int kCompactDeviceBackwardMaxAccumulators =
   cuda::kCompactDeviceBackwardMaxAccumulators;
@@ -11,92 +11,6 @@ constexpr int kCsrqMaxMatrices = cuda::kCsrqMaxMatrices;
 constexpr int kCsrqStreamSlots = cuda::kCsrqStreamSlots;
 constexpr int kCompactProjectionSlots =
   spect::core::kMaxBeds * kCsrqMaxMatrices;
-
-// Phase-B transpose experiment switch (default off; A/B measurement only).
-// The production compact transpose path stays per-RHS cusparseSpMV CSR_ALG2
-// when SPECT_COMPACT_T_SPMM is unset. At convergence this switch is either
-// removed (variant rejected) or the winning variant becomes the only path.
-//   unset/""/"off"/"0" -> per-RHS cusparseSpMV CSR_ALG2 (protected baseline)
-//   "alg1:K"    -> K-grouped cusparseSpMM CSR_ALG1 on COL-major batch slices
-//   "alg1pre:K" -> alg1 plus cusparseSpMM_preprocess once per chunk visit
-//   "default:K" -> K-grouped cusparseSpMM ALG_DEFAULT
-//   "spmvpre"   -> per-RHS CSR_ALG2 plus cusparseSpMV_preprocess per visit
-//   "cscn"      -> control: same device buffers reinterpreted as CSC(A^T),
-//                  per-RHS SpMV op=N ALG_DEFAULT (no data movement)
-//   "csrt"      -> R1 route: true CSR(A^T) halves, built on host at first
-//                  visit (pinned), uploaded JIT on a side stream, backward
-//                  runs op=N cusparseSpMM per half (2nd half beta=1).
-//                  Forward/A path untouched.
-enum class CompactTransposeMode {
-  KeepSpmvAlg2,
-  SpmmCsrAlg1,
-  SpmmCsrAlg1Preprocess,
-  SpmmDefault,
-  SpmvAlg2Preprocess,
-  CscSpmvN,
-  TrueCsrTranspose,
-};
-
-struct CompactTransposeConfig {
-  CompactTransposeMode mode = CompactTransposeMode::KeepSpmvAlg2;
-  int groupK = 0;
-};
-
-inline const CompactTransposeConfig &compactTransposeConfig() {
-  static const CompactTransposeConfig config = [] {
-    CompactTransposeConfig parsed;
-    const char *raw = std::getenv("SPECT_COMPACT_T_SPMM");
-    if (raw == nullptr || raw[0] == '\0') {
-      return parsed;
-    }
-    const std::string text(raw);
-    if (text == "off" || text == "0") {
-      return parsed;
-    }
-    if (text == "spmvpre") {
-      parsed.mode = CompactTransposeMode::SpmvAlg2Preprocess;
-      return parsed;
-    }
-    if (text == "cscn") {
-      parsed.mode = CompactTransposeMode::CscSpmvN;
-      return parsed;
-    }
-    if (text == "csrt") {
-      parsed.mode = CompactTransposeMode::TrueCsrTranspose;
-      return parsed;
-    }
-    std::string name = text;
-    int k = 0;
-    const size_t colon = text.find(':');
-    if (colon != std::string::npos) {
-      name = text.substr(0, colon);
-      k = std::atoi(text.c_str() + colon + 1);
-    }
-    if (name == "alg1") {
-      parsed.mode = CompactTransposeMode::SpmmCsrAlg1;
-    } else if (name == "alg1pre") {
-      parsed.mode = CompactTransposeMode::SpmmCsrAlg1Preprocess;
-    } else if (name == "default") {
-      parsed.mode = CompactTransposeMode::SpmmDefault;
-    } else {
-      throw std::runtime_error(
-          "SPECT_COMPACT_T_SPMM must be off|alg1:K|alg1pre:K|default:K|"
-          "spmvpre|cscn|csrt, got '" +
-          text + "'");
-    }
-    if (k < 2) {
-      throw std::runtime_error(
-          "SPECT_COMPACT_T_SPMM SpMM variants require ':K' with K >= 2, "
-          "got '" +
-          text + "'");
-    }
-    parsed.groupK = k;
-    return parsed;
-  }();
-  return config;
-}
-
-inline uint64_t estimatePreparedChunkHostBytes(const io::CSRView &matrix);
 
 class CudaStreamGuard {
 public:
@@ -1023,11 +937,6 @@ public:
     }
 
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-    if (compactTransposeConfig().mode ==
-        CompactTransposeMode::TrueCsrTranspose) {
-      // Queue A^T half uploads now so they hide under forward + ratio.
-      queueCompactTrueTransposeUploadLocked(matrix);
-    }
     const int64_t rows = cached.rows;
     const int64_t cols = cached.cols;
     for (int bed = 0; bed < bedCount; ++bed) {
@@ -1171,10 +1080,6 @@ public:
           "compact sensitivity branch-batch helper requires symmetryMode 45 or 90.");
     }
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-    if (compactTransposeConfig().mode ==
-        CompactTransposeMode::TrueCsrTranspose) {
-      queueCompactTrueTransposeUploadLocked(matrix);
-    }
     const int64_t rows = cached.rows;
     const int64_t cols = cached.cols;
     if (static_cast<size_t>(cols) != accumSize) {
@@ -1261,22 +1166,6 @@ public:
                                       outputStart)
             .count(),
         voxelCount * sizeof(double), true);
-  }
-
-  // csrt experiment: derive host CSR(A^T) halves ahead of the iteration loop
-  // so the one-time transpose cost lands in matrix prepare, not core time.
-  bool prepareCompactTransposeHost(const io::CSRView &matrix) {
-    if (compactTransposeConfig().mode !=
-        CompactTransposeMode::TrueCsrTranspose) {
-      return false;
-    }
-    if (!matrix.valid() || matrix.rows < 2 || matrix.nnz == 0) {
-      return false;
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    (void)ensureCompactTransposeHostEntry(
-        compactTransposeFingerprint(matrix), matrix);
-    return true;
   }
 
 private:
@@ -1667,205 +1556,11 @@ private:
                                         hostStart)
               .count());
     }
-    // Phase-B experiment: opt-in K-grouped transpose SpMM / SpMV preprocess.
-    // Batch buffers are contiguous per-RHS slices, i.e. already COL-major
-    // dense matrices (ld = vector length), so grouping needs no packing.
-    const bool transposeOp = operation == CUSPARSE_OPERATION_TRANSPOSE;
-    const CompactTransposeConfig &tCfg = compactTransposeConfig();
-    if (transposeOp && tCfg.mode != CompactTransposeMode::KeepSpmvAlg2 &&
-        !compactTransposeExpLogged_) {
-      std::cerr << "[NOTE] experimental compact transpose path active: "
-                << "SPECT_COMPACT_T_SPMM mode="
-                << static_cast<int>(tCfg.mode) << " K=" << tCfg.groupK
-                << "\n";
-      compactTransposeExpLogged_ = true;
-    }
-    if (transposeOp && tCfg.mode == CompactTransposeMode::TrueCsrTranspose) {
-      const bool slotsMatch =
-          compactTransposeActiveValid_ &&
-          compactTransposeActiveKey_ == cached.key &&
-          compactTransposeSlots_[0].rows == cRows &&
-          compactTransposeSlots_[0].rowBegin == 0 &&
-          compactTransposeSlots_[1].rowEnd == static_cast<int>(bRows);
-      if (slotsMatch) {
-        const auto hostStart = std::chrono::steady_clock::now();
-        if (!compactTransposeCsrtLogged_) {
-          std::cerr << "[NOTE] csrt backward active: op=N SpMM on true "
-                       "CSR(A^T) halves, K=" << batchSize << "\n";
-          compactTransposeCsrtLogged_ = true;
-        }
-        handle_.setStream(stream);
-        const float alpha = 1.0f;
-        CuSparseDnMatGuard matBDescs[2];
-        CuSparseDnMatGuard matCDescs[2];
-        size_t spmmBytes = 0;
-        for (int h = 0; h < 2; ++h) {
-          CompactTransposeDeviceHalf &slot = compactTransposeSlots_[h];
-          const float betaHalf = h == 0 ? 0.0f : 1.0f;
-          matBDescs[h].create(slot.cols, batchSize, bRows,
-                              matB + slot.rowBegin, CUDA_R_32F,
-                              CUSPARSE_ORDER_COL);
-          matCDescs[h].create(cRows, batchSize, cRows, matC, CUDA_R_32F,
-                              CUSPARSE_ORDER_COL);
-          size_t bytes = 0;
-          SPECT_CUSPARSE_CHECK(cusparseSpMM_bufferSize(
-              handle_.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
-              CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, slot.mat.get(),
-              matBDescs[h].get(), &betaHalf, matCDescs[h].get(), CUDA_R_32F,
-              CUSPARSE_SPMM_ALG_DEFAULT, &bytes));
-          spmmBytes = std::max(spmmBytes, bytes);
-        }
-        dBuffer_.ensure(spmmBytes);
-        for (int h = 0; h < 2; ++h) {
-          CompactTransposeDeviceHalf &slot = compactTransposeSlots_[h];
-          const float betaHalf = h == 0 ? 0.0f : 1.0f;
-          if (slot.uploadPending) {
-            slot.uploadReady.wait(stream);
-            slot.uploadPending = false;
-          }
-          SPECT_CUSPARSE_CHECK(cusparseSpMM(
-              handle_.get(), CUSPARSE_OPERATION_NON_TRANSPOSE,
-              CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, slot.mat.get(),
-              matBDescs[h].get(), &betaHalf, matCDescs[h].get(), CUDA_R_32F,
-              CUSPARSE_SPMM_ALG_DEFAULT, dBuffer_.get()));
-          slot.consumed.record(stream);
-          slot.consumedRecorded = true;
-        }
-        noteCudaCusparseBackwardHost(
-            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                          hostStart)
-                .count());
-        b = batchSize;
-      } else if (!compactTransposeFallbackLogged_) {
-        std::cerr << "[NOTE] csrt: transpose call without queued A^T slots "
-                     "(expected once for sensitivity/denominator); falling "
-                     "back to per-RHS op=T.\n";
-        compactTransposeFallbackLogged_ = true;
-      }
-    }
-    if (transposeOp &&
-        (tCfg.mode == CompactTransposeMode::SpmmCsrAlg1 ||
-         tCfg.mode == CompactTransposeMode::SpmmCsrAlg1Preprocess ||
-         tCfg.mode == CompactTransposeMode::SpmmDefault) &&
-        batchSize >= tCfg.groupK) {
-      const auto hostStart = std::chrono::steady_clock::now();
-      const int k = tCfg.groupK;
-      const cusparseSpMMAlg_t alg =
-          tCfg.mode == CompactTransposeMode::SpmmDefault
-              ? CUSPARSE_SPMM_ALG_DEFAULT
-              : CUSPARSE_SPMM_CSR_ALG1;
-      const float alpha = 1.0f;
-      const float betaZero = 0.0f;
-      CuSparseDnMatGuard matBDesc;
-      CuSparseDnMatGuard matCDesc;
-      matBDesc.create(bRows, k, bRows, matB, CUDA_R_32F, CUSPARSE_ORDER_COL);
-      matCDesc.create(cRows, k, cRows, matC, CUDA_R_32F, CUSPARSE_ORDER_COL);
-      handle_.setStream(stream);
-      size_t spmmBufferSize = 0;
-      SPECT_CUSPARSE_CHECK(cusparseSpMM_bufferSize(
-          handle_.get(), operation, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
-          cached.matA.get(), matBDesc.get(), &betaZero, matCDesc.get(),
-          CUDA_R_32F, alg, &spmmBufferSize));
-      dBuffer_.ensure(spmmBufferSize);
-      if (tCfg.mode == CompactTransposeMode::SpmmCsrAlg1Preprocess) {
-        SPECT_CUSPARSE_CHECK(cusparseSpMM_preprocess(
-            handle_.get(), operation, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, cached.matA.get(), matBDesc.get(), &betaZero,
-            matCDesc.get(), CUDA_R_32F, alg, dBuffer_.get()));
-      }
-      for (; b + k <= batchSize; b += k) {
-        SPECT_CUSPARSE_CHECK(cusparseDnMatSetValues(
-            matBDesc.get(),
-            matB + static_cast<size_t>(b) * static_cast<size_t>(bRows)));
-        SPECT_CUSPARSE_CHECK(cusparseDnMatSetValues(
-            matCDesc.get(),
-            matC + static_cast<size_t>(b) * static_cast<size_t>(cRows)));
-        SPECT_CUSPARSE_CHECK(cusparseSpMM(
-            handle_.get(), operation, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &alpha, cached.matA.get(), matBDesc.get(), &betaZero,
-            matCDesc.get(), CUDA_R_32F, alg, dBuffer_.get()));
-      }
-      noteCudaCusparseBackwardHost(
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        hostStart)
-              .count());
-    }
-    if (transposeOp && tCfg.mode == CompactTransposeMode::CscSpmvN &&
-        b < batchSize) {
-      // Control experiment: CSR(A) buffers are bit-identical to CSC(A^T)
-      // [cRows x bRows]; run op=N SpMV per RHS on that descriptor.
-      const auto hostStart = std::chrono::steady_clock::now();
-      cusparseSpMatDescr_t cscMat = nullptr;
-      SPECT_CUSPARSE_CHECK(cusparseCreateCsc(
-          &cscMat, cRows, bRows, cached.nnz, cached.dRowPtr.get(),
-          cached.dColIdx.get(), cached.dValues.get(), CUSPARSE_INDEX_32I,
-          CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-      handle_.setStream(stream);
-      const float alpha = 1.0f;
-      const float betaZero = 0.0f;
-      size_t cscBufferSize = 0;
-      bool cscBufferSizeValid = false;
-      for (; b < batchSize; ++b) {
-        CuSparseVecGuard vecX;
-        CuSparseVecGuard vecY;
-        vecX.create(bRows, matB + static_cast<size_t>(b) *
-                                      static_cast<size_t>(bRows));
-        vecY.create(cRows, matC + static_cast<size_t>(b) *
-                                      static_cast<size_t>(cRows));
-        if (!cscBufferSizeValid) {
-          SPECT_CUSPARSE_CHECK(cusparseSpMV_bufferSize(
-              handle_.get(), CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, cscMat,
-              vecX.get(), &betaZero, vecY.get(), CUDA_R_32F,
-              CUSPARSE_SPMV_ALG_DEFAULT, &cscBufferSize));
-          cscBufferSizeValid = true;
-          std::cerr << "[NOTE] cscn control workspace bytes=" << cscBufferSize
-                    << " (nnz=" << cached.nnz << ")\n";
-          dBuffer_.ensure(cscBufferSize);
-        }
-        SPECT_CUSPARSE_CHECK(cusparseSpMV(
-            handle_.get(), CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, cscMat,
-            vecX.get(), &betaZero, vecY.get(), CUDA_R_32F,
-            CUSPARSE_SPMV_ALG_DEFAULT, dBuffer_.get()));
-      }
-      SPECT_CUSPARSE_CHECK(cusparseDestroySpMat(cscMat));
-      noteCudaCusparseBackwardHost(
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        hostStart)
-              .count());
-    }
     // Remainder and all transpose: per-RHS CSR_ALG2. Rejected custom T
     // (atomic 2-RHS, private-Y reduce) stays deleted.
     size_t bufferSize = 0;
     bool bufferSizeValid = false;
     const bool profileAsBackward = operation == CUSPARSE_OPERATION_TRANSPOSE;
-    if (transposeOp &&
-        tCfg.mode == CompactTransposeMode::SpmvAlg2Preprocess &&
-        b < batchSize) {
-      const auto hostStart = std::chrono::steady_clock::now();
-      const float alpha = 1.0f;
-      const float betaZero = 0.0f;
-      CuSparseVecGuard vecX;
-      CuSparseVecGuard vecY;
-      vecX.create(bRows, matB);
-      vecY.create(cRows, matC);
-      handle_.setStream(stream);
-      size_t preBufferSize = 0;
-      SPECT_CUSPARSE_CHECK(cusparseSpMV_bufferSize(
-          handle_.get(), operation, &alpha, cached.matA.get(), vecX.get(),
-          &betaZero, vecY.get(), CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG2,
-          &preBufferSize));
-      bufferSize = preBufferSize;
-      bufferSizeValid = true;
-      dBuffer_.ensure(preBufferSize);
-      SPECT_CUSPARSE_CHECK(cusparseSpMV_preprocess(
-          handle_.get(), operation, &alpha, cached.matA.get(), vecX.get(),
-          &betaZero, vecY.get(), CUDA_R_32F, CUSPARSE_SPMV_CSR_ALG2,
-          dBuffer_.get()));
-      noteCudaCusparseBackwardHost(
-          std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                        hostStart)
-              .count());
-    }
     for (; b < batchSize; ++b) {
       CuSparseVecGuard vecX;
       CuSparseVecGuard vecY;
@@ -2135,16 +1830,6 @@ private:
     slot->compactUploadPending = false;
   }
 
-  void unregisterCompactHostPinsLocked() {
-    for (void *ptr : compactHostPins_) {
-      const cudaError_t err = cudaHostUnregister(ptr);
-      if (err != cudaSuccess) {
-        (void)cudaGetLastError();
-      }
-    }
-    compactHostPins_.clear();
-  }
-
   const CachedMatrix &ensureCompactFloatMatrixUploaded(
       const io::CSRView &matrix) {
     const MatrixCacheKey key = makeCacheKey(matrix);
@@ -2217,231 +1902,6 @@ private:
     streamingRangeKey_ = key;
     streamingRangeValid_ = true;
     return streamingRangeCache_;
-  }
-
-  // ---- csrt experiment (SPECT_COMPACT_T_SPMM=csrt): true CSR(A^T) ----
-  // Host A^T is derived once per chunk (content-fingerprinted so host-cache
-  // eviction/reload of A does not rebuild), split into two row halves so the
-  // per-half upload hides under forward+ratio / the first backward SpMM.
-
-  struct CompactTransposeHostHalf {
-    int rowBegin = 0;
-    int rowEnd = 0;
-    int64_t nnz = 0;
-    std::vector<int32_t> rowPtr; // cols(A)+1
-    std::vector<int32_t> colIdx; // local A-row indices (r - rowBegin)
-    std::vector<float> values;
-  };
-
-  struct CompactTransposeHostEntry {
-    int64_t rows = 0;
-    int64_t cols = 0;
-    int64_t nnz = 0;
-    std::array<CompactTransposeHostHalf, 2> halves;
-  };
-
-  struct CompactTransposeDeviceHalf {
-    DeviceArray<int32_t> dRowPtr;
-    DeviceArray<int32_t> dColIdx;
-    DeviceArray<float> dValues;
-    CuSparseMatGuard mat;
-    int64_t rows = 0; // = cols(A)
-    int64_t cols = 0; // = rowEnd - rowBegin
-    int64_t nnz = 0;
-    int rowBegin = 0;
-    int rowEnd = 0;
-    CudaEventGuard uploadReady;
-    CudaEventGuard consumed;
-    bool uploadPending = false;
-    bool consumedRecorded = false;
-  };
-
-  static uint64_t compactTransposeFingerprint(const io::CSRView &matrix) {
-    uint64_t hash = 1469598103934665603ull;
-    const auto mix = [&hash](uint64_t v) {
-      hash ^= v;
-      hash *= 1099511628211ull;
-    };
-    mix(static_cast<uint64_t>(matrix.rows));
-    mix(static_cast<uint64_t>(matrix.cols));
-    mix(matrix.nnz);
-    constexpr int kSamples = 64;
-    for (int i = 0; i <= kSamples; ++i) {
-      const size_t idx =
-          matrix.rows > 0
-              ? (static_cast<size_t>(matrix.rows) * static_cast<size_t>(i)) /
-                    kSamples
-              : 0;
-      mix(matrix.row_ptr[idx]);
-    }
-    return hash;
-  }
-
-  void registerCompactTransposePinned(void *ptr, size_t bytes) {
-    // Page-granular pinning of tiny heap blocks entangles neighbouring
-    // allocations (toy tests); bandwidth only matters for the GB-scale
-    // production arrays anyway.
-    if (bytes < (1u << 20)) {
-      return;
-    }
-    const cudaError_t err =
-        cudaHostRegister(ptr, bytes, cudaHostRegisterDefault);
-    if (err == cudaSuccess) {
-      compactHostPins_.push_back(ptr);
-    } else {
-      (void)cudaGetLastError();
-      if (!compactTransposePinWarned_) {
-        std::cerr << "[NOTE] csrt: pinning host A^T failed ("
-                  << cudaGetErrorString(err)
-                  << "); uploads fall back to pageable bandwidth.\n";
-        compactTransposePinWarned_ = true;
-      }
-    }
-  }
-
-  const CompactTransposeHostEntry &ensureCompactTransposeHostEntry(
-      uint64_t fingerprint, const io::CSRView &matrix) {
-    auto it = compactTransposeHost_.find(fingerprint);
-    if (it != compactTransposeHost_.end()) {
-      const CompactTransposeHostEntry &entry = it->second;
-      if (entry.rows != matrix.rows || entry.cols != matrix.cols ||
-          entry.nnz != static_cast<int64_t>(matrix.nnz)) {
-        throw std::runtime_error(
-            "csrt: fingerprint collision between distinct chunks; aborting "
-            "experiment.");
-      }
-      return entry;
-    }
-
-    const auto buildStart = std::chrono::steady_clock::now();
-    CompactTransposeHostEntry entry;
-    entry.rows = matrix.rows;
-    entry.cols = matrix.cols;
-    entry.nnz = static_cast<int64_t>(matrix.nnz);
-    const int mid = matrix.rows / 2;
-    for (int h = 0; h < 2; ++h) {
-      CompactTransposeHostHalf &half = entry.halves[h];
-      half.rowBegin = h == 0 ? 0 : mid;
-      half.rowEnd = h == 0 ? mid : matrix.rows;
-      const uint32_t nnzBase = matrix.row_ptr[half.rowBegin];
-      half.nnz = static_cast<int64_t>(matrix.row_ptr[half.rowEnd]) -
-                 static_cast<int64_t>(nnzBase);
-      if (half.nnz > static_cast<int64_t>(
-                         std::numeric_limits<int32_t>::max())) {
-        throw std::runtime_error("csrt: half-chunk nnz exceeds int32.");
-      }
-      half.rowPtr.assign(static_cast<size_t>(matrix.cols) + 1u, 0);
-      half.colIdx.resize(static_cast<size_t>(half.nnz));
-      half.values.resize(static_cast<size_t>(half.nnz));
-      {
-        std::vector<int32_t> counts(static_cast<size_t>(matrix.cols), 0);
-        const uint32_t *colBase = matrix.col_idx + nnzBase;
-        for (int64_t k = 0; k < half.nnz; ++k) {
-          ++counts[colBase[k]];
-        }
-        int64_t running = 0;
-        for (int c = 0; c < matrix.cols; ++c) {
-          half.rowPtr[static_cast<size_t>(c)] =
-              static_cast<int32_t>(running);
-          running += counts[static_cast<size_t>(c)];
-        }
-        half.rowPtr[static_cast<size_t>(matrix.cols)] =
-            static_cast<int32_t>(running);
-      }
-      {
-        std::unique_ptr<std::atomic<int32_t>[]> cursors(
-            new std::atomic<int32_t>[static_cast<size_t>(matrix.cols)]);
-        for (int c = 0; c < matrix.cols; ++c) {
-          cursors[static_cast<size_t>(c)].store(
-              half.rowPtr[static_cast<size_t>(c)],
-              std::memory_order_relaxed);
-        }
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(dynamic, 256)
-#endif
-        for (int r = half.rowBegin; r < half.rowEnd; ++r) {
-          for (uint32_t k = matrix.row_ptr[r]; k < matrix.row_ptr[r + 1];
-               ++k) {
-            const uint32_t c = matrix.col_idx[k];
-            const int32_t pos =
-                cursors[c].fetch_add(1, std::memory_order_relaxed);
-            half.colIdx[static_cast<size_t>(pos)] =
-                static_cast<int32_t>(r - half.rowBegin);
-            half.values[static_cast<size_t>(pos)] = matrix.val[k];
-          }
-        }
-      }
-    }
-
-    auto emplaced = compactTransposeHost_.emplace(fingerprint, std::move(entry));
-    CompactTransposeHostEntry &stored = emplaced.first->second;
-    for (int h = 0; h < 2; ++h) {
-      CompactTransposeHostHalf &half = stored.halves[h];
-      registerCompactTransposePinned(half.rowPtr.data(),
-                                     half.rowPtr.size() * sizeof(int32_t));
-      registerCompactTransposePinned(half.colIdx.data(),
-                                     half.colIdx.size() * sizeof(int32_t));
-      registerCompactTransposePinned(half.values.data(),
-                                     half.values.size() * sizeof(float));
-    }
-    std::cerr << "[NOTE] csrt: host A^T halves built in "
-              << std::chrono::duration<double>(
-                     std::chrono::steady_clock::now() - buildStart)
-                     .count()
-              << " s (rows=" << stored.rows << " nnz=" << stored.nnz
-              << " cached_chunks=" << compactTransposeHost_.size() << ")\n";
-    return stored;
-  }
-
-  void queueCompactTrueTransposeUploadLocked(const io::CSRView &matrix) {
-    if (matrix.rows < 2 || matrix.nnz == 0) {
-      return; // degenerate halves; backward falls back to per-RHS op=T
-    }
-    const MatrixCacheKey key = makeCacheKey(matrix);
-    const uint64_t fingerprint = compactTransposeFingerprint(matrix);
-    // Pointer keys can alias after free/realloc; require the content
-    // fingerprint to match too before trusting the resident A^T slots.
-    if (compactTransposeActiveValid_ && compactTransposeActiveKey_ == key &&
-        compactTransposeActiveFingerprint_ == fingerprint) {
-      return;
-    }
-    const CompactTransposeHostEntry &entry =
-        ensureCompactTransposeHostEntry(fingerprint, matrix);
-    if (entry.halves[0].nnz == 0 || entry.halves[1].nnz == 0) {
-      return;
-    }
-    cudaStream_t uploadStream = compactTransposeUploadStream_.get();
-    const auto queueStart = std::chrono::steady_clock::now();
-    for (int h = 0; h < 2; ++h) {
-      CompactTransposeDeviceHalf &slot = compactTransposeSlots_[h];
-      const CompactTransposeHostHalf &half = entry.halves[h];
-      if (slot.consumedRecorded) {
-        slot.consumed.wait(uploadStream);
-        slot.consumedRecorded = false;
-      }
-      slot.dRowPtr.copyFromHostAsync(half.rowPtr.data(), half.rowPtr.size(),
-                                     uploadStream);
-      slot.dColIdx.copyFromHostAsync(half.colIdx.data(), half.colIdx.size(),
-                                     uploadStream);
-      slot.dValues.copyFromHostAsync(half.values.data(), half.values.size(),
-                                     uploadStream);
-      slot.rows = entry.cols;
-      slot.cols = static_cast<int64_t>(half.rowEnd - half.rowBegin);
-      slot.nnz = half.nnz;
-      slot.rowBegin = half.rowBegin;
-      slot.rowEnd = half.rowEnd;
-      slot.mat.create(slot.rows, slot.cols, slot.nnz, slot.dRowPtr.get(),
-                      slot.dColIdx.get(), slot.dValues.get());
-      slot.uploadReady.record(uploadStream);
-      slot.uploadPending = true;
-    }
-    compactTransposeActiveKey_ = key;
-    compactTransposeActiveFingerprint_ = fingerprint;
-    compactTransposeActiveValid_ = true;
-    noteCudaCompactMatrixUpload(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      queueStart)
-            .count());
   }
 
   void queueTransientRangeUpload(size_t slot, const MatrixCacheKey &key,
@@ -2873,7 +2333,6 @@ public:
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CUDA_CHECK(cudaDeviceSynchronize());
-    unregisterCompactHostPinsLocked();
 
     residentMatrixSetCache_.invalidate();
     cache_.release();
@@ -2931,25 +2390,6 @@ public:
     batchZMirrorsHost_.clear();
     hostFloatScratch_.clear();
 
-    // csrt experiment state: host pins were just unregistered above and the
-    // device buffers below would otherwise outlive this reset.
-    for (auto &slot : compactTransposeSlots_) {
-      slot.mat.reset();
-      slot.dRowPtr.reset();
-      slot.dColIdx.reset();
-      slot.dValues.reset();
-      slot.rows = 0;
-      slot.cols = 0;
-      slot.nnz = 0;
-      slot.rowBegin = 0;
-      slot.rowEnd = 0;
-      slot.uploadPending = false;
-      slot.consumedRecorded = false;
-    }
-    compactTransposeHost_.clear();
-    compactTransposeActiveKey_ = MatrixCacheKey{};
-    compactTransposeActiveFingerprint_ = 0;
-    compactTransposeActiveValid_ = false;
   }
 
   void refreshCompactProjection(const double *projection, size_t count,
@@ -4417,7 +3857,6 @@ private:
   size_t compactBatchInputCount_ = 0;
   bool compactSortedHint_ = false;
   bool compactPackedKLogged_ = false;
-  bool compactTransposeExpLogged_ = false;
   std::array<DeviceArray<double>, kCompactDeviceBackwardMaxAccumulators>
       dCompactBackwardAccum_;
   std::vector<float> hostFloatScratch_;
@@ -4489,18 +3928,6 @@ private:
   DeviceBuffer dBuffer_;
   CudaStreamGuard computeStream_;
   std::array<CudaStreamGuard, kTransientRangeSlotCount> transientUploadStreams_;
-  std::vector<void *> compactHostPins_;
-  // csrt experiment state (see queueCompactTrueTransposeUploadLocked).
-  std::unordered_map<uint64_t, CompactTransposeHostEntry>
-      compactTransposeHost_;
-  std::array<CompactTransposeDeviceHalf, 2> compactTransposeSlots_;
-  MatrixCacheKey compactTransposeActiveKey_{};
-  uint64_t compactTransposeActiveFingerprint_ = 0;
-  bool compactTransposeActiveValid_ = false;
-  CudaStreamGuard compactTransposeUploadStream_;
-  bool compactTransposePinWarned_ = false;
-  bool compactTransposeCsrtLogged_ = false;
-  bool compactTransposeFallbackLogged_ = false;
   std::mutex mutex_;
 };
 
