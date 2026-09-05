@@ -23,6 +23,7 @@ void launchCompactRatioKernel(
     const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
     double eps, cudaStream_t stream = nullptr);
 
+// Null yhatBatch prepares a binary p!=0 activity mask in ratioBatch.
 void launchCompactRatioBatchKernel(
     const float *yhatBatch, const double *fullProjection,
     const double *fullBackground, size_t fullProjectionCount,
@@ -95,7 +96,8 @@ void launchCompactPackColPairToFloat2Kernel(const float *x0, const float *x1,
 void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
                                      const int32_t *colIdx, const float *xPair,
                                      float *y0, float *y1, int rows,
-                                     cudaStream_t stream = nullptr);
+                                     cudaStream_t stream = nullptr,
+                                     bool zeroProjectionMask = false);
 
 void launchCompactPackColQuadToFloat4Kernel(const float *x0, const float *x1,
                                             const float *x2, const float *x3,

@@ -178,6 +178,12 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     ratioBatch[index] = 0.0f;
     return;
   }
+  // Reuse the exact ratio row mapping to prepare a projection-activity mask.
+  // Keep this as a double zero comparison: tiny positive counts stay active.
+  if (yhatBatch == nullptr) {
+    ratioBatch[index] = fullProjection[fullIndex] == 0.0 ? 0.0f : 1.0f;
+    return;
+  }
   double denom = static_cast<double>(yhatBatch[index]);
   if (fullBackground != nullptr) {
     denom += fullBackground[fullIndex];
@@ -776,9 +782,14 @@ extern "C" __global__ void compact_csr_spmv_xpair(const float *values,
                                                  const int *colIdx,
                                                  const float2 *xpair,
                                                  float *y0, float *y1,
-                                                 int rows) {
+                                                 int rows, int zeroProjectionMask) {
   const int row = static_cast<int>(blockIdx.x);
   if (row >= rows) {
+    return;
+  }
+  // Numerator only: y initially holds 0/1 activity, then Ax overwrites it.
+  // A zero pair already contains the required zeros; ratio later reads p.
+  if (zeroProjectionMask != 0 && y0[row] == 0.0f && y1[row] == 0.0f) {
     return;
   }
   const int start = rowPtr[row];

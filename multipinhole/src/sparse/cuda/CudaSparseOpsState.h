@@ -982,10 +982,23 @@ public:
 
     TimedCudaStagePair forwardTiming;
     forwardTiming.recordStart(nullptr);
+    // Prepare p!=0 in the existing output buffer. No per-bed matrix or mask
+    // cache: the same row mapping is reused, and ratio overwrites it below.
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const size_t offset = static_cast<size_t>(bed) *
+                            static_cast<size_t>(branchCount) *
+                            static_cast<size_t>(rows);
+      launchCompactRatioBatchKernel(
+          nullptr,
+          dCompactProjectionInput_[static_cast<size_t>(cacheSlotBase + bed)].get(),
+          nullptr, fullProjectionCount, commonRatioParams, dBatchSymIds_.get(),
+          dBatchZMirrors_.get(), branchCount, dBatchOutput_.get() + offset,
+          static_cast<size_t>(rows), 1e-10);
+    }
     executeColMajorBatchSpMVLocked(
         cached, CUSPARSE_OPERATION_NON_TRANSPOSE, dBatchInput_.get(), cols,
         dBatchOutput_.get(), rows, batchSize, nullptr,
-        dFullBatchOutput_.get());
+        dFullBatchOutput_.get(), true);
     forwardTiming.recordStop(nullptr);
 
     TimedCudaStagePair ratioTiming;
@@ -1438,7 +1451,8 @@ private:
                                       float *matB, int64_t bRows, float *matC,
                                       int64_t cRows, int batchSize,
                                       cudaStream_t stream = nullptr,
-                                      float *xPairScratch = nullptr) {
+                                      float *xPairScratch = nullptr,
+                                      bool zeroProjectionMask = false) {
     if (batchSize <= 0 || bRows <= 0 || cRows <= 0) {
       throw std::runtime_error(
           "compact col-major batch SpMV requires positive sizes.");
@@ -1511,7 +1525,7 @@ private:
                                                stream);
         launchCompactCsrSpmvXPairKernel(
             cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
-            xPairScratch, y0, y1, rows, stream);
+            xPairScratch, y0, y1, rows, stream, zeroProjectionMask);
       }
       noteCudaCusparseForwardHost(
           std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -3117,7 +3131,7 @@ private:
           launchCompactCsrSpmvXPairKernel(values, rowPtr, colIdx, xPackScratch,
                                           matC + static_cast<size_t>(b) * cStride,
                                           matC + static_cast<size_t>(b + 1) * cStride,
-                                          rpa);
+                                          rpa, nullptr, false);
         }
       }
     }

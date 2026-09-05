@@ -95,6 +95,21 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
     projBed0[i] = 1.0 + 0.01 * static_cast<double>(i);
     projBed1[i] = 2.0 + 0.02 * static_cast<double>(i);
   }
+  // Independent detector-Z anchor: in this 2x2 detector, front and back
+  // ix=0 rays are one packed pair. Cover both zero, either zero, and dense;
+  // the ix=1 rays stay positive. The expanded dense oracle retains all rows.
+  for (int angle = 0; angle < meta.fullNumAngles; ++angle) {
+    const size_t front = static_cast<size_t>(angle) * meta.fullRaysPerAngle();
+    const size_t back = front + meta.detNx;
+    if (angle % 4 < 2) {
+      projBed0[front] = 0.0;
+      projBed1[back] = 0.0;
+    }
+    if (angle % 4 == 0 || angle % 4 == 2) {
+      projBed0[back] = 0.0;
+      projBed1[front] = 0.0;
+    }
+  }
 
   std::vector<std::vector<double>> localImages = {imageBed0, imageBed1};
   std::vector<std::vector<double>> localNumers(

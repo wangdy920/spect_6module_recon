@@ -613,7 +613,7 @@ void launchCompactPackColPairToFloat2Kernel(const float *x0, const float *x1,
 void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
                                      const int32_t *colIdx, const float *xPair,
                                      float *y0, float *y1, int rows,
-                                     cudaStream_t stream) {
+                                     cudaStream_t stream, bool zeroProjectionMask) {
   ensureProjDomainKernelsLoaded();
   if (rows <= 0) {
     return;
@@ -628,8 +628,9 @@ void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
       reinterpret_cast<CUdeviceptr>(const_cast<float *>(xPair));
   CUdeviceptr y0Ptr = reinterpret_cast<CUdeviceptr>(y0);
   CUdeviceptr y1Ptr = reinterpret_cast<CUdeviceptr>(y1);
+  int useZeroProjectionMask = zeroProjectionMask ? 1 : 0;
   void *args[] = {&valuesPtr, &rowPtrPtr, &colIdxPtr, &xPairPtr, &y0Ptr,
-                  &y1Ptr, &rows};
+                  &y1Ptr, &rows, &useZeroProjectionMask};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize = static_cast<unsigned int>(rows);
   SPECT_CUDRV_CHECK(cuLaunchKernel(

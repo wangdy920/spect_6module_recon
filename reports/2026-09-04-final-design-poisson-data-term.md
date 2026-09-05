@@ -430,6 +430,14 @@ CUDA Graph 只在提交间隙被证实显著时作为后续项：官方说明它
 
 证据目录的 `summary.json`、`edge_checks.json`、`profile_B/analysis.json`、`csrb_ctac20/validation.json` 和 `runtime_hashes.json`／`candidate_loaded_runtime.json` 支持以上结论；原命令、输出和复核脚本保留。固定0ddc6ab exe在 `recon_out/lu208_resident_roi_20260905/frozen_binary/SPECT_recon.exe`，SHA-256 `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`，作为下一机制的独立对照；exe备份仍需配套已验证runtime布局。
 
+## 7.8 2026-09-05 零计数 pair 的分子正向候选
+
+用户在§7.7执行期间再次要求“继续”。ROI机制已完成独立配对及CTAC回归，以下只考察§7.6已量出的零计数工作：当前默认K=2，raw五床约62.38%的nnz加权pair两路p均为0；正向仍约占GPU核时间35%。对合法有限输入，p=0对应的分子ratio为0，不需要该行Ax；灵敏度S仍保留所有原始行。
+
+最小候选复用 `compute_compact_ratio_chunk_batch` 的现有行映射，在同一 `dBatchOutput_` 中暂存0/1投影活跃标记；packed-2分子核仅在两路标记均为0时提前退出，其余计算／舍入／反投不变。原ratio随后覆盖该缓冲；无新增矩阵、长期mask缓存、CUDA模块或配置。独立forward、CTAC、sensitivity和其它K保持原语义，CTAC调用显式使用普通packed-2行为。现有非有限S／图像检查保留。
+
+冻结基线A为§7.7的 `20260905+0ddc6ab`（SHA `0fc94c77828025b3d692c00331a016c9789b2b1afbcb642bd6e78ef9fa8d6fc4`），B为零pair候选；沿用相同Lu208五床／生产配置／MLEM50／denom hit／完整默认主机缓存，relL2≤1e-5，核心目标120 s／下限180 s，新增复杂度要求三组配对中位核心收益≥5%。每次600 s，不并行占用GPU；5次预热为诊断，50次为保护端点。先完整构建／CTest（密集、两路均零、仅一路零的独立dense oracle及既有forward／S／CTAC测试），再A-B／B-A／A-B三组；另用短Nsight观察正向成本与额外活跃标记成本，复跑现有CTAC20保护端点以核对共享launcher未改变该路径。达到数值与收益门才保留；不重新打开已拒转置／SpMM／精度变体。证据目录 `recon_out/lu208_zero_pair_20260905/`；执行 `exploring`、证据 `preliminary`、采纳 `pending`。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。
