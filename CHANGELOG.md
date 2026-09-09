@@ -8,6 +8,28 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- CSRB numerator backward: zero-row scatter transpose (2026-09-09). The
+  numerator ratio is exactly 0 for zero-count bins (74-90 % of the five-bed
+  Lu-177 input), and the per-RHS cuSPARSE transpose still walked every row
+  (~82 % of numerator GPU time after cfffea5). `compact_csr_spmvt_pair` now
+  scatters two RHS per matrix pass with atomics over CSR(A) and returns before
+  reading any matrix byte when both ratios of a row are zero (single-branch
+  atomics when only one is). The path is chosen per pass from the zero-bin
+  fraction of the beds' projections (`compactScatterBackwardPreferred`,
+  threshold 0.40, recorded at projection upload); below it the per-RHS
+  cuSPARSE CSR_ALG2 transpose is unchanged, so dense Tc-99m data never pays
+  the 0.71x dense penalty. `SPECT_CSRB_SCATTER_BACKWARD=0/1` forces either
+  path for A/B on one binary. Sensitivity, independent forward and CTAC
+  transposes are untouched. Bench on the real Lu-177 208 keV chunk 0
+  (`spect_transpose_bench ... scatter`, 40 RHS): 378 -> 119 ms at 80 % zero
+  bins (3.18x), break-even at ~30 %. Unit test: scatter vs cuSPARSE vs dense
+  oracle on a 70 %-zero toy projection. Frozen Lu-177 208 keV five-bed MLEM50
+  gate (A = cfffea5, B = this build, A-B/B-A/A-B, full host cache, denom hit,
+  runs shared with foreign GPU jobs repeated): core 144.606 -> 73.565 s
+  median (-49.1 %, pairs 49.24/48.99/49.42 %), full command 190.3 -> 117.4 s,
+  max primary relL2 1.44e-7; the same B exe forced to cuSPARSE gives 143.2 s.
+  The 120 s core target is met for the first time. CSRB CTAC (per-angle
+  cuSPARSE transpose, unchanged) A/B it5 relL2 3.1e-8. Design report §7.9.
 - Buffer and dead-path convergence (2026-09-05, after e5d376a): removed the
   uncalled full/subset/range CSR conversion and upload-cache cluster. Compact
   CSRB prefetch keeps its own single upload stream. Host gradients and disabled

@@ -942,6 +942,144 @@ extern "C" __global__ void compact_csr_spmv_xquad(const float *values,
   }
 }
 
+// Transpose (rays -> voxels) scatter for a pair of RHS with zero-row
+// skipping: y0[col] += a_t * r0, y1[col] += a_t * r1 for every nnz t of row
+// (one block per row, the same float4/int4 row walk as the forward pair
+// kernel). Rows whose two ratios are both exactly zero contribute nothing to
+// the accumulation and are skipped before any matrix byte is read; the
+// production numerator ratio is exactly 0 for zero-count bins, so on the
+// five-bed Lu-177 input ~62 % of the nnz work disappears. The outputs are
+// accumulated (the caller zeroes them first). Independent forward /
+// sensitivity semantics are untouched: this only replaces the per-RHS
+// cuSPARSE transpose inside the numerator.
+extern "C" __global__ void compact_csr_spmvt_pair(const float *values,
+                                                  const int *rowPtr,
+                                                  const int *colIdx,
+                                                  const float *x0,
+                                                  const float *x1, float *y0,
+                                                  float *y1, int rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const float r0 = x0[row];
+  const float r1 = x1[row];
+  if (r0 == 0.0f && r1 == 0.0f) {
+    return;
+  }
+  const int start = rowPtr[row];
+  const int end = rowPtr[row + 1];
+  const int tid = static_cast<int>(threadIdx.x);
+  const int stride = static_cast<int>(blockDim.x);
+  const bool both = r0 != 0.0f && r1 != 0.0f;
+  float *ySingle = r0 != 0.0f ? y0 : y1;
+  const float rSingle = r0 != 0.0f ? r0 : r1;
+
+  const int aligned = (start + 3) & ~3;
+  for (int t = start + tid; t < aligned && t < end; t += stride) {
+    const int c = colIdx[t];
+    const float a = values[t];
+    if (both) {
+      atomicAdd(y0 + c, a * r0);
+      atomicAdd(y1 + c, a * r1);
+    } else {
+      atomicAdd(ySingle + c, a * rSingle);
+    }
+  }
+  for (int t = aligned + tid * 4; t + 3 < end; t += stride * 4) {
+    const float4 a = *reinterpret_cast<const float4 *>(values + t);
+    const int4 c = *reinterpret_cast<const int4 *>(colIdx + t);
+    if (both) {
+      atomicAdd(y0 + c.x, a.x * r0);
+      atomicAdd(y1 + c.x, a.x * r1);
+      atomicAdd(y0 + c.y, a.y * r0);
+      atomicAdd(y1 + c.y, a.y * r1);
+      atomicAdd(y0 + c.z, a.z * r0);
+      atomicAdd(y1 + c.z, a.z * r1);
+      atomicAdd(y0 + c.w, a.w * r0);
+      atomicAdd(y1 + c.w, a.w * r1);
+    } else {
+      atomicAdd(ySingle + c.x, a.x * rSingle);
+      atomicAdd(ySingle + c.y, a.y * rSingle);
+      atomicAdd(ySingle + c.z, a.z * rSingle);
+      atomicAdd(ySingle + c.w, a.w * rSingle);
+    }
+  }
+  const int vecEnd =
+      aligned < end ? aligned + ((end - aligned) & ~3) : end;
+  for (int t = vecEnd + tid; t < end; t += stride) {
+    const int c = colIdx[t];
+    const float a = values[t];
+    if (both) {
+      atomicAdd(y0 + c, a * r0);
+      atomicAdd(y1 + c, a * r1);
+    } else {
+      atomicAdd(ySingle + c, a * rSingle);
+    }
+  }
+}
+
+// Same for four RHS at once (one matrix read per four columns); a row is
+// skipped only when all four ratios are zero, so fewer rows skip than with
+// pairs — the bench decides which grouping wins on the real input.
+extern "C" __global__ void compact_csr_spmvt_quad(
+    const float *values, const int *rowPtr, const int *colIdx, const float *x0,
+    const float *x1, const float *x2, const float *x3, float *y0, float *y1,
+    float *y2, float *y3, int rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+  const float r0 = x0[row];
+  const float r1 = x1[row];
+  const float r2 = x2[row];
+  const float r3 = x3[row];
+  if (r0 == 0.0f && r1 == 0.0f && r2 == 0.0f && r3 == 0.0f) {
+    return;
+  }
+  const int start = rowPtr[row];
+  const int end = rowPtr[row + 1];
+  const int tid = static_cast<int>(threadIdx.x);
+  const int stride = static_cast<int>(blockDim.x);
+  const bool z0 = r0 != 0.0f;
+  const bool z1 = r1 != 0.0f;
+  const bool z2 = r2 != 0.0f;
+  const bool z3 = r3 != 0.0f;
+
+  const int aligned = (start + 3) & ~3;
+  for (int t = start + tid; t < aligned && t < end; t += stride) {
+    const int c = colIdx[t];
+    const float a = values[t];
+    if (z0) atomicAdd(y0 + c, a * r0);
+    if (z1) atomicAdd(y1 + c, a * r1);
+    if (z2) atomicAdd(y2 + c, a * r2);
+    if (z3) atomicAdd(y3 + c, a * r3);
+  }
+  for (int t = aligned + tid * 4; t + 3 < end; t += stride * 4) {
+    const float4 a = *reinterpret_cast<const float4 *>(values + t);
+    const int4 c = *reinterpret_cast<const int4 *>(colIdx + t);
+    const int cs[4] = {c.x, c.y, c.z, c.w};
+    const float as[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      if (z0) atomicAdd(y0 + cs[q], as[q] * r0);
+      if (z1) atomicAdd(y1 + cs[q], as[q] * r1);
+      if (z2) atomicAdd(y2 + cs[q], as[q] * r2);
+      if (z3) atomicAdd(y3 + cs[q], as[q] * r3);
+    }
+  }
+  const int vecEnd =
+      aligned < end ? aligned + ((end - aligned) & ~3) : end;
+  for (int t = vecEnd + tid; t < end; t += stride) {
+    const int c = colIdx[t];
+    const float a = values[t];
+    if (z0) atomicAdd(y0 + c, a * r0);
+    if (z1) atomicAdd(y1 + c, a * r1);
+    if (z2) atomicAdd(y2 + c, a * r2);
+    if (z3) atomicAdd(y3 + c, a * r3);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CSRQ kernels
 // ---------------------------------------------------------------------------

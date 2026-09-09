@@ -458,6 +458,47 @@ profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。�
 
 复核现有配对数据：`python recon_out/lu208_zero_pair_20260905/experiment.py summarize`；复核时间线：`python recon_out/lu208_zero_pair_20260905/analyze_profile.py`。复跑使用新的隔离输出目录，复制该目录的测量/顺序驱动及gate_dry_run输入描述，冻结两版EXE身份后运行 `run_when_ready.py`；不要覆盖本轮原始输出。§7.7与§7.8各有独立A/B，不能跨轮相除声称严格配对累计收益。
 
+## 7.9 2026-09-09 零计数行反投：pair 散射转置替代逐 RHS cuSPARSE
+
+§7.8 之后分子 GPU 核时间约 82% 在 cuSPARSE `csrmv_v3_transpose_kernel`（1200 次/5 迭代、11.59 s）；它对每个 RHS 完整遍历 CSR(A)，不知道 ratio 中的零。而对合法输入 `p_i=0 ⇒ ratio_i=0`，五床原始输入 74–90% 的 bin 为零、K=2 配对约 62% 的 nnz 工作两路 ratio 均为零，这些行对反投贡献恒为 0。8 月 Phase-B 拒绝过"自定义原子 2-RHS 转置"，但那是在无零结构的 Sampling 数据上比较的（那里它 0.7× 慢于 cuSPARSE）；零行跳过是新的杠杆，因此重新以真实 chunk 做只读基准，再决定是否进生产。
+
+**核**：`compact_csr_spmvt_pair(values, rowPtr, colIdx, x0, x1, y0, y1, rows)` 每行一个 block，先读两路 ratio，两路均为 0 立即返回（不读任何矩阵字节）；仅一路非零时只对该路做原子累加；其余与正向 pair 核相同的 float4/int4 对齐行遍历，`atomicAdd(y_k + col, a·r_k)`。输出为累加语义，调用方先 memset。`compact_csr_spmvt_quad` 为四路版本，仅供基准比较。两核使用绝对 nnz 下标，因此也可像 packed 正向核那样以 `rowPtr + angle·rpa` 偏移作用于按角度子区间（CTAC 路径未改，见下）。
+
+**只读基准**（`tools/transpose_bench.cpp` 新增 `scatter` 模式，`spect_transpose_bench <matrix> 0 40 5 <zeroFrac> scatter`；真实 Lu-177 208 keV chunk 0，17280 行 × 3168000 列、730,587,994 nnz，40 RHS，RTX 4070 Ti SUPER；zeroFrac 为每个 (row, RHS) 独立置零概率，`relL2` 对 cuSPARSE 同输入结果）：
+
+| zeroFrac（单 bin 零率） | 两路均零 pair 占 nnz | cuSPARSE 逐 RHS T / ms | pair 散射+跳过 / ms | 加速 | quad 散射+跳过 |
+|---:|---:|---:|---:|---:|---:|
+| 0（稠密） | 0% | 377.7 | 529.9 | **0.71×** | 0.73× |
+| 0.15 | 2.2% | 373.7 | 446.2 | 0.84× | 0.87× |
+| 0.30 | 9.0% | 370.3 | 369.2 | 1.00× | 1.04× |
+| 0.40 | 16.0% | 379.1 | 326.0 | 1.16× | 1.21× |
+| 0.55 | 30.2% | 380.2 | 250.4 | 1.52× | 1.59× |
+| 0.70 | 49.0% | 370.2 | 168.3 | 2.20× | 2.28× |
+| 0.80 | 63.9% | 378.3 | **118.9** | **3.18×** | 3.15× |
+| 0.90 | 80.9% | 377.2 | 59.4 | 6.35× | 5.23× |
+
+所有变体 relL2 ≤ 1.2e-7（fp32 原子求和顺序）。稠密时慢 0.71× 与 Phase-B 结论一致；盈亏平衡在单 bin 零率约 0.30；真实五床（74–90%）落在 3× 以上区间。pair 与 quad 在高零率下 pair 更优（跳过条件更松），低零率 quad 略优但那里本就应留在 cuSPARSE，故生产只用 pair。
+
+**生产接入**（`executeColMajorBatchSpMVLocked` 新增 `zeroRowScatterTranspose`，仅 `executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat` 的分子反投传入）：投影上传时（`ensureCompactFullProjectionUploaded`，每床一次）统计精确零 bin 比例；每次分子调用取本 pass 各床均值，`compactScatterBackwardPreferred(zeroFrac, batchSize)` 在 ≥ **0.40**（`kCompactScatterBackwardZeroFractionMin`，留出 0.30 盈亏点以上 1.16× 的余量）时选散射：memset `dFullBatchOutput_` 后按 (b, b+1) 逐对启动，奇数余量仍走 cuSPARSE；否则整条路径与 cfffea5 完全相同。环境变量 `SPECT_CSRB_SCATTER_BACKWARD=0/1` 强制任一路径，用于同一 exe 的 A/B；首次调用打印 `[NOTE] compact numerator backward=… zero_bin_frac=…`。灵敏度、独立 forward、CTAC（按角度 cuSPARSE 转置）语义不变。跳过判据是 ratio 本身为 0，与零率估计无关，因此选择只影响速度不影响结果。
+
+**单元门**：`CompactScatterBackward.ZeroFractionThresholdSelectsPath`（纯函数）；`MultiBedCompactNumeratorTest.ScatterBackwardMatchesCusparseAndDense`（70% 零 bin 的两床玩具投影，强制散射与强制 cuSPARSE 各跑一次，均对 dense oracle ≤1e-4，两者互差 ≤1e-6·max）。多床分子既有 8 项测试全部通过。
+
+**五床 MLEM50 门**：冻结 A = `20260905+cfffea5`（`build/verify-vs`，SHA `69fb2d28…a5ec`），B = 本候选 `20260909+3b69b36-dirty`（`build/metadata-compat`，SHA `3684e4ea…d168d`；两树 CMake 配置一致：`/O2 /Ob2 /DNDEBUG`，sm 86/89/120）。协议同 §7.8：≥42 GiB 可用并稳定 60 s、无其它 SPECT_recon、GPU ≤2.5 GiB／≤20%（桌面本底 9–11%）且无外来计算进程，各一次 it3 预热（各树生成五床 denom cache `auto_338348f9b2178b4a`），再 A-B / B-A / A-B 三组 MLEM50，relL2 对首个 A primary ≤1e-5、三组配对核心收益 ≥5%；另加一次 `SPECT_CSRB_SCATTER_BACKWARD=0` 的 B 运行隔离机制。驱动与证据 `recon_out/lu208_scatter_backward_20260909/`（`run_gate.py run|summarize`，`summary.json`，逐运行 `console.log`／`result.json`／1 Hz `samples.csv`，内含本进程工作集、整卡显存、系统可用内存和外来 GPU 进程名）。
+
+本机是共享主机：另一用户作业（PET 归一化 `gpu_px_direct.exe`、约 20 GiB 的 `compare_direct_cdf.py`，以及每隔数分钟启动约 2 s 的 `super_cuda.exe`）在测量期间间歇运行。驱动把"外来 GPU 计算进程出现 >5 个 1 Hz 采样，或系统可用内存 <4 GiB"的运行标记为污染并自动重跑；被污染的尝试全部保留在证据目录但不进入统计。最先一次 A 与 `gpu_px_direct` 同时运行得到 354.78 s（`A1_contaminated_gpu_px/`），直接说明为何需要这条规则；A2 首两次（144.438／147.708 s，各 2 s 外来采样）、A3 首次（146.190 s，7 s）、B3 前三次（76.045／75.333／75.198 s，8／1／1 s）和首次 `B_scatter_off`（147.089 s，11 s）也一并保留，其中 ≤5 s 者数值上与干净运行一致，取零外来采样的尝试进入正式表。
+
+| 三组 MLEM50（执行顺序 A1 B1 B2 A2 A3 B3） | A：cfffea5 核心 / s | B：pair 散射 核心 / s | 核心减少 | primary relL2 vs A1 |
+|---|---:|---:|---:|---:|
+| A1 → B1 | 144.606 | **73.398** | **49.24%** | 7.7969e-8 |
+| B2 ← A2（A2_r3） | 144.229 | **73.565** | **48.99%** | 1.3102e-7 |
+| A3（A3_r2） → B3（B3_r4） | 147.816 | **74.760** | **49.42%** | 1.4366e-7 |
+
+核心中位数 **144.606 → 73.565 s（−49.1%）**，整命令中位数 **190.310 → 117.423 s（−38.3%）**，B 整命令范围 115.969–118.343 s；A 三次 144.229–147.816 s 与 §7.8 的 144.8 s 基线一致。三组配对收益均 ≥5%；全部 primary relL2 ≤1.44e-7 ≤1e-5（fp32 原子求和顺序）。**核心 120 s 目标首次通过（中位 73.6 s），180 s 下限通过。** 同一 B exe 强制 `SPECT_CSRB_SCATTER_BACKWARD=0` 得 **143.162 s**（relL2 1.59e-7），与 A 同级，因此全部收益归于反投核替换，而非编译差异。六次正式运行均为完整默认主机缓存、denom hit、无污染；B 日志均为 `backward=scatter_pair_zero_skip zero_bin_frac=0.802396`（五床精确零 bin 均值 80.24%，与 §7.6 的 74–90% 描述性统计一致）。资源：本进程工作集峰值 A 33.213 GiB、B 33.207–33.411 GiB；整卡采样显存峰值双方 14.0–14.4 GiB，没有新增矩阵或掩码副本（散射仅 memset 既有 `dFullBatchOutput_`）。
+
+三迭代预热（诊断，不入门）：A 10.005 s → B 5.403 s。CTAC 共享调用方守护：Lu-177 Derenzo 床 1 + Lu208 CSRB + 208.4 keV 水柱 μ 图，MLEM it5，A/B 主图 relL2 **3.1327e-8**，核心 10.851／10.906 s 相同，B 未出现散射日志（CTAC 分子仍走按角度 cuSPARSE 转置），见 `csrb_ctac_guard/validation.json`。单元套件 286 通过／4 既有跳过。
+
+执行 `completed`、本机同输入证据 `validated`、源码采纳 `merged`。剩余方向：反投现在约为原来一半，正向 packed-2（cfffea5 已跳零对）与反投量级接近，五床分子的下一步应重新以短 Nsight 划分；CSRB CTAC 的按角度转置可复用同一核（`rowPtr + angle·rpa`，需每角度 memset 8×nvox 输出，先测再定）；稠密投影（Tc-99m 高计数）保持 cuSPARSE，阈值 0.40 若要下调需在 0.30–0.40 区间补实测。不重开已拒 SpMM／CSC 真转置／FP16。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。

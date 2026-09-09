@@ -33,6 +33,8 @@ struct ProjDomainKernelCache {
   CUfunction compactCsrSpmvXPairFunction = nullptr;
   CUfunction compactPackColQuadFunction = nullptr;
   CUfunction compactCsrSpmvXQuadFunction = nullptr;
+  CUfunction compactCsrSpmvTPairFunction = nullptr;
+  CUfunction compactCsrSpmvTQuadFunction = nullptr;
   CUfunction csrqForwardFunction = nullptr;
   CUfunction csrqBackwardFunction = nullptr;
   CUfunction csrqBackwardPackedFunction = nullptr;
@@ -85,6 +87,8 @@ void ensureProjDomainKernelsLoaded() {
       g_projDomainKernelCache.compactCsrSpmvXPairFunction != nullptr &&
       g_projDomainKernelCache.compactPackColQuadFunction != nullptr &&
       g_projDomainKernelCache.compactCsrSpmvXQuadFunction != nullptr &&
+      g_projDomainKernelCache.compactCsrSpmvTPairFunction != nullptr &&
+      g_projDomainKernelCache.compactCsrSpmvTQuadFunction != nullptr &&
       g_projDomainKernelCache.csrqForwardFunction != nullptr &&
       g_projDomainKernelCache.csrqBackwardFunction != nullptr &&
       g_projDomainKernelCache.csrqBackwardPackedFunction != nullptr &&
@@ -128,6 +132,8 @@ void ensureProjDomainKernelsLoaded() {
     g_projDomainKernelCache.compactCsrSpmvXPairFunction = nullptr;
     g_projDomainKernelCache.compactPackColQuadFunction = nullptr;
     g_projDomainKernelCache.compactCsrSpmvXQuadFunction = nullptr;
+    g_projDomainKernelCache.compactCsrSpmvTPairFunction = nullptr;
+    g_projDomainKernelCache.compactCsrSpmvTQuadFunction = nullptr;
     g_projDomainKernelCache.csrqForwardFunction = nullptr;
     g_projDomainKernelCache.csrqBackwardFunction = nullptr;
     g_projDomainKernelCache.csrqBackwardPackedFunction = nullptr;
@@ -185,6 +191,12 @@ void ensureProjDomainKernelsLoaded() {
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.compactCsrSpmvXQuadFunction,
       g_projDomainKernelCache.module, "compact_csr_spmv_xquad"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactCsrSpmvTPairFunction,
+      g_projDomainKernelCache.module, "compact_csr_spmvt_pair"));
+  SPECT_CUDRV_CHECK(cuModuleGetFunction(
+      &g_projDomainKernelCache.compactCsrSpmvTQuadFunction,
+      g_projDomainKernelCache.module, "compact_csr_spmvt_quad"));
   SPECT_CUDRV_CHECK(cuModuleGetFunction(
       &g_projDomainKernelCache.csrqForwardFunction,
       g_projDomainKernelCache.module, "csrq_forward_k8"));
@@ -689,6 +701,66 @@ void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.compactCsrSpmvXQuadFunction, gridSize, 1, 1,
       blockSize, 1, 1, 0, reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactCsrSpmvTPairKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *x0,
+                                     const float *x1, float *y0, float *y1,
+                                     int rows, cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr x0Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x0));
+  CUdeviceptr x1Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x1));
+  CUdeviceptr y0Ptr = reinterpret_cast<CUdeviceptr>(y0);
+  CUdeviceptr y1Ptr = reinterpret_cast<CUdeviceptr>(y1);
+  void *args[] = {&valuesPtr, &rowPtrPtr, &colIdxPtr, &x0Ptr, &x1Ptr, &y0Ptr,
+                  &y1Ptr, &rows};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactCsrSpmvTPairFunction,
+      static_cast<unsigned int>(rows), 1, 1, blockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
+}
+
+void launchCompactCsrSpmvTQuadKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *x0,
+                                     const float *x1, const float *x2,
+                                     const float *x3, float *y0, float *y1,
+                                     float *y2, float *y3, int rows,
+                                     cudaStream_t stream) {
+  ensureProjDomainKernelsLoaded();
+  if (rows <= 0) {
+    return;
+  }
+  CUdeviceptr valuesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<float *>(values));
+  CUdeviceptr rowPtrPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(rowPtr));
+  CUdeviceptr colIdxPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int32_t *>(colIdx));
+  CUdeviceptr x0Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x0));
+  CUdeviceptr x1Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x1));
+  CUdeviceptr x2Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x2));
+  CUdeviceptr x3Ptr = reinterpret_cast<CUdeviceptr>(const_cast<float *>(x3));
+  CUdeviceptr y0Ptr = reinterpret_cast<CUdeviceptr>(y0);
+  CUdeviceptr y1Ptr = reinterpret_cast<CUdeviceptr>(y1);
+  CUdeviceptr y2Ptr = reinterpret_cast<CUdeviceptr>(y2);
+  CUdeviceptr y3Ptr = reinterpret_cast<CUdeviceptr>(y3);
+  void *args[] = {&valuesPtr, &rowPtrPtr, &colIdxPtr, &x0Ptr, &x1Ptr, &x2Ptr,
+                  &x3Ptr, &y0Ptr, &y1Ptr, &y2Ptr, &y3Ptr, &rows};
+  const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
+  SPECT_CUDRV_CHECK(cuLaunchKernel(
+      g_projDomainKernelCache.compactCsrSpmvTQuadFunction,
+      static_cast<unsigned int>(rows), 1, 1, blockSize, 1, 1, 0,
+      reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
 namespace {

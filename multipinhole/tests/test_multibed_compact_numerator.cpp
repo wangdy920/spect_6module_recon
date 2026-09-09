@@ -624,5 +624,103 @@ TEST(CompactPackedForwardK, L2BudgetSelectsSampling4And220As2) {
   EXPECT_EQ(spect::cuda::compactPackedForwardTile(1, true), 1);
 }
 
+TEST(CompactScatterBackward, ZeroFractionThresholdSelectsPath) {
+  EXPECT_FALSE(spect::cuda::compactScatterBackwardPreferred(0.15, 40));
+  EXPECT_FALSE(spect::cuda::compactScatterBackwardPreferred(0.39, 40));
+  EXPECT_TRUE(spect::cuda::compactScatterBackwardPreferred(0.40, 40));
+  EXPECT_TRUE(spect::cuda::compactScatterBackwardPreferred(0.85, 16));
+  EXPECT_FALSE(spect::cuda::compactScatterBackwardPreferred(0.85, 1));
+}
+
+namespace {
+void setScatterBackwardEnv(const char *value) {
+#ifdef _WIN32
+  _putenv_s("SPECT_CSRB_SCATTER_BACKWARD", value);
+#else
+  if (value[0] == '\0') {
+    unsetenv("SPECT_CSRB_SCATTER_BACKWARD");
+  } else {
+    setenv("SPECT_CSRB_SCATTER_BACKWARD", value, 1);
+  }
+#endif
+}
+} // namespace
+
+// The zero-row scatter transpose and the per-RHS cuSPARSE transpose must give
+// the same numerator on a projection where most bins are zero (the case the
+// scatter path is chosen for); both are checked against the dense oracle.
+TEST_F(MultiBedCompactNumeratorTest, ScatterBackwardMatchesCusparseAndDense) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto full = expandCompactToyToFullDense(meta, compact);
+
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_scatter_backward_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1024 * 1024);
+  ASSERT_EQ(chunks.chunks().size(), 1u);
+
+  constexpr int bedCount = 2;
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  std::vector<double> imageBed0 = {1.0, 1.3, 1.7, 2.1, 0.8, 1.2, 1.6, 2.0};
+  std::vector<double> imageBed1 = {0.5, 0.8, 1.2, 1.6, 1.0, 1.4, 1.8, 2.2};
+  // ~70 % zero bins with a bed-dependent pattern so branch pairs mix
+  // both-zero, one-zero and dense rows.
+  std::vector<double> projBed0(fullRows, 0.0);
+  std::vector<double> projBed1(fullRows, 0.0);
+  for (size_t i = 0; i < fullRows; ++i) {
+    if (i % 10 < 3) {
+      projBed0[i] = 1.0 + 0.01 * static_cast<double>(i);
+    }
+    if ((i + 4) % 10 < 3) {
+      projBed1[i] = 2.0 + 0.02 * static_cast<double>(i);
+    }
+  }
+  const double *imagePtrs[bedCount] = {imageBed0.data(), imageBed1.data()};
+  const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
+
+  auto runNumerator = [&](const char *env) {
+    setScatterBackwardEnv(env);
+    std::vector<std::vector<double>> numers(bedCount,
+                                            std::vector<double>(nvox, 0.0));
+    double *numerPtrs[2] = {numers[0].data(), numers[1].data()};
+    EXPECT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs,
+        false, nullptr, nullptr));
+    return numers;
+  };
+  const auto scatter = runNumerator("1");
+  const auto cusparse = runNumerator("0");
+  setScatterBackwardEnv("");
+
+  const auto ref0 = denseNumerator(full, projBed0, imageBed0,
+                                   static_cast<int>(fullRows), meta.totalVoxels);
+  const auto ref1 = denseNumerator(full, projBed1, imageBed1,
+                                   static_cast<int>(fullRows), meta.totalVoxels);
+  double refMax = 0.0;
+  for (size_t i = 0; i < nvox; ++i) {
+    refMax = std::max({refMax, std::abs(ref0[i]), std::abs(ref1[i])});
+  }
+  ASSERT_GT(refMax, 0.0);
+  for (size_t i = 0; i < nvox; ++i) {
+    EXPECT_NEAR(scatter[0][i], ref0[i], 1e-4) << "bed0 voxel " << i;
+    EXPECT_NEAR(scatter[1][i], ref1[i], 1e-4) << "bed1 voxel " << i;
+    EXPECT_NEAR(scatter[0][i], cusparse[0][i], 1e-6 * refMax) << "bed0 voxel "
+                                                              << i;
+    EXPECT_NEAR(scatter[1][i], cusparse[1][i], 1e-6 * refMax) << "bed1 voxel "
+                                                              << i;
+  }
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
 } // namespace
 } // namespace spect::main

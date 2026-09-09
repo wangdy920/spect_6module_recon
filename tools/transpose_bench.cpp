@@ -6,9 +6,19 @@
 //
 // Usage:
 //   spect_transpose_bench <matrixDir> [chunkIndex=0] [batch=40] [reps=5]
+//                         [zeroFrac=0] [mode=full|scatter]
+//
+// 2026-09-07 `scatter` mode (reports/2026-09-04-final-design-poisson-data-term.md
+// §7.9): the production numerator ratio is exactly 0 for zero-count bins
+// (62 % of K=2 pairs on the five-bed Lu-177 input), so a transpose that
+// skips all-zero rows never reads their matrix bytes. zeroFrac draws that
+// pattern per (row, RHS); the mode compares per-RHS cuSPARSE CSR_ALG2 with
+// the pair / quad scatter kernels of the production fatbin, with and without
+// the skip, and needs no CSR(A^T).
 
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
+#include "CudaProjKernelLauncher.h"
 
 #include <cuda_runtime.h>
 #include <cusparse.h>
@@ -108,8 +118,14 @@ int main(int argc, char **argv) {
   const size_t chunkIndex = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 0;
   const int batch = argc > 3 ? std::atoi(argv[3]) : 40;
   const int reps = argc > 4 ? std::atoi(argv[4]) : 5;
-  if (batch <= 0 || reps <= 0) {
-    std::fprintf(stderr, "batch and reps must be positive\n");
+  const double zeroFrac = argc > 5 ? std::atof(argv[5]) : 0.0;
+  const std::string mode = argc > 6 ? argv[6] : "full";
+  const bool scatterMode = mode == "scatter";
+  if (batch <= 0 || reps <= 0 || zeroFrac < 0.0 || zeroFrac >= 1.0 ||
+      (mode != "full" && mode != "scatter")) {
+    std::fprintf(stderr,
+                 "batch and reps must be positive, zeroFrac in [0, 1), mode "
+                 "full|scatter\n");
     return 2;
   }
 
@@ -125,8 +141,9 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  std::printf("matrix=%s chunk=%zu batch=%d reps=%d\n", matrixDir.c_str(),
-              chunkIndex, batch, reps);
+  std::printf("matrix=%s chunk=%zu batch=%d reps=%d zeroFrac=%.3f mode=%s\n",
+              matrixDir.c_str(), chunkIndex, batch, reps, zeroFrac,
+              mode.c_str());
   const double tLoad0 = nowSeconds();
   const auto chunk = directory.loadChunk(chunkIndex);
   const double tLoad1 = nowSeconds();
@@ -144,39 +161,45 @@ int main(int argc, char **argv) {
   const float *hValues = chunk->valuesData();
 
   // ---- Host transpose: CSR(A) -> CSR(A^T) (counting sort by column) ----
-  const double tT0 = nowSeconds();
-  std::vector<int32_t> tRowPtr(static_cast<size_t>(colsA) + 1, 0);
-  {
-    std::vector<int32_t> counts(static_cast<size_t>(colsA), 0);
-    for (uint64_t k = 0; k < nnz; ++k)
-      ++counts[hColIdx[k]];
-    int64_t running = 0;
-    for (int c = 0; c < colsA; ++c) {
-      tRowPtr[c] = static_cast<int32_t>(running);
-      running += counts[c];
+  // Only the full mode needs CSR(A^T); scatter mode keeps host memory small.
+  std::vector<int32_t> tRowPtr;
+  std::vector<int32_t> tColIdx;
+  std::vector<float> tValues;
+  if (!scatterMode) {
+    const double tT0 = nowSeconds();
+    tRowPtr.assign(static_cast<size_t>(colsA) + 1, 0);
+    {
+      std::vector<int32_t> counts(static_cast<size_t>(colsA), 0);
+      for (uint64_t k = 0; k < nnz; ++k)
+        ++counts[hColIdx[k]];
+      int64_t running = 0;
+      for (int c = 0; c < colsA; ++c) {
+        tRowPtr[c] = static_cast<int32_t>(running);
+        running += counts[c];
+      }
+      tRowPtr[colsA] = static_cast<int32_t>(running);
     }
-    tRowPtr[colsA] = static_cast<int32_t>(running);
-  }
-  std::vector<int32_t> tColIdx(static_cast<size_t>(nnz));
-  std::vector<float> tValues(static_cast<size_t>(nnz));
-  {
-    std::unique_ptr<std::atomic<int32_t>[]> cursors(
-        new std::atomic<int32_t>[static_cast<size_t>(colsA)]);
-    for (int c = 0; c < colsA; ++c)
-      cursors[c].store(tRowPtr[c], std::memory_order_relaxed);
+    tColIdx.resize(static_cast<size_t>(nnz));
+    tValues.resize(static_cast<size_t>(nnz));
+    {
+      std::unique_ptr<std::atomic<int32_t>[]> cursors(
+          new std::atomic<int32_t>[static_cast<size_t>(colsA)]);
+      for (int c = 0; c < colsA; ++c)
+        cursors[c].store(tRowPtr[c], std::memory_order_relaxed);
 #pragma omp parallel for schedule(dynamic, 1024)
-    for (int r = 0; r < rowsA; ++r) {
-      for (uint32_t k = hRowPtr[r]; k < hRowPtr[r + 1]; ++k) {
-        const uint32_t c = hColIdx[k];
-        const int32_t pos =
-            cursors[c].fetch_add(1, std::memory_order_relaxed);
-        tColIdx[static_cast<size_t>(pos)] = r;
-        tValues[static_cast<size_t>(pos)] = hValues[k];
+      for (int r = 0; r < rowsA; ++r) {
+        for (uint32_t k = hRowPtr[r]; k < hRowPtr[r + 1]; ++k) {
+          const uint32_t c = hColIdx[k];
+          const int32_t pos =
+              cursors[c].fetch_add(1, std::memory_order_relaxed);
+          tColIdx[static_cast<size_t>(pos)] = r;
+          tValues[static_cast<size_t>(pos)] = hValues[k];
+        }
       }
     }
+    const double tT1 = nowSeconds();
+    std::printf("host_transpose_s=%.2f\n", tT1 - tT0);
   }
-  const double tT1 = nowSeconds();
-  std::printf("host_transpose_s=%.2f\n", tT1 - tT0);
 
   // ---- Device upload ----
   size_t freeB = 0;
@@ -205,40 +228,95 @@ int main(int argc, char **argv) {
   DeviceMem dTRowPtr;
   DeviceMem dTColIdx;
   DeviceMem dTValues;
-  dTRowPtr.alloc((static_cast<size_t>(colsA) + 1) * sizeof(int32_t));
-  dTColIdx.alloc(static_cast<size_t>(nnz) * sizeof(int32_t));
-  dTValues.alloc(static_cast<size_t>(nnz) * sizeof(float));
-  BENCH_CUDA_CHECK(cudaMemcpy(dTRowPtr.ptr, tRowPtr.data(),
-                              (static_cast<size_t>(colsA) + 1) *
-                                  sizeof(int32_t),
-                              cudaMemcpyHostToDevice));
-  BENCH_CUDA_CHECK(cudaMemcpy(dTColIdx.ptr, tColIdx.data(),
-                              static_cast<size_t>(nnz) * sizeof(int32_t),
-                              cudaMemcpyHostToDevice));
-  BENCH_CUDA_CHECK(cudaMemcpy(dTValues.ptr, tValues.data(),
-                              static_cast<size_t>(nnz) * sizeof(float),
-                              cudaMemcpyHostToDevice));
+  if (!scatterMode) {
+    dTRowPtr.alloc((static_cast<size_t>(colsA) + 1) * sizeof(int32_t));
+    dTColIdx.alloc(static_cast<size_t>(nnz) * sizeof(int32_t));
+    dTValues.alloc(static_cast<size_t>(nnz) * sizeof(float));
+    BENCH_CUDA_CHECK(cudaMemcpy(dTRowPtr.ptr, tRowPtr.data(),
+                                (static_cast<size_t>(colsA) + 1) *
+                                    sizeof(int32_t),
+                                cudaMemcpyHostToDevice));
+    BENCH_CUDA_CHECK(cudaMemcpy(dTColIdx.ptr, tColIdx.data(),
+                                static_cast<size_t>(nnz) * sizeof(int32_t),
+                                cudaMemcpyHostToDevice));
+    BENCH_CUDA_CHECK(cudaMemcpy(dTValues.ptr, tValues.data(),
+                                static_cast<size_t>(nnz) * sizeof(float),
+                                cudaMemcpyHostToDevice));
+  }
 
   // Backward input: ratio batch (A-row domain). Forward input: image batch
   // (voxel domain). Shared output buffer sized for the larger direction.
+  // zeroFrac zeroes each (row, RHS) ratio independently (the production
+  // ratio is exactly 0 for zero-count bins); hRatioDense keeps every entry
+  // non-zero so the scatter kernels can be timed without any skipping.
   std::vector<float> hRatio(static_cast<size_t>(rowsA) * batch);
+  std::vector<float> hRatioDense(hRatio.size());
   std::vector<float> hImage(static_cast<size_t>(colsA) * batch);
   {
     std::mt19937 rng(20260817u);
     std::uniform_real_distribution<float> dist(0.5f, 1.5f);
-    for (auto &v : hRatio)
-      v = dist(rng);
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+    for (size_t i = 0; i < hRatio.size(); ++i) {
+      const float v = dist(rng);
+      hRatioDense[i] = v;
+      hRatio[i] = coin(rng) < zeroFrac ? 0.0f : v;
+    }
     for (auto &v : hImage)
       v = dist(rng);
   }
+  if (zeroFrac > 0.0) {
+    // Fraction of nnz work a K=2 pair (columns b, b+1) / K=4 quad skips.
+    uint64_t pairRowsZero = 0;
+    uint64_t pairNnzZero = 0;
+    uint64_t quadRowsZero = 0;
+    uint64_t quadNnzZero = 0;
+    uint64_t pairRows = 0;
+    uint64_t quadRows = 0;
+    for (int b = 0; b + 1 < batch; b += 2) {
+      for (int r = 0; r < rowsA; ++r) {
+        const uint64_t rowNnz = hRowPtr[r + 1] - hRowPtr[r];
+        ++pairRows;
+        if (hRatio[static_cast<size_t>(b) * rowsA + r] == 0.0f &&
+            hRatio[static_cast<size_t>(b + 1) * rowsA + r] == 0.0f) {
+          ++pairRowsZero;
+          pairNnzZero += rowNnz;
+        }
+      }
+    }
+    for (int b = 0; b + 3 < batch; b += 4) {
+      for (int r = 0; r < rowsA; ++r) {
+        const uint64_t rowNnz = hRowPtr[r + 1] - hRowPtr[r];
+        ++quadRows;
+        bool allZero = true;
+        for (int q = 0; q < 4; ++q)
+          allZero = allZero &&
+                    hRatio[static_cast<size_t>(b + q) * rowsA + r] == 0.0f;
+        if (allZero) {
+          ++quadRowsZero;
+          quadNnzZero += rowNnz;
+        }
+      }
+    }
+    std::printf("zero_pairs: rows=%.2f%% nnz=%.2f%%   zero_quads: rows=%.2f%% "
+                "nnz=%.2f%%\n",
+                100.0 * pairRowsZero / std::max<uint64_t>(1, pairRows),
+                100.0 * pairNnzZero / std::max<uint64_t>(1, nnz * (pairRows / rowsA)),
+                100.0 * quadRowsZero / std::max<uint64_t>(1, quadRows),
+                100.0 * quadNnzZero / std::max<uint64_t>(1, nnz * (quadRows / rowsA)));
+  }
   DeviceMem dRatio;
+  DeviceMem dRatioDense;
   DeviceMem dImage;
   DeviceMem dOut;
   dRatio.alloc(hRatio.size() * sizeof(float));
+  dRatioDense.alloc(hRatioDense.size() * sizeof(float));
   dImage.alloc(hImage.size() * sizeof(float));
   dOut.alloc(static_cast<size_t>(colsA) * batch * sizeof(float));
   BENCH_CUDA_CHECK(cudaMemcpy(dRatio.ptr, hRatio.data(),
                               hRatio.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
+  BENCH_CUDA_CHECK(cudaMemcpy(dRatioDense.ptr, hRatioDense.data(),
+                              hRatioDense.size() * sizeof(float),
                               cudaMemcpyHostToDevice));
   BENCH_CUDA_CHECK(cudaMemcpy(dImage.ptr, hImage.data(),
                               hImage.size() * sizeof(float),
@@ -246,7 +324,7 @@ int main(int argc, char **argv) {
 
   // H2D bandwidth probe on this exact machine (values array, 3 reps):
   // pageable vs pinned. Feeds the R1 upload-hiding budget.
-  {
+  if (!scatterMode) {
     const size_t probeBytes = static_cast<size_t>(nnz) * sizeof(float);
     for (int pinned = 0; pinned < 2; ++pinned) {
       if (pinned) {
@@ -281,10 +359,12 @@ int main(int argc, char **argv) {
       &matA, rowsA, colsA, static_cast<int64_t>(nnz), dARowPtr.ptr,
       dAColIdx.ptr, dAValues.ptr, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
       CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
-  BENCH_CUSPARSE_CHECK(cusparseCreateCsr(
-      &matT, colsA, rowsA, static_cast<int64_t>(nnz), dTRowPtr.ptr,
-      dTColIdx.ptr, dTValues.ptr, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
-      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
+  if (!scatterMode) {
+    BENCH_CUSPARSE_CHECK(cusparseCreateCsr(
+        &matT, colsA, rowsA, static_cast<int64_t>(nnz), dTRowPtr.ptr,
+        dTColIdx.ptr, dTValues.ptr, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F));
+  }
 
   DeviceMem workspace;
   size_t workspaceBytes = 0;
@@ -410,6 +490,7 @@ int main(int argc, char **argv) {
   };
 
   const float *ratioIn = static_cast<const float *>(dRatio.ptr);
+  const float *ratioDenseIn = static_cast<const float *>(dRatioDense.ptr);
   const float *imageIn = static_cast<const float *>(dImage.ptr);
 
   // ---- Backward direction: rays -> voxels (the 70% bottleneck) ----
@@ -418,6 +499,80 @@ int main(int argc, char **argv) {
     runSpmvPass(matA, CUSPARSE_OPERATION_TRANSPOSE, CUSPARSE_SPMV_CSR_ALG2,
                 ratioIn, rowsA, colsA);
   });
+
+  if (scatterMode) {
+    // Production-fatbin scatter kernels on CSR(A): pairs / quads of RHS,
+    // zero-row skipping. Outputs accumulate, so each pass zeroes them first
+    // (the same memset the numerator would need instead of beta = 0).
+    const float *aValues = static_cast<const float *>(dAValues.ptr);
+    const int32_t *aRowPtr = static_cast<const int32_t *>(dARowPtr.ptr);
+    const int32_t *aColIdx = static_cast<const int32_t *>(dAColIdx.ptr);
+    float *out = static_cast<float *>(dOut.ptr);
+    const size_t outBytes = static_cast<size_t>(colsA) * batch * sizeof(float);
+    auto pairPass = [&](const float *in) {
+      BENCH_CUDA_CHECK(cudaMemsetAsync(out, 0, outBytes));
+      for (int b = 0; b + 1 < batch; b += 2) {
+        spect::launchCompactCsrSpmvTPairKernel(
+            aValues, aRowPtr, aColIdx, in + static_cast<size_t>(b) * rowsA,
+            in + static_cast<size_t>(b + 1) * rowsA,
+            out + static_cast<size_t>(b) * colsA,
+            out + static_cast<size_t>(b + 1) * colsA, rowsA);
+      }
+    };
+    auto quadPass = [&](const float *in) {
+      BENCH_CUDA_CHECK(cudaMemsetAsync(out, 0, outBytes));
+      for (int b = 0; b + 3 < batch; b += 4) {
+        spect::launchCompactCsrSpmvTQuadKernel(
+            aValues, aRowPtr, aColIdx, in + static_cast<size_t>(b) * rowsA,
+            in + static_cast<size_t>(b + 1) * rowsA,
+            in + static_cast<size_t>(b + 2) * rowsA,
+            in + static_cast<size_t>(b + 3) * rowsA,
+            out + static_cast<size_t>(b) * colsA,
+            out + static_cast<size_t>(b + 1) * colsA,
+            out + static_cast<size_t>(b + 2) * colsA,
+            out + static_cast<size_t>(b + 3) * colsA, rowsA);
+      }
+    };
+    if (batch % 4 != 0) {
+      std::fprintf(stderr, "scatter mode needs batch %% 4 == 0\n");
+      return 2;
+    }
+    benchVariant("A_T_scatter_pair_skip", colsA, refBackward, bwdResults,
+                 [&] { pairPass(ratioIn); });
+    benchVariant("A_T_scatter_quad_skip", colsA, refBackward, bwdResults,
+                 [&] { quadPass(ratioIn); });
+    // Dense ratios: no row skips; isolates kernel efficiency vs cuSPARSE.
+    // Their outputs differ from the reference (different input) so relL2 is
+    // reported against a dense cuSPARSE run instead.
+    std::vector<float> refDense;
+    std::vector<BenchResult> denseResults;
+    benchVariant("A_T_spmv_alg2(dense)", colsA, refDense, denseResults, [&] {
+      runSpmvPass(matA, CUSPARSE_OPERATION_TRANSPOSE, CUSPARSE_SPMV_CSR_ALG2,
+                  ratioDenseIn, rowsA, colsA);
+    });
+    benchVariant("A_T_scatter_pair_dense", colsA, refDense, denseResults,
+                 [&] { pairPass(ratioDenseIn); });
+    benchVariant("A_T_scatter_quad_dense", colsA, refDense, denseResults,
+                 [&] { quadPass(ratioDenseIn); });
+
+    auto printSummaryScatter = [](const char *label,
+                                  const std::vector<BenchResult> &results) {
+      const BenchResult &base = results.front();
+      std::printf("\n%s summary (speedup vs %s):\n", label, base.name.c_str());
+      for (const auto &r : results) {
+        std::printf("%-28s %6.2fx relL2=%.3e\n", r.name.c_str(),
+                    base.msMin / r.msMin, r.relL2);
+      }
+    };
+    printSummaryScatter("backward (zeroFrac pattern)", bwdResults);
+    printSummaryScatter("backward (dense ratios)", denseResults);
+    BENCH_CUDA_CHECK(cudaEventDestroy(evStart));
+    BENCH_CUDA_CHECK(cudaEventDestroy(evStop));
+    BENCH_CUSPARSE_CHECK(cusparseDestroySpMat(matA));
+    BENCH_CUSPARSE_CHECK(cusparseDestroy(handle));
+    return 0;
+  }
+
   benchVariant("At_N_spmv_alg2", colsA, refBackward, bwdResults, [&] {
     runSpmvPass(matT, CUSPARSE_OPERATION_NON_TRANSPOSE,
                 CUSPARSE_SPMV_CSR_ALG2, ratioIn, rowsA, colsA);

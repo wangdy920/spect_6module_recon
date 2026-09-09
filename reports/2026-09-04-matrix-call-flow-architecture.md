@@ -72,6 +72,8 @@ flowchart TD
 
 **`cfffea5` 已通过零计数pair分子优化门**：复用ratio核的既有投影行映射在原输出缓冲准备p!=0标记，packed-2仅在两路都为0时省去Ax，随后ratio覆盖；独立forward、CTAC、灵敏度S不做此裁剪。三组核心中位数 **181.016 → 144.843 s**，配对中位收益19.94%，最大primary relL2 6.9892e-8；整命令215.666→179.964 s。**核心180 s门槛已过，120 s目标未过**。主机峰值约33.46849 GiB、专用显存12.733677 GiB，基本不变。5次Nsight正向6.20344→2.40070 s，标记准备0.000628 s；当前主反投核约占分子GPU核活跃时间82.05%，小核合计约0.84%。CTAC20最大relL2 6.1629e-8通过；完整证据与后续边界见最终设计§7.8。
 
+**2026-09-09 分子反投改为零行 pair 散射转置**（最终设计 §7.9）：`executeColMajorBatchSpMVLocked(..., zeroRowScatterTranspose)` 在 op=T 时 memset 输出后按 (b, b+1) 启动 `compact_csr_spmvt_pair`——每行一个 block，两路 ratio 均为 0 的行不读矩阵，仅一路非零时只做该路原子累加——奇数余量仍 cuSPARSE。只有 `executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat` 的分子反投传入该标志，且仅当本 pass 各床投影的精确零 bin 均值 ≥0.40（`cuda::compactScatterBackwardPreferred`，在 `ensureCompactFullProjectionUploaded` 统计一次；`SPECT_CSRB_SCATTER_BACKWARD=0/1` 可强制）；否则仍是逐 RHS CSR_ALG2。灵敏度、独立 forward、CTAC（`csrbAngleSpMVLocked` 按角度 cuSPARSE 转置）不变。真实 chunk 基准：稠密 0.71×、零率 0.30 持平、0.80 3.18×。五床 MLEM50 三组配对核心 **144.606 → 73.565 s（−49.1%）**，整命令 190.310 → 117.423 s，最大 primary relL2 1.4366e-7；同一 exe 强制 cuSPARSE 143.162 s。**核心 120 s 目标首次通过。** CTAC it5 A/B relL2 3.1327e-8。
+
 历史实测（P0 之前的同一 exe `build/metadata-compat`，单床 MLEM；表中 host-ratio 路径已删除，数值不代表当前构建的配对性能）：
 
 | 矩阵 | 分支 | denom 准备（miss / hit） | s/iter | 记录 |

@@ -1022,7 +1022,8 @@ public:
     backwardTiming.recordStart(nullptr);
     executeColMajorBatchSpMVLocked(
         cached, CUSPARSE_OPERATION_TRANSPOSE, dBatchOutput_.get(), rows,
-        dFullBatchOutput_.get(), cols, batchSize);
+        dFullBatchOutput_.get(), cols, batchSize, nullptr, nullptr, false,
+        compactScatterBackwardLocked(cacheSlotBase, bedCount, batchSize));
     backwardTiming.recordStop(nullptr);
 
     TimedCudaStagePair transformTiming;
@@ -1228,6 +1229,12 @@ private:
     dProjection.copyFromHost(src, count);
     compactProjectionHostKey_[static_cast<size_t>(cacheSlot)] = src;
     compactProjectionCount_[static_cast<size_t>(cacheSlot)] = count;
+    size_t zeroBins = 0;
+    for (size_t i = 0; i < count; ++i) {
+      zeroBins += src[i] == 0.0 ? 1 : 0;
+    }
+    compactProjectionZeroFraction_[static_cast<size_t>(cacheSlot)] =
+        static_cast<double>(zeroBins) / static_cast<double>(count);
     noteCudaCompactProjectionH2D(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       uploadStart)
@@ -1443,16 +1450,47 @@ private:
   // Rejected on Sampling 3-iter hit vs SpMV CSR_ALG2 27.076 s: 8-wide SpMM
   // tiles 68.362 s; ROW-major-B SpMM DEFAULT 48.790 s; ROW-major-B SpMM
   // CSR_ALG2 72.715 s; fused 4-RHS COL forward 35.433 s.
+  // CSRB numerator backward choice (cuda::compactScatterBackwardPreferred on
+  // the mean zero-bin fraction of the beds in this pass). SPECT_CSRB_SCATTER_
+  // BACKWARD=0/1 forces either path for A/B runs on one binary.
+  bool compactScatterBackwardLocked(int cacheSlotBase, int bedCount,
+                                    int batchSize) {
+    double zeroFraction = 0.0;
+    for (int bed = 0; bed < bedCount; ++bed) {
+      zeroFraction +=
+          compactProjectionZeroFraction_[static_cast<size_t>(cacheSlotBase + bed)];
+    }
+    zeroFraction /= static_cast<double>(std::max(bedCount, 1));
+    bool scatter = cuda::compactScatterBackwardPreferred(zeroFraction, batchSize);
+    const char *forced = std::getenv("SPECT_CSRB_SCATTER_BACKWARD");
+    if (forced != nullptr && (forced[0] == '0' || forced[0] == '1')) {
+      scatter = forced[0] == '1' && batchSize >= 2;
+    }
+    if (!compactScatterBackwardLogged_) {
+      std::cerr << "[NOTE] compact numerator backward="
+                << (scatter ? "scatter_pair_zero_skip" : "cusparse_per_rhs")
+                << " zero_bin_frac=" << zeroFraction
+                << " threshold=" << cuda::kCompactScatterBackwardZeroFractionMin
+                << (forced != nullptr ? " (forced by env)" : "") << "\n";
+      compactScatterBackwardLogged_ = true;
+    }
+    return scatter;
+  }
+
   // Forward tile is packed-K from a 60% L2 budget, K in {1,2,4}. packed-4
   // also requires sorted_hint (performance confidence, not correctness).
-  // Transpose and packed remainder are per-RHS CSR_ALG2.
+  // Transpose is per-RHS CSR_ALG2 unless zeroRowScatterTranspose: then RHS
+  // pairs go through the atomic scatter kernel that skips rows whose two
+  // ratios are exactly zero (matC is zeroed first; an odd remainder stays on
+  // cuSPARSE). Packed remainder is per-RHS CSR_ALG2.
   void executeColMajorBatchSpMVLocked(const CachedMatrix &cached,
                                       cusparseOperation_t operation,
                                       float *matB, int64_t bRows, float *matC,
                                       int64_t cRows, int batchSize,
                                       cudaStream_t stream = nullptr,
                                       float *xPairScratch = nullptr,
-                                      bool zeroProjectionMask = false) {
+                                      bool zeroProjectionMask = false,
+                                      bool zeroRowScatterTranspose = false) {
     if (batchSize <= 0 || bRows <= 0 || cRows <= 0) {
       throw std::runtime_error(
           "compact col-major batch SpMV requires positive sizes.");
@@ -1462,6 +1500,30 @@ private:
           "compact col-major batch SpMV received a null dense buffer.");
     }
     int b = 0;
+    if (operation == CUSPARSE_OPERATION_TRANSPOSE && zeroRowScatterTranspose &&
+        batchSize >= 2 &&
+        bRows <= static_cast<int64_t>(std::numeric_limits<int>::max())) {
+      const auto hostStart = std::chrono::steady_clock::now();
+      CUDA_CHECK(cudaMemsetAsync(
+          matC, 0,
+          static_cast<size_t>(cRows) * static_cast<size_t>(batchSize) *
+              sizeof(float),
+          stream));
+      const int rows = static_cast<int>(bRows);
+      for (; b + 1 < batchSize; b += 2) {
+        launchCompactCsrSpmvTPairKernel(
+            cached.dValues.get(), cached.dRowPtr.get(), cached.dColIdx.get(),
+            matB + static_cast<size_t>(b) * static_cast<size_t>(bRows),
+            matB + static_cast<size_t>(b + 1) * static_cast<size_t>(bRows),
+            matC + static_cast<size_t>(b) * static_cast<size_t>(cRows),
+            matC + static_cast<size_t>(b + 1) * static_cast<size_t>(cRows),
+            rows, stream);
+      }
+      noteCudaCusparseBackwardHost(
+          std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                        hostStart)
+              .count());
+    }
     const bool canPack =
         operation == CUSPARSE_OPERATION_NON_TRANSPOSE &&
         xPairScratch != nullptr &&
@@ -3614,6 +3676,10 @@ private:
   std::vector<float> hostFloatScratch_;
   std::array<const double *, kCompactProjectionSlots> compactProjectionHostKey_{};
   std::array<size_t, kCompactProjectionSlots> compactProjectionCount_{};
+  // Fraction of exactly-zero bins per projection slot; drives the CSRB
+  // numerator backward choice (zero-row scatter vs per-RHS cuSPARSE).
+  std::array<double, kCompactProjectionSlots> compactProjectionZeroFraction_{};
+  bool compactScatterBackwardLogged_ = false;
   // Per-window background (scatter estimate) next to each projection slot;
   // both formats' ratio kernels add it to the forward estimate.
   std::array<DeviceArray<double>, kCompactProjectionSlots>

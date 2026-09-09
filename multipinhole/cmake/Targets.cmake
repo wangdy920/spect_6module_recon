@@ -300,9 +300,11 @@ if(SPECT_BUILD_CUDA_SCAFFOLD AND SPECT_ENABLE_CUDA_SPARSEOPS)
   )
   target_include_directories(spect_transpose_bench PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sparse/cuda
   )
+  # spect_sparse_cuda supplies the production fatbin kernels (scatter mode).
   target_link_libraries(spect_transpose_bench PRIVATE
-    spect_io CUDA::cudart CUDA::cusparse
+    spect_io spect_sparse_cuda CUDA::cudart CUDA::cusparse
   )
   if(OpenMP_CXX_FOUND)
     target_link_libraries(spect_transpose_bench PRIVATE OpenMP::OpenMP_CXX)

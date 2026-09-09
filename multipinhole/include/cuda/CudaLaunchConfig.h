@@ -88,4 +88,20 @@ inline int compactPackedForwardTile(int kMem, bool sortedHint) {
   return 2;
 }
 
+// CSRB numerator backward: the ratio is exactly 0 for zero-count bins, so a
+// pair-RHS atomic scatter over CSR(A) that skips all-zero rows beats per-RHS
+// cuSPARSE CSR_ALG2 transpose once enough bins are empty. Measured on the
+// Lu-177 208 keV chunk 0 (730 M nnz, RTX 4070 Ti SUPER, tools/transpose_bench
+// scatter mode, i.i.d. zero pattern): zero fraction 0.15 -> 0.84x, 0.30 ->
+// 1.00x, 0.40 -> 1.16x, 0.80 -> 3.18x, 0.90 -> 6.35x; dense 0.71x. The
+// five-bed Lu-177 input has 74-90 % zero bins. Below the threshold the
+// per-RHS cuSPARSE transpose stays.
+constexpr double kCompactScatterBackwardZeroFractionMin = 0.40;
+
+inline bool compactScatterBackwardPreferred(double projectionZeroFraction,
+                                            int batchSize) {
+  return batchSize >= 2 &&
+         projectionZeroFraction >= kCompactScatterBackwardZeroFractionMin;
+}
+
 } // namespace spect::cuda

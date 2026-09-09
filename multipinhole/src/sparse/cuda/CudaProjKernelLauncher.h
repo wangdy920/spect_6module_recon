@@ -99,6 +99,20 @@ void launchCompactCsrSpmvXPairKernel(const float *values, const int32_t *rowPtr,
                                      cudaStream_t stream = nullptr,
                                      bool zeroProjectionMask = false);
 
+// Transpose scatter y_k[col] += a * x_k[row] for two / four RHS with zero-row
+// skipping (rows whose ratios are all exactly zero read no matrix bytes).
+// Outputs accumulate; the caller zeroes them.
+void launchCompactCsrSpmvTPairKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *x0,
+                                     const float *x1, float *y0, float *y1,
+                                     int rows, cudaStream_t stream = nullptr);
+void launchCompactCsrSpmvTQuadKernel(const float *values, const int32_t *rowPtr,
+                                     const int32_t *colIdx, const float *x0,
+                                     const float *x1, const float *x2,
+                                     const float *x3, float *y0, float *y1,
+                                     float *y2, float *y3, int rows,
+                                     cudaStream_t stream = nullptr);
+
 void launchCompactPackColQuadToFloat4Kernel(const float *x0, const float *x1,
                                             const float *x2, const float *x3,
                                             float *xQuad, int cols,
