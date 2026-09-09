@@ -978,6 +978,43 @@ TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   runAll(pair.csrb, gotCsrb, true);
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   expectMatches(gotCsrb, "CSRB");
+
+  // CSRB CTAC numerator with zero-count bins (~60 %): the per-angle backward
+  // may take the zero-row pair scatter on the angle's sub-range. Forced on
+  // and forced off must both match the oracle and each other.
+  {
+    std::vector<double> proj0z = proj0, proj1z = proj1;
+    for (size_t i = 0; i < fullRows; ++i) {
+      if (i % 5 < 3) proj0z[i] = 0.0;
+      if ((i + 2) % 5 < 3) proj1z[i] = 0.0;
+    }
+    const double *imagePtrs[2] = {image0.data(), image1.data()};
+    const double *projPtrs[2] = {proj0z.data(), proj1z.data()};
+    const uint16_t *attPtrs[2] = {att0.data(), att1.data()};
+    auto runTwoBed = [&](const char *env) {
+      spect::io::test::setCsrbScatterBackwardEnv(env);
+      std::vector<std::vector<double>> numers(2, std::vector<double>(nvox, 0.0));
+      double *numerPtrs[2] = {numers[0].data(), numers[1].data()};
+      EXPECT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+          pair.csrb, meta, projPtrs, nullptr, imagePtrs, 2, 1, numerPtrs, false,
+          nullptr, attPtrs));
+      return numers;
+    };
+    const auto scatter = runTwoBed("1");
+    const auto cusparse = runTwoBed("0");
+    spect::io::test::setCsrbScatterBackwardEnv("");
+    ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+    const std::vector<std::vector<double>> refZ = {
+        oracle0.numerator(proj0z, image0), oracle1.numerator(proj1z, image1)};
+    for (int bed = 0; bed < 2; ++bed) {
+      EXPECT_LE(relL2(scatter[bed], refZ[bed]), tol)
+          << "CSRB CTAC scatter backward, zero bins, bed " << bed;
+      EXPECT_LE(relL2(cusparse[bed], refZ[bed]), tol)
+          << "CSRB CTAC cuSPARSE backward, zero bins, bed " << bed;
+      EXPECT_LE(relL2(scatter[bed], cusparse[bed]), 1e-6)
+          << "CSRB CTAC scatter vs cuSPARSE, bed " << bed;
+    }
+  }
   // CSRQ with the packed backward (attenuated packed transform-add), then the
   // default branch-major backward whose outputs feed the adjoint check.
   ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(true));

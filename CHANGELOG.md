@@ -28,8 +28,16 @@ experiment commits are intentionally omitted.
   runs shared with foreign GPU jobs repeated): core 144.606 -> 73.565 s
   median (-49.1 %, pairs 49.24/48.99/49.42 %), full command 190.3 -> 117.4 s,
   max primary relL2 1.44e-7; the same B exe forced to cuSPARSE gives 143.2 s.
-  The 120 s core target is met for the first time. CSRB CTAC (per-angle
-  cuSPARSE transpose, unchanged) A/B it5 relL2 3.1e-8. Design report §7.9.
+  The 120 s core target is met for the first time. Design report §7.9.
+- CSRB CTAC numerator backward uses the same zero-row pair scatter on each
+  compact angle's sub-range (`csrbAngleSpMVLocked`, row pointers offset by
+  the angle, per-angle memset of the `[branch][voxel]` output), under the same
+  zero-fraction rule and env override; the CTAC sensitivity keeps per-RHS
+  cuSPARSE. Mouse bed (73.6 % zero bins), water-cylinder mu-map, MLEM it5:
+  core 10.82 -> 9.62 s (-11 %), per-angle backward timer 2.99 -> 1.67 s,
+  relL2 vs cfffea5 3.5e-8; dense Derenzo bed (2.9 % zeros) auto-keeps
+  cuSPARSE, relL2 3.2e-8, time unchanged. CTAC unit test now also checks the
+  forced scatter vs forced cuSPARSE vs host oracle on a 60 %-zero projection.
 - Buffer and dead-path convergence (2026-09-05, after e5d376a): removed the
   uncalled full/subset/range CSR conversion and upload-cache cluster. Compact
   CSRB prefetch keeps its own single upload stream. Host gradients and disabled

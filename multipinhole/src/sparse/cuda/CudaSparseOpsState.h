@@ -486,6 +486,11 @@ public:
                            static_cast<size_t>(branchCount));
     dFullBatchOutput_.allocate(nvox * static_cast<size_t>(branchCount));
     CsrbAngleMatrices angleMats = csrbCreateAngleMatricesLocked(cached, chunk);
+    // Same zero-row scatter choice as the plain numerator: the per-angle
+    // ratio is exactly 0 for zero-count bins, so the pair scatter on the
+    // angle's sub-range skips those rows; dense data keeps cuSPARSE.
+    const bool scatterBackward =
+        compactScatterBackwardLocked(cacheSlotBase, bedCount, branchCount);
 
     const size_t stages =
         static_cast<size_t>(bedCount) * static_cast<size_t>(chunk.angles);
@@ -532,7 +537,7 @@ public:
         csrbAngleSpMVLocked(angleMats, cached, chunk, i,
                             CUSPARSE_OPERATION_TRANSPOSE, dBatchOutput_.get(),
                             static_cast<size_t>(rpa), dFullBatchOutput_.get(),
-                            nvox, nvox, branchCount, nullptr);
+                            nvox, nvox, branchCount, nullptr, scatterBackward);
         csrbAttenBackwardTimers_[stage].recordStop(nullptr);
 
         csrbAttenTransformTimers_[stage].recordStart(nullptr);
@@ -3143,8 +3148,10 @@ private:
   // Forward (op=N) uses the production packed-K row kernels on the sub-range
   // pointers (one block per row; cuSPARSE CSR_ALG2 needs ~20 ms per call on
   // 1152 rows of ~30k nnz, the packed kernels ~0.3 ms) with a per-RHS
-  // cuSPARSE remainder; transpose is per-RHS cuSPARSE CSR_ALG2 as in the
-  // plain batch path.
+  // cuSPARSE remainder. Transpose is per-RHS cuSPARSE CSR_ALG2 as in the
+  // plain batch path unless zeroRowScatterTranspose: then matC is zeroed and
+  // RHS pairs go through the zero-row-skipping scatter kernel on the same
+  // sub-range pointers (numerator ratios only; sensitivity keeps cuSPARSE).
   // Column b of matC starts at matC + b * cStride (cStride >= cRows lets the
   // forward projection write one angle's rows into a [branch][chunkRow]
   // buffer).
@@ -3152,20 +3159,35 @@ private:
                            const CsrbAttenChunk &chunk, int angle,
                            cusparseOperation_t operation, const float *matB,
                            size_t bRows, float *matC, size_t cRows,
-                           size_t cStride, int batchSize, float *xPackScratch) {
+                           size_t cStride, int batchSize, float *xPackScratch,
+                           bool zeroRowScatterTranspose = false) {
     const size_t bufferIndex = spmvBufferIndex(operation);
     const size_t a = static_cast<size_t>(angle);
     int b = 0;
+    // The row kernels vectorise on t % 4 relative to the array base, so they
+    // get the chunk's own arrays and the row pointers offset by the angle's
+    // first row (absolute nnz indices); only cuSPARSE needs the zero-based
+    // copies.
+    const int rpa = chunk.compactRaysPerAngle;
+    const float *values = cached.dValues.get();
+    const int32_t *rowPtr = cached.dRowPtr.get() + a * static_cast<size_t>(rpa);
+    const int32_t *colIdx = cached.dColIdx.get();
+    if (operation == CUSPARSE_OPERATION_TRANSPOSE && zeroRowScatterTranspose &&
+        batchSize >= 2) {
+      CUDA_CHECK(cudaMemsetAsync(
+          matC, 0,
+          (static_cast<size_t>(batchSize - 1) * cStride + cRows) * sizeof(float),
+          nullptr));
+      for (; b + 1 < batchSize; b += 2) {
+        launchCompactCsrSpmvTPairKernel(
+            values, rowPtr, colIdx, matB + static_cast<size_t>(b) * bRows,
+            matB + static_cast<size_t>(b + 1) * bRows,
+            matC + static_cast<size_t>(b) * cStride,
+            matC + static_cast<size_t>(b + 1) * cStride, rpa);
+      }
+    }
     if (operation == CUSPARSE_OPERATION_NON_TRANSPOSE && xPackScratch != nullptr &&
         bRows <= static_cast<size_t>(std::numeric_limits<int>::max())) {
-      // The row kernels vectorise on t % 4 relative to the array base, so
-      // they get the chunk's own arrays and the row pointers offset by the
-      // angle's first row (absolute nnz indices); only cuSPARSE needs the
-      // zero-based copies.
-      const int rpa = chunk.compactRaysPerAngle;
-      const float *values = cached.dValues.get();
-      const int32_t *rowPtr = cached.dRowPtr.get() + a * static_cast<size_t>(rpa);
-      const int32_t *colIdx = cached.dColIdx.get();
       const int cols = static_cast<int>(bRows);
       const int kMem = cuda::compactPackedForwardKMem(
           static_cast<int64_t>(bRows), batchSize, cuda::getL2CacheBytes());

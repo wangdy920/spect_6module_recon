@@ -497,7 +497,22 @@ profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。�
 
 三迭代预热（诊断，不入门）：A 10.005 s → B 5.403 s。CTAC 共享调用方守护：Lu-177 Derenzo 床 1 + Lu208 CSRB + 208.4 keV 水柱 μ 图，MLEM it5，A/B 主图 relL2 **3.1327e-8**，核心 10.851／10.906 s 相同，B 未出现散射日志（CTAC 分子仍走按角度 cuSPARSE 转置），见 `csrb_ctac_guard/validation.json`。单元套件 286 通过／4 既有跳过。
 
-执行 `completed`、本机同输入证据 `validated`、源码采纳 `merged`。剩余方向：反投现在约为原来一半，正向 packed-2（cfffea5 已跳零对）与反投量级接近，五床分子的下一步应重新以短 Nsight 划分；CSRB CTAC 的按角度转置可复用同一核（`rowPtr + angle·rpa`，需每角度 memset 8×nvox 输出，先测再定）；稠密投影（Tc-99m 高计数）保持 cuSPARSE，阈值 0.40 若要下调需在 0.30–0.40 区间补实测。不重开已拒 SpMM／CSC 真转置／FP16。
+执行 `completed`、本机同输入证据 `validated`、源码采纳 `merged`（`e88b135`）。
+
+### CSRB CTAC 逐角度转置复用同一核（2026-09-09，用户："全零行本身就应该跳过，继续将同类核应用于 CSRB CTAC 逐角度转置"）
+
+`csrbAngleSpMVLocked(..., zeroRowScatterTranspose)`：op=T 且启用时先 memset 该角度的 `[branch][nvox]` 输出（8×3.168M×4 B ≈ 101 MB／角度），再以 `rowPtr + angle·rpa`、`rows = rpa`（1152）按 (b, b+1) 启动 `compact_csr_spmvt_pair`——与 packed 正向核使用子区间的方式相同，无需零基 row pointer 副本。只有 `executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat` 的分子反投传入该标志，判据仍是 `compactScatterBackwardLocked`（各床精确零 bin 均值 ≥0.40，`SPECT_CSRB_SCATTER_BACKWARD` 可强制）；CTAC 灵敏度（全 1／行权重，无零）继续逐 RHS cuSPARSE。单元门：`CtacFactorisationMatchesCsrbAndIsAdjoint` 新增 60% 零 bin 两床 CSRB CTAC 分子，强制散射／强制 cuSPARSE 各对 host oracle ≤1e-5、互差 ≤1e-6；全套 286 通过／4 既有跳过。
+
+真实数据 A（cfffea5）／B（本候选）各一次、单床 MLEM it5、Lu208 CSRB、208.4 keV 水柱 μ 图（μ 图对小鼠无物理意义，只作数值与时间对照），`-cyl 30,21.6` 使之走 host input/update 路径：
+
+| 输入 | 零 bin 比例 | B 所选路径 | 核心 it5 A → B | `cuda.cusparse_bwd` 总计（含灵敏度） | primary relL2 |
+|---|---:|---|---:|---:|---:|
+| `derenzo_lu_6s/Bed1` | 2.9% | cuSPARSE（自动） | 10.872 → 10.827 s | — | 3.1869e-8 |
+| `mouse_normal_lu/Bed3` | 73.6% | pair 散射 | **10.823 → 9.617 s（−11.1%）** | 2.990 → 1.673 s | 3.4872e-8 |
+
+正向（1.55／1.57 s）与 transform-add（0.175／0.166 s）不变，因此差值全部来自按角度反投；CTAC 路径的其余成本（host 输入准备／更新、逐角度缩放与 ratio、上传等待）不受影响，所以整体收益小于纯 CSRB 分子。每角度 memset 约 0.1 s／遍（54 GB/遍）已计入反投计时；若以后需要，可让 `compact_transform_backward_add_batch_atten` 读后置零来省掉这一独立 pass，当前不值得单独立项。证据 `recon_out/lu208_scatter_backward_20260909/csrb_ctac_scatter{,_mouse}/`（`run_guard.ps1`、A/B `stdout.log`、`validation.json`）。
+
+剩余方向：反投现在约为原来一半，正向 packed-2（cfffea5 已跳零对）与反投量级接近，五床分子的下一步应重新以短 Nsight 划分；稠密投影（Tc-99m 高计数）保持 cuSPARSE，阈值 0.40 若要下调需在 0.30–0.40 区间补实测。不重开已拒 SpMM／CSC 真转置／FP16。
 
 ## 8. 当前实现摘要
 

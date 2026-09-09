@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 #include "io/CompactSymmetryMetadata.h"
@@ -200,6 +201,20 @@ inline void expectVectorsNear(const std::vector<double>& a,
     for (size_t i = 0; i < a.size(); ++i) {
         EXPECT_NEAR(a[i], b[i], tol) << "index=" << i;
     }
+}
+
+// Forces the CSRB numerator backward path ("1" scatter, "0" cuSPARSE, ""
+// back to the zero-fraction default) for tests of both paths on one input.
+inline void setCsrbScatterBackwardEnv(const char* value) {
+#ifdef _WIN32
+    _putenv_s("SPECT_CSRB_SCATTER_BACKWARD", value);
+#else
+    if (value[0] == '\0') {
+        unsetenv("SPECT_CSRB_SCATTER_BACKWARD");
+    } else {
+        setenv("SPECT_CSRB_SCATTER_BACKWARD", value, 1);
+    }
+#endif
 }
 
 } // namespace test

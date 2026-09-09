@@ -632,20 +632,6 @@ TEST(CompactScatterBackward, ZeroFractionThresholdSelectsPath) {
   EXPECT_FALSE(spect::cuda::compactScatterBackwardPreferred(0.85, 1));
 }
 
-namespace {
-void setScatterBackwardEnv(const char *value) {
-#ifdef _WIN32
-  _putenv_s("SPECT_CSRB_SCATTER_BACKWARD", value);
-#else
-  if (value[0] == '\0') {
-    unsetenv("SPECT_CSRB_SCATTER_BACKWARD");
-  } else {
-    setenv("SPECT_CSRB_SCATTER_BACKWARD", value, 1);
-  }
-#endif
-}
-} // namespace
-
 // The zero-row scatter transpose and the per-RHS cuSPARSE transpose must give
 // the same numerator on a projection where most bins are zero (the case the
 // scatter path is chosen for); both are checked against the dense oracle.
@@ -688,7 +674,7 @@ TEST_F(MultiBedCompactNumeratorTest, ScatterBackwardMatchesCusparseAndDense) {
   const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
 
   auto runNumerator = [&](const char *env) {
-    setScatterBackwardEnv(env);
+    spect::io::test::setCsrbScatterBackwardEnv(env);
     std::vector<std::vector<double>> numers(bedCount,
                                             std::vector<double>(nvox, 0.0));
     double *numerPtrs[2] = {numers[0].data(), numers[1].data()};
@@ -699,7 +685,7 @@ TEST_F(MultiBedCompactNumeratorTest, ScatterBackwardMatchesCusparseAndDense) {
   };
   const auto scatter = runNumerator("1");
   const auto cusparse = runNumerator("0");
-  setScatterBackwardEnv("");
+  spect::io::test::setCsrbScatterBackwardEnv("");
 
   const auto ref0 = denseNumerator(full, projBed0, imageBed0,
                                    static_cast<int>(fullRows), meta.totalVoxels);

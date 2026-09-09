@@ -219,7 +219,7 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
 | `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
 | `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Override the resource-aware host matrix cache; auto keeps the whole matrix only when current RAM leaves safe headroom |
 | `SPECT_COMPACT_BRANCH_BATCH` | on | Resident branch×bed batch (packed-K forward + CSR_ALG2 transpose); set `0` disables resident MLEM and is not a product A/B |
-| `SPECT_CSRB_SCATTER_BACKWARD` | auto | CSRB numerator backward. Auto picks the zero-row pair scatter transpose when >= 40 % of the beds' bins are zero counts (Lu-177 mouse: 74-90 %), else per-RHS cuSPARSE CSR_ALG2; `1`/`0` force either path for A/B on one binary. Numerically equivalent (fp32 atomic order only) |
+| `SPECT_CSRB_SCATTER_BACKWARD` | auto | CSRB numerator backward (plain and CTAC per-angle). Auto picks the zero-row pair scatter transpose when >= 40 % of the beds' bins are zero counts (Lu-177 mouse: 74-90 %), else per-RHS cuSPARSE CSR_ALG2; `1`/`0` force either path for A/B on one binary. Sensitivity always uses cuSPARSE. Numerically equivalent (fp32 atomic order only) |
 | `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
 | `SPECT_CSRQ_BACKWARD_PACKED` | off | CSRQ backward scatters all eight branches in one pass into `[voxel][8]` with `float4` atomics (native on sm_90+, e.g. the RTX 5060 Ti); on sm_86/89 the scalar fallback is 4x slower than the branch-major default. Numerically equivalent; for the sm_120 trial |
