@@ -358,8 +358,8 @@ void launchCompactAccumulateBedFloatToGlobalDoubleKernel(
 
 void launchCompactMlemUpdateKernel(
     double *image, const double *numer, const double *denom,
-    const uint8_t *mask, bool hasMask, size_t count, uint32_t *flags,
-    double eps, cudaStream_t stream) {
+    const double *globalDenom, const uint8_t *mask, bool hasMask, size_t count,
+    uint32_t *flags, double eps, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (count == 0)
     return;
@@ -368,13 +368,15 @@ void launchCompactMlemUpdateKernel(
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(numer));
   CUdeviceptr denomPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(denom));
+  CUdeviceptr globalDenomPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(globalDenom));
   CUdeviceptr maskPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<uint8_t *>(mask));
   CUdeviceptr flagsPtr = reinterpret_cast<CUdeviceptr>(flags);
   int useMask = hasMask ? 1 : 0;
   unsigned long long total = static_cast<unsigned long long>(count);
-  void *args[] = {&imagePtr, &numerPtr, &denomPtr, &maskPtr, &useMask,
-                  &total, &flagsPtr, &eps};
+  void *args[] = {&imagePtr, &numerPtr, &denomPtr, &globalDenomPtr, &maskPtr,
+                  &useMask, &total, &flagsPtr, &eps};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
@@ -542,6 +544,8 @@ void launchCompactRatioBatchKernel(
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dZMirrors));
   CUdeviceptr blockAnglesPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(commonParams.blockAngles));
+  CUdeviceptr rowCompactIndexPtr = reinterpret_cast<CUdeviceptr>(
+      const_cast<int *>(commonParams.rowCompactIndex));
   CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratioBatch);
   unsigned long long projectionCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -564,6 +568,7 @@ void launchCompactRatioBatchKernel(
                   &symIdsPtr,
                   &zMirrorsPtr,
                   &blockAnglesPtr,
+                  &rowCompactIndexPtr,
                   &batchSize,
                   &ratioPtr,
                   &rowCount,
@@ -1130,6 +1135,7 @@ void launchCompactUnitRatioBatchKernel(
   CUdeviceptr symIds = devPtr(dSymIds);
   CUdeviceptr zMirrors = devPtr(dZMirrors);
   CUdeviceptr blockAngles = devPtr(commonParams.blockAngles);
+  CUdeviceptr rowCompactIndex = devPtr(commonParams.rowCompactIndex);
   CUdeviceptr ratio = devPtr(ratioBatch);
   unsigned long long projCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -1148,6 +1154,7 @@ void launchCompactUnitRatioBatchKernel(
                   &symIds,
                   &zMirrors,
                   &blockAngles,
+                  &rowCompactIndex,
                   &batchSize,
                   &ratio,
                   &rowCount};

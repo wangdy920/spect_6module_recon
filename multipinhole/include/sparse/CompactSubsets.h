@@ -17,14 +17,36 @@
 
 namespace spect {
 
+// Subset partitions of the canonical compact rows. Angles is the classic
+// view-based OSEM partition; Pixels is the POSEM partition over canonical
+// detector rows (one pixel orbit per row: every symmetry branch of a row
+// stays in the row's subset, so the subsets still partition the matrix rows
+// exactly and sum_m S_m == S holds).
+enum class CompactSubsetMode { Angles, Pixels };
+
+// Lu-177 runs 74-90 % zero bins; more than this many subsets thins each
+// sub-iteration's data past the low-count stability the staged schedule was
+// designed for. Enforced by parseCompactSubsetSchedule.
+inline constexpr int kMaxCompactSubsetCount = 10;
+
 struct CompactSubsetSpec {
   int count = 1; // N subsets
   int index = 0; // this subset (0..N-1)
+  CompactSubsetMode mode = CompactSubsetMode::Angles;
 };
 
 // Absolute compact angles of subset spec.index out of spec.count.
 std::vector<int> compactSubsetAngles(int compactNumAngles,
                                      const CompactSubsetSpec &spec);
+
+// POSEM subset id of one canonical row (absolute compact angle + ray within
+// the angle). The angle term shifts the detector phase every view so each
+// subset samples every pinhole footprint instead of a fixed detector strip;
+// ids nest exactly (id % M for M | N selects the coarser subset j as the union
+// of the finest j, j+M, ...), and each angle's rays split floor/ceil(R/N).
+inline int compactPixelSubsetId(int absoluteCompactAngle, int ray, int count) {
+  return (absoluteCompactAngle + ray) % count;
+}
 
 // Deterministic processing order of N subsets: greedy maximal circular
 // separation from all previously chosen subsets, ties broken by the distance
@@ -40,14 +62,21 @@ struct CompactSubsetStage {
 };
 
 // "N" -> all iterations with N subsets; "N1:i1,N2:i2,..." -> stages whose
-// iterations must sum to numIters. Every subset count must divide
-// compactNumAngles and every later count must divide the previous one, so
-// the coarser subset sensitivities are exact sums of the finest ones.
+// iterations must sum to numIters. N is capped at kMaxCompactSubsetCount.
+// Angle mode additionally requires every count to divide compactNumAngles;
+// pixel mode needs no angle divisibility (rows interleave within each angle).
+// Every later count must divide the previous one, so the coarser subset
+// sensitivities are exact sums of the finest ones in both modes.
 std::vector<CompactSubsetStage>
 parseCompactSubsetSchedule(const std::string &text, int numIters,
-                           int compactNumAngles);
+                           int compactNumAngles,
+                           CompactSubsetMode mode = CompactSubsetMode::Angles);
 
 std::string formatCompactSubsetSchedule(
     const std::vector<CompactSubsetStage> &schedule);
+
+// "angle"/"angles" | "pixel"/"pixels"/"posem" (case-insensitive).
+CompactSubsetMode parseCompactSubsetMode(const std::string &text);
+std::string formatCompactSubsetMode(CompactSubsetMode mode);
 
 } // namespace spect

@@ -824,13 +824,17 @@ std::vector<double> runCompactSymmetricReconstruction(
                   "kernels are the plain ones.");
         }
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
-        // Ordered subsets over compact angles (design report 7.10). The
-        // schedule is non-increasing, so the first stage has the finest
-        // subset count; every coarser stage's S_m is an exact sum of the
-        // finest ones and stage 1 is the plain full-data update.
+        // Ordered subsets (design report 7.10). The schedule is non-increasing,
+        // so the first stage has the finest subset count; every coarser
+        // stage's S_m is an exact sum of the finest ones and stage 1 is the
+        // plain full-data update. Angle subsets interleave compact angles;
+        // pixel subsets (POSEM) interleave the canonical rows themselves.
+        const CompactSubsetMode subsetMode =
+            parseCompactSubsetMode(args.subsetMode);
         const std::vector<CompactSubsetStage> subsetSchedule =
             parseCompactSubsetSchedule(args.subsetSchedule, args.numIters,
-                                       compactMeta.compactNumAngles);
+                                       compactMeta.compactNumAngles,
+                                       subsetMode);
         const int finestSubsetCount = subsetSchedule.front().subsets;
         const bool useSubsets = finestSubsetCount > 1;
         if (useSubsets) {
@@ -838,6 +842,12 @@ std::vector<double> runCompactSymmetricReconstruction(
             throw std::runtime_error(
                 "-subsets > 1 is not supported with joint dual-window (CSRQ) "
                 "reconstruction; CSRB single window only.");
+          }
+          if (subsetMode == CompactSubsetMode::Pixels && compactHasAttenuation) {
+            throw std::runtime_error(
+                "-subset-mode pixels (POSEM) does not support CTAC yet; the "
+                "per-angle attenuated batches assume whole-angle slices. Use "
+                "angle subsets or run pixels without attenuation.");
           }
           if (args.bsremDiagnostics || args.bsremMlemEquivalenceMode) {
             throw std::runtime_error(
@@ -848,11 +858,14 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::ostringstream orderText;
           for (const int k : compactSubsetOrder(finestSubsetCount))
             orderText << (orderText.tellp() > 0 ? "," : "") << k;
-          logInfo("compact ordered subsets: schedule " +
-                  formatCompactSubsetSchedule(subsetSchedule) +
-                  " over " + std::to_string(compactMeta.compactNumAngles) +
-                  " compact angles (interleaved; visiting order of the finest "
-                  "stage: " + orderText.str() + ")");
+          logInfo("compact ordered subsets: mode " +
+                  formatCompactSubsetMode(subsetMode) + ", schedule " +
+                  formatCompactSubsetSchedule(subsetSchedule) + " over " +
+                  std::to_string(compactMeta.compactNumAngles) +
+                  " compact angles and " +
+                  std::to_string(compactMeta.compactRaysPerAngle) +
+                  " rays (visiting order of the finest stage: " +
+                  orderText.str() + ")");
         }
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
@@ -1127,9 +1140,11 @@ std::vector<double> runCompactSymmetricReconstruction(
           finestSubsetDenoms.assign(static_cast<size_t>(finestSubsetCount),
                                     std::vector<double>(globalNvox, 0.0));
           for (int k = 0; k < finestSubsetCount; ++k) {
-            const CompactSubsetSpec spec{finestSubsetCount, k};
+            const CompactSubsetSpec spec{finestSubsetCount, k, subsetMode};
             const std::string subsetManifest =
-                compactDenomManifest + "subset=" + std::to_string(k) + "/" +
+                compactDenomManifest + "subset_mode=" +
+                formatCompactSubsetMode(subsetMode) + "\nsubset=" +
+                std::to_string(k) + "/" +
                 std::to_string(finestSubsetCount) + "\n";
             std::filesystem::path subsetCachePath;
             if (explicitDenomCachePath) {
@@ -1409,13 +1424,15 @@ std::vector<double> runCompactSymmetricReconstruction(
             -> std::optional<CompactSubsetSpec> {
           if (sub + 1 < stageSubsetCount) {
             return CompactSubsetSpec{stageSubsetCount,
-                                     stageOrder[static_cast<size_t>(sub + 1)]};
+                                     stageOrder[static_cast<size_t>(sub + 1)],
+                                     subsetMode};
           }
           if (iteration >= args.numIters)
             return std::nullopt;
           const int nextCount =
               subsetSchedule[stageIndexOfIteration(iteration + 1)].subsets;
-          return CompactSubsetSpec{nextCount, compactSubsetOrder(nextCount)[0]};
+          return CompactSubsetSpec{nextCount, compactSubsetOrder(nextCount)[0],
+                                   subsetMode};
         };
 
         for (int it = 1; it <= args.numIters; ++it) {
@@ -1425,7 +1442,8 @@ std::vector<double> runCompactSymmetricReconstruction(
             enterStage(stageIndexOfIteration(it));
           for (int sub = 0; sub < stageSubsetCount; ++sub) {
           const CompactSubsetSpec subsetSpec{
-              stageSubsetCount, stageOrder[static_cast<size_t>(sub)]};
+              stageSubsetCount, stageOrder[static_cast<size_t>(sub)],
+              subsetMode};
           const std::optional<CompactSubsetSpec> nextSpec =
               nextSubsetSpec(it, sub);
           // -1 selects the global S on the device (full-data step).
@@ -1721,8 +1739,9 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (recordDiag)
             imagePrev = image;
           if (!useBsremUpdate) {
+            // Global S carries the subset skip rule (S_m <= 0, S > 0 keeps).
             applyMlemUpdate(image, numer, subsetDenom, maskPtr, opts.nonneg,
-                            opts.threads);
+                            opts.threads, &denom);
           } else {
             BsremUpdateParams updateParams;
             updateParams.mask = maskPtr;

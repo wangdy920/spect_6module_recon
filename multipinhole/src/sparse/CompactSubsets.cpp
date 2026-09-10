@@ -1,6 +1,7 @@
 #include "sparse/CompactSubsets.h"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 
@@ -75,7 +76,7 @@ std::vector<int> compactSubsetOrder(int count) {
 
 std::vector<CompactSubsetStage>
 parseCompactSubsetSchedule(const std::string &text, int numIters,
-                           int compactNumAngles) {
+                           int compactNumAngles, CompactSubsetMode mode) {
   std::vector<CompactSubsetStage> schedule;
   if (numIters <= 0) {
     throw std::runtime_error("subset schedule needs a positive iteration count.");
@@ -92,7 +93,14 @@ parseCompactSubsetSchedule(const std::string &text, int numIters,
       throw std::runtime_error("invalid subset count '" + token +
                                "' in -subsets " + text);
     }
-    if (compactNumAngles > 0 && compactNumAngles % value != 0) {
+    if (value > kMaxCompactSubsetCount) {
+      throw std::runtime_error(
+          "-subsets count '" + token + "' exceeds the low-count cap " +
+          std::to_string(kMaxCompactSubsetCount) +
+          " (Lu-177 runs 74-90 % zero bins; thinner subsets destabilise).");
+    }
+    if (mode == CompactSubsetMode::Angles && compactNumAngles > 0 &&
+        compactNumAngles % value != 0) {
       throw std::runtime_error(
           "-subsets " + token + " must divide the compact angle count " +
           std::to_string(compactNumAngles) + ".");
@@ -155,6 +163,28 @@ std::string formatCompactSubsetSchedule(
     out += std::to_string(stage.subsets) + ':' + std::to_string(stage.iterations);
   }
   return out;
+}
+
+CompactSubsetMode parseCompactSubsetMode(const std::string &text) {
+  std::string lowered;
+  lowered.reserve(text.size());
+  for (const char c : text) {
+    lowered.push_back(static_cast<char>(std::tolower(
+        static_cast<unsigned char>(c))));
+  }
+  if (lowered == "angle" || lowered == "angles") {
+    return CompactSubsetMode::Angles;
+  }
+  if (lowered == "pixel" || lowered == "pixels" || lowered == "posem") {
+    return CompactSubsetMode::Pixels;
+  }
+  throw std::runtime_error(
+      "invalid subset mode '" + text +
+      "' (expected angle|pixels|posem for -subset-mode).");
+}
+
+std::string formatCompactSubsetMode(CompactSubsetMode mode) {
+  return mode == CompactSubsetMode::Pixels ? "pixels" : "angles";
 }
 
 } // namespace spect

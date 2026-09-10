@@ -83,6 +83,12 @@ struct CompactChunkCSRData {
   // identifies the subset for device caching (0 = whole chunk).
   CSRSubsetView subsetView(const std::vector<int> &compactAngles,
                            int raysPerAngle, uint64_t tag) const;
+  // CSRB only: the canonical rows of one POSEM pixel subset (rows r of
+  // absolute angle a with compactPixelSubsetId(a, r, count) == index),
+  // ascending, as a slice with rowCompactIndex mapping. count > 0,
+  // 0 <= index < count.
+  CSRSubsetView pixelSubsetView(int count, int index, int raysPerAngle,
+                                uint64_t tag) const;
   const uint32_t *colIdxData() const;
   const float *valuesData() const;
   size_t colIdxCount() const;

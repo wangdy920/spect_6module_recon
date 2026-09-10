@@ -600,6 +600,44 @@ TEST(IOTest, CompactSymmetricParserAcceptsSubsetSchedule) {
     EXPECT_EQ(args.subsetSchedule, "10:3,5:2,1:5");
 }
 
+TEST(IOTest, CompactSymmetricParserAcceptsSubsetMode) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-subsets", "6:2,1:3"});
+    argv.insert(argv.end(), {"-subset-mode", "posem"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.subsetMode, "posem");
+    EXPECT_EQ(args.subsetSchedule, "6:2,1:3");
+}
+
+TEST(IOTest, CompactSymmetricParserRejectsBadSubsetMode) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-subset-mode", "spiral"});
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, CompactSymmetricParserReadsSubsetModeFromConfig) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_subset_mode_config.ini";
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out);
+        out << "[Algorithm]\nsubsets = 4\nsubset_mode = pixels\n";
+    }
+
+    const std::vector<std::string> argv = {
+        "SPECT_recon", "-algoConf", path.string(), "-df", "proj.bin",
+        "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "5",
+        "-vox", "0.3", "-ang", "360"};
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.subsetMode, "pixels");
+    std::filesystem::remove(path);
+}
+
 TEST(IOTest, CompactSymmetricParserReadsSubsetScheduleFromConfig) {
     const auto path = std::filesystem::temp_directory_path() /
                       "spect_subset_schedule_config.ini";

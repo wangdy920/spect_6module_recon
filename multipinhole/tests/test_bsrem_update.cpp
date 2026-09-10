@@ -33,6 +33,48 @@ void applyHostMlem(std::vector<double> &x, const std::vector<double> &n,
 
 } // namespace
 
+TEST(BsremUpdateTest, MlemZeroSubsetSensitivitySkipsWhenGlobalPositive) {
+  const size_t n = 8;
+  std::vector<double> x(n);
+  std::vector<double> numer(n);
+  std::vector<double> subsetDenom(n);
+  std::vector<double> globalDenom(n);
+  for (size_t i = 0; i < n; ++i) {
+    x[i] = 0.5 + 0.1 * static_cast<double>(i);
+    numer[i] = 1.0 + 0.1 * static_cast<double>(i);
+    globalDenom[i] = 1.5;
+    // Half the voxels are invisible to this subset (S_m = 0, S > 0).
+    subsetDenom[i] = i < n / 2 ? 1.2 : 0.0;
+  }
+  const std::vector<double> x0 = x;
+  spect::applyMlemUpdate(x, numer, subsetDenom, nullptr, true, 1,
+                         &globalDenom);
+  for (size_t i = 0; i < n; ++i) {
+    if (i < n / 2) {
+      // Visible voxels update as usual.
+      EXPECT_NEAR(x[i], x0[i] * numer[i] / subsetDenom[i], 1e-12);
+    } else {
+      // Subset-invisible voxels keep their value instead of being zeroed.
+      EXPECT_EQ(x[i], x0[i]);
+    }
+  }
+
+  // Without the global sensitivity the classic rule applies: S_m = 0 zeroes
+  // (backward-compatible full-data behaviour when denom IS the global S).
+  x = x0;
+  spect::applyMlemUpdate(x, numer, subsetDenom, nullptr, true, 1);
+  for (size_t i = n / 2; i < n; ++i)
+    EXPECT_EQ(x[i], 0.0);
+
+  // S = 0 with S_m = 0 still zeroes: invisible to every row.
+  std::fill(globalDenom.begin(), globalDenom.end(), 0.0);
+  x = x0;
+  spect::applyMlemUpdate(x, numer, subsetDenom, nullptr, true, 1,
+                         &globalDenom);
+  for (size_t i = n / 2; i < n; ++i)
+    EXPECT_EQ(x[i], 0.0);
+}
+
 TEST(BsremUpdateTest, EquivalenceMatchesMlemOnSynthetic) {
   const size_t n = 8;
   std::vector<double> x0(n);

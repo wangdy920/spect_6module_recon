@@ -1338,8 +1338,13 @@ private:
     // block (host copy for the per-angle CTAC tables, device copy for the
     // ratio kernels). Empty for a matrix uploaded from a plain CSRView.
     std::vector<int> blockAngles;
+    // Pixel-subset (POSEM) slice: canonical row of every matrix row (device
+    // copy for the ratio kernels). Empty for angle slices and plain CSRView
+    // uploads; exclusive with blockAngles by construction.
+    std::vector<int> rowCompactIndex;
     int rowsPerBlock = 0;
     DeviceArray<int> dBlockAngles;
+    DeviceArray<int> dRowCompactIndex;
     CuSparseMatGuard matA;
     mutable std::array<size_t, 2> spmvBufferSizes{};
     mutable std::array<bool, 2> spmvBufferSizeValid{};
@@ -1353,6 +1358,7 @@ private:
       nnz = 0;
       valueType = CachedMatrixValueType::Float;
       blockAngles.clear();
+      rowCompactIndex.clear();
       rowsPerBlock = 0;
       matA.reset();
       spmvBufferSizes = {};
@@ -1368,17 +1374,26 @@ private:
       dColIdx.reset();
       dValues.reset();
       dBlockAngles.reset();
+      dRowCompactIndex.reset();
     }
 
     CudaEventGuard compactUploadReady;
     bool compactUploadPending = false;
     // Async upload staging for the (small, unregistered) rowPtr array and the
-    // slice's block-angle table: a pageable-source cudaMemcpyAsync
-    // host-blocks until the stream drains, which exposed whole-chunk copy
-    // times in the enqueue path. Layout [rowPtr (rows + 1) | blockAngles].
+    // slice's block-angle / pixel-row tables: a pageable-source
+    // cudaMemcpyAsync host-blocks until the stream drains, which exposed
+    // whole-chunk copy times in the enqueue path. Layout
+    // [rowPtr (rows + 1) | blockAngles | rowCompactIndex].
     PinnedHostArray<int32_t> rowPtrStage;
     CudaEventGuard rowPtrStageDone;
     bool rowPtrStagePending = false;
+    // Fragmented pixel-subset slices: two alternating pinned nnz stages
+    // (col_idx / val gathered per ~8 MB) guarded by their own events.
+    PinnedHostArray<int32_t> nnzColStage[2];
+    PinnedHostArray<float> nnzValStage[2];
+    CudaEventGuard nnzStageDone[2];
+    bool nnzStagePending[2] = {false, false};
+    unsigned nnzStageNext = 0;
   };
 
   struct ResidentMatrixSetCache {
@@ -1736,9 +1751,12 @@ private:
   }
 
 
-  // Slice upload: re-based row pointers and the block-angle table go through
-  // the pinned stage in one shot; the nnz segments are copied back to back
-  // straight from the (page-locked) chunk arrays.
+  // Slice upload: re-based row pointers, the block-angle table and the
+  // pixel-subset row index go through the pinned stage in one shot; angle
+  // slices' nnz segments are copied back to back straight from the
+  // (page-locked) chunk arrays however many they are, while pixel slices —
+  // fragmented into single-row segments by construction — gather through a
+  // double-buffered nnz stage in bounded batches.
   void uploadIoCsrSubsetViewAsync(const io::CSRSubsetView &slice,
                                   const MatrixCacheKey &key,
                                   CachedMatrix *cache, cudaStream_t stream) {
@@ -1749,45 +1767,120 @@ private:
     cache->nnz = static_cast<int64_t>(slice.nnz);
     cache->valueType = CachedMatrixValueType::Float;
     cache->blockAngles = slice.blockAngles;
+    cache->rowCompactIndex = slice.rowCompactIndex;
     cache->rowsPerBlock = slice.rowsPerBlock;
     const size_t rowPtrCount = static_cast<size_t>(slice.rows) + 1u;
     const size_t blockCount = slice.blockAngles.size();
+    const size_t rowCompactCount = slice.rowCompactIndex.size();
     if (cache->rowPtrStagePending) {
       CUDA_CHECK(cudaEventSynchronize(cache->rowPtrStageDone.get()));
       cache->rowPtrStagePending = false;
     }
-    cache->rowPtrStage.allocate(rowPtrCount + blockCount);
+    cache->rowPtrStage.allocate(rowPtrCount + blockCount + rowCompactCount);
     std::memcpy(cache->rowPtrStage.data(), slice.row_ptr.data(),
                 rowPtrCount * sizeof(int32_t));
     std::memcpy(cache->rowPtrStage.data() + rowPtrCount,
                 slice.blockAngles.data(), blockCount * sizeof(int32_t));
+    std::memcpy(cache->rowPtrStage.data() + rowPtrCount + blockCount,
+                slice.rowCompactIndex.data(),
+                rowCompactCount * sizeof(int32_t));
     cache->dRowPtr.copyFromHostAsync(cache->rowPtrStage.data(), rowPtrCount,
                                      stream);
     cache->dBlockAngles.copyFromHostAsync(
         cache->rowPtrStage.data() + rowPtrCount, blockCount, stream);
+    cache->dRowCompactIndex.copyFromHostAsync(
+        cache->rowPtrStage.data() + rowPtrCount + blockCount, rowCompactCount,
+        stream);
     cache->rowPtrStageDone.record(stream);
     cache->rowPtrStagePending = true;
     cache->dColIdx.allocate(static_cast<size_t>(slice.nnz));
     cache->dValues.allocate(static_cast<size_t>(slice.nnz));
     size_t offset = 0;
-    for (const io::CSRSegment &segment : slice.segments) {
-      const size_t count = static_cast<size_t>(segment.nnz);
-      if (count == 0) {
-        continue;
+    // Pixel-ness, not the segment count, picks the path: an interleaved
+    // angle subset legitimately has tens of segments (numAngles / N) that
+    // must keep the direct page-locked DMA; only pixel slices are built
+    // fragmented (one segment per selected row).
+    const bool fragmented = !slice.rowCompactIndex.empty();
+    if (!fragmented) {
+      for (const io::CSRSegment &segment : slice.segments) {
+        const size_t count = static_cast<size_t>(segment.nnz);
+        if (count == 0) {
+          continue;
+        }
+        CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + offset,
+                                   segment.col_idx, count * sizeof(int32_t),
+                                   cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + offset, segment.val,
+                                   count * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream));
+        offset += count;
       }
-      CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + offset, segment.col_idx,
-                                 count * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                 stream));
-      CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + offset, segment.val,
-                                 count * sizeof(float), cudaMemcpyHostToDevice,
-                                 stream));
-      offset += count;
+    } else {
+      offset = stageFragmentedSegmentsAsync(slice, cache, stream);
     }
     if (offset != static_cast<size_t>(slice.nnz)) {
       throw std::runtime_error(
           "compact subset slice segments do not add up to its nnz.");
     }
     createMatA(cache);
+  }
+
+  // Gather a fragmented (pixel-subset) slice's single-row segments into two
+  // alternating pinned buffers so the upload stays a bounded number of async
+  // copies; a buffer is only refilled after its previous copy completed
+  // (per-buffer events). Returns the number of nnz entries sent.
+  size_t stageFragmentedSegmentsAsync(const io::CSRSubsetView &slice,
+                                      CachedMatrix *cache,
+                                      cudaStream_t stream) {
+    constexpr size_t kFlushEntries = 2u << 20; // ~8 MB of col_idx per flush
+    const size_t total = static_cast<size_t>(slice.nnz);
+    size_t sent = 0;
+    size_t seg = 0;    // segment holding the next entry to stage
+    size_t within = 0; // offset inside that segment
+    while (sent < total) {
+      const size_t take = std::min(kFlushEntries, total - sent);
+      const unsigned slot = cache->nnzStageNext;
+      if (cache->nnzStagePending[slot]) {
+        CUDA_CHECK(cudaEventSynchronize(cache->nnzStageDone[slot].get()));
+        cache->nnzStagePending[slot] = false;
+      }
+      cache->nnzColStage[slot].allocate(take);
+      cache->nnzValStage[slot].allocate(take);
+      size_t written = 0;
+      while (written < take) {
+        while (seg < slice.segments.size() &&
+               within >= static_cast<size_t>(slice.segments[seg].nnz)) {
+          ++seg;
+          within = 0;
+        }
+        if (seg >= slice.segments.size()) {
+          throw std::runtime_error(
+              "compact pixel-subset slice ran out of segments while staging.");
+        }
+        const io::CSRSegment &segment = slice.segments[seg];
+        const size_t count =
+            std::min(static_cast<size_t>(segment.nnz) - within, take - written);
+        std::memcpy(cache->nnzColStage[slot].data() + written,
+                    segment.col_idx + within, count * sizeof(int32_t));
+        std::memcpy(cache->nnzValStage[slot].data() + written,
+                    segment.val + within, count * sizeof(float));
+        written += count;
+        within += count;
+      }
+      CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + sent,
+                                 cache->nnzColStage[slot].data(),
+                                 take * sizeof(int32_t),
+                                 cudaMemcpyHostToDevice, stream));
+      CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + sent,
+                                 cache->nnzValStage[slot].data(),
+                                 take * sizeof(float), cudaMemcpyHostToDevice,
+                                 stream));
+      cache->nnzStageDone[slot].record(stream);
+      cache->nnzStagePending[slot] = true;
+      cache->nnzStageNext = 1u - slot;
+      sent += take;
+    }
+    return sent;
   }
 
   void validateIoCsrViewForUpload(const io::CSRView &matrix) const {
@@ -1961,13 +2054,27 @@ private:
     return *target;
   }
 
-  // Ratio parameters for a pass over `cached`: a slice carries its own block
-  // -> angle table; a CSRView upload keeps the caller's contiguous mapping.
+  // Ratio parameters for a pass over `cached`: an angle slice carries its
+  // block -> angle table, a pixel slice its per-row canonical index; a
+  // CSRView upload keeps the caller's contiguous mapping.
   static cuda::CompactDeviceRatioParams sliceRatioParams(
       const cuda::CompactDeviceRatioParams &common, const CachedMatrix &cached) {
     cuda::CompactDeviceRatioParams p = common;
     p.blockAngles = cached.blockAngles.empty() ? nullptr : cached.dBlockAngles.get();
-    if (p.blockAngles != nullptr && cached.rowsPerBlock != p.compactRaysPerAngle) {
+    p.rowCompactIndex = cached.rowCompactIndex.empty()
+                            ? nullptr
+                            : cached.dRowCompactIndex.get();
+    if (p.blockAngles != nullptr && p.rowCompactIndex != nullptr) {
+      throw std::runtime_error(
+          "compact slice carries both angle blocks and pixel row indices.");
+    }
+    if (p.rowCompactIndex != nullptr &&
+        cached.rowCompactIndex.size() != static_cast<size_t>(cached.rows)) {
+      throw std::runtime_error(
+          "compact pixel slice row index does not match its row count.");
+    }
+    if (cached.rowsPerBlock != 0 &&
+        cached.rowsPerBlock != p.compactRaysPerAngle) {
       throw std::runtime_error(
           "compact slice rows per block does not match compactRaysPerAngle.");
     }
@@ -2266,6 +2373,7 @@ public:
     launchCompactMlemUpdateKernel(
         dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
         compactUpdateSensitivityLocked(subsetIndex, globalImageCount),
+        dCompactDenom_.get(),
         mask == nullptr ? nullptr : dCompactMask_.get(), mask != nullptr,
         globalImageCount, dCompactIterationFlags_.get(), 1e-12);
     checkCompactResidentUpdateFlagsLocked(requirePositiveNumerator,
@@ -3493,6 +3601,11 @@ private:
   const CsrbAttenChunk &csrbEnsureAttenChunkLocked(
       const uint32_t *hostRowPtr, const std::vector<int> &compactAngles,
       const CachedMatrix &cached, const cuda::CompactDeviceRatioParams &p) {
+    if (!cached.rowCompactIndex.empty()) {
+      throw std::runtime_error(
+          "compact CTAC per-angle batches do not support pixel (POSEM) subsets "
+          "yet; run pixel subsets without attenuation.");
+    }
     CsrbAttenChunk &chunk =
         csrbAttenChunks_[std::make_pair(cached.key.rowPtr, cached.key.tag)];
     if (chunk.rows == static_cast<int>(cached.rows) &&

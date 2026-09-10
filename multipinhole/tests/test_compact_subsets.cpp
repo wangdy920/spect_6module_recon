@@ -115,6 +115,98 @@ TEST(CompactSubsets, ScheduleParsesRefinesCoarselyAndSumsToIterations) {
                std::runtime_error);
   EXPECT_THROW(spect::parseCompactSubsetSchedule("", 10, 90),
                std::runtime_error);
+  // Low-count cap: any stage beyond kMaxCompactSubsetCount is rejected.
+  EXPECT_THROW(spect::parseCompactSubsetSchedule("11", 10, 90),
+               std::runtime_error);
+  EXPECT_THROW(spect::parseCompactSubsetSchedule("12:5,11:5", 10, 90),
+               std::runtime_error);
+  // Pixel mode: no compact-angle divisibility requirement, but the cap and
+  // the stage refinement still apply.
+  const auto pixels7 = spect::parseCompactSubsetSchedule(
+      "7", 10, 8, spect::CompactSubsetMode::Pixels);
+  EXPECT_EQ(pixels7[0].subsets, 7);
+  EXPECT_THROW(spect::parseCompactSubsetSchedule(
+                   "11", 10, 8, spect::CompactSubsetMode::Pixels),
+               std::runtime_error);
+  EXPECT_THROW(spect::parseCompactSubsetSchedule(
+                   "6:5,4:5", 10, 8, spect::CompactSubsetMode::Pixels),
+               std::runtime_error);
+}
+
+TEST(CompactSubsets, SubsetModeParsingRoundTrips) {
+  EXPECT_EQ(spect::parseCompactSubsetMode("angle"),
+            spect::CompactSubsetMode::Angles);
+  EXPECT_EQ(spect::parseCompactSubsetMode("ANGLES"),
+            spect::CompactSubsetMode::Angles);
+  EXPECT_EQ(spect::parseCompactSubsetMode("pixel"),
+            spect::CompactSubsetMode::Pixels);
+  EXPECT_EQ(spect::parseCompactSubsetMode("Posem"),
+            spect::CompactSubsetMode::Pixels);
+  EXPECT_EQ(spect::formatCompactSubsetMode(spect::CompactSubsetMode::Angles),
+            "angles");
+  EXPECT_EQ(spect::formatCompactSubsetMode(spect::CompactSubsetMode::Pixels),
+            "pixels");
+  EXPECT_THROW(spect::parseCompactSubsetMode("spiral"), std::runtime_error);
+}
+
+// --- POSEM canonical-row partition -------------------------------------------
+
+// Pixel id pattern: every canonical row exactly once, per-angle floor/ceil
+// balance, and exact nesting (id % M for M | N selects the coarser union).
+TEST(CompactSubsets, PixelPartitionCoversBalancesAndNests) {
+  const int angles = 6;
+  const int rpa = 8;
+  for (const int count : {1, 2, 3, 4, 7, 8}) {
+    std::vector<int> seen;
+    for (int index = 0; index < count; ++index) {
+      int perAngleMin = rpa;
+      int perAngleMax = 0;
+      for (int a = 0; a < angles; ++a) {
+        int perAngle = 0;
+        for (int r = 0; r < rpa; ++r) {
+          if (spect::compactPixelSubsetId(a, r, count) == index) {
+            seen.push_back(a * rpa + r);
+            ++perAngle;
+          }
+        }
+        perAngleMin = std::min(perAngleMin, perAngle);
+        perAngleMax = std::max(perAngleMax, perAngle);
+      }
+      // rpa % count in {0,1} here; a subset never differs by more than one
+      // row per angle (floor vs ceil of rpa / count).
+      EXPECT_LE(perAngleMax - perAngleMin, 1) << "count " << count;
+    }
+    std::sort(seen.begin(), seen.end());
+    std::vector<int> all(static_cast<size_t>(angles * rpa));
+    std::iota(all.begin(), all.end(), 0);
+    EXPECT_EQ(seen, all) << "count " << count;
+  }
+  for (const int fine : {2, 4, 8}) {
+    for (const int coarse : {1, 2, 4}) {
+      if (fine % coarse != 0)
+        continue;
+      for (int a = 0; a < angles; ++a) {
+        for (int r = 0; r < rpa; ++r) {
+          EXPECT_EQ(spect::compactPixelSubsetId(a, r, fine) % coarse,
+                    spect::compactPixelSubsetId(a, r, coarse));
+        }
+      }
+    }
+  }
+}
+
+// A toy geometry with real detector extent (detNx 4, compactDetZ 2 -> 8
+// rays per angle) so pixel subsets exercise several rays per angle.
+spect::io::CompactSymmetryMetadata makePixelMeta() {
+  auto meta = spect::io::test::makeToySym90ZMeta();
+  meta.detNx = 4;
+  meta.detNz = 4;
+  meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8;
+  meta.compactNumAngles = 6;
+  meta.fullNumAngles = 24;
+  meta.totalRows = meta.compactNumAngles * meta.compactRaysPerAngle;
+  return meta;
 }
 
 // --- toy matrix with 6 compact angles in two chunks -------------------------
@@ -304,6 +396,73 @@ TEST(CompactSubsets, ChunkSliceCoalescesAdjacentAnglesAndRebasesRowPointers) {
   EXPECT_TRUE(none.empty());
   EXPECT_TRUE(none.valid());
   EXPECT_THROW(chunk->subsetView({3, 1}, rpa, 1), std::runtime_error);
+  std::filesystem::remove_all(dir);
+}
+
+// POSEM slice: the chunk's canonical rows whose pixel id selects the subset,
+// ascending, with a per-row canonical index and re-based row pointers; the
+// pixel subsets of one chunk partition all of its rows.
+TEST(CompactSubsets, ChunkPixelSliceSelectsInterleavedCanonicalRows) {
+  const auto meta = makePixelMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_pixel_slice_test";
+  writeChunkDirectory(dir, meta, compact, /*anglesPerChunk=*/6);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1 << 20);
+  ASSERT_EQ(chunks.chunks().size(), 1u);
+  const auto chunk = chunks.loadChunk(0);
+  const int rpa = meta.compactRaysPerAngle;
+
+  uint64_t totalRows = 0;
+  uint64_t totalNnz = 0;
+  for (int index = 0; index < 3; ++index) {
+    const uint64_t tag = (1ull << 62) | (3ull << 32) |
+                         static_cast<uint64_t>(index);
+    const auto slice = chunk->pixelSubsetView(3, index, rpa, tag);
+    ASSERT_TRUE(slice.valid()) << "index " << index;
+    EXPECT_EQ(slice.tag, tag);
+    EXPECT_TRUE(slice.blockAngles.empty());
+    ASSERT_EQ(slice.rowCompactIndex.size(), static_cast<size_t>(slice.rows));
+    // Rows ascending canonical; each one belongs to this pixel subset.
+    uint32_t nnz = 0;
+    int previousCanonical = -1;
+    size_t expectedSegments = 0;
+    for (size_t r = 0; r < slice.rowCompactIndex.size(); ++r) {
+      const int canonical = slice.rowCompactIndex[r];
+      EXPECT_GT(canonical, previousCanonical);
+      EXPECT_EQ(spect::compactPixelSubsetId(canonical / rpa, canonical % rpa, 3),
+                index);
+      if (previousCanonical < 0 || canonical != previousCanonical + 1)
+        ++expectedSegments;
+      previousCanonical = canonical;
+      const uint32_t rowNnz =
+          compact.rowPtr[static_cast<size_t>(canonical) + 1u] -
+          compact.rowPtr[static_cast<size_t>(canonical)];
+      EXPECT_EQ(slice.row_ptr[r], nnz);
+      nnz += rowNnz;
+    }
+    EXPECT_EQ(slice.row_ptr.back(), nnz);
+    EXPECT_EQ(slice.nnz, nnz);
+    // Interleaved rows rarely adjoin, but the last ray of one angle and
+    // the first of the next can: segments = runs of adjacent canonical
+    // rows, never more than one per selected row.
+    EXPECT_EQ(slice.segments.size(), expectedSegments);
+    EXPECT_LE(slice.segments.size(), slice.rowCompactIndex.size());
+    uint64_t segmentNnz = 0;
+    for (const auto &segment : slice.segments)
+      segmentNnz += segment.nnz;
+    EXPECT_EQ(segmentNnz, slice.nnz);
+    totalRows += static_cast<uint64_t>(slice.rows);
+    totalNnz += slice.nnz;
+  }
+  EXPECT_EQ(totalRows, static_cast<uint64_t>(meta.totalRows));
+  EXPECT_EQ(totalNnz, static_cast<uint64_t>(compact.values.size()));
+
+  EXPECT_THROW(chunk->pixelSubsetView(0, 0, rpa, 1), std::runtime_error);
+  EXPECT_THROW(chunk->pixelSubsetView(3, 3, rpa, 1), std::runtime_error);
   std::filesystem::remove_all(dir);
 }
 
@@ -611,6 +770,353 @@ TEST_F(CompactSubsetCudaTest, ResidentSubsetUpdatesMatchHost) {
                    false, sGlobal.data(), nullptr, nullptr, true, true, &allZero,
                    count),
                std::runtime_error);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
+// Compact CSR with the values of canonical rows outside the pixel subset
+// zeroed; expanding it gives the dense oracle restricted to the subset's rows
+// (every symmetry branch of a selected row stays in, of a dropped row goes).
+spect::io::test::ToyCompactCSR restrictCompactToPixelSubset(
+    const spect::io::test::ToyCompactCSR &compact, int rpa, int count,
+    int index) {
+  auto out = compact;
+  const int rows = static_cast<int>(compact.rowPtr.size()) - 1;
+  for (int row = 0; row < rows; ++row) {
+    if (spect::compactPixelSubsetId(row / rpa, row % rpa, count) != index) {
+      std::fill(out.values.begin() + compact.rowPtr[static_cast<size_t>(row)],
+                out.values.begin() + compact.rowPtr[static_cast<size_t>(row) + 1u],
+                0.0f);
+    }
+  }
+  return out;
+}
+
+// POSEM: S_m and q_m of pixel subsets match the dense oracle restricted to
+// the subset's canonical rows, and the subsets add back to the full data —
+// through the per-row canonical index mapping, over two chunks.
+TEST_F(CompactSubsetCudaTest, PixelSubsetSensitivityAndNumeratorMatchRestrictedOracle) {
+  const auto meta = makePixelMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_pixel_cuda_test";
+  writeChunkDirectory(dir, meta, compact, /*anglesPerChunk=*/3);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1 << 20);
+  ASSERT_EQ(chunks.chunks().size(), 2u);
+
+  const int fullRows = meta.fullRows();
+  const int cols = meta.totalVoxels;
+  const size_t nvox = static_cast<size_t>(cols);
+  constexpr int bedCount = 2;
+  const int rpa = meta.compactRaysPerAngle;
+  std::vector<double> imageBed0 = {1.0, 1.3, 1.7, 2.1, 0.8, 1.2, 1.6, 2.0};
+  std::vector<double> imageBed1 = {0.5, 0.8, 1.2, 1.6, 1.0, 1.4, 1.8, 2.2};
+  std::vector<double> projBed0(static_cast<size_t>(fullRows));
+  std::vector<double> projBed1(static_cast<size_t>(fullRows));
+  for (size_t i = 0; i < projBed0.size(); ++i) {
+    projBed0[i] = (i % 5 < 2) ? 1.0 + 0.01 * static_cast<double>(i) : 0.0;
+    projBed1[i] = ((i + 2) % 5 < 2) ? 2.0 + 0.02 * static_cast<double>(i) : 0.0;
+  }
+  const double *imagePtrs[bedCount] = {imageBed0.data(), imageBed1.data()};
+  const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
+  const auto channels = std::vector<spect::cuda::CompactMatrixChannel>{
+      spect::cuda::CompactMatrixChannel{&chunks, 1.0, 1.0}};
+
+  std::vector<double> sFull(nvox, 0.0);
+  ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+      channels, meta, 1, sFull.data(), nullptr, nullptr, nullptr, nullptr));
+  std::vector<std::vector<double>> qFull(bedCount, std::vector<double>(nvox, 0.0));
+  {
+    double *numerPtrs[bedCount] = {qFull[0].data(), qFull[1].data()};
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+        channels, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs,
+        false, nullptr, nullptr, true, false, true, nullptr, nullptr));
+  }
+
+  for (const int count : {2, 3, 4}) {
+    std::vector<double> sSum(nvox, 0.0);
+    std::vector<std::vector<double>> qSum(bedCount, std::vector<double>(nvox, 0.0));
+    const auto order = spect::compactSubsetOrder(count);
+    for (size_t s = 0; s < order.size(); ++s) {
+      const spect::CompactSubsetSpec spec{count, order[s],
+                                          spect::CompactSubsetMode::Pixels};
+      const auto restrictedCompact =
+          restrictCompactToPixelSubset(compact, rpa, count, spec.index);
+      const auto restricted =
+          spect::io::test::expandCompactToyToFullDense(meta, restrictedCompact);
+
+      std::vector<double> sSub(nvox, 0.0);
+      ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+          channels, meta, 1, sSub.data(), nullptr, nullptr, nullptr, &spec));
+      const auto sRef = spect::io::test::denseDenom(restricted, fullRows, cols);
+      EXPECT_LE(relL2(sSub, sRef), 1e-5) << "N=" << count << " m=" << spec.index;
+      for (size_t j = 0; j < nvox; ++j)
+        sSum[j] += sSub[j];
+
+      std::vector<std::vector<double>> qSub(bedCount,
+                                            std::vector<double>(nvox, 0.0));
+      double *numerPtrs[bedCount] = {qSub[0].data(), qSub[1].data()};
+      const std::optional<spect::CompactSubsetSpec> next =
+          s + 1 < order.size()
+              ? std::optional<spect::CompactSubsetSpec>(
+                    spect::CompactSubsetSpec{count, order[s + 1],
+                                             spect::CompactSubsetMode::Pixels})
+              : std::nullopt;
+      ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+          channels, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs,
+          (s % 2) == 1, nullptr, nullptr, true, false, true, &spec,
+          next ? &*next : nullptr));
+      const auto q0Ref = spect::io::test::denseNumerator(
+          restricted, projBed0, imageBed0, fullRows, cols);
+      const auto q1Ref = spect::io::test::denseNumerator(
+          restricted, projBed1, imageBed1, fullRows, cols);
+      EXPECT_LE(relL2(qSub[0], q0Ref), 1e-5) << "N=" << count << " m=" << spec.index;
+      EXPECT_LE(relL2(qSub[1], q1Ref), 1e-5) << "N=" << count << " m=" << spec.index;
+      for (size_t j = 0; j < nvox; ++j) {
+        qSum[0][j] += qSub[0][j];
+        qSum[1][j] += qSub[1][j];
+      }
+    }
+    EXPECT_LE(relL2(sSum, sFull), 1e-6) << "pixel sum of S_m vs S, N=" << count;
+    EXPECT_LE(relL2(qSum[0], qFull[0]), 1e-6) << "pixel sum of q_m vs q, N=" << count;
+    EXPECT_LE(relL2(qSum[1], qFull[1]), 1e-6) << "pixel sum of q_m vs q, N=" << count;
+  }
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
+// POSEM resident updates: the device OSEM / BSREM sub-iteration over pixel
+// subsets equals the host update with the same S_m and subset count.
+TEST_F(CompactSubsetCudaTest, ResidentPixelSubsetUpdatesMatchHost) {
+  const auto meta = makePixelMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_pixel_update_test";
+  writeChunkDirectory(dir, meta, compact, /*anglesPerChunk=*/3);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1 << 20);
+  const auto channels = std::vector<spect::cuda::CompactMatrixChannel>{
+      spect::cuda::CompactMatrixChannel{&chunks, 1.0, 1.0}};
+
+  const int fullRows = meta.fullRows();
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  constexpr int bedCount = 2;
+  constexpr int count = 3;
+  const size_t globalNvox = bedCount * nvox;
+  std::vector<double> globalImage(globalNvox);
+  for (size_t i = 0; i < globalNvox; ++i)
+    globalImage[i] = 0.7 + 0.05 * static_cast<double>(i);
+  std::vector<double> projBed0(static_cast<size_t>(fullRows));
+  std::vector<double> projBed1(static_cast<size_t>(fullRows));
+  for (size_t i = 0; i < projBed0.size(); ++i) {
+    projBed0[i] = (i % 3 == 0) ? 0.0 : 1.0 + 0.01 * static_cast<double>(i);
+    projBed1[i] = (i % 4 == 0) ? 0.0 : 2.0 + 0.02 * static_cast<double>(i);
+  }
+  const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
+  const int bedZStarts[bedCount] = {0, meta.Nz};
+
+  auto globalSensitivity = [&](const spect::CompactSubsetSpec *spec) {
+    std::vector<double> local(nvox, 0.0);
+    EXPECT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+        channels, meta, 1, local.data(), nullptr, nullptr, nullptr, spec));
+    std::vector<double> global(globalNvox);
+    for (int bed = 0; bed < bedCount; ++bed)
+      std::copy(local.begin(), local.end(),
+                global.begin() + static_cast<ptrdiff_t>(bed * nvox));
+    return global;
+  };
+  const std::vector<double> sGlobal = globalSensitivity(nullptr);
+  std::vector<std::vector<double>> sSubsets;
+  std::vector<const double *> sSubsetPtrs;
+  for (int m = 0; m < count; ++m) {
+    const spect::CompactSubsetSpec spec{count, m,
+                                        spect::CompactSubsetMode::Pixels};
+    sSubsets.push_back(globalSensitivity(&spec));
+  }
+  for (const auto &s : sSubsets)
+    sSubsetPtrs.push_back(s.data());
+  ASSERT_TRUE(spect::cuda::setCompactSubsetSensitivitiesCUDA(
+      sSubsetPtrs.data(), count, globalNvox));
+
+  auto hostSubsetNumerator = [&](const std::vector<double> &image, int m) {
+    const spect::CompactSubsetSpec spec{count, m,
+                                        spect::CompactSubsetMode::Pixels};
+    std::vector<std::vector<double>> numers(bedCount,
+                                            std::vector<double>(nvox, 0.0));
+    double *numerPtrs[2] = {numers[0].data(), numers[1].data()};
+    const double *imagePtrs[2] = {image.data(), image.data() + nvox};
+    EXPECT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+        channels, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs,
+        false, nullptr, nullptr, true, false, true, &spec, nullptr));
+    std::vector<double> global(globalNvox);
+    for (int bed = 0; bed < bedCount; ++bed)
+      std::copy(numers[bed].begin(), numers[bed].end(),
+                global.begin() + static_cast<ptrdiff_t>(bed * nvox));
+    return global;
+  };
+  auto deviceSubsetNumerator = [&](bool uploadImage, int m) {
+    const spect::CompactSubsetSpec spec{count, m,
+                                        spect::CompactSubsetMode::Pixels};
+    ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+        meta, globalImage.data(), globalImage.size(), bedCount * meta.Nz,
+        bedZStarts, bedCount, false, nullptr, uploadImage));
+    ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+        channels, meta, projPtrs, nullptr, nullptr, bedCount, 1, nullptr,
+        false, nullptr, nullptr, true, true, false, &spec, nullptr));
+  };
+
+  std::vector<double> hostImage = globalImage;
+  const auto order = spect::compactSubsetOrder(count);
+  for (size_t s = 0; s < order.size(); ++s) {
+    const int m = order[s];
+    const auto q = hostSubsetNumerator(hostImage, m);
+    spect::applyMlemUpdate(hostImage, q, sSubsets[static_cast<size_t>(m)],
+                           nullptr, true, 1, &sGlobal);
+    deviceSubsetNumerator(s == 0, m);
+    bool allZero = true;
+    ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
+        meta, globalNvox, bedCount * meta.Nz, bedZStarts, bedCount, false,
+        sGlobal.data(), nullptr, nullptr, true, s == 0, &allZero, m));
+    EXPECT_FALSE(allZero);
+  }
+  std::vector<double> deviceImage(globalNvox, 0.0);
+  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(deviceImage.data(),
+                                                            globalNvox));
+  EXPECT_LE(relL2(deviceImage, hostImage), 1e-6);
+  EXPECT_GT(relL2(hostImage, globalImage), 1e-3);
+
+  spect::cuda::CompactBsremUpdateParams deviceParams;
+  deviceParams.alpha = 0.8;
+  deviceParams.subsetScale = static_cast<double>(count);
+  deviceParams.clipRelativeStep = true;
+  deviceParams.zeroLowSensitivity = true;
+  spect::BsremUpdateParams hostParams;
+  hostParams.alpha = 0.8;
+  hostParams.subsetScale = static_cast<double>(count);
+  hostParams.threads = 1;
+  hostImage = globalImage;
+  for (size_t s = 0; s < order.size(); ++s) {
+    const int m = order[s];
+    const auto q = hostSubsetNumerator(hostImage, m);
+    spect::applyBsremUpdate(hostImage, q, sGlobal, sSubsets[static_cast<size_t>(m)],
+                            hostParams);
+    deviceSubsetNumerator(s == 0, m);
+    bool allZero = true;
+    ASSERT_TRUE(spect::cuda::finishCompactResidentBsremIterationCUDA(
+        meta, globalNvox, bedCount * meta.Nz, bedZStarts, bedCount, false,
+        sGlobal.data(), nullptr, nullptr, deviceParams, true, s == 0, &allZero,
+        m));
+    EXPECT_FALSE(allZero);
+  }
+  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(deviceImage.data(),
+                                                            globalNvox));
+  EXPECT_LE(relL2(deviceImage, hostImage), 1e-6);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
+// Ordered-subset skip rule: a voxel with S_m <= 0 but S > 0 keeps its value
+// on both the host and the resident device update instead of being zeroed.
+TEST_F(CompactSubsetCudaTest, ResidentMlemSkipsZeroSubsetSensitivity) {
+  const auto meta = makeSixAngleMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_subset_skip_test";
+  writeChunkDirectory(dir, meta, compact, /*anglesPerChunk=*/3);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1 << 20);
+  const auto channels = std::vector<spect::cuda::CompactMatrixChannel>{
+      spect::cuda::CompactMatrixChannel{&chunks, 1.0, 1.0}};
+
+  const int fullRows = meta.fullRows();
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  constexpr int bedCount = 2;
+  constexpr int count = 3;
+  const size_t globalNvox = bedCount * nvox;
+  std::vector<double> globalImage(globalNvox);
+  for (size_t i = 0; i < globalNvox; ++i)
+    globalImage[i] = 0.6 + 0.03 * static_cast<double>(i);
+  std::vector<double> projBed0(static_cast<size_t>(fullRows));
+  std::vector<double> projBed1(static_cast<size_t>(fullRows));
+  for (size_t i = 0; i < projBed0.size(); ++i) {
+    projBed0[i] = 1.0 + 0.01 * static_cast<double>(i);
+    projBed1[i] = 2.0 + 0.02 * static_cast<double>(i);
+  }
+  const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
+  const int bedZStarts[bedCount] = {0, meta.Nz};
+
+  auto globalSensitivity = [&](const spect::CompactSubsetSpec *spec) {
+    std::vector<double> local(nvox, 0.0);
+    EXPECT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+        channels, meta, 1, local.data(), nullptr, nullptr, nullptr, spec));
+    std::vector<double> global(globalNvox);
+    for (int bed = 0; bed < bedCount; ++bed)
+      std::copy(local.begin(), local.end(),
+                global.begin() + static_cast<ptrdiff_t>(bed * nvox));
+    return global;
+  };
+  const std::vector<double> sGlobal = globalSensitivity(nullptr);
+  std::vector<std::vector<double>> sSubsets;
+  std::vector<const double *> sSubsetPtrs;
+  for (int m = 0; m < count; ++m)
+    sSubsets.push_back(globalSensitivity(
+        &spect::CompactSubsetSpec{count, m}));
+  // Simulate voxels invisible to subset 1 only (FOV-edge geometry): zero
+  // S_1 over the second bed's voxels, leaving S > 0 there.
+  const size_t zeroFrom = nvox;
+  const size_t zeroTo = globalNvox;
+  for (size_t j = zeroFrom; j < zeroTo; ++j)
+    sSubsets[1][j] = 0.0;
+  for (const auto &s : sSubsets)
+    sSubsetPtrs.push_back(s.data());
+  ASSERT_TRUE(spect::cuda::setCompactSubsetSensitivitiesCUDA(
+      sSubsetPtrs.data(), count, globalNvox));
+
+  const spect::CompactSubsetSpec spec1{count, 1};
+  // Host reference: numerator from the same subset, skip-rule update.
+  std::vector<std::vector<double>> numers(bedCount,
+                                          std::vector<double>(nvox, 0.0));
+  double *numerPtrs[2] = {numers[0].data(), numers[1].data()};
+  const double *imagePtrs[2] = {globalImage.data(),
+                                globalImage.data() + nvox};
+  ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+      channels, meta, projPtrs, nullptr, imagePtrs, bedCount, 1, numerPtrs,
+      false, nullptr, nullptr, true, false, true, &spec1, nullptr));
+  std::vector<double> q(globalNvox);
+  for (int bed = 0; bed < bedCount; ++bed)
+    std::copy(numers[bed].begin(), numers[bed].end(),
+              q.begin() + static_cast<ptrdiff_t>(bed * nvox));
+
+  std::vector<double> hostImage = globalImage;
+  spect::applyMlemUpdate(hostImage, q, sSubsets[1], nullptr, true, 1, &sGlobal);
+  // Skipped voxels keep their value exactly; visible ones move.
+  for (size_t j = zeroFrom; j < zeroTo; ++j)
+    EXPECT_EQ(hostImage[j], globalImage[j]);
+  EXPECT_GT(relL2(hostImage, globalImage), 1e-3);
+
+  // Resident device update over the same subset.
+  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+      meta, globalImage.data(), globalImage.size(), bedCount * meta.Nz,
+      bedZStarts, bedCount, false, nullptr, true));
+  ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+      channels, meta, projPtrs, nullptr, nullptr, bedCount, 1, nullptr,
+      false, nullptr, nullptr, true, true, false, &spec1, nullptr));
+  bool allZero = true;
+  ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
+      meta, globalNvox, bedCount * meta.Nz, bedZStarts, bedCount, false,
+      sGlobal.data(), nullptr, nullptr, true, true, &allZero, 1));
+  EXPECT_FALSE(allZero);
+  std::vector<double> deviceImage(globalNvox, 0.0);
+  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(deviceImage.data(),
+                                                            globalNvox));
+  EXPECT_LE(relL2(deviceImage, hostImage), 1e-6);
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   std::filesystem::remove_all(dir);
 }

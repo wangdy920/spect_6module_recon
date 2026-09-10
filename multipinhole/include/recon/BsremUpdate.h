@@ -8,11 +8,15 @@ namespace spect {
 
 /// Host MLEM multiplicative update used by the compact non-resident path.
 /// If s_j <= 0 the voxel is zeroed; otherwise x <- x * n / max(s, eps).
+/// `globalDenom` (the full-data S, optional) carries the ordered-subset skip
+/// rule: a voxel with S_m <= 0 but S > 0 is invisible to this subset only and
+/// keeps its value instead of being zeroed, while S <= 0 still zeroes.
 void applyMlemUpdate(std::vector<double> &image,
                      const std::vector<double> &numerator,
                      const std::vector<double> &denom,
                      const std::vector<uint8_t> *mask, bool nonneg,
-                     int threads);
+                     int threads,
+                     const std::vector<double> *globalDenom = nullptr);
 
 struct BsremUpdateParams {
   const std::vector<uint8_t> *mask = nullptr;

@@ -108,12 +108,20 @@ extern "C" __global__ void compute_compact_ratio_chunk(
 
 // Compact row -> (absolute compact angle, ray within the angle). blockAngles
 // (one entry per compactRaysPerAngle row block) serves ordered-subset slices
-// whose blocks are not consecutive angles; null keeps the contiguous chunk
-// mapping from compactRowBase.
+// whose blocks are not consecutive angles; rowCompactIndex (one canonical
+// row = absoluteAngle * compactRaysPerAngle + ray per matrix row) serves
+// pixel-subset (POSEM) slices whose rows interleave within every angle. Both
+// null keeps the contiguous chunk mapping from compactRowBase; rowCompactIndex
+// wins when both are set (they are mutually exclusive by construction).
 __device__ __forceinline__ void compact_row_angle(
     int compactRowBase, int rowInChunk, int compactRaysPerAngle,
-    const int *blockAngles, int *compactAngle, int *rr) {
-  if (blockAngles != nullptr) {
+    const int *blockAngles, const int *rowCompactIndex, int *compactAngle,
+    int *rr) {
+  if (rowCompactIndex != nullptr) {
+    const int compactRow = rowCompactIndex[rowInChunk];
+    *compactAngle = compactRow / compactRaysPerAngle;
+    *rr = compactRow - *compactAngle * compactRaysPerAngle;
+  } else if (blockAngles != nullptr) {
     const int block = rowInChunk / compactRaysPerAngle;
     *compactAngle = blockAngles[block];
     *rr = rowInChunk - block * compactRaysPerAngle;
@@ -131,8 +139,8 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, const int *symIds, const int *zMirrors,
-    const int *blockAngles, int batchSize, float *ratioBatch,
-    unsigned long long rows, double eps) {
+    const int *blockAngles, const int *rowCompactIndex, int batchSize,
+    float *ratioBatch, unsigned long long rows, double eps) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -148,7 +156,8 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
   int compactAngle = 0;
   int rr = 0;
   compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
-                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
+                    compactRaysPerAngle, blockAngles, rowCompactIndex,
+                    &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -224,8 +233,8 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
     int symmetryMode, int compactRowBase, int compactRaysPerAngle,
     int compactNumAngles, int detNx, int detNz, int compactDetZ,
     int fullNumAngles, int fullRaysPerAngle, const int *symIds,
-    const int *zMirrors, const int *blockAngles, int batchSize,
-    float *ratioBatch, unsigned long long rows) {
+    const int *zMirrors, const int *blockAngles, const int *rowCompactIndex,
+    int batchSize, float *ratioBatch, unsigned long long rows) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -241,7 +250,8 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
   int compactAngle = 0;
   int rr = 0;
   compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
-                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
+                    compactRaysPerAngle, blockAngles, rowCompactIndex,
+                    &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -351,8 +361,8 @@ extern "C" __global__ void compact_accumulate_bed_float_to_global_double(
 
 extern "C" __global__ void compact_mlem_update(
     double *image, const double *numer, const double *denom,
-    const unsigned char *mask, int hasMask, unsigned long long count,
-    unsigned int *flags, double eps) {
+    const double *globalDenom, const unsigned char *mask, int hasMask,
+    unsigned long long count, unsigned int *flags, double eps) {
   __shared__ unsigned int blockFlags;
   if (threadIdx.x == 0) blockFlags = 0;
   __syncthreads();
@@ -367,10 +377,19 @@ extern "C" __global__ void compact_mlem_update(
     else if (n < 0.0) localFlags |= 4U;
 
     double value = 0.0;
-    if ((hasMask == 0 || mask[index] != 0) && denom[index] > 0.0) {
+    if (hasMask != 0 && mask[index] == 0) {
+      value = 0.0;
+    } else if (denom[index] > 0.0) {
       const double d = denom[index] > eps ? denom[index] : eps;
       value = image[index] * (n / d);
       if (value < 0.0) value = 0.0;
+    } else if (globalDenom == nullptr || !(globalDenom[index] > 0.0)) {
+      // Classic full-data rule: never seen by any row -> zero. NaN counts as
+      // not-positive, matching the host skip rule exactly.
+      value = 0.0;
+    } else {
+      // Ordered-subset skip rule: S_m <= 0 with S > 0 keeps the voxel.
+      value = image[index];
     }
     image[index] = value;
     if (!isfinite(value)) localFlags |= 8U;

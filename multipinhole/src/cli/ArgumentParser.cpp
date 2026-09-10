@@ -535,6 +535,20 @@ void ArgumentParser::registerHandlers() {
         }
         return true;
     }, {"-subsets"});
+    // Token-level check only; the recon loop re-validates once the matrix
+    // metadata is known (parseCompactSubsetMode / parseCompactSubsetSchedule).
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        std::string mode = ArgumentParser::getRequiredArg(i, argc, argv, "-subset-mode");
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (mode != "angle" && mode != "angles" && mode != "pixel" &&
+            mode != "pixels" && mode != "posem") {
+            std::cerr << "Error: -subset-mode needs angle(s)|pixel(s)|posem\n";
+            return false;
+        }
+        a.subsetMode = mode;
+        return true;
+    }, {"-subset-mode"});
     auto threadsHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.numThreads = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
@@ -1437,6 +1451,9 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
     const std::string subsets = cfg.getString("Algorithm", "subsets");
     if (!subsets.empty())
         a.subsetSchedule = subsets;
+    const std::string subsetMode = cfg.getString("Algorithm", "subset_mode");
+    if (!subsetMode.empty())
+        a.subsetMode = toLower(subsetMode);
 
     // [Regularization] section
     std::string regT = cfg.getString("Regularization", "type");
@@ -2143,7 +2160,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[Algorithm]\n";
     std::cout << "name       = " << a.getAlgorithmName() << "\n";
     std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n";
-    std::cout << "subsets    = " << a.subsetSchedule << "\n\n";
+    std::cout << "subsets    = " << a.subsetSchedule << "\n";
+    std::cout << "subset_mode = " << a.subsetMode << "\n\n";
 
     std::cout << "[Regularization]\n";
     std::cout << "type  = " << regTypeToString(a.reg.type) << "\n";
@@ -2346,9 +2364,11 @@ void ArgumentParser::printUsage() {
     std::cout << "                           Auto-loads config/algo_<name>.conf\n";
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
-    std::cout << "  -subsets <N|N1:i1,...>   Ordered subsets over compact angles (CSRB);\n";
-    std::cout << "                           N | compact angles, later N | earlier N,\n";
-    std::cout << "                           stage iterations sum to -it (default 1)\n";
+    std::cout << "  -subsets <N|N1:i1,...>   Ordered subsets (CSRB); N <= 10,\n";
+    std::cout << "                           angle mode: N | compact angles; later N |\n";
+    std::cout << "                           earlier N; stage iterations sum to -it\n";
+    std::cout << "  -subset-mode <mode>       angle (default) | pixels | posem (POSEM\n";
+    std::cout << "                           canonical-row interleave; no CTAC yet)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";

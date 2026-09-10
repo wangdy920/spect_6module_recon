@@ -816,16 +816,20 @@ struct CompactBranchDescriptor {
 };
 
 // --- Ordered-subset slices -----------------------------------------------------
-// The streaming unit of every CSRB pass is the (chunk, subset) slice: the
-// chunk's rows of the subset's compact angles. The full-data pass is the
-// subset of all angles (count 1), whose slice is the whole chunk with tag 0
-// so it shares the device copy of the chunk's own CSRView.
+// The streaming unit of every CSRB pass is the (chunk, subset) slice. Angle
+// subsets take the chunk's rows of the subset's compact angles; pixel (POSEM)
+// subsets take the chunk's canonical rows whose compactPixelSubsetId selects
+// the subset. The full-data pass is the angle subset of all angles (count 1),
+// whose slice is the whole chunk with tag 0 so it shares the device copy of
+// the chunk's own CSRView. The tag's mode bit keeps a pixel N-subset cache
+// entry from ever aliasing an angle N-subset entry of the same chunk.
 
 struct CompactSubsetSelection {
-  std::vector<int> angles; // absolute compact angles, ascending
+  std::vector<int> angles; // angle mode: absolute compact angles, ascending
   uint64_t tag = 0;
   int count = 1;
   int index = 0;
+  CompactSubsetMode mode = CompactSubsetMode::Angles;
 };
 
 CompactSubsetSelection selectCompactSubset(
@@ -836,9 +840,22 @@ CompactSubsetSelection selectCompactSubset(
   if (subset != nullptr) {
     spec = *subset;
   }
-  out.angles = compactSubsetAngles(meta.compactNumAngles, spec);
+  if (spec.count <= 0 || spec.index < 0 || spec.index >= spec.count) {
+    throw std::runtime_error("compact subset spec is out of range.");
+  }
+  out.mode = spec.mode;
   out.count = spec.count;
   out.index = spec.index;
+  if (spec.mode == CompactSubsetMode::Pixels && spec.count > 1) {
+    // Pixel subsets touch rows of every angle; the per-angle CTAC tables and
+    // the ratio mapping come from the slice's row index instead of angles.
+    out.tag = (1ull << 62) | (static_cast<uint64_t>(spec.count) << 32) |
+              static_cast<uint64_t>(spec.index);
+    return out;
+  }
+  // Angle subsets, and the full-data step of any mode (count 1 = all
+  // angles, the whole chunk, tag 0 sharing the chunk's CSRView cache).
+  out.angles = compactSubsetAngles(meta.compactNumAngles, spec);
   out.tag = spec.count <= 1
                 ? 0u
                 : (static_cast<uint64_t>(spec.count) << 32) |
@@ -850,6 +867,10 @@ spect::io::CSRSubsetView compactChunkSlice(
     const spect::io::CompactChunkCSRData &chunk,
     const spect::io::CompactSymmetryMetadata &meta,
     const CompactSubsetSelection &subset) {
+  if (subset.mode == CompactSubsetMode::Pixels && subset.count > 1) {
+    return chunk.pixelSubsetView(subset.count, subset.index,
+                                 meta.compactRaysPerAngle, subset.tag);
+  }
   return chunk.subsetView(subset.angles, meta.compactRaysPerAngle, subset.tag);
 }
 

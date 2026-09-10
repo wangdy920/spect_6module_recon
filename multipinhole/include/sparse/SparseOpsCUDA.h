@@ -34,6 +34,11 @@ struct CompactDeviceRatioParams {
     /// ordered-subset slice, whose blocks are not consecutive angles; nullptr
     /// keeps the contiguous mapping angle = (compactRowBase + row) / rpa.
     const int* blockAngles = nullptr;
+    /// Device table of the canonical row (absoluteAngle * rpa + ray) of every
+    /// matrix row, for pixel-subset (POSEM) slices whose rows interleave
+    /// within each angle. Mutually exclusive with blockAngles by construction;
+    /// nullptr otherwise.
+    const int* rowCompactIndex = nullptr;
 };
 
 struct CompactDeviceRatioTiming {

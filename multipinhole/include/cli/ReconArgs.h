@@ -40,10 +40,15 @@ struct ReconArgs {
     std::string badDetectorFile;   ///< Global numbers or hardware IDs; empty list disables masking
     bool badDetectorFileExplicit = false; ///< CLI path is resolved from cwd, not config dir
     int numIters = 50;            ///< Total iterations
-    /// Ordered-subset schedule over compact angles: "N" or "N1:i1,N2:i2,..."
-    /// (iterations summing to numIters, each N dividing the compact angle
-    /// count and the previous N). "1" is the full-data update (MLEM / BSREM).
+    /// Ordered-subset schedule: "N" or "N1:i1,N2:i2,..." (iterations summing
+    /// to numIters; angle mode additionally requires each N to divide the
+    /// compact angle count, and every later N divides the earlier one; N is
+    /// capped at 10 for the Lu-177 zero-bin budget). "1" is the full-data
+    /// update (MLEM / BSREM).
     std::string subsetSchedule = "1";
+    /// Subset partition: "angle" (interleaved compact angles, default) or
+    /// "pixel"/"posem" (canonical-row interleave, POSEM).
+    std::string subsetMode = "angle";
     int saveInterval = 5;         ///< Save every N iterations
     int numThreads = 8;           ///< Thread count
     std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI

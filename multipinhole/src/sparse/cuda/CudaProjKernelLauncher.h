@@ -47,8 +47,8 @@ void launchCompactAccumulateBedFloatToGlobalDoubleKernel(
 
 void launchCompactMlemUpdateKernel(
     double *image, const double *numer, const double *denom,
-    const uint8_t *mask, bool hasMask, size_t count, uint32_t *flags,
-    double eps, cudaStream_t stream = nullptr);
+    const double *globalDenom, const uint8_t *mask, bool hasMask, size_t count,
+    uint32_t *flags, double eps, cudaStream_t stream = nullptr);
 
 // curvature = |gradient| / max(image, eps) (BSREM curvature surrogate).
 void launchCompactBsremCurvatureKernel(const double *image,

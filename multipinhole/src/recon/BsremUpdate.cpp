@@ -32,12 +32,15 @@ void applyMlemUpdate(std::vector<double> &image,
                      const std::vector<double> &numerator,
                      const std::vector<double> &denom,
                      const std::vector<uint8_t> *mask, bool nonneg,
-                     int threads) {
+                     int threads,
+                     const std::vector<double> *globalDenom) {
   const size_t nvox = image.size();
   requireSize("numerator", numerator.size(), nvox);
   requireSize("denom", denom.size(), nvox);
   if (mask)
     requireSize("mask", mask->size(), nvox);
+  if (globalDenom)
+    requireSize("global_denom", globalDenom->size(), nvox);
   constexpr double eps = 1e-12;
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(std::max(1, threads))
@@ -50,7 +53,11 @@ void applyMlemUpdate(std::vector<double> &image,
     }
     const double denomEff = denom[idx];
     if (!(denomEff > 0.0)) {
-      image[idx] = 0.0;
+      // Zero subset sensitivity with positive global S: invisible to this
+      // subset only -> skip (keep) the voxel; S <= 0 zeroes as before.
+      if (!(globalDenom != nullptr && (*globalDenom)[idx] > 0.0)) {
+        image[idx] = 0.0;
+      }
       continue;
     }
     double value = image[idx] * (numerator[idx] / std::max(denomEff, eps));
