@@ -525,6 +525,16 @@ void ArgumentParser::registerHandlers() {
         return ArgumentParser::parseIterations(
             ArgumentParser::getRequiredArg(i, argc, argv, "-it"), a);
     }, {"-it"});
+    // Divisibility against the compact angle count is checked once the
+    // matrix metadata is known (recon loop, parseCompactSubsetSchedule).
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.subsetSchedule = ArgumentParser::getRequiredArg(i, argc, argv, "-subsets");
+        if (a.subsetSchedule.empty()) {
+            std::cerr << "Error: -subsets needs N or N1:i1,N2:i2,...\n";
+            return false;
+        }
+        return true;
+    }, {"-subsets"});
     auto threadsHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.numThreads = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
@@ -1424,6 +1434,9 @@ bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
         if (it.size() > 1)
             a.saveInterval = std::stoi(it[1]);
     }
+    const std::string subsets = cfg.getString("Algorithm", "subsets");
+    if (!subsets.empty())
+        a.subsetSchedule = subsets;
 
     // [Regularization] section
     std::string regT = cfg.getString("Regularization", "type");
@@ -2129,7 +2142,8 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
 
     std::cout << "[Algorithm]\n";
     std::cout << "name       = " << a.getAlgorithmName() << "\n";
-    std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n\n";
+    std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n";
+    std::cout << "subsets    = " << a.subsetSchedule << "\n\n";
 
     std::cout << "[Regularization]\n";
     std::cout << "type  = " << regTypeToString(a.reg.type) << "\n";
@@ -2332,6 +2346,9 @@ void ArgumentParser::printUsage() {
     std::cout << "                           Auto-loads config/algo_<name>.conf\n";
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
     std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
+    std::cout << "  -subsets <N|N1:i1,...>   Ordered subsets over compact angles (CSRB);\n";
+    std::cout << "                           N | compact angles, later N | earlier N,\n";
+    std::cout << "                           stage iterations sum to -it (default 1)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";

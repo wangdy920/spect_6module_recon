@@ -403,6 +403,10 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("opti", bsremActive ? "bsrem" : "mlem");
   json.integer("iterations", args.numIters);
   json.integer("save_interval", args.saveInterval);
+  // "N" or "N1:i1,N2:i2,..." over interleaved compact angles; "1" is the
+  // full-data update. Stage order and the per-subset sensitivities follow
+  // from the schedule (CompactSubsets.h), so the string is the identity.
+  json.string("subsets", args.subsetSchedule);
   if (bsremActive) {
     json.beginObject("bsrem");
     json.number("alpha0", args.bsrem_alpha0);

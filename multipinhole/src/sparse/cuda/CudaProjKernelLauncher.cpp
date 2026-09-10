@@ -407,18 +407,25 @@ void launchCompactBsremCurvatureKernel(const double *image,
 
 void launchCompactBsremUpdateKernel(
     double *image, const double *numer, const double *denom,
-    const double *gradient, const double *curvature, const double *kappa,
-    const uint8_t *mask, bool hasMask, size_t count,
-    const cuda::CompactBsremUpdateParams &params, uint32_t *flags,
-    cudaStream_t stream) {
+    const double *subsetDenom, const double *gradient,
+    const double *curvature, const double *kappa, const uint8_t *mask,
+    bool hasMask, size_t count, const cuda::CompactBsremUpdateParams &params,
+    uint32_t *flags, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
   if (count == 0)
     return;
+  if (subsetDenom == nullptr)
+    throw std::runtime_error(
+        "compact BSREM update needs the subset sensitivity (pass denom for a "
+        "full-data step).");
   CUdeviceptr imagePtr = reinterpret_cast<CUdeviceptr>(image);
   CUdeviceptr numerPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(numer));
   CUdeviceptr denomPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(denom));
+  CUdeviceptr subsetDenomPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<double *>(subsetDenom));
+  double subsetScale = params.subsetScale;
   CUdeviceptr gradPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<double *>(gradient));
   CUdeviceptr curvPtr =
@@ -439,10 +446,12 @@ void launchCompactBsremUpdateKernel(
   double clipMax = params.clipMax;
   int nonneg = params.nonneg ? 1 : 0;
   int zeroLow = params.zeroLowSensitivity ? 1 : 0;
-  void *args[] = {&imagePtr, &numerPtr, &denomPtr, &gradPtr, &curvPtr,
-                  &kappaPtr, &maskPtr,  &useMask,  &total,   &alpha,
-                  &beta,     &denomEps, &sMin,     &clip,    &clipMin,
-                  &clipMax,  &nonneg,   &zeroLow,  &flagsPtr};
+  void *args[] = {&imagePtr,    &numerPtr, &denomPtr, &subsetDenomPtr,
+                  &subsetScale, &gradPtr,  &curvPtr,  &kappaPtr,
+                  &maskPtr,     &useMask,  &total,    &alpha,
+                  &beta,        &denomEps, &sMin,     &clip,
+                  &clipMin,     &clipMax,  &nonneg,   &zeroLow,
+                  &flagsPtr};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
@@ -531,6 +540,8 @@ void launchCompactRatioBatchKernel(
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dSymIds));
   CUdeviceptr zMirrorsPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dZMirrors));
+  CUdeviceptr blockAnglesPtr =
+      reinterpret_cast<CUdeviceptr>(const_cast<int *>(commonParams.blockAngles));
   CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratioBatch);
   unsigned long long projectionCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -552,6 +563,7 @@ void launchCompactRatioBatchKernel(
                   const_cast<int *>(&commonParams.fullRaysPerAngle),
                   &symIdsPtr,
                   &zMirrorsPtr,
+                  &blockAnglesPtr,
                   &batchSize,
                   &ratioPtr,
                   &rowCount,
@@ -1117,6 +1129,7 @@ void launchCompactUnitRatioBatchKernel(
   CUdeviceptr weights = devPtr(rowWeights);
   CUdeviceptr symIds = devPtr(dSymIds);
   CUdeviceptr zMirrors = devPtr(dZMirrors);
+  CUdeviceptr blockAngles = devPtr(commonParams.blockAngles);
   CUdeviceptr ratio = devPtr(ratioBatch);
   unsigned long long projCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -1134,6 +1147,7 @@ void launchCompactUnitRatioBatchKernel(
                   const_cast<int *>(&commonParams.fullRaysPerAngle),
                   &symIds,
                   &zMirrors,
+                  &blockAngles,
                   &batchSize,
                   &ratio,
                   &rowCount};

@@ -40,6 +40,10 @@ struct ReconArgs {
     std::string badDetectorFile;   ///< Global numbers or hardware IDs; empty list disables masking
     bool badDetectorFileExplicit = false; ///< CLI path is resolved from cwd, not config dir
     int numIters = 50;            ///< Total iterations
+    /// Ordered-subset schedule over compact angles: "N" or "N1:i1,N2:i2,..."
+    /// (iterations summing to numIters, each N dividing the compact angle
+    /// count and the previous N). "1" is the full-data update (MLEM / BSREM).
+    std::string subsetSchedule = "1";
     int saveInterval = 5;         ///< Save every N iterations
     int numThreads = 8;           ///< Thread count
     std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI

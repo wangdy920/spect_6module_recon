@@ -425,7 +425,7 @@ public:
   // Numerator: bed b accumulates H_b^T(p_b / (H_b x_b + bg_b)) into
   // accumulator accumulatorBaseIndex + b from the refreshed branch batch.
   void executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const double *const *fullProjections,
+      const io::CSRSubsetView &matrix, const double *const *fullProjections,
       size_t fullProjectionCount,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
@@ -478,7 +478,7 @@ public:
     ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
     ensureProjDomainKernelsLoaded();
     const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
-        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+        matrix.row_ptr.data(), matrix.blockAngles, cached, commonRatioParams);
     const int rpa = commonRatioParams.compactRaysPerAngle;
     const size_t nvox = static_cast<size_t>(cols);
     dCsrbAttenBatch_.allocate(nvox * static_cast<size_t>(branchCount));
@@ -514,8 +514,8 @@ public:
               .get();
       for (int i = 0; i < chunk.angles; ++i, ++stage) {
         const int *dSlice = chunk.dSliceIndex.get() + i * branchCount;
-        cuda::CompactDeviceRatioParams angleParams = commonRatioParams;
-        angleParams.compactRowBase = commonRatioParams.compactRowBase + i * rpa;
+        const cuda::CompactDeviceRatioParams angleParams =
+            csrbAngleRatioParams(commonRatioParams, chunk, i);
 
         csrbAttenForwardTimers_[stage].recordStart(nullptr);
         launchCompactBranchBatchAttenScaleKernel(
@@ -573,7 +573,7 @@ public:
   // Sensitivity: H^T W 1 of one chunk for one bed's table, added to
   // accumulatorIndex (rowWeights may be null for W = 1).
   void executeCompactSensitivityBranchBatchAttenSpmvTAccumulateFloat(
-      const io::CSRView &matrix,
+      const io::CSRSubsetView &matrix,
       const cuda::CompactDeviceRatioParams &commonRatioParams,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const int *symIds, const int *zMirrors, int branchCount,
@@ -608,7 +608,7 @@ public:
     const double *dRowWeights = ensureCompactRowWeightsUploaded(
         rowWeights, rowWeights == nullptr ? 0 : fullProjectionCount);
     const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
-        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+        matrix.row_ptr.data(), matrix.blockAngles, cached, commonRatioParams);
     const int rpa = commonRatioParams.compactRaysPerAngle;
     const size_t nvox = static_cast<size_t>(cols);
     dBatchOnes_.allocate(static_cast<size_t>(rpa) *
@@ -624,8 +624,8 @@ public:
     csrbEnsureAttenTimersLocked(stages);
     for (int i = 0; i < chunk.angles; ++i) {
       const int *dSlice = chunk.dSliceIndex.get() + i * branchCount;
-      cuda::CompactDeviceRatioParams angleParams = commonRatioParams;
-      angleParams.compactRowBase = commonRatioParams.compactRowBase + i * rpa;
+      const cuda::CompactDeviceRatioParams angleParams =
+          csrbAngleRatioParams(commonRatioParams, chunk, i);
       // W per (row, branch) for rows with a full projection counterpart
       // (1 without weights), the same contract as the CSRQ unit ratio.
       launchCompactUnitRatioBatchKernel(
@@ -692,7 +692,10 @@ public:
     ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
     ensureProjDomainKernelsLoaded();
     const CsrbAttenChunk &chunk = csrbEnsureAttenChunkLocked(
-        matrix, cached, commonRatioParams.compactRowBase, commonRatioParams);
+        matrix.row_ptr,
+        consecutiveCompactAngles(commonRatioParams.compactRowBase, matrix.rows,
+                                 commonRatioParams.compactRaysPerAngle),
+        cached, commonRatioParams);
     const int rpa = commonRatioParams.compactRaysPerAngle;
     dCsrbAttenBatch_.allocate(nvox * static_cast<size_t>(branchCount));
     dBatchOutput_.allocate(count);
@@ -915,9 +918,9 @@ public:
   }
 
   void executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const double *const *fullProjections,
+      const io::CSRSubsetView &matrix, const double *const *fullProjections,
       size_t fullProjectionCount,
-      const cuda::CompactDeviceRatioParams &commonRatioParams,
+      const cuda::CompactDeviceRatioParams &commonRatioParamsIn,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const int *symIds, const int *zMirrors, int branchCount, int bedCount,
       cuda::CompactDeviceRatioTiming *ratioTimingOut,
@@ -935,13 +938,15 @@ public:
         cacheSlotBase + bedCount > spect::core::kMaxBeds) {
       throw std::runtime_error("compact bed-branch batch slots out of range.");
     }
-    if (commonRatioParams.symmetryMode != 45 &&
-        commonRatioParams.symmetryMode != 90) {
+    if (commonRatioParamsIn.symmetryMode != 45 &&
+        commonRatioParamsIn.symmetryMode != 90) {
       throw std::runtime_error(
           "compact bed-branch batch requires symmetryMode 45 or 90.");
     }
 
     const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
+    const cuda::CompactDeviceRatioParams commonRatioParams =
+        sliceRatioParams(commonRatioParamsIn, cached);
     const int64_t rows = cached.rows;
     const int64_t cols = cached.cols;
     for (int bed = 0; bed < bedCount; ++bed) {
@@ -1068,7 +1073,7 @@ public:
   }
 
   void executeCompactSensitivityBranchBatchSpmvTAccumulateFloat(
-      const io::CSRView &matrix,
+      const io::CSRSubsetView &matrix,
       const cuda::CompactDeviceTransformParams &commonTransformParams,
       const int *symIds, const int *zMirrors, int batchSize,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
@@ -1123,7 +1128,8 @@ public:
             "compact weighted sensitivity needs the row -> projection mapping.");
       }
       launchCompactUnitRatioBatchKernel(
-          dRowWeights, rowWeightCount, *commonRatioParams, dBatchSymIds_.get(),
+          dRowWeights, rowWeightCount,
+          sliceRatioParams(*commonRatioParams, cached), dBatchSymIds_.get(),
           dBatchZMirrors_.get(), batchSize, dBatchOnes_.get(),
           static_cast<size_t>(rows));
     } else {
@@ -1328,6 +1334,12 @@ private:
     DeviceArray<int32_t> dRowPtr;
     DeviceArray<int32_t> dColIdx;
     DeviceArray<float> dValues;
+    // Ordered-subset slice: absolute compact angle of every rowsPerBlock row
+    // block (host copy for the per-angle CTAC tables, device copy for the
+    // ratio kernels). Empty for a matrix uploaded from a plain CSRView.
+    std::vector<int> blockAngles;
+    int rowsPerBlock = 0;
+    DeviceArray<int> dBlockAngles;
     CuSparseMatGuard matA;
     mutable std::array<size_t, 2> spmvBufferSizes{};
     mutable std::array<bool, 2> spmvBufferSizeValid{};
@@ -1340,6 +1352,8 @@ private:
       cols = 0;
       nnz = 0;
       valueType = CachedMatrixValueType::Float;
+      blockAngles.clear();
+      rowsPerBlock = 0;
       matA.reset();
       spmvBufferSizes = {};
       spmvBufferSizeValid = {};
@@ -1353,13 +1367,15 @@ private:
       dRowPtr.reset();
       dColIdx.reset();
       dValues.reset();
+      dBlockAngles.reset();
     }
 
     CudaEventGuard compactUploadReady;
     bool compactUploadPending = false;
-    // Async upload staging for the (small, unregistered) rowPtr array: a
-    // pageable-source cudaMemcpyAsync host-blocks until the stream drains,
-    // which exposed whole-chunk copy times in the enqueue path.
+    // Async upload staging for the (small, unregistered) rowPtr array and the
+    // slice's block-angle table: a pageable-source cudaMemcpyAsync
+    // host-blocks until the stream drains, which exposed whole-chunk copy
+    // times in the enqueue path. Layout [rowPtr (rows + 1) | blockAngles].
     PinnedHostArray<int32_t> rowPtrStage;
     CudaEventGuard rowPtrStageDone;
     bool rowPtrStagePending = false;
@@ -1720,6 +1736,60 @@ private:
   }
 
 
+  // Slice upload: re-based row pointers and the block-angle table go through
+  // the pinned stage in one shot; the nnz segments are copied back to back
+  // straight from the (page-locked) chunk arrays.
+  void uploadIoCsrSubsetViewAsync(const io::CSRSubsetView &slice,
+                                  const MatrixCacheKey &key,
+                                  CachedMatrix *cache, cudaStream_t stream) {
+    cache->prepareForUpload();
+    cache->key = key;
+    cache->rows = slice.rows;
+    cache->cols = slice.cols;
+    cache->nnz = static_cast<int64_t>(slice.nnz);
+    cache->valueType = CachedMatrixValueType::Float;
+    cache->blockAngles = slice.blockAngles;
+    cache->rowsPerBlock = slice.rowsPerBlock;
+    const size_t rowPtrCount = static_cast<size_t>(slice.rows) + 1u;
+    const size_t blockCount = slice.blockAngles.size();
+    if (cache->rowPtrStagePending) {
+      CUDA_CHECK(cudaEventSynchronize(cache->rowPtrStageDone.get()));
+      cache->rowPtrStagePending = false;
+    }
+    cache->rowPtrStage.allocate(rowPtrCount + blockCount);
+    std::memcpy(cache->rowPtrStage.data(), slice.row_ptr.data(),
+                rowPtrCount * sizeof(int32_t));
+    std::memcpy(cache->rowPtrStage.data() + rowPtrCount,
+                slice.blockAngles.data(), blockCount * sizeof(int32_t));
+    cache->dRowPtr.copyFromHostAsync(cache->rowPtrStage.data(), rowPtrCount,
+                                     stream);
+    cache->dBlockAngles.copyFromHostAsync(
+        cache->rowPtrStage.data() + rowPtrCount, blockCount, stream);
+    cache->rowPtrStageDone.record(stream);
+    cache->rowPtrStagePending = true;
+    cache->dColIdx.allocate(static_cast<size_t>(slice.nnz));
+    cache->dValues.allocate(static_cast<size_t>(slice.nnz));
+    size_t offset = 0;
+    for (const io::CSRSegment &segment : slice.segments) {
+      const size_t count = static_cast<size_t>(segment.nnz);
+      if (count == 0) {
+        continue;
+      }
+      CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + offset, segment.col_idx,
+                                 count * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                 stream));
+      CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + offset, segment.val,
+                                 count * sizeof(float), cudaMemcpyHostToDevice,
+                                 stream));
+      offset += count;
+    }
+    if (offset != static_cast<size_t>(slice.nnz)) {
+      throw std::runtime_error(
+          "compact subset slice segments do not add up to its nnz.");
+    }
+    createMatA(cache);
+  }
+
   void validateIoCsrViewForUpload(const io::CSRView &matrix) const {
     if (!matrix.valid()) {
       throw std::runtime_error(
@@ -1732,6 +1802,22 @@ private:
           "CUDA sparse backend only supports nnz representable as int32.");
     }
     if (matrix.cols > std::numeric_limits<int32_t>::max()) {
+      throw std::runtime_error(
+          "CUDA sparse backend only supports column dimensions representable as int32.");
+    }
+  }
+
+  void validateIoCsrSubsetViewForUpload(const io::CSRSubsetView &slice) const {
+    if (!slice.valid() || slice.rows == 0 || slice.sourceRowPtr == nullptr) {
+      throw std::runtime_error(
+          "Invalid or empty io::CSRSubsetView passed to CUDA sparse backend.");
+    }
+    if (slice.row_ptr.back() != slice.nnz ||
+        slice.nnz > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+      throw std::runtime_error(
+          "compact subset slice nnz must match its row pointers and fit int32.");
+    }
+    if (slice.cols > std::numeric_limits<int32_t>::max()) {
       throw std::runtime_error(
           "CUDA sparse backend only supports column dimensions representable as int32.");
     }
@@ -1811,6 +1897,24 @@ private:
     slot->compactUploadPending = false;
   }
 
+  // Slot for a synchronous (cache-miss) upload. The primary slot unless a
+  // prefetch is in flight there: the miss is then the matrix *before* the
+  // prefetched one (the pass has just started, or slices are streamed for
+  // the first time), and overwriting the primary slot would discard that
+  // prefetch and make every following matrix miss as well. A free resident
+  // slot takes the upload instead and is bound to the key.
+  CachedMatrix *selectCompactSyncUploadTarget() {
+    if (!cache_.compactUploadPending || !residentMatrixSetCache_.initialized) {
+      return &cache_;
+    }
+    for (auto &slot : residentMatrixSetCache_.slots) {
+      if (slot != nullptr && !slot->compactUploadPending) {
+        return slot.get();
+      }
+    }
+    return &cache_;
+  }
+
   const CachedMatrix &ensureCompactFloatMatrixUploaded(
       const io::CSRView &matrix) {
     const MatrixCacheKey key = makeCacheKey(matrix);
@@ -1820,14 +1924,54 @@ private:
       return *slot;
     }
     validateIoCsrViewForUpload(matrix);
-    waitCompactSlotUpload(&cache_, nullptr);
+    CachedMatrix *target = selectCompactSyncUploadTarget();
+    waitCompactSlotUpload(target, nullptr);
     const auto uploadStart = std::chrono::steady_clock::now();
-    uploadIoCsrView(matrix, key, &cache_);
+    uploadIoCsrView(matrix, key, target);
+    bindCompactSlotKey(target, key);
     noteCudaCompactMatrixUpload(
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
                                       uploadStart)
             .count());
-    return cache_;
+    return *target;
+  }
+
+  // Slice counterpart: a prefetched slice is found by key; otherwise the
+  // slice is uploaded synchronously. Returns the slot with its block-angle
+  // table resident.
+  const CachedMatrix &ensureCompactFloatMatrixUploaded(
+      const io::CSRSubsetView &slice) {
+    const MatrixCacheKey key = makeCacheKey(slice);
+    if (CachedMatrix *slot = findCompactFloatSlot(key)) {
+      waitCompactSlotUpload(slot, nullptr);
+      noteCudaCompactMatrixReuseHit();
+      return *slot;
+    }
+    validateIoCsrSubsetViewForUpload(slice);
+    CachedMatrix *target = selectCompactSyncUploadTarget();
+    waitCompactSlotUpload(target, nullptr);
+    const auto uploadStart = std::chrono::steady_clock::now();
+    uploadIoCsrSubsetViewAsync(slice, key, target, nullptr);
+    CUDA_CHECK(cudaStreamSynchronize(nullptr));
+    bindCompactSlotKey(target, key);
+    noteCudaCompactMatrixUpload(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      uploadStart)
+            .count());
+    return *target;
+  }
+
+  // Ratio parameters for a pass over `cached`: a slice carries its own block
+  // -> angle table; a CSRView upload keeps the caller's contiguous mapping.
+  static cuda::CompactDeviceRatioParams sliceRatioParams(
+      const cuda::CompactDeviceRatioParams &common, const CachedMatrix &cached) {
+    cuda::CompactDeviceRatioParams p = common;
+    p.blockAngles = cached.blockAngles.empty() ? nullptr : cached.dBlockAngles.get();
+    if (p.blockAngles != nullptr && cached.rowsPerBlock != p.compactRaysPerAngle) {
+      throw std::runtime_error(
+          "compact slice rows per block does not match compactRaysPerAngle.");
+    }
+    return p;
   }
 
 
@@ -2046,6 +2190,60 @@ public:
       *imageAllZero = (flags & 16U) == 0;
   }
 
+  // Ordered subsets: S_0..S_{count-1} resident as one [count][nvox] array.
+  void setCompactSubsetSensitivities(const double *const *hostSensitivities,
+                                     int count, size_t globalImageCount) {
+    ensureCudaRuntimeAvailable();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count <= 0) {
+      dCompactSubsetDenom_.reset();
+      compactSubsetDenomCount_ = 0;
+      compactSubsetDenomStride_ = 0;
+      return;
+    }
+    if (hostSensitivities == nullptr || globalImageCount == 0) {
+      throw std::runtime_error("compact subset sensitivities are empty.");
+    }
+    const size_t total = static_cast<size_t>(count) * globalImageCount;
+    dCompactSubsetDenom_.reset();
+    dCompactSubsetDenom_.allocate(total);
+    const auto inputStart = std::chrono::steady_clock::now();
+    for (int k = 0; k < count; ++k) {
+      if (hostSensitivities[k] == nullptr) {
+        throw std::runtime_error("compact subset sensitivity is null.");
+      }
+      CUDA_CHECK(cudaMemcpy(dCompactSubsetDenom_.get() +
+                                static_cast<size_t>(k) * globalImageCount,
+                            hostSensitivities[k],
+                            globalImageCount * sizeof(double),
+                            cudaMemcpyHostToDevice));
+    }
+    compactSubsetDenomCount_ = count;
+    compactSubsetDenomStride_ = globalImageCount;
+    noteCudaCompactInputH2D(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      inputStart)
+            .count());
+  }
+
+  // Sensitivity that divides / offsets this update: the global denom for a
+  // full-data step (subsetIndex < 0), else resident subset sensitivity k.
+  const double *compactUpdateSensitivityLocked(int subsetIndex,
+                                               size_t globalImageCount) const {
+    if (subsetIndex < 0) {
+      return dCompactDenom_.get();
+    }
+    if (subsetIndex >= compactSubsetDenomCount_ ||
+        compactSubsetDenomStride_ != globalImageCount ||
+        dCompactSubsetDenom_.get() == nullptr) {
+      throw std::runtime_error(
+          "compact subset sensitivity " + std::to_string(subsetIndex) +
+          " is not resident (setCompactSubsetSensitivitiesCUDA).");
+    }
+    return dCompactSubsetDenom_.get() +
+           static_cast<size_t>(subsetIndex) * globalImageCount;
+  }
+
   void finishCompactResidentMlemIteration(
       size_t globalImageCount, int globalNz, const int *bedZStarts,
       int bedCount, bool flipLocalZ,
@@ -2055,7 +2253,7 @@ public:
       const std::vector<double> *castorKy,
       const std::vector<double> *castorKz,
       bool requirePositiveNumerator, bool refreshStaticInputs,
-      bool *imageAllZero) {
+      bool *imageAllZero, int subsetIndex) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     accumulateCompactResidentDataTermLocked(
@@ -2067,9 +2265,9 @@ public:
                           sizeof(uint32_t)));
     launchCompactMlemUpdateKernel(
         dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
-        dCompactDenom_.get(), mask == nullptr ? nullptr : dCompactMask_.get(),
-        mask != nullptr, globalImageCount, dCompactIterationFlags_.get(),
-        1e-12);
+        compactUpdateSensitivityLocked(subsetIndex, globalImageCount),
+        mask == nullptr ? nullptr : dCompactMask_.get(), mask != nullptr,
+        globalImageCount, dCompactIterationFlags_.get(), 1e-12);
     checkCompactResidentUpdateFlagsLocked(requirePositiveNumerator,
                                           imageAllZero, "MLEM");
   }
@@ -2109,13 +2307,15 @@ public:
       const std::vector<double> *castorKz,
       const cuda::CompactBsremUpdateParams &params,
       bool requirePositiveNumerator, bool refreshStaticInputs,
-      bool *imageAllZero) {
+      bool *imageAllZero, int subsetIndex) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     accumulateCompactResidentDataTermLocked(
         globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
         commonTransformParams, denom, mask, castorKx, castorKy, castorKz,
         refreshStaticInputs);
+    const double *dSubsetDenom =
+        compactUpdateSensitivityLocked(subsetIndex, globalImageCount);
 
     const double *dKappa = nullptr;
     if (params.kappa != nullptr) {
@@ -2153,9 +2353,10 @@ public:
                           sizeof(uint32_t)));
     launchCompactBsremUpdateKernel(
         dCompactGlobalImage_.get(), dCompactGlobalNumer_.get(),
-        dCompactDenom_.get(), params.deviceGradient, dCurvature, dKappa,
-        mask == nullptr ? nullptr : dCompactMask_.get(), mask != nullptr,
-        globalImageCount, params, dCompactIterationFlags_.get());
+        dCompactDenom_.get(), dSubsetDenom, params.deviceGradient, dCurvature,
+        dKappa, mask == nullptr ? nullptr : dCompactMask_.get(),
+        mask != nullptr, globalImageCount, params,
+        dCompactIterationFlags_.get());
     checkCompactResidentUpdateFlagsLocked(requirePositiveNumerator,
                                           imageAllZero, "BSREM");
   }
@@ -2196,6 +2397,9 @@ public:
     dCompactBedSecondary_.reset();
     dCompactGlobalNumer_.reset();
     dCompactDenom_.reset();
+    dCompactSubsetDenom_.reset();
+    compactSubsetDenomCount_ = 0;
+    compactSubsetDenomStride_ = 0;
     dCompactMask_.reset();
     dCompactIterationFlags_.reset();
     for (auto &projection : dCompactProjectionInput_)
@@ -2830,12 +3034,12 @@ public:
         count * sizeof(float), false);
   }
 
-  void prefetchCompactFloatMatrix(const io::CSRView &next,
-                                  const io::CSRView &current) {
+  void prefetchCompactFloatMatrix(const io::CSRSubsetView &next,
+                                  const io::CSRSubsetView &current) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
-    validateIoCsrViewForUpload(next);
-    validateIoCsrViewForUpload(current);
+    validateIoCsrSubsetViewForUpload(next);
+    validateIoCsrSubsetViewForUpload(current);
     const MatrixCacheKey nextKey = makeCacheKey(next);
     const MatrixCacheKey currentKey = makeCacheKey(current);
     if (findCompactFloatSlot(nextKey) != nullptr) {
@@ -2846,8 +3050,8 @@ public:
       return;
     }
     const auto uploadStart = std::chrono::steady_clock::now();
-    uploadIoCsrViewAsync(next, nextKey, target,
-                         compactUploadStream_.get());
+    uploadIoCsrSubsetViewAsync(next, nextKey, target,
+                               compactUploadStream_.get());
     bindCompactSlotKey(target, nextKey);
     target->compactUploadReady.record(compactUploadStream_.get());
     target->compactUploadPending = true;
@@ -3023,28 +3227,21 @@ private:
     return maxAngles;
   }
 
-  // (compact angle, branch) -> slice table of one chunk of whole compact
-  // angles [rowBase, rowBase + rows) for the current branch ids, appended to
-  // sliceIndex ([angle][branchCount] ints, -1 = no full angle); the distinct
-  // full angles the chunk reaches go to fullAngles in slice order. Returns
-  // the angle count. Shared by the CSRQ and CSRB attenuated passes.
-  int buildAttenChunkSliceTableLocked(const cuda::CompactDeviceRatioParams &p,
-                                      int rowBase, int rows,
-                                      std::vector<int> &sliceIndex,
-                                      std::vector<int> &fullAngles) const {
-    if (p.compactRaysPerAngle <= 0 || rows % p.compactRaysPerAngle != 0 ||
-        rowBase % p.compactRaysPerAngle != 0) {
-      throw std::runtime_error(
-          "compact CTAC requires chunks made of whole compact angles.");
-    }
-    const int angles = rows / p.compactRaysPerAngle;
-    const int firstAngle = rowBase / p.compactRaysPerAngle;
+  // (compact angle, branch) -> slice table of the given compact angles (the
+  // row blocks of one chunk or chunk slice, in row order) for the current
+  // branch ids, appended to sliceIndex ([angle][branchCount] ints, -1 = no
+  // full angle); the distinct full angles reached go to fullAngles in slice
+  // order. Shared by the CSRQ and CSRB attenuated passes.
+  void buildAttenSliceTableLocked(const cuda::CompactDeviceRatioParams &p,
+                                  const std::vector<int> &compactAngles,
+                                  std::vector<int> &sliceIndex,
+                                  std::vector<int> &fullAngles) const {
     const int branchCount = static_cast<int>(batchSymIdsHost_.size());
     fullAngles.clear();
-    for (int i = 0; i < angles; ++i) {
+    for (const int compactAngle : compactAngles) {
       for (int k = 0; k < branchCount; ++k) {
         const int fullAngle =
-            csrqAttenFullAngle(p, firstAngle + i, batchSymIdsHost_[k]);
+            csrqAttenFullAngle(p, compactAngle, batchSymIdsHost_[k]);
         int slice = -1;
         if (fullAngle >= 0) {
           auto it = std::find(fullAngles.begin(), fullAngles.end(), fullAngle);
@@ -3057,7 +3254,32 @@ private:
         sliceIndex.push_back(slice);
       }
     }
+  }
+
+  // Compact angles of a chunk of whole consecutive angles
+  // [rowBase, rowBase + rows).
+  static std::vector<int> consecutiveCompactAngles(int rowBase, int rows,
+                                                   int compactRaysPerAngle) {
+    if (compactRaysPerAngle <= 0 || rows % compactRaysPerAngle != 0 ||
+        rowBase % compactRaysPerAngle != 0) {
+      throw std::runtime_error(
+          "compact CTAC requires chunks made of whole compact angles.");
+    }
+    std::vector<int> angles(static_cast<size_t>(rows / compactRaysPerAngle));
+    const int firstAngle = rowBase / compactRaysPerAngle;
+    for (size_t i = 0; i < angles.size(); ++i)
+      angles[i] = firstAngle + static_cast<int>(i);
     return angles;
+  }
+
+  int buildAttenChunkSliceTableLocked(const cuda::CompactDeviceRatioParams &p,
+                                      int rowBase, int rows,
+                                      std::vector<int> &sliceIndex,
+                                      std::vector<int> &fullAngles) const {
+    const std::vector<int> angles =
+        consecutiveCompactAngles(rowBase, rows, p.compactRaysPerAngle);
+    buildAttenSliceTableLocked(p, angles, sliceIndex, fullAngles);
+    return static_cast<int>(angles.size());
   }
 
   // Per-matrix CTAC plan: for every chunk the (compact angle, branch) -> slice
@@ -3095,11 +3317,12 @@ private:
     return plan;
   }
 
-  // CSRB counterpart for one uploaded chunk (row range [compactRowBase,
-  // compactRowBase + rows)): slice table plus, per compact angle, the
-  // zero-based sub-CSR row pointers and nnz range so cuSPARSE can address the
-  // angle's rows as a matrix of their own. Cached per chunk row base and
-  // revalidated against the chunk identity, geometry and branch ids.
+  // CSRB counterpart for one uploaded chunk or chunk slice: slice table plus,
+  // per compact angle (row block), the zero-based sub-CSR row pointers and
+  // nnz range so cuSPARSE can address the angle's rows as a matrix of their
+  // own. compactAngles[i] is the absolute compact angle of block i (not
+  // consecutive for an ordered-subset slice). Cached per (chunk, subset tag)
+  // and revalidated against the uploaded matrix, geometry and branch ids.
   struct CsrbAttenChunk {
     MatrixCacheKey matrixKey;
     int rows = 0;
@@ -3109,6 +3332,7 @@ private:
     int fullNumAngles = 0;
     std::vector<int> symIds;
     int angles = 0;
+    std::vector<int> compactAngles;
     std::vector<int> fullAngles;
     std::vector<int64_t> nnzOffset;   // per angle
     std::vector<int64_t> nnzCount;    // per angle
@@ -3264,17 +3488,26 @@ private:
     grow(csrbAttenTransformTimers_);
   }
 
+  // hostRowPtr: the uploaded matrix's (re-based) row pointers, rows + 1
+  // entries; compactAngles: absolute compact angle of every row block.
   const CsrbAttenChunk &csrbEnsureAttenChunkLocked(
-      const io::CSRView &matrix, const CachedMatrix &cached,
-      int compactRowBase, const cuda::CompactDeviceRatioParams &p) {
-    CsrbAttenChunk &chunk = csrbAttenChunks_[compactRowBase];
+      const uint32_t *hostRowPtr, const std::vector<int> &compactAngles,
+      const CachedMatrix &cached, const cuda::CompactDeviceRatioParams &p) {
+    CsrbAttenChunk &chunk =
+        csrbAttenChunks_[std::make_pair(cached.key.rowPtr, cached.key.tag)];
     if (chunk.rows == static_cast<int>(cached.rows) &&
         chunk.matrixKey == cached.key && chunk.symmetryMode == p.symmetryMode &&
         chunk.compactRaysPerAngle == p.compactRaysPerAngle &&
         chunk.compactNumAngles == p.compactNumAngles &&
         chunk.fullNumAngles == p.fullNumAngles &&
+        chunk.compactAngles == compactAngles &&
         chunk.symIds == batchSymIdsHost_ && chunk.dSubRowPtr.get() != nullptr) {
       return chunk;
+    }
+    const int rpa = p.compactRaysPerAngle;
+    if (rpa <= 0 || static_cast<int64_t>(compactAngles.size()) * rpa != cached.rows) {
+      throw std::runtime_error(
+          "compact CTAC requires a matrix made of whole compact angles.");
     }
     chunk.matrixKey = cached.key;
     chunk.rows = static_cast<int>(cached.rows);
@@ -3283,24 +3516,23 @@ private:
     chunk.compactNumAngles = p.compactNumAngles;
     chunk.fullNumAngles = p.fullNumAngles;
     chunk.symIds = batchSymIdsHost_;
+    chunk.compactAngles = compactAngles;
+    chunk.angles = static_cast<int>(compactAngles.size());
     std::vector<int> sliceIndex;
-    chunk.angles = buildAttenChunkSliceTableLocked(p, compactRowBase, chunk.rows,
-                                                   sliceIndex, chunk.fullAngles);
+    buildAttenSliceTableLocked(p, compactAngles, sliceIndex, chunk.fullAngles);
     chunk.dSliceIndex.copyFromHost(sliceIndex.data(), sliceIndex.size());
-    const int rpa = p.compactRaysPerAngle;
     std::vector<int32_t> subRowPtr(static_cast<size_t>(chunk.angles) *
                                    (static_cast<size_t>(rpa) + 1u));
     chunk.nnzOffset.assign(static_cast<size_t>(chunk.angles), 0);
     chunk.nnzCount.assign(static_cast<size_t>(chunk.angles), 0);
     for (int i = 0; i < chunk.angles; ++i) {
-      const int64_t base = matrix.row_ptr[static_cast<size_t>(i) * rpa];
-      const int64_t end = matrix.row_ptr[static_cast<size_t>(i + 1) * rpa];
+      const int64_t base = hostRowPtr[static_cast<size_t>(i) * rpa];
+      const int64_t end = hostRowPtr[static_cast<size_t>(i + 1) * rpa];
       chunk.nnzOffset[static_cast<size_t>(i)] = base;
       chunk.nnzCount[static_cast<size_t>(i)] = end - base;
       for (int j = 0; j <= rpa; ++j) {
         const int64_t shifted =
-            static_cast<int64_t>(
-                matrix.row_ptr[static_cast<size_t>(i) * rpa + j]) -
+            static_cast<int64_t>(hostRowPtr[static_cast<size_t>(i) * rpa + j]) -
             base;
         if (shifted < 0 || shifted > std::numeric_limits<int32_t>::max()) {
           throw std::runtime_error(
@@ -3312,6 +3544,19 @@ private:
     }
     chunk.dSubRowPtr.copyFromHost(subRowPtr.data(), subRowPtr.size());
     return chunk;
+  }
+
+  // Per-angle ratio parameters of block i of a CTAC chunk: the angle's rows
+  // are addressed as their own rpa-row matrix, so the contiguous mapping with
+  // compactRowBase = angle * rpa applies.
+  static cuda::CompactDeviceRatioParams csrbAngleRatioParams(
+      const cuda::CompactDeviceRatioParams &common, const CsrbAttenChunk &chunk,
+      int i) {
+    cuda::CompactDeviceRatioParams p = common;
+    p.compactRowBase =
+        chunk.compactAngles[static_cast<size_t>(i)] * chunk.compactRaysPerAngle;
+    p.blockAngles = nullptr;
+    return p;
   }
 
   // Page-locks a caller-owned factor table once (cached by pointer) so its
@@ -3684,6 +3929,10 @@ private:
   size_t compactResidentImageCount_ = 0;
   DeviceArray<double> dCompactGlobalNumer_;
   DeviceArray<double> dCompactDenom_;
+  // Ordered-subset sensitivities [count][stride] (setCompactSubsetSensitivities).
+  DeviceArray<double> dCompactSubsetDenom_;
+  int compactSubsetDenomCount_ = 0;
+  size_t compactSubsetDenomStride_ = 0;
   DeviceArray<uint8_t> dCompactMask_;
   DeviceArray<uint32_t> dCompactIterationFlags_;
   size_t compactResidentStaticCount_ = 0;
@@ -3756,9 +4005,9 @@ private:
   // Packed [nvox][8] backward with float4 atomics (sm_120 trial; default from
   // SPECT_CSRQ_BACKWARD_PACKED=1, tests toggle it directly).
   bool csrqPackedBackward_ = csrqPackedBackwardDefault();
-  // CSRB CTAC: per-chunk slice tables and sub-CSR row pointers, keyed by the
-  // chunk's compact row base (revalidated against the uploaded chunk).
-  std::map<int, CsrbAttenChunk> csrbAttenChunks_;
+  // CSRB CTAC: per-(chunk, subset tag) slice tables and sub-CSR row pointers
+  // (revalidated against the uploaded matrix).
+  std::map<std::pair<const void *, uint64_t>, CsrbAttenChunk> csrbAttenChunks_;
   // CSRB CTAC scratch: attenuated [branch][voxel] batch input of one bed and
   // per-(bed, compact angle) stage timers.
   DeviceArray<float> dCsrbAttenBatch_;

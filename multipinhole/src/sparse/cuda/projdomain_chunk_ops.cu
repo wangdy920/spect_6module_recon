@@ -106,6 +106,24 @@ extern "C" __global__ void compute_compact_ratio_chunk(
   ratio[index] = static_cast<float>(fullProjection[fullIndex] / denom);
 }
 
+// Compact row -> (absolute compact angle, ray within the angle). blockAngles
+// (one entry per compactRaysPerAngle row block) serves ordered-subset slices
+// whose blocks are not consecutive angles; null keeps the contiguous chunk
+// mapping from compactRowBase.
+__device__ __forceinline__ void compact_row_angle(
+    int compactRowBase, int rowInChunk, int compactRaysPerAngle,
+    const int *blockAngles, int *compactAngle, int *rr) {
+  if (blockAngles != nullptr) {
+    const int block = rowInChunk / compactRaysPerAngle;
+    *compactAngle = blockAngles[block];
+    *rr = rowInChunk - block * compactRaysPerAngle;
+  } else {
+    const int compactRow = compactRowBase + rowInChunk;
+    *compactAngle = compactRow / compactRaysPerAngle;
+    *rr = compactRow - *compactAngle * compactRaysPerAngle;
+  }
+}
+
 extern "C" __global__ void compute_compact_ratio_chunk_batch(
     const float *yhatBatch, const double *fullProjection,
     const double *fullBackground,
@@ -113,7 +131,8 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, const int *symIds, const int *zMirrors,
-    int batchSize, float *ratioBatch, unsigned long long rows, double eps) {
+    const int *blockAngles, int batchSize, float *ratioBatch,
+    unsigned long long rows, double eps) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -126,9 +145,10 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
   const int symId = symIds[branch];
   const int zMirror = zMirrors[branch];
 
-  const int compactRow = compactRowBase + static_cast<int>(rowInBranch);
-  const int compactAngle = compactRow / compactRaysPerAngle;
-  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  int compactAngle = 0;
+  int rr = 0;
+  compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
+                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -204,8 +224,8 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
     int symmetryMode, int compactRowBase, int compactRaysPerAngle,
     int compactNumAngles, int detNx, int detNz, int compactDetZ,
     int fullNumAngles, int fullRaysPerAngle, const int *symIds,
-    const int *zMirrors, int batchSize, float *ratioBatch,
-    unsigned long long rows) {
+    const int *zMirrors, const int *blockAngles, int batchSize,
+    float *ratioBatch, unsigned long long rows) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -218,9 +238,10 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
   const int symId = symIds[branch];
   const int zMirror = zMirrors[branch];
 
-  const int compactRow = compactRowBase + static_cast<int>(rowInBranch);
-  const int compactAngle = compactRow / compactRaysPerAngle;
-  const int rr = compactRow - compactAngle * compactRaysPerAngle;
+  int compactAngle = 0;
+  int rr = 0;
+  compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
+                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -376,20 +397,22 @@ extern "C" __global__ void compact_bsrem_curvature(
 }
 
 // BSREM-II relative update, one voxel per thread, same arithmetic as the host
-// applyBsremUpdate (subset = 1, so the subset and global sensitivities are the
-// same array):
-//   lambda = beta * kappa;  v = (q - S - lambda * r) / (S + lambda * max(c,0) + eps)
-//   u = clip(alpha * v);     x <- max(x, 1e-12) * (1 + u), floored per nonneg
+// applyBsremUpdate. denom is the global sensitivity S (scaling), subsetDenom
+// the sensitivity S_m of the rows in this update (== denom for a full-data
+// step) and subsetScale the subset count M (Ahn & Fessler 2003, D = M x / S):
+//   lambda = beta * kappa
+//   v = (M (q_m - S_m) - lambda * r) / (S + lambda * max(c,0) + eps)
+//   u = clip(alpha * v);  x <- max(x, 1e-12) * (1 + u), floored per nonneg
 // gradient / curvature / kappa / mask may be null. Flags share the MLEM
 // layout: 1 non-finite numerator, 2 positive numerator seen, 4 negative
 // numerator seen, 8 non-finite image, 16 nonzero image.
 extern "C" __global__ void compact_bsrem_update(
     double *image, const double *numer, const double *denom,
-    const double *gradient, const double *curvature, const double *kappa,
-    const unsigned char *mask, int hasMask, unsigned long long count,
-    double alpha, double beta, double denomEps, double sMin, int clip,
-    double clipMin, double clipMax, int nonneg, int zeroLowSensitivity,
-    unsigned int *flags) {
+    const double *subsetDenom, double subsetScale, const double *gradient,
+    const double *curvature, const double *kappa, const unsigned char *mask,
+    int hasMask, unsigned long long count, double alpha, double beta,
+    double denomEps, double sMin, int clip, double clipMin, double clipMax,
+    int nonneg, int zeroLowSensitivity, unsigned int *flags) {
   __shared__ unsigned int blockFlags;
   if (threadIdx.x == 0) blockFlags = 0;
   __syncthreads();
@@ -417,7 +440,9 @@ extern "C" __global__ void compact_bsrem_update(
         const double r = gradient != nullptr ? gradient[index] : 0.0;
         double c = curvature != nullptr ? curvature[index] : 0.0;
         if (c < 0.0) c = 0.0;
-        const double v = (n - s - lambda * r) / (s + lambda * c + denomEps);
+        const double sSub = subsetDenom[index];
+        const double v = (subsetScale * (n - sSub) - lambda * r) /
+                         (s + lambda * c + denomEps);
         double u = alpha * v;
         if (clip != 0) {
           if (u > clipMax) u = clipMax;

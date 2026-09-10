@@ -77,6 +77,12 @@ struct CompactChunkCSRData {
 
   CSRView view() const;          // CSRB only; throws for CSRQ
   CompactRunU16View runView() const; // CSRQ only; throws for CSRB
+  // CSRB only: the rows of the given absolute compact angles (strictly
+  // ascending) that fall inside this chunk, as an ordered-subset slice with
+  // adjacent angles merged into one segment. Empty when none do. tag
+  // identifies the subset for device caching (0 = whole chunk).
+  CSRSubsetView subsetView(const std::vector<int> &compactAngles,
+                           int raysPerAngle, uint64_t tag) const;
   const uint32_t *colIdxData() const;
   const float *valuesData() const;
   size_t colIdxCount() const;

@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -814,27 +815,96 @@ struct CompactBranchDescriptor {
   bool zMirror = false;
 };
 
-void prefetchNextCompactChunk(
-    const spect::io::CompactChunkCSRDirectory &chunks, size_t chunkIndex,
-    size_t chunkCount, bool reverseChunkOrder,
-    const spect::io::CSRView &current) {
+// --- Ordered-subset slices -----------------------------------------------------
+// The streaming unit of every CSRB pass is the (chunk, subset) slice: the
+// chunk's rows of the subset's compact angles. The full-data pass is the
+// subset of all angles (count 1), whose slice is the whole chunk with tag 0
+// so it shares the device copy of the chunk's own CSRView.
+
+struct CompactSubsetSelection {
+  std::vector<int> angles; // absolute compact angles, ascending
+  uint64_t tag = 0;
+  int count = 1;
+  int index = 0;
+};
+
+CompactSubsetSelection selectCompactSubset(
+    const spect::io::CompactSymmetryMetadata &meta,
+    const CompactSubsetSpec *subset) {
+  CompactSubsetSelection out;
+  CompactSubsetSpec spec;
+  if (subset != nullptr) {
+    spec = *subset;
+  }
+  out.angles = compactSubsetAngles(meta.compactNumAngles, spec);
+  out.count = spec.count;
+  out.index = spec.index;
+  out.tag = spec.count <= 1
+                ? 0u
+                : (static_cast<uint64_t>(spec.count) << 32) |
+                      static_cast<uint64_t>(spec.index);
+  return out;
+}
+
+spect::io::CSRSubsetView compactChunkSlice(
+    const spect::io::CompactChunkCSRData &chunk,
+    const spect::io::CompactSymmetryMetadata &meta,
+    const CompactSubsetSelection &subset) {
+  return chunk.subsetView(subset.angles, meta.compactRaysPerAngle, subset.tag);
+}
+
+// First non-empty slice of `subset` walking the chunks from `start` in the
+// given direction (a subset with fewer angles than a chunk has no rows in
+// some chunks). Returns false when none is left.
+bool nextNonEmptyCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
+                              const spect::io::CompactSymmetryMetadata &meta,
+                              const CompactSubsetSelection &subset,
+                              size_t start, bool reverseChunkOrder,
+                              spect::io::CSRSubsetView &slice) {
+  const size_t chunkCount = chunks.chunks().size();
+  for (size_t index = start; index < chunkCount;
+       index = reverseChunkOrder ? index - 1 : index + 1) {
+    slice = compactChunkSlice(*chunks.loadChunk(index), meta, subset);
+    if (!slice.empty()) {
+      return true;
+    }
+    if (reverseChunkOrder && index == 0) {
+      break;
+    }
+  }
+  return false;
+}
+
+// Prefetch behind the slice being consumed: the next non-empty slice of this
+// pass, or — after the last one — the first slice of the next pass, which
+// walks the chunks in the opposite order (the caller flips
+// reverseChunkOrder between passes) over `nextSubset`.
+void prefetchNextCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
+                              const spect::io::CompactSymmetryMetadata &meta,
+                              size_t chunkIndex, bool reverseChunkOrder,
+                              const CompactSubsetSelection &subset,
+                              const CompactSubsetSelection *nextSubset,
+                              const spect::io::CSRSubsetView &current) {
+  const size_t chunkCount = chunks.chunks().size();
   if (chunkCount == 0) {
     return;
   }
-  size_t nextIndex = 0;
-  if (reverseChunkOrder) {
-    if (chunkIndex == 0) {
-      return;
-    }
-    nextIndex = chunkIndex - 1;
-  } else {
-    if (chunkIndex + 1 >= chunkCount) {
-      return;
-    }
-    nextIndex = chunkIndex + 1;
+  spect::io::CSRSubsetView next;
+  const bool inPass = reverseChunkOrder ? chunkIndex > 0
+                                        : chunkIndex + 1 < chunkCount;
+  if (inPass &&
+      nextNonEmptyCompactSlice(chunks, meta, subset,
+                               reverseChunkOrder ? chunkIndex - 1 : chunkIndex + 1,
+                               reverseChunkOrder, next)) {
+    prefetchCompactFloatMatrixCUDA(next, current);
+    return;
   }
-  const auto next = chunks.loadChunk(nextIndex);
-  prefetchCompactFloatMatrixCUDA(next->view(), current);
+  if (nextSubset != nullptr &&
+      nextNonEmptyCompactSlice(chunks, meta, *nextSubset,
+                               reverseChunkOrder ? 0 : chunkCount - 1,
+                               !reverseChunkOrder, next)) {
+    prefetchCompactFloatMatrixCUDA(next, current);
+  }
 }
 
 std::vector<CompactBranchDescriptor>
@@ -1152,7 +1222,7 @@ bool computePoissonSensitivityCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing, const uint16_t *attFactors,
-    const double *rowWeights) {
+    const double *rowWeights, const CompactSubsetSpec *subset) {
   validateChannels(channels, meta, "sensitivity");
   warmCompactChunks(channels);
 
@@ -1160,9 +1230,16 @@ bool computePoissonSensitivityCUDA(
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
   const auto branches = enumerateCompactBranches(meta);
+  const CompactSubsetSelection subsetSelection =
+      selectCompactSubset(meta, subset);
   std::fill(denom, denom + nvox, 0.0);
 
   if (isCsrqChannelSet(channels)) {
+    if (subsetSelection.count > 1) {
+      throw std::runtime_error(
+          "ordered subsets are implemented for CSRB matrices only; CSRQ "
+          "sensitivity cannot be restricted to a subset.");
+    }
     std::vector<int> symIds;
     std::vector<int> zMirrors;
     fillBranchSymmetryTables(branches, symIds, zMirrors);
@@ -1207,6 +1284,11 @@ bool computePoissonSensitivityCUDA(
         "compact CTAC sensitivity needs the branch-batch device path "
         "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
   }
+  if (subsetSelection.count > 1 && !useBranchBatch) {
+    throw std::runtime_error(
+        "compact subset sensitivity needs the branch-batch device path "
+        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
+  }
   if (!compactDeviceBackwardBeginCUDA(nvox, 0)) {
     return false;
   }
@@ -1220,21 +1302,25 @@ bool computePoissonSensitivityCUDA(
   std::vector<float> ratio;
   for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
     const auto chunk = chunks.loadChunk(chunkIndex);
-    const spect::io::CSRView view = chunk->view();
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
     if (useBranchBatch) {
+      const spect::io::CSRSubsetView slice =
+          compactChunkSlice(*chunk, meta, subsetSelection);
+      if (slice.empty()) {
+        continue;
+      }
       CompactDeviceBackwardTiming backwardTiming;
       const CompactDeviceRatioParams commonRatio =
           makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
       const bool ok =
           attFactors != nullptr
               ? compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
-                    view, commonRatio, commonTransform, symIds.data(),
+                    slice, commonRatio, commonTransform, symIds.data(),
                     zMirrors.data(), static_cast<int>(branches.size()),
                     attFactors, compactAttenTableCount(meta), attenPower,
                     rowWeights, fullProjectionCount, &backwardTiming, 0)
               : compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-                    view, commonTransform, symIds.data(), zMirrors.data(),
+                    slice, commonTransform, symIds.data(), zMirrors.data(),
                     static_cast<int>(branches.size()), &backwardTiming, 0, 0,
                     &commonRatio, rowWeights,
                     rowWeights == nullptr ? 0 : fullProjectionCount);
@@ -1248,6 +1334,7 @@ bool computePoissonSensitivityCUDA(
       }
       continue;
     }
+    const spect::io::CSRView view = chunk->view();
     for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
       const auto &branch = branches[branchIndex];
       auto stageStart = Clock::now();
@@ -1337,7 +1424,7 @@ bool finishCompactResidentMlemIterationCUDA(
     int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
     const spect::filters::PSFKernels *castorPsf,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero) {
+    bool *imageAllZero, int subsetIndex) {
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
   return spect::cuda::finishCompactResidentMlemIterationCUDA(
@@ -1346,7 +1433,7 @@ bool finishCompactResidentMlemIterationCUDA(
       castorPsf == nullptr ? nullptr : &castorPsf->kx,
       castorPsf == nullptr ? nullptr : &castorPsf->ky,
       castorPsf == nullptr ? nullptr : &castorPsf->kz,
-      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero, subsetIndex);
 }
 
 bool finishCompactResidentBsremIterationCUDA(
@@ -1355,7 +1442,7 @@ bool finishCompactResidentBsremIterationCUDA(
     int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
     const spect::filters::PSFKernels *castorPsf,
     const CompactBsremUpdateParams &params, bool requirePositiveNumerator,
-    bool refreshStaticInputs, bool *imageAllZero) {
+    bool refreshStaticInputs, bool *imageAllZero, int subsetIndex) {
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
   return spect::cuda::finishCompactResidentBsremIterationCUDA(
@@ -1364,7 +1451,7 @@ bool finishCompactResidentBsremIterationCUDA(
       castorPsf == nullptr ? nullptr : &castorPsf->kx,
       castorPsf == nullptr ? nullptr : &castorPsf->ky,
       castorPsf == nullptr ? nullptr : &castorPsf->kz, params,
-      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero, subsetIndex);
 }
 
 bool runCompactChunkMlemNumerCUDA(
@@ -1576,7 +1663,8 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     double *const *numers, bool reverseChunkOrder,
     CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors, bool refreshProjectionInputs,
-    bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
+    bool branchBatchInputPrepared, bool downloadBackwardOutputs,
+    const CompactSubsetSpec *subset, const CompactSubsetSpec *nextSubset) {
   if (bedCount < 1 || bedCount > spect::core::kMaxBeds) {
     throw std::runtime_error(
         "compact chunk multi-bed CUDA helper supports 1.." +
@@ -1622,8 +1710,15 @@ bool accumulatePoissonBackprojectedRatioCUDA(
   }
 
   warmCompactChunks(channels);
+  const CompactSubsetSelection subsetSelection =
+      selectCompactSubset(meta, subset);
   const bool csrq = isCsrqChannelSet(channels);
   if (csrq) {
+    if (subsetSelection.count > 1) {
+      throw std::runtime_error(
+          "ordered subsets are implemented for CSRB matrices only; use a CSRB "
+          "matrix directory or -subsets 1 with CSRQ.");
+    }
     return runCsrqMlemNumerMultiBed(
         channels, meta, fullProjections, hasBackground ? fullBackgrounds : nullptr,
         smoothedImages, bedCount, threads, numers, timing,
@@ -1653,6 +1748,15 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     throw std::runtime_error(
         "compact CTAC needs the branch-batch device path "
         "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
+  }
+  if (subsetSelection.count > 1 && !useBranchBatch) {
+    throw std::runtime_error(
+        "compact ordered subsets need the branch-batch device path "
+        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
+  }
+  std::optional<CompactSubsetSelection> nextSubsetSelection;
+  if (nextSubset != nullptr) {
+    nextSubsetSelection = selectCompactSubset(meta, nextSubset);
   }
   const double attenPower = channels.front().attenPower;
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
@@ -1707,10 +1811,15 @@ bool accumulatePoissonBackprojectedRatioCUDA(
 
   const auto processChunk = [&](size_t chunkIndex) -> bool {
     const auto chunk = chunks.loadChunk(chunkIndex);
-    const spect::io::CSRView view = chunk->view();
-    prefetchNextCompactChunk(chunks, chunkIndex, chunkCount, reverseChunkOrder,
-                             view);
     const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
+    const spect::io::CSRSubsetView slice =
+        compactChunkSlice(*chunk, meta, subsetSelection);
+    if (slice.empty()) {
+      return true;
+    }
+    prefetchNextCompactSlice(
+        chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
+        nextSubsetSelection ? &*nextSubsetSelection : nullptr, slice);
     if (useBranchBatch) {
       CompactDeviceRatioTiming deviceTiming;
       CompactDeviceBackwardTiming backwardTiming;
@@ -1721,13 +1830,13 @@ bool accumulatePoissonBackprojectedRatioCUDA(
       const bool ok =
           hasAtten
               ? compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
-                    view, fullProjections, fullProjectionCount, commonRatio,
+                    slice, fullProjections, fullProjectionCount, commonRatio,
                     commonTransform, branchSymIds.data(), branchZMirrors.data(),
                     static_cast<int>(branchCount), bedCount, attFactors,
                     compactAttenTableCount(meta), attenPower, &deviceTiming,
                     &backwardTiming)
               : compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
-                    view, fullProjections, fullProjectionCount, commonRatio,
+                    slice, fullProjections, fullProjectionCount, commonRatio,
                     commonTransform, branchSymIds.data(), branchZMirrors.data(),
                     static_cast<int>(branchCount), bedCount, &deviceTiming,
                     &backwardTiming);
@@ -1743,6 +1852,9 @@ bool accumulatePoissonBackprojectedRatioCUDA(
       }
       return true;
     }
+    // Per-branch fallback (SPECT_COMPACT_BRANCH_BATCH=0): whole chunks only;
+    // the whole-chunk slice above shares the device copy (tag 0).
+    const spect::io::CSRView view = chunk->view();
     for (int bed = 0; bed < bedCount; ++bed) {
       const double *fullProjection = fullProjections[bed];
       for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {

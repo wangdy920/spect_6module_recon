@@ -6,6 +6,7 @@
 #include "core/AttenuationCoefficients.h"
 #include "core/Masks.h"
 #include "core/ReconLimits.h"
+#include "sparse/CompactSubsets.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
 #include "filters/ButterworthFilter.h"
@@ -33,6 +34,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -822,6 +824,36 @@ std::vector<double> runCompactSymmetricReconstruction(
                   "kernels are the plain ones.");
         }
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
+        // Ordered subsets over compact angles (design report 7.10). The
+        // schedule is non-increasing, so the first stage has the finest
+        // subset count; every coarser stage's S_m is an exact sum of the
+        // finest ones and stage 1 is the plain full-data update.
+        const std::vector<CompactSubsetStage> subsetSchedule =
+            parseCompactSubsetSchedule(args.subsetSchedule, args.numIters,
+                                       compactMeta.compactNumAngles);
+        const int finestSubsetCount = subsetSchedule.front().subsets;
+        const bool useSubsets = finestSubsetCount > 1;
+        if (useSubsets) {
+          if (ctx.compactChunks2 != nullptr) {
+            throw std::runtime_error(
+                "-subsets > 1 is not supported with joint dual-window (CSRQ) "
+                "reconstruction; CSRB single window only.");
+          }
+          if (args.bsremDiagnostics || args.bsremMlemEquivalenceMode) {
+            throw std::runtime_error(
+                "-subsets > 1 cannot be combined with the BSREM diagnostics or "
+                "MLEM-equivalence debug modes (per-iteration objectives are "
+                "full-data quantities).");
+          }
+          std::ostringstream orderText;
+          for (const int k : compactSubsetOrder(finestSubsetCount))
+            orderText << (orderText.tellp() > 0 ? "," : "") << k;
+          logInfo("compact ordered subsets: schedule " +
+                  formatCompactSubsetSchedule(subsetSchedule) +
+                  " over " + std::to_string(compactMeta.compactNumAngles) +
+                  " compact angles (interleaved; visiting order of the finest "
+                  "stage: " + orderText.str() + ")");
+        }
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
         // The frozen prototype prunes CSR columns to the cylinder before PSF.
@@ -985,97 +1017,157 @@ std::vector<double> runCompactSymmetricReconstruction(
             useWeightedSensitivity ? &detZSensWeights : nullptr,
             compactHasAttenuation ? &opts.bedAttenFactors : nullptr,
             compactHasAttenuation ? &ctacAttenPowers : nullptr);
+        if (useWeightedSensitivity && detZEdgeCensor > 0) {
+          logInfo("detZ edge censoring: using masked sensitivity (k=" +
+                  std::to_string(detZEdgeCensor) + ", " +
+                  std::to_string(detZEdgeCensor) +
+                  " detZ rows censored per side) for the denominator.");
+        }
+        // Assign every window its device matrix slot (aliasing channels that
+        // share a directory) before any per-channel call below.
+        spect::cuda::prepareChannelExecutionCUDA(channels);
+        // Global sensitivity S over all rows into `target` (beds accumulated,
+        // PSF^T applied per bed), or S_m over one subset's rows.
+        std::vector<double> localDenom(baseNvox, 0.0);
+        auto computeGlobalSensitivity = [&](std::vector<double> &target,
+                                            const CompactSubsetSpec *subset) {
+          std::fill(target.begin(), target.end(), 0.0);
+          auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
+            std::fill(localDenom.begin(), localDenom.end(), 0.0);
+            const bool ok = spect::cuda::computePoissonSensitivityCUDA(
+                channels, compactMeta, opts.threads, localDenom.data(),
+                &compactCudaTiming, attenuation,
+                useWeightedSensitivity ? detZSensWeights.data() : nullptr,
+                subset);
+            if (!ok) {
+              throw std::runtime_error(
+                  "compact-symmetric sensitivity requires CUDA sparse backend.");
+            }
+            if (!compactLocalSupportMask.empty())
+              spect::core::applyMaskInplace(localDenom,
+                                             compactLocalSupportMask);
+            apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
+                               psfPtr, opts.threads);
+          };
+          if (compactHasAttenuation) {
+            for (int bed = 0; bed < bedCount; ++bed) {
+              computeLocalSensitivity(
+                  compactAttFactorPtrs[static_cast<size_t>(bed)]);
+              spect::app::accumulateBedVolumeToGlobal(
+                  target, localDenom, baseNx, baseNy, baseNz,
+                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
+              observeCompactMemory();
+            }
+          } else {
+            computeLocalSensitivity(nullptr);
+            for (int bed = 0; bed < bedCount; ++bed) {
+              spect::app::accumulateBedVolumeToGlobal(
+                  target, localDenom, baseNx, baseNy, baseNz,
+                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
+              observeCompactMemory();
+            }
+          }
+        };
+        // Cache-or-compute one sensitivity volume. Returns true on a cache hit.
+        auto loadOrComputeSensitivity =
+            [&](const std::filesystem::path &cachePath,
+                const std::string &manifest, const char *label,
+                std::vector<double> &target, const CompactSubsetSpec *subset) {
+              bool loaded = false;
+              if (!cachePath.empty()) {
+                std::string cacheStatus;
+                loaded = tryLoadCompactDenomCache(cachePath, manifest, geometry,
+                                                  target, &cacheStatus);
+                if (loaded) {
+                  logInfo(std::string("compact ") + label + " cache hit: " +
+                          cachePath.string());
+                } else {
+                  if (isCompactDenomManifestMismatch(cacheStatus)) {
+                    throw std::runtime_error(
+                        std::string("compact ") + label +
+                        " cache manifest mismatch for " + cachePath.string() +
+                        ": " + cacheStatus +
+                        ". Use a distinct -compactDenomCache path for no-PSF, "
+                        "PSF/FWHM, and bed-geometry variants, or delete the "
+                        "stale cache intentionally.");
+                  }
+                  logInfo(std::string("compact ") + label + " cache miss: " +
+                          cacheStatus);
+                }
+              }
+              if (!loaded) {
+                computeGlobalSensitivity(target, subset);
+                if (!cachePath.empty()) {
+                  try {
+                    saveCompactDenomCache(cachePath, manifest, geometry, target);
+                    logInfo(std::string("compact ") + label + " cache saved: " +
+                            cachePath.string());
+                  } catch (const std::exception &ex) {
+                    logWarn(std::string("Failed saving compact ") + label +
+                            " cache: " + ex.what());
+                  }
+                }
+              }
+              return loaded;
+            };
+        const bool explicitDenomCachePath = !compactDenomCachePath.empty();
         if (compactDenomCachePath.empty()) {
           compactDenomCachePath =
               autoCompactDenomCachePath(args, compactDenomManifest);
           logInfo("compact denom auto-cache path: " +
                   compactDenomCachePath.string());
         }
-        bool loadedCompactDenomCache = false;
-        if (!compactDenomCachePath.empty()) {
-          std::string cacheStatus;
-          loadedCompactDenomCache = tryLoadCompactDenomCache(
-              compactDenomCachePath, compactDenomManifest, geometry, denom,
-              &cacheStatus);
-          if (loadedCompactDenomCache) {
-            logInfo("compact denom cache hit: " +
-                    compactDenomCachePath.string());
-            spect::cuda::prepareChannelExecutionCUDA(channels);
-          } else {
-            if (isCompactDenomManifestMismatch(cacheStatus)) {
-              throw std::runtime_error(
-                  "compact denom cache manifest mismatch for " +
-                  compactDenomCachePath.string() + ": " + cacheStatus +
-                  ". Use a distinct -compactDenomCache path for no-PSF, "
-                  "PSF/FWHM, and bed-geometry variants, or delete the "
-                  "stale cache intentionally.");
+        const bool loadedCompactDenomCache = loadOrComputeSensitivity(
+            compactDenomCachePath, compactDenomManifest, "denom", denom,
+            nullptr);
+        // Finest-stage subset sensitivities S_m (each its own cache entry:
+        // the global manifest plus the subset line). Coarser stages sum them.
+        std::vector<std::vector<double>> finestSubsetDenoms;
+        if (useSubsets) {
+          finestSubsetDenoms.assign(static_cast<size_t>(finestSubsetCount),
+                                    std::vector<double>(globalNvox, 0.0));
+          for (int k = 0; k < finestSubsetCount; ++k) {
+            const CompactSubsetSpec spec{finestSubsetCount, k};
+            const std::string subsetManifest =
+                compactDenomManifest + "subset=" + std::to_string(k) + "/" +
+                std::to_string(finestSubsetCount) + "\n";
+            std::filesystem::path subsetCachePath;
+            if (explicitDenomCachePath) {
+              subsetCachePath = compactDenomCachePath;
+              subsetCachePath.replace_extension();
+              subsetCachePath += "_s" + std::to_string(k) + "of" +
+                                 std::to_string(finestSubsetCount) + ".mhd";
+            } else {
+              subsetCachePath = autoCompactDenomCachePath(args, subsetManifest);
             }
-            logInfo("compact denom cache miss: " + cacheStatus);
+            const std::string label =
+                "subset " + std::to_string(k) + "/" +
+                std::to_string(finestSubsetCount) + " denom";
+            loadOrComputeSensitivity(subsetCachePath, subsetManifest,
+                                     label.c_str(),
+                                     finestSubsetDenoms[static_cast<size_t>(k)],
+                                     &spec);
+          }
+          // Consistency gate: the subset rows partition the matrix rows.
+          double sumAll = 0.0;
+          double sumSubsets = 0.0;
+          for (size_t j = 0; j < globalNvox; ++j) {
+            sumAll += denom[j];
+            for (const auto &subsetDenom : finestSubsetDenoms)
+              sumSubsets += subsetDenom[j];
+          }
+          const double relDiff =
+              std::abs(sumSubsets - sumAll) / std::max(sumAll, 1e-300);
+          logInfo("compact subset sensitivities: sum_m S_m vs S total relative "
+                  "difference " + std::to_string(relDiff));
+          if (!(relDiff < 1e-4)) {
+            throw std::runtime_error(
+                "compact subset sensitivities do not add up to the global "
+                "sensitivity (relative difference " + std::to_string(relDiff) +
+                "); stale cache or subset mapping fault.");
           }
         }
-        if (!loadedCompactDenomCache) {
-          std::vector<double> localDenom(baseNvox, 0.0);
-          if (useWeightedSensitivity && detZEdgeCensor > 0) {
-            logInfo("detZ edge censoring: using masked sensitivity (k=" +
-                    std::to_string(detZEdgeCensor) + ", " +
-                    std::to_string(detZEdgeCensor) +
-                    " detZ rows censored per side) for the denominator.");
-          }
-          // Assign every window its device matrix slot (aliasing channels
-          // that share a directory) before any per-channel call below.
-          spect::cuda::prepareChannelExecutionCUDA(channels);
-          auto computeLocalSensitivity = [&](const uint16_t *attenuation) {
-            std::fill(localDenom.begin(), localDenom.end(), 0.0);
-            const bool ok = spect::cuda::computePoissonSensitivityCUDA(
-                channels, compactMeta, opts.threads, localDenom.data(),
-                &compactCudaTiming, attenuation,
-                useWeightedSensitivity ? detZSensWeights.data() : nullptr);
-            if (!ok) {
-              throw std::runtime_error(
-                  "compact-symmetric sensitivity requires CUDA sparse backend.");
-            }
-          };
-          if (compactHasAttenuation) {
-            for (int bed = 0; bed < bedCount; ++bed) {
-              computeLocalSensitivity(
-                  compactAttFactorPtrs[static_cast<size_t>(bed)]);
-              if (!compactLocalSupportMask.empty())
-                spect::core::applyMaskInplace(localDenom,
-                                               compactLocalSupportMask);
-              apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
-                                 psfPtr, opts.threads);
-              spect::app::accumulateBedVolumeToGlobal(
-                  denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
-              observeCompactMemory();
-            }
-          } else {
-            computeLocalSensitivity(nullptr);
-            if (!compactLocalSupportMask.empty())
-              spect::core::applyMaskInplace(localDenom,
-                                             compactLocalSupportMask);
-            apply_psf_backward(localDenom, baseNx, baseNy, baseNz, opts,
-                               psfPtr, opts.threads);
-            for (int bed = 0; bed < bedCount; ++bed) {
-              spect::app::accumulateBedVolumeToGlobal(
-                  denom, localDenom, baseNx, baseNy, baseNz,
-                  bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
-              observeCompactMemory();
-            }
-          }
-
-          if (!compactDenomCachePath.empty()) {
-            try {
-              saveCompactDenomCache(compactDenomCachePath, compactDenomManifest,
-                                    geometry, denom);
-              logInfo("compact denom cache saved: " +
-                      compactDenomCachePath.string());
-            } catch (const std::exception &ex) {
-              logWarn(std::string("Failed saving compact denom cache: ") +
-                      ex.what());
-            }
-          }
-        }
+        localDenom = std::vector<double>();
         compactTiming.compactSensitivitySeconds +=
             std::chrono::duration<double>(ProfileClock::now() - sensStart)
                 .count();
@@ -1250,9 +1342,105 @@ std::vector<double> runCompactSymmetricReconstruction(
         std::vector<std::vector<double>> localNumers(bedCount);
         std::vector<const double *> imagePtrs(bedCount);
         std::vector<double *> numerPtrs(bedCount);
+
+        // Subset schedule bookkeeping. A stage with M subsets runs M
+        // sub-iterations per iteration, each over one interleaved subset of
+        // compact angles in the maximal-separation order; the stage's S_m
+        // are the finest S_m summed (stage M = 1 uses the global S itself).
+        auto stageIndexOfIteration = [&](int iteration) {
+          int cumulative = 0;
+          for (size_t s = 0; s < subsetSchedule.size(); ++s) {
+            cumulative += subsetSchedule[s].iterations;
+            if (iteration <= cumulative)
+              return s;
+          }
+          return subsetSchedule.size() - 1;
+        };
+        size_t currentStage = subsetSchedule.size(); // none entered yet
+        int stageSubsetCount = 1;
+        std::vector<int> stageOrder{0};
+        std::vector<std::vector<double>> stageDenomStorage;
+        std::vector<const std::vector<double> *> stageDenoms{&denom};
+        auto enterStage = [&](size_t stage) {
+          currentStage = stage;
+          stageSubsetCount = subsetSchedule[stage].subsets;
+          stageOrder = compactSubsetOrder(stageSubsetCount);
+          stageDenomStorage.clear();
+          stageDenoms.clear();
+          if (stageSubsetCount == 1) {
+            stageDenoms.push_back(&denom);
+          } else if (stageSubsetCount == finestSubsetCount) {
+            for (const auto &subsetDenom : finestSubsetDenoms)
+              stageDenoms.push_back(&subsetDenom);
+          } else {
+            // Subset j of M is the union of the finest subsets k == j (mod M).
+            stageDenomStorage.assign(static_cast<size_t>(stageSubsetCount),
+                                     std::vector<double>(globalNvox, 0.0));
+            for (int k = 0; k < finestSubsetCount; ++k) {
+              auto &target =
+                  stageDenomStorage[static_cast<size_t>(k % stageSubsetCount)];
+              const auto &source = finestSubsetDenoms[static_cast<size_t>(k)];
+              for (size_t j = 0; j < globalNvox; ++j)
+                target[j] += source[j];
+            }
+            for (const auto &stageDenom : stageDenomStorage)
+              stageDenoms.push_back(&stageDenom);
+          }
+          std::vector<const double *> devicePtrs;
+          for (const auto *stageDenom : stageDenoms)
+            devicePtrs.push_back(stageDenom->data());
+          if (!spect::cuda::setCompactSubsetSensitivitiesCUDA(
+                  stageSubsetCount > 1 ? devicePtrs.data() : nullptr,
+                  stageSubsetCount > 1 ? stageSubsetCount : 0, globalNvox)) {
+            throw std::runtime_error(
+                "compact subset sensitivities require the CUDA backend.");
+          }
+          if (useSubsets) {
+            logInfo("compact subset stage " + std::to_string(stage + 1) + "/" +
+                    std::to_string(subsetSchedule.size()) + ": " +
+                    std::to_string(stageSubsetCount) + " subset(s) for " +
+                    std::to_string(subsetSchedule[stage].iterations) +
+                    " iteration(s)");
+          }
+        };
+        // Subset of the numerator call after (iteration, sub) in schedule
+        // order, for the cross-pass prefetch; nullopt after the last call.
+        auto nextSubsetSpec = [&](int iteration, int sub)
+            -> std::optional<CompactSubsetSpec> {
+          if (sub + 1 < stageSubsetCount) {
+            return CompactSubsetSpec{stageSubsetCount,
+                                     stageOrder[static_cast<size_t>(sub + 1)]};
+          }
+          if (iteration >= args.numIters)
+            return std::nullopt;
+          const int nextCount =
+              subsetSchedule[stageIndexOfIteration(iteration + 1)].subsets;
+          return CompactSubsetSpec{nextCount, compactSubsetOrder(nextCount)[0]};
+        };
+
         for (int it = 1; it <= args.numIters; ++it) {
           logInfo("[ITER] " + std::to_string(it) + "/" +
                   std::to_string(args.numIters) + " compact");
+          if (stageIndexOfIteration(it) != currentStage)
+            enterStage(stageIndexOfIteration(it));
+          for (int sub = 0; sub < stageSubsetCount; ++sub) {
+          const CompactSubsetSpec subsetSpec{
+              stageSubsetCount, stageOrder[static_cast<size_t>(sub)]};
+          const std::optional<CompactSubsetSpec> nextSpec =
+              nextSubsetSpec(it, sub);
+          // -1 selects the global S on the device (full-data step).
+          const int deviceSubsetIndex =
+              stageSubsetCount > 1 ? subsetSpec.index : -1;
+          const std::vector<double> &subsetDenom =
+              *stageDenoms[static_cast<size_t>(
+                  stageSubsetCount > 1 ? subsetSpec.index : 0)];
+          if (stageSubsetCount > 1) {
+            logInfo("[ITER] " + std::to_string(it) + " subset " +
+                    std::to_string(subsetSpec.index) + "/" +
+                    std::to_string(stageSubsetCount) + " (" +
+                    std::to_string(sub + 1) + " of " +
+                    std::to_string(stageSubsetCount) + ")");
+          }
           // The resident branch-batch input (image rotated on the device)
           // serves any bed count and both formats, backgrounds and CTAC
           // included (the factor is applied on the device per compact angle);
@@ -1275,7 +1463,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           const bool residentIteration =
               residentBatchInput && residentUpdateAllowed;
-          if (it == 1) {
+          if (it == 1 && sub == 0) {
             logInfo(std::string("compact iteration path: input=") +
                     (residentBatchInput ? "device" : "host") + ", update=" +
                     (residentIteration ? "device" : "host") +
@@ -1344,7 +1532,8 @@ std::vector<double> runCompactSymmetricReconstruction(
                 compactAttFactorPtrs.empty() ? nullptr
                                              : compactAttFactorPtrs.data(),
                 /*refreshProjectionInputs=*/false, residentBatchInput,
-                !residentIteration);
+                !residentIteration, &subsetSpec,
+                nextSpec ? &*nextSpec : nullptr);
             if (!ok) {
               throw std::runtime_error(
                   "compact-symmetric numerator requires CUDA sparse backend.");
@@ -1364,18 +1553,20 @@ std::vector<double> runCompactSymmetricReconstruction(
                       maskPtr == nullptr ? nullptr : maskPtr->data(),
                       compactPsfActive ? psfPtr : nullptr,
                       compactPositiveProjectionInput, !imageResident,
-                      &imageAllZero)) {
+                      &imageAllZero, deviceSubsetIndex)) {
                 throw std::runtime_error(
                     "compact resident MLEM update requires CUDA backend.");
               }
             } else {
               // BSREM-II on the resident image: penalty gradient from the
               // device image, then the relative update, no host round trip.
+              // alpha is per iteration (constant over its sub-iterations).
               const int k = it - 1;
               spect::cuda::CompactBsremUpdateParams updateParams;
               updateParams.alpha =
                   args.bsrem_alpha0 /
                   (1.0 + static_cast<double>(args.bsrem_gamma) * k);
+              updateParams.subsetScale = static_cast<double>(stageSubsetCount);
               updateParams.betaScaled = useRegularization ? args.reg.beta : 0.0;
               updateParams.denomEps = 1e-12;
               updateParams.sMin = std::max(1e-12, bsremSensFloorAbs);
@@ -1418,7 +1609,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                       maskPtr == nullptr ? nullptr : maskPtr->data(),
                       compactPsfActive ? psfPtr : nullptr, updateParams,
                       compactPositiveProjectionInput, !imageResident,
-                      &imageAllZero)) {
+                      &imageAllZero, deviceSubsetIndex)) {
                 throw std::runtime_error(
                     "compact resident BSREM update requires CUDA backend.");
               }
@@ -1530,7 +1721,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (recordDiag)
             imagePrev = image;
           if (!useBsremUpdate) {
-            applyMlemUpdate(image, numer, denom, maskPtr, opts.nonneg,
+            applyMlemUpdate(image, numer, subsetDenom, maskPtr, opts.nonneg,
                             opts.threads);
           } else {
             BsremUpdateParams updateParams;
@@ -1545,6 +1736,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 args.bsremMlemEquivalenceMode ? 0.0 : bsremBeta;
             updateParams.alpha =
                 args.bsremMlemEquivalenceMode ? 1.0 : bsremAlpha;
+            updateParams.subsetScale = static_cast<double>(stageSubsetCount);
             updateParams.mlemEquivalenceMode = args.bsremMlemEquivalenceMode;
             updateParams.clipRelativeStep = !args.bsremMlemEquivalenceMode;
             updateParams.denomEps = args.bsremMlemEquivalenceMode ? 0.0 : 1e-12;
@@ -1557,7 +1749,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               updateParams.rawRelativeSteps = &rawSteps;
               updateParams.preconditionedSteps = &precondSteps;
             }
-            applyBsremUpdate(image, numer, denom, denom, updateParams);
+            applyBsremUpdate(image, numer, denom, subsetDenom, updateParams);
           }
           compactTiming.mlemUpdateSeconds +=
               std::chrono::duration<double>(ProfileClock::now() - updateStart)
@@ -1590,7 +1782,10 @@ std::vector<double> runCompactSymmetricReconstruction(
             metricsCsv.flush();
           }
 
-          if (prepared.butterConf.enabled) {
+          // In-iteration filters act once per iteration, after its last
+          // subset update.
+          const bool lastSubIteration = sub + 1 == stageSubsetCount;
+          if (lastSubIteration && prepared.butterConf.enabled) {
             const auto butterStart = ProfileClock::now();
             filters::apply_butterworth_inplace(image, args.Nx, args.Ny,
                                                args.Nz, spacing,
@@ -1601,7 +1796,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                     .count();
           }
 
-          if (prepared.smoothConf.enabled) {
+          if (lastSubIteration && prepared.smoothConf.enabled) {
             applySeparableConvRuntime(
                 image, args.Nx, args.Ny, args.Nz, prepared.smoothConf.kx,
                 prepared.smoothConf.ky, prepared.smoothConf.kz, opts.threads);
@@ -1611,9 +1806,13 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (maskPtr)
             spect::core::applyMaskInplace(image, *maskPtr);
           guardZeroMaxCheckpoint(
-              image, "compact iteration " + std::to_string(it));
+              image, "compact iteration " + std::to_string(it) +
+                         (stageSubsetCount > 1
+                              ? " subset " + std::to_string(subsetSpec.index)
+                              : std::string()));
           imageResident = false;
           }
+          } // sub-iterations
           lastIterationDone = ProfileClock::now();
           observeCompactMemory();
 

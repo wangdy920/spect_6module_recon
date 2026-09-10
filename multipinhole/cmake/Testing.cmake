@@ -27,6 +27,7 @@ if(SPECT_BUILD_TESTS)
     tests/test_parser.cpp
     tests/test_multibed_cli.cpp
     tests/test_multibed_compact_numerator.cpp
+    tests/test_compact_subsets.cpp
     tests/test_csrq_compact_matrix.cpp
     tests/test_bed_offsets.cpp
     tests/test_main_auto_mu_map.cpp

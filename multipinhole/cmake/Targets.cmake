@@ -151,6 +151,9 @@ add_library(spect_io STATIC
   src/io/MHDWriter.cpp
   src/io/CompactSymmetryMetadata.cpp
   src/io/CompactChunkCSR.cpp
+  # Ordered-subset partition of the compact angles (host only; consumed by the
+  # CUDA projector and the recon loop next to CompactChunkCSR::subsetView).
+  src/sparse/CompactSubsets.cpp
 )
 target_include_directories(spect_io PUBLIC
   $<BUILD_INTERFACE:${SPECT_RECON_SOURCE_DIR}/include>

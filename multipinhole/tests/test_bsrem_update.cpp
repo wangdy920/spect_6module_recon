@@ -85,6 +85,29 @@ TEST(BsremUpdateTest, ClipAppliesToFullRelativeStepIncludingAlpha) {
   EXPECT_DOUBLE_EQ(x[0], 2.0);
 }
 
+TEST(BsremUpdateTest, SubsetScaleUsesGlobalDataGradient) {
+  std::vector<double> x = {1.0};
+  const std::vector<double> numer = {3.0};
+  const std::vector<double> globalDenom = {2.0};
+  const std::vector<double> subsetDenom = {1.5};
+
+  spect::BsremUpdateParams p;
+  p.betaScaled = 0.0;
+  p.alpha = 1.0;
+  p.denomEps = 0.0;
+  p.clipRelativeStep = false;
+  p.subsetScale = 2.0;
+  spect::applyBsremUpdate(x, numer, globalDenom, subsetDenom, p);
+
+  // v = M(q_m - S_m) / S = 2 * (3 - 1.5) / 2 = 1.5.
+  EXPECT_DOUBLE_EQ(x[0], 2.5);
+
+  p.subsetScale = 0.0;
+  EXPECT_THROW(
+      spect::applyBsremUpdate(x, numer, globalDenom, subsetDenom, p),
+      std::runtime_error);
+}
+
 TEST(BsremUpdateTest, SensitivityFloorFreezesLowSupportVoxels) {
   // C.3: voxels with s <= sMin are frozen (zeroed with zeroLowSensitivity),
   // voxels above the floor update normally.

@@ -751,6 +751,61 @@ CSRView CompactChunkCSRData::view() const {
   return out;
 }
 
+CSRSubsetView CompactChunkCSRData::subsetView(
+    const std::vector<int> &compactAngles, int raysPerAngle,
+    uint64_t tag) const {
+  const CSRView full = view();
+  if (raysPerAngle <= 0 || info.rows % raysPerAngle != 0) {
+    throw std::runtime_error(
+        "compact chunk rows are not a whole number of angles: " +
+        info.path.string());
+  }
+  CSRSubsetView out;
+  out.cols = cols;
+  out.rowsPerBlock = raysPerAngle;
+  out.sourceRowPtr = full.row_ptr;
+  out.tag = tag;
+  const int firstAngle = info.angleOffset;
+  const int lastAngle = info.angleOffset + info.angleCount;
+  out.row_ptr.push_back(0u);
+  int previousAngle = -1;
+  for (const int angle : compactAngles) {
+    if (angle < firstAngle || angle >= lastAngle) {
+      continue;
+    }
+    if (angle <= previousAngle) {
+      throw std::runtime_error(
+          "compact subset angles must be strictly ascending: " +
+          info.path.string());
+    }
+    const size_t rowBase =
+        static_cast<size_t>(angle - firstAngle) * static_cast<size_t>(raysPerAngle);
+    const uint32_t nnzStart = full.row_ptr[rowBase];
+    const uint32_t nnzEnd = full.row_ptr[rowBase + static_cast<size_t>(raysPerAngle)];
+    const uint32_t base = out.row_ptr.back();
+    for (int r = 1; r <= raysPerAngle; ++r) {
+      out.row_ptr.push_back(base + (full.row_ptr[rowBase + static_cast<size_t>(r)] -
+                                    nnzStart));
+    }
+    // Adjacent angles are adjacent in the chunk arrays: extend the segment
+    // so a whole chunk (or a run of angles) is one copy.
+    if (previousAngle >= 0 && angle == previousAngle + 1) {
+      out.segments.back().nnz += nnzEnd - nnzStart;
+    } else {
+      CSRSegment segment;
+      segment.col_idx = full.col_idx + nnzStart;
+      segment.val = full.val + nnzStart;
+      segment.nnz = nnzEnd - nnzStart;
+      out.segments.push_back(segment);
+    }
+    out.blockAngles.push_back(angle);
+    out.nnz += nnzEnd - nnzStart;
+    out.rows += raysPerAngle;
+    previousAngle = angle;
+  }
+  return out;
+}
+
 CompactRunU16View CompactChunkCSRData::runView() const {
   if (info.format != CompactChunkFormat::CsrqRunU16) {
     throw std::runtime_error(

@@ -81,6 +81,10 @@ private:
     size_t capacity_ = 0;
 };
 
+// Identity of an uploaded CSRB matrix: the host arrays it was copied from
+// (for a subset slice: the chunk's row pointer array and the first segment)
+// plus its shape and the subset tag (0 for a whole chunk, so a whole-chunk
+// slice and the chunk's own CSRView share one device copy).
 struct MatrixCacheKey {
     const void *rowPtr = nullptr;
     const void *colIdx = nullptr;
@@ -88,11 +92,12 @@ struct MatrixCacheKey {
     int64_t rows = 0;
     int64_t cols = 0;
     int64_t nnz = 0;
+    uint64_t tag = 0;
 
     bool operator==(const MatrixCacheKey &other) const {
         return rowPtr == other.rowPtr && colIdx == other.colIdx &&
                      values == other.values && rows == other.rows && cols == other.cols &&
-                     nnz == other.nnz;
+                     nnz == other.nnz && tag == other.tag;
     }
 };
 
@@ -162,6 +167,7 @@ void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward);
 uint64_t selectPreparedChunkHostCacheBudgetCapBytes();
 
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
+MatrixCacheKey makeCacheKey(const io::CSRSubsetView &slice);
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz);
 
 } // namespace spect

@@ -31,6 +31,9 @@ struct BsremUpdateParams {
   /// User regularization strength beta. lambda_j = beta * kappa_j.
   double betaScaled = 0.0;
   double alpha = 1.0;
+  /// M: subset count of the current stage; scales the subset data gradient
+  /// n - s_m to full-data size (Ahn & Fessler 2003). 1 for a full-data step.
+  double subsetScale = 1.0;
   /// Added to the BSREM denominator after lambda * max(D_reg,0).
   double denomEps = 1e-12;
   /// Voxels with s_j <= sMin are not updated with a tiny denominator.
@@ -45,9 +48,9 @@ struct BsremUpdateParams {
   int threads = 1;
 };
 
-/// BSREM-II relative update:
+/// BSREM-II relative update (M = subsetScale, s = global, s_m = subset):
 ///   lambda_j = beta * kappa_j
-///   u_j = alpha * (n_j - s_m,j - lambda_j r_j) / (s_j + lambda_j max(c_j,0) + eps)
+///   u_j = alpha * (M (n_j - s_m,j) - lambda_j r_j) / (s_j + lambda_j max(c_j,0) + eps)
 ///   ū_j = clip(u_j, clipMin, clipMax)
 ///   x <- x * (1 + ū)
 void applyBsremUpdate(std::vector<double> &image,

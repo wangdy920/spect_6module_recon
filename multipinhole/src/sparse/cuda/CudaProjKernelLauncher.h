@@ -58,12 +58,14 @@ void launchCompactBsremCurvatureKernel(const double *image,
 
 // BSREM-II relative update in place; gradient / curvature / kappa / mask may
 // be null. Flags share the MLEM update layout.
+// subsetDenom: sensitivity of the rows in this update (== denom for a
+// full-data step); params.subsetScale is the subset count M.
 void launchCompactBsremUpdateKernel(
     double *image, const double *numer, const double *denom,
-    const double *gradient, const double *curvature, const double *kappa,
-    const uint8_t *mask, bool hasMask, size_t count,
-    const cuda::CompactBsremUpdateParams &params, uint32_t *flags,
-    cudaStream_t stream = nullptr);
+    const double *subsetDenom, const double *gradient,
+    const double *curvature, const double *kappa, const uint8_t *mask,
+    bool hasMask, size_t count, const cuda::CompactBsremUpdateParams &params,
+    uint32_t *flags, cudaStream_t stream = nullptr);
 
 void launchCompactTransformForwardBatchKernel(
     const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,

@@ -130,14 +130,24 @@ bool finishCompactResidentMlemIterationCUDA(
     const std::vector<double> *castorKy,
     const std::vector<double> *castorKz,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero) {
+    bool *imageAllZero, int subsetIndex) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().finishCompactResidentMlemIteration(
       globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
       commonTransformParams, denom, mask, castorKx, castorKy, castorKz,
-      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero, subsetIndex);
+  return true;
+}
+
+bool setCompactSubsetSensitivitiesCUDA(const double *const *hostSensitivities,
+                                       int count, size_t globalImageCount) {
+  if (!isCudaAvailable()) {
+    return false;
+  }
+  cudaState().setCompactSubsetSensitivities(hostSensitivities, count,
+                                            globalImageCount);
   return true;
 }
 
@@ -159,14 +169,14 @@ bool finishCompactResidentBsremIterationCUDA(
     const std::vector<double> *castorKz,
     const cuda::CompactBsremUpdateParams &params,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero) {
+    bool *imageAllZero, int subsetIndex) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().finishCompactResidentBsremIteration(
       globalImageCount, globalNz, bedZStarts, bedCount, flipLocalZ,
       commonTransformParams, denom, mask, castorKx, castorKy, castorKz, params,
-      requirePositiveNumerator, refreshStaticInputs, imageAllZero);
+      requirePositiveNumerator, refreshStaticInputs, imageAllZero, subsetIndex);
   return true;
 }
 
@@ -184,8 +194,8 @@ double *compactResidentGradientDeviceCUDA(size_t count) {
   return cudaState().compactResidentGradientDevice(count);
 }
 
-bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
-                                    const io::CSRView &current) {
+bool prefetchCompactFloatMatrixCUDA(const io::CSRSubsetView &next,
+                                    const io::CSRSubsetView &current) {
   if (!isCudaAvailable()) {
     return false;
   }
@@ -265,7 +275,7 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
 }
 
 bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const double *const *fullProjections,
+    const io::CSRSubsetView &matrix, const double *const *fullProjections,
     size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonRatioParams,
     const cuda::CompactDeviceTransformParams &commonTransformParams,
@@ -284,7 +294,7 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
 }
 
 bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix,
+    const io::CSRSubsetView &matrix,
     const cuda::CompactDeviceRatioParams &commonRatioParams,
     const cuda::CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int branchCount,
@@ -318,7 +328,7 @@ bool compactBranchBatchAttenForwardCUDA(
 }
 
 bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const double *const *fullProjections,
+    const io::CSRSubsetView &matrix, const double *const *fullProjections,
     size_t fullProjectionCount,
     const cuda::CompactDeviceRatioParams &commonRatioParams,
     const cuda::CompactDeviceTransformParams &commonTransformParams,
@@ -336,7 +346,7 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
 }
 
 bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix,
+    const io::CSRSubsetView &matrix,
     const cuda::CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int batchSize,
     cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
@@ -588,11 +598,15 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
   return false;
 }
 
+bool setCompactSubsetSensitivitiesCUDA(const double *const *, int, size_t) {
+  return false;
+}
+
 bool finishCompactResidentMlemIterationCUDA(
     size_t, int, const int *, int, bool,
     const cuda::CompactDeviceTransformParams &, const double *,
     const uint8_t *, const std::vector<double> *, const std::vector<double> *,
-    const std::vector<double> *, bool, bool, bool *) {
+    const std::vector<double> *, bool, bool, bool *, int) {
   return false;
 }
 
@@ -603,7 +617,7 @@ bool finishCompactResidentBsremIterationCUDA(
     const cuda::CompactDeviceTransformParams &, const double *,
     const uint8_t *, const std::vector<double> *, const std::vector<double> *,
     const std::vector<double> *, const cuda::CompactBsremUpdateParams &, bool,
-    bool, bool *) {
+    bool, bool *, int) {
   return false;
 }
 
@@ -611,7 +625,8 @@ const double *compactResidentImageDeviceCUDA(size_t) { return nullptr; }
 
 double *compactResidentGradientDeviceCUDA(size_t) { return nullptr; }
 
-bool prefetchCompactFloatMatrixCUDA(const io::CSRView &, const io::CSRView &) {
+bool prefetchCompactFloatMatrixCUDA(const io::CSRSubsetView &,
+                                    const io::CSRSubsetView &) {
   return false;
 }
 
@@ -626,7 +641,7 @@ bool spmvTFloatCUDA(const io::CSRView &, const float *, float *) {
 }
 
 bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView &, const double *const *, size_t,
+    const io::CSRSubsetView &, const double *const *, size_t,
     const CompactDeviceRatioParams &, const CompactDeviceTransformParams &,
     const int *, const int *, int, int, const uint16_t *const *, size_t, double,
     CompactDeviceRatioTiming *, CompactDeviceBackwardTiming *) {
@@ -634,7 +649,7 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
 }
 
 bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView &, const CompactDeviceRatioParams &,
+    const io::CSRSubsetView &, const CompactDeviceRatioParams &,
     const CompactDeviceTransformParams &, const int *, const int *, int,
     const uint16_t *, size_t, double, const double *, size_t,
     CompactDeviceBackwardTiming *, int) {

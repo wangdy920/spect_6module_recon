@@ -29,6 +29,11 @@ struct CompactDeviceRatioParams {
     int fullRaysPerAngle = 0;
     int symId = 0;
     bool zMirror = false;
+    /// Device table of the absolute compact angle of every compactRaysPerAngle
+    /// row block (rows / compactRaysPerAngle entries). Set by the state for an
+    /// ordered-subset slice, whose blocks are not consecutive angles; nullptr
+    /// keeps the contiguous mapping angle = (compactRowBase + row) / rpa.
+    const int* blockAngles = nullptr;
 };
 
 struct CompactDeviceRatioTiming {
@@ -51,10 +56,11 @@ struct CompactDeviceBackwardTiming {
     double transformBackwardSeconds = 0.0;
 };
 
-/// Device BSREM-II relative update on the resident image (subset = 1), same
-/// contract as the host BsremUpdateParams / applyBsremUpdate:
+/// Device BSREM-II relative update on the resident image, same contract as
+/// the host BsremUpdateParams / applyBsremUpdate (Ahn & Fessler 2003 scaling
+/// with M subsets; M = 1 and S_m = S is the plain full-data step):
 ///   lambda = betaScaled * kappa
-///   u = alpha * (q - S - lambda * r) / (S + lambda * max(c, 0) + denomEps)
+///   u = alpha * (M (q_m - S_m) - lambda * r) / (S + lambda * max(c, 0) + denomEps)
 ///   x <- max(x, 1e-12) * (1 + clip(u))
 /// The regularizer gradient r is a device array produced by the volume ops
 /// (computeRegGradientDeviceCUDA) from the resident image; the curvature
@@ -63,6 +69,9 @@ struct CompactDeviceBackwardTiming {
 struct CompactBsremUpdateParams {
     double alpha = 1.0;
     double betaScaled = 0.0;
+    /// M: number of subsets of the current stage (scales the subset data
+    /// gradient q_m - S_m to full-data size).
+    double subsetScale = 1.0;
     double denomEps = 1e-12;
     double sMin = 1e-12;
     bool clipRelativeStep = true;
@@ -102,6 +111,16 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const std::vector<double> *castorKx = nullptr,
     const std::vector<double> *castorKy = nullptr,
     const std::vector<double> *castorKz = nullptr);
+/// Ordered subsets: keeps the subset sensitivities S_0..S_{count-1} (count
+/// host arrays of globalImageCount doubles) resident so the update tails
+/// below can select one by index without a per-sub-iteration upload. count
+/// 0 releases them. Replaces the previous set.
+bool setCompactSubsetSensitivitiesCUDA(const double *const *hostSensitivities,
+                                       int count, size_t globalImageCount);
+/// Resident MLEM (OSEM) iteration tail: x <- x q_m / S_m over the accumulated
+/// per-bed backward outputs. subsetIndex < 0 divides by the global denom
+/// (uploaded when refreshStaticInputs); otherwise by the resident subset
+/// sensitivity of that index.
 bool finishCompactResidentMlemIterationCUDA(
     size_t globalImageCount, int globalNz, const int *bedZStarts,
     int bedCount, bool flipLocalZ,
@@ -111,10 +130,11 @@ bool finishCompactResidentMlemIterationCUDA(
     const std::vector<double> *castorKy,
     const std::vector<double> *castorKz,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero);
+    bool *imageAllZero, int subsetIndex = -1);
 bool downloadCompactResidentImageCUDA(double *image, size_t count);
 /// Resident BSREM-II iteration tail: accumulates q like the MLEM variant and
-/// applies the relative update with the given penalty terms.
+/// applies the relative update with the given penalty terms. subsetIndex < 0
+/// uses S_m = S (global denom); otherwise the resident subset sensitivity.
 bool finishCompactResidentBsremIterationCUDA(
     size_t globalImageCount, int globalNz, const int *bedZStarts,
     int bedCount, bool flipLocalZ,
@@ -125,14 +145,16 @@ bool finishCompactResidentBsremIterationCUDA(
     const std::vector<double> *castorKz,
     const CompactBsremUpdateParams &params,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero);
+    bool *imageAllZero, int subsetIndex = -1);
 /// Device pointer of the resident image (count doubles) for the volume ops;
 /// nullptr when CUDA is unavailable.
 const double *compactResidentImageDeviceCUDA(size_t count);
 /// Device scratch (count doubles) that receives the regularizer gradient.
 double *compactResidentGradientDeviceCUDA(size_t count);
-bool prefetchCompactFloatMatrixCUDA(const io::CSRView &next,
-                                    const io::CSRView &current);
+/// Streams the next slice into the free device slot on the upload stream
+/// while `current` (already resident) is being consumed.
+bool prefetchCompactFloatMatrixCUDA(const io::CSRSubsetView &next,
+                                    const io::CSRSubsetView &current);
 bool releaseCompactExecutionCUDA();
 bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
@@ -157,13 +179,21 @@ bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
     int accumulatorIndex = 0,
     int cacheSlot = 0);
+// --- CSRB batch passes over a chunk slice ------------------------------------
+// The matrix operand of the four passes below is an io::CSRSubsetView: the
+// rows of the compact angles of one ordered subset that fall in one chunk, or
+// the whole chunk (all its angles, tag 0). The slice is streamed into a device
+// slot (segments back to back, re-based row pointers) and its per-block angle
+// table drives the row -> full projection mapping, so the kernels never assume
+// consecutive angles. commonRatioParams.compactRowBase is ignored for slices
+// with more than one block; the state fills blockAngles.
+
 /// CSRB CTAC numerator on the branch batch: H_b = A att_b^attPower, the
 /// factor applied per compact angle in the image domain (see the CSRQ
 /// counterpart csrqRunNumerCUDA). bedAttFactors holds one full-angle uint16
-/// table (attCount entries) per bed; commonRatioParams.compactRowBase is the
-/// chunk's first compact row.
+/// table (attCount entries) per bed.
 bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
+    const io::CSRSubsetView& matrix,
     const double* const* fullProjections,
     size_t fullProjectionCount,
     const CompactDeviceRatioParams& commonRatioParams,
@@ -182,7 +212,7 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
 /// (row -> projection validity); rowWeights (that many doubles) may be
 /// nullptr for W = 1.
 bool compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
+    const io::CSRSubsetView& matrix,
     const CompactDeviceRatioParams& commonRatioParams,
     const CompactDeviceTransformParams& commonTransformParams,
     const int* symIds,
@@ -214,7 +244,7 @@ bool compactBranchBatchAttenForwardCUDA(
 /// branchCount columns per bed; each bed keeps its own projection and backward
 /// accumulator.
 bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
+    const io::CSRSubsetView& matrix,
     const double* const* fullProjections,
     size_t fullProjectionCount,
     const CompactDeviceRatioParams& commonRatioParams,
@@ -233,7 +263,7 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
 /// supplies the row -> full projection mapping. CTAC runs use the attenuated
 /// variant above.
 bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
+    const io::CSRSubsetView& matrix,
     const CompactDeviceTransformParams& commonTransformParams,
     const int* symIds,
     const int* zMirrors,

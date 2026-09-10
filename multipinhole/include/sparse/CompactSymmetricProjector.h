@@ -3,6 +3,7 @@
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
 #include "filters/PSFConfig.h"
+#include "sparse/CompactSubsets.h"
 #include "sparse/SparseOpsCUDA.h"
 
 #include <cstddef>
@@ -52,6 +53,12 @@ struct CompactMatrixChannel {
 // with H_k = w_k A_k. The data gradient is q - S. Nothing below knows which
 // optimizer or penalty will use the result.
 
+// Ordered subsets (CSRB only, design report 7.10): both statistics may be
+// restricted to one subset of compact angles (CompactSubsetSpec, see
+// CompactSubsets.h). The matrix is then streamed as (chunk, subset) slices —
+// only the subset's rows cross PCIe — and S_m / q_m are the sums over those
+// rows, so sum_m S_m = S. nullptr or count 1 is the full-data pass.
+
 // S: joint sensitivity over all channels, S = sum_k w_k A_k^T W 1.
 // rowWeights (optional, meta.fullRows() doubles indexed like the measured
 // projection) carries the per-row sensitivity weights: detector masks and
@@ -62,11 +69,16 @@ bool computePoissonSensitivityCUDA(
     const spect::io::CompactSymmetryMetadata &meta, int threads, double *denom,
     CompactSymmetricStageTiming *timing = nullptr,
     const uint16_t *attFactors = nullptr,
-    const double *rowWeights = nullptr);
+    const double *rowWeights = nullptr,
+    const CompactSubsetSpec *subset = nullptr);
 
 // q: joint backprojected ratio per bed.
 // fullProjections / fullBackgrounds are indexed [channel * bedCount + bed]
 // (fullBackgrounds may be nullptr, or hold nullptr entries).
+// nextSubset (optional): the subset of the following call, whose first slice
+// is prefetched behind this pass's last one. The caller flips
+// reverseChunkOrder between consecutive calls, so that first slice is the
+// last chunk of this call's order.
 bool accumulatePoissonBackprojectedRatioCUDA(
     const std::vector<CompactMatrixChannel> &channels,
     const spect::io::CompactSymmetryMetadata &meta,
@@ -78,7 +90,9 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     const uint16_t *const *attFactors = nullptr,
     bool refreshProjectionInputs = true,
     bool branchBatchInputPrepared = false,
-    bool downloadBackwardOutputs = true);
+    bool downloadBackwardOutputs = true,
+    const CompactSubsetSpec *subset = nullptr,
+    const CompactSubsetSpec *nextSubset = nullptr);
 
 // Assigns device matrix slots and uploads every channel's CSRQ matrix (or
 // warms the CSRB resident cache). Must run before the per-channel calls.
@@ -122,13 +136,15 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const spect::filters::PSFKernels *castorPsf = nullptr,
     bool uploadGlobalImage = true);
 
+// subsetIndex >= 0 divides by the resident subset sensitivity of that index
+// (setCompactSubsetSensitivitiesCUDA); -1 is the full-data step over denom.
 bool finishCompactResidentMlemIterationCUDA(
     const spect::io::CompactSymmetryMetadata &meta,
     size_t globalImageCount, int globalNz, const int *bedZStarts,
     int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
     const spect::filters::PSFKernels *castorPsf,
     bool requirePositiveNumerator, bool refreshStaticInputs,
-    bool *imageAllZero);
+    bool *imageAllZero, int subsetIndex = -1);
 
 // BSREM-II counterpart: same data-term accumulation, then the relative update
 // with params (penalty gradient already on the device, see
@@ -139,7 +155,7 @@ bool finishCompactResidentBsremIterationCUDA(
     int bedCount, bool flipLocalZ, const double *denom, const uint8_t *mask,
     const spect::filters::PSFKernels *castorPsf,
     const CompactBsremUpdateParams &params, bool requirePositiveNumerator,
-    bool refreshStaticInputs, bool *imageAllZero);
+    bool refreshStaticInputs, bool *imageAllZero, int subsetIndex = -1);
 
 bool runCompactChunkMlemNumerCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks,

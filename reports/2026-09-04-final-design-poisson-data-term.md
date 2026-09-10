@@ -514,6 +514,28 @@ profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。�
 
 剩余方向：反投现在约为原来一半，正向 packed-2（cfffea5 已跳零对）与反投量级接近，五床分子的下一步应重新以短 Nsight 划分；稠密投影（Tc-99m 高计数）保持 cuSPARSE，阈值 0.40 若要下调需在 0.30–0.40 区间补实测。不重开已拒 SpMM／CSC 真转置／FP16。
 
+## 7.10 2026-09-09 子集（OSEM / 分块 BSREM）调研结论与设计决定
+
+用户问题：投影数据如何划分子集、能否加速、子集矩阵如何加载、子集间如何"融合"；主要算法族 MLEM / OSEM / BSREM + RDP / TV。以下为文献与专利检索（PMB、IEEE TMI、PETRIC 2024、CASToR 文档、Google Patents）后的结论；专利部分只是工程认知，不是法律意见。
+
+### 调研结论
+
+1. **加速机制与上限。** OSEM 的加速比约等于子集数（Hudson & Larkin 1994；Branderhorst 2010 复述 "x 次 OSEM × y 子集 ≈ xy 次 MLEM"）。收益来自完整迭代数减少，不是每次迭代更快；本机一次完整 pass 仍要传 33.5 GB（≈1.1 s，已占核心 1.47 s 的大部分），所以子集不会把单次完整迭代压到 1.1 s 以下。
+2. **子集单元。** Utrecht/MILabs 的 POSEM（Branderhorst, Vastenhouw, Beekman, PMB 55:2023, 2010）指出：对**静止聚焦多针孔**（U-SPECT-II，75 针孔、投影截断）按"视角"分子集时 30 个以上子集即出现严重伪影（骨扫描均值偏差 24%），原因是体素位置相关的灵敏度破坏了 Hudson–Larkin 的"子集平衡"；他们改为把探测器像素按规则图案分到子集（POSEM），128 子集仍接近 MLEM。同一文中，15 个视角子集（每子集 5 个针孔投影、跨 5 环、相邻环角距≈90°）与 MLEM 的均值偏差仅 1.1%。我们的系统是 **360 角旋转采集**，每个 compact 角经 4 重 xy 对称覆盖 4 个相隔 90° 的全角度，交错子集天然是全 360° 均匀采样：N=6/10/15 时每子集 60/36/24 个全角度，远高于 POSEM 中已表现良好的"每子集 5 视角"。因此首选**按 compact 角交错的视角子集**；像素子集作为后备（可通过一次离线行重排得到连续存储，不需要新核）。
+3. **低计数与子集数。** 同一团队的 CR-OSEM（Vaissier 2012）与 SR-OSEM（Vaissier, Beekman, Goorden, PMB 61:4300, 2016）说明：子集多、投影计数少时会出现"活动被错误抹除"的伪影；他们按体素自适应地降低子集数。五床 Lu-177 有 74–90% 零 bin，属低计数，因此 N 先取 ≤ 10，并以 Derenzo/小鼠对 MLEM 的偏差指标（Branderhorst 表格式：剖面均值/最大偏差占 MLEM 峰值百分比）为门。
+4. **收敛型子集算法。** Ahn & Fessler（IEEE TMI 22:613, 2003）证明 modified BSREM-II / relaxed OS-SPS 全局收敛：缩放函数 D_j = M·x_j/p_j（p 为全局灵敏度，M 子集数，M=1、α=1 退化为 EM），每步后投影到 [ε, U−ε]，松弛 α_n = α_0/(γn+1) 满足 Σα_n=∞、Σα_n²<∞；正则项按 1/M 计入每个子集目标（其式 (27)，比只在部分子集加正则更稳）。文中明确："早期子集多为好，后期子集少为好"，并提出"跑几次 OS 再切换到非 OS 算法 / 逐步减少子集数"作为等价的收敛手段。GE Q.Clear（Ahn et al., PMB 60:5733, 2015；Ross 白皮书）即 modified BSREM + RDP：28 子集、约 25 次迭代跑到实用收敛，2 次 OSEM 预热。
+5. **"融合"类算法。** COSEM/E-COSEM（Hsiao, Rangarajan, Gindi, PMB 49, 2004）存每子集完全数据像后再合成，收敛且无需松弛计划，但每床多 N 个体积；PETRIC 2024（RDP 正则 PET）冠军 MaGeZ 用带先验预条件的 SVRG（Ehrhardt/Schramm/Kereta，Frontiers Nucl Med 2025），约 25 子集，步长 3→1→0.5，cofactor 确定性子集顺序，SVRG 需每 epoch 一次额外全梯度 pass（对我们是额外一次 33.5 GB 传输），SAGA 则需存 N 个子集梯度。结论：这类方法在传输受限的本机不是第一步；先用已有 BSREM-II 的松弛 + 子集递减实现收敛，SAGA 留作后续。
+6. **工程实现参考。** CASToR 直方图模式为每个子集**现算**灵敏度并允许每次迭代不同子集数，list-mode 则用全局灵敏度/子集数（仅在子集平衡时正确），并警告直方图事件顺序需打乱以免伪影。Branderhorst 也指出截断投影下某些体素在某个子集中无采样，需处理 S_k=0。因此我们存 **N 份精确的 S_k**（不用 S/N），S_k=0 处跳过更新。
+7. **专利。** OSEM（1994 论文）、RAMLA（1996）、BSREM（De Pierro 2001）、松弛 OS（2003）、RDP（Nuyts 2002）、POSEM（2010）、COSEM（2002–04）均为公开文献。检索到的 GE 专利是 PL 重建的特定附加项（如 US9256967B2 PET PL 部分容积校正），MILabs 专利为聚焦针孔硬件（US7145153、US8067741）；未发现覆盖"角度交错子集 + 松弛 BSREM + 子集递减"的有效权利要求。这不是 FTO 意见。
+
+### 设计决定（据此实施）
+
+- **子集**：compact 角交错，N | 90，先支持 N ∈ {6, 9, 10, 15, 18, 30}（N ≥ 6 使一个子集切片不超过现有设备槽容量）；顺序用位反转/最大角间隔的确定性序，写入 manifest。
+- **加载**：流式单元从 chunk 改为 (chunk, 子集) 切片：每个 chunk 中该子集各角的 nnz 区间（每段 ≈65 MB）按顺序拷入设备槽，host 生成重定基 rowPtr；沿用双槽预取。要求完整主机锁页缓存。ratio / unit-ratio 核增加按 rpa 块的角度表（空指针保持原语义）；正向 packed 核、pair 散射反投核不变。
+- **灵敏度**：`computeCompactChunkSensitivityCUDA` 加子集限制，N 份 S_k 进分母缓存（key 含 N 与顺序）；CTAC 同样按子集。
+- **优化器**：统一为 Ahn–Fessler 形式 u_j = α_n [M(n_{k,j} − S_{k,j}) − λ_j r_j] / (S_j + λ_j max(c_j,0) + ε)，M=1 时即现有 BSREM-II；MLEM 类（β=0，α=1）用 `-subsets` 调度串（如 `10:3,5:2,1:5`，末段 1 子集即 MLEM）得到与 MLEM50 可比的终点；BSREM+RDP/TV 用固定 N 加现有 α_n 松弛。TV 仍走现有梯度/曲率接口，不引入 SPDHG。
+- **门**：单元测试（子集分子对 host oracle；ΣS_k = S；N=1 与 MLEM 一致）；Derenzo OSEM 调度 vs MLEM50 的 Branderhorst 式偏差与杆对比度；五床墙钟；不与 MLEM50 做 1e-5 relL2 门。
+
 ## 8. 当前实现摘要
 
 `Measurement operator (A, att, s, W, b) → Poisson statistics (q, S) → Optimizer (MLEM | BSREM-II)`。CTAC 在按角度的输入与收口阶段施加，背景进入 ratio，行权重只进入 S；BSREM 复用现有梯度核，再做逐体素更新。CSRB 与 CSRQ 各自保留必要的格式内核，不新增统一内核或算子类层次。

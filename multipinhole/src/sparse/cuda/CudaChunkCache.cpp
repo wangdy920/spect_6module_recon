@@ -200,6 +200,20 @@ MatrixCacheKey makeCacheKey(const io::CSRView &matrix) {
   return key;
 }
 
+MatrixCacheKey makeCacheKey(const io::CSRSubsetView &slice) {
+  MatrixCacheKey key;
+  key.rowPtr = slice.sourceRowPtr;
+  if (!slice.segments.empty()) {
+    key.colIdx = slice.segments.front().col_idx;
+    key.values = slice.segments.front().val;
+  }
+  key.rows = slice.rows;
+  key.cols = slice.cols;
+  key.nnz = static_cast<int64_t>(slice.nnz);
+  key.tag = slice.tag;
+  return key;
+}
+
 
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz) {
   if (rows <= 0 || nnz <= 0) {

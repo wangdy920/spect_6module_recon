@@ -90,6 +90,9 @@ void applyBsremUpdate(std::vector<double> &image,
   const double beta = equiv ? 0.0 : params.betaScaled;
   const double denomEps = equiv ? 0.0 : params.denomEps;
   const bool clip = equiv ? false : params.clipRelativeStep;
+  const double subsetScale = equiv ? 1.0 : params.subsetScale;
+  if (!(subsetScale >= 1.0))
+    throw std::runtime_error("applyBsremUpdate: subsetScale must be >= 1");
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(std::max(1, threads))
@@ -134,7 +137,7 @@ void applyBsremUpdate(std::vector<double> &image,
       c = (*params.curvature)[idx];
     const double c_pos = std::max(c, 0.0);
 
-    const double v_num = numerator[idx] - s_sub - lambda * r;
+    const double v_num = subsetScale * (numerator[idx] - s_sub) - lambda * r;
     const double v_den = s_eff + lambda * c_pos + denomEps;
     const double v = v_num / v_den;
     double u = alpha * v;

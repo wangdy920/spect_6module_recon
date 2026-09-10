@@ -584,11 +584,47 @@ TEST(IOTest, PublicCtacModelRejectsLegacyPerVoxel) {
 
 TEST(IOTest, UnknownAndDeprecatedCliArgumentsAreIgnored) {
     auto argv = compactBaseArgs();
-    argv.insert(argv.end(), {"-prior", "prior.mhd", "-subsets", "1",
+    argv.insert(argv.end(), {"-prior", "prior.mhd",
                              "spect_psf_sigma=0.637"});
 
     spect::cli::ReconArgs args;
     EXPECT_TRUE(parseReconArgsForTest(argv, args));
+}
+
+TEST(IOTest, CompactSymmetricParserAcceptsSubsetSchedule) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-subsets", "10:3,5:2,1:5"});
+
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.subsetSchedule, "10:3,5:2,1:5");
+}
+
+TEST(IOTest, CompactSymmetricParserReadsSubsetScheduleFromConfig) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "spect_subset_schedule_config.ini";
+    {
+        std::ofstream out(path);
+        ASSERT_TRUE(out);
+        out << "[Algorithm]\nsubsets = 6:2,1:3\n";
+    }
+
+    const std::vector<std::string> argv = {
+        "SPECT_recon", "-algoConf", path.string(), "-df", "proj.bin",
+        "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "5",
+        "-vox", "0.3", "-ang", "360"};
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.subsetSchedule, "6:2,1:3");
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, CompactSymmetricParserRejectsEmptySubsetSchedule) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-subsets", ""});
+
+    spect::cli::ReconArgs args;
+    EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
 
 TEST(IOTest, CompactSymmetricParserReadsDefaultChunkCSRDirFromConfig) {
