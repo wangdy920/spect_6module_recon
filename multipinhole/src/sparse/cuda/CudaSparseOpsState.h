@@ -1338,13 +1338,8 @@ private:
     // block (host copy for the per-angle CTAC tables, device copy for the
     // ratio kernels). Empty for a matrix uploaded from a plain CSRView.
     std::vector<int> blockAngles;
-    // Pixel-subset (POSEM) slice: canonical row of every matrix row (device
-    // copy for the ratio kernels). Empty for angle slices and plain CSRView
-    // uploads; exclusive with blockAngles by construction.
-    std::vector<int> rowCompactIndex;
     int rowsPerBlock = 0;
     DeviceArray<int> dBlockAngles;
-    DeviceArray<int> dRowCompactIndex;
     CuSparseMatGuard matA;
     mutable std::array<size_t, 2> spmvBufferSizes{};
     mutable std::array<bool, 2> spmvBufferSizeValid{};
@@ -1358,7 +1353,6 @@ private:
       nnz = 0;
       valueType = CachedMatrixValueType::Float;
       blockAngles.clear();
-      rowCompactIndex.clear();
       rowsPerBlock = 0;
       matA.reset();
       spmvBufferSizes = {};
@@ -1374,26 +1368,17 @@ private:
       dColIdx.reset();
       dValues.reset();
       dBlockAngles.reset();
-      dRowCompactIndex.reset();
     }
 
     CudaEventGuard compactUploadReady;
     bool compactUploadPending = false;
     // Async upload staging for the (small, unregistered) rowPtr array and the
-    // slice's block-angle / pixel-row tables: a pageable-source
-    // cudaMemcpyAsync host-blocks until the stream drains, which exposed
-    // whole-chunk copy times in the enqueue path. Layout
-    // [rowPtr (rows + 1) | blockAngles | rowCompactIndex].
+    // slice's block-angle table: a pageable-source cudaMemcpyAsync
+    // host-blocks until the stream drains, which exposed whole-chunk copy
+    // times in the enqueue path. Layout [rowPtr (rows + 1) | blockAngles].
     PinnedHostArray<int32_t> rowPtrStage;
     CudaEventGuard rowPtrStageDone;
     bool rowPtrStagePending = false;
-    // Fragmented pixel-subset slices: two alternating pinned nnz stages
-    // (col_idx / val gathered per ~8 MB) guarded by their own events.
-    PinnedHostArray<int32_t> nnzColStage[2];
-    PinnedHostArray<float> nnzValStage[2];
-    CudaEventGuard nnzStageDone[2];
-    bool nnzStagePending[2] = {false, false};
-    unsigned nnzStageNext = 0;
   };
 
   struct ResidentMatrixSetCache {
@@ -1751,12 +1736,9 @@ private:
   }
 
 
-  // Slice upload: re-based row pointers, the block-angle table and the
-  // pixel-subset row index go through the pinned stage in one shot; angle
-  // slices' nnz segments are copied back to back straight from the
-  // (page-locked) chunk arrays however many they are, while pixel slices —
-  // fragmented into single-row segments by construction — gather through a
-  // double-buffered nnz stage in bounded batches.
+  // Slice upload: re-based row pointers and the block-angle table go through
+  // the pinned stage in one shot; the nnz segments are copied back to back
+  // straight from the (page-locked) chunk arrays.
   void uploadIoCsrSubsetViewAsync(const io::CSRSubsetView &slice,
                                   const MatrixCacheKey &key,
                                   CachedMatrix *cache, cudaStream_t stream) {
@@ -1767,120 +1749,45 @@ private:
     cache->nnz = static_cast<int64_t>(slice.nnz);
     cache->valueType = CachedMatrixValueType::Float;
     cache->blockAngles = slice.blockAngles;
-    cache->rowCompactIndex = slice.rowCompactIndex;
     cache->rowsPerBlock = slice.rowsPerBlock;
     const size_t rowPtrCount = static_cast<size_t>(slice.rows) + 1u;
     const size_t blockCount = slice.blockAngles.size();
-    const size_t rowCompactCount = slice.rowCompactIndex.size();
     if (cache->rowPtrStagePending) {
       CUDA_CHECK(cudaEventSynchronize(cache->rowPtrStageDone.get()));
       cache->rowPtrStagePending = false;
     }
-    cache->rowPtrStage.allocate(rowPtrCount + blockCount + rowCompactCount);
+    cache->rowPtrStage.allocate(rowPtrCount + blockCount);
     std::memcpy(cache->rowPtrStage.data(), slice.row_ptr.data(),
                 rowPtrCount * sizeof(int32_t));
     std::memcpy(cache->rowPtrStage.data() + rowPtrCount,
                 slice.blockAngles.data(), blockCount * sizeof(int32_t));
-    std::memcpy(cache->rowPtrStage.data() + rowPtrCount + blockCount,
-                slice.rowCompactIndex.data(),
-                rowCompactCount * sizeof(int32_t));
     cache->dRowPtr.copyFromHostAsync(cache->rowPtrStage.data(), rowPtrCount,
                                      stream);
     cache->dBlockAngles.copyFromHostAsync(
         cache->rowPtrStage.data() + rowPtrCount, blockCount, stream);
-    cache->dRowCompactIndex.copyFromHostAsync(
-        cache->rowPtrStage.data() + rowPtrCount + blockCount, rowCompactCount,
-        stream);
     cache->rowPtrStageDone.record(stream);
     cache->rowPtrStagePending = true;
     cache->dColIdx.allocate(static_cast<size_t>(slice.nnz));
     cache->dValues.allocate(static_cast<size_t>(slice.nnz));
     size_t offset = 0;
-    // Pixel-ness, not the segment count, picks the path: an interleaved
-    // angle subset legitimately has tens of segments (numAngles / N) that
-    // must keep the direct page-locked DMA; only pixel slices are built
-    // fragmented (one segment per selected row).
-    const bool fragmented = !slice.rowCompactIndex.empty();
-    if (!fragmented) {
-      for (const io::CSRSegment &segment : slice.segments) {
-        const size_t count = static_cast<size_t>(segment.nnz);
-        if (count == 0) {
-          continue;
-        }
-        CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + offset,
-                                   segment.col_idx, count * sizeof(int32_t),
-                                   cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + offset, segment.val,
-                                   count * sizeof(float),
-                                   cudaMemcpyHostToDevice, stream));
-        offset += count;
+    for (const io::CSRSegment &segment : slice.segments) {
+      const size_t count = static_cast<size_t>(segment.nnz);
+      if (count == 0) {
+        continue;
       }
-    } else {
-      offset = stageFragmentedSegmentsAsync(slice, cache, stream);
+      CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + offset, segment.col_idx,
+                                 count * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                 stream));
+      CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + offset, segment.val,
+                                 count * sizeof(float), cudaMemcpyHostToDevice,
+                                 stream));
+      offset += count;
     }
     if (offset != static_cast<size_t>(slice.nnz)) {
       throw std::runtime_error(
           "compact subset slice segments do not add up to its nnz.");
     }
     createMatA(cache);
-  }
-
-  // Gather a fragmented (pixel-subset) slice's single-row segments into two
-  // alternating pinned buffers so the upload stays a bounded number of async
-  // copies; a buffer is only refilled after its previous copy completed
-  // (per-buffer events). Returns the number of nnz entries sent.
-  size_t stageFragmentedSegmentsAsync(const io::CSRSubsetView &slice,
-                                      CachedMatrix *cache,
-                                      cudaStream_t stream) {
-    constexpr size_t kFlushEntries = 2u << 20; // ~8 MB of col_idx per flush
-    const size_t total = static_cast<size_t>(slice.nnz);
-    size_t sent = 0;
-    size_t seg = 0;    // segment holding the next entry to stage
-    size_t within = 0; // offset inside that segment
-    while (sent < total) {
-      const size_t take = std::min(kFlushEntries, total - sent);
-      const unsigned slot = cache->nnzStageNext;
-      if (cache->nnzStagePending[slot]) {
-        CUDA_CHECK(cudaEventSynchronize(cache->nnzStageDone[slot].get()));
-        cache->nnzStagePending[slot] = false;
-      }
-      cache->nnzColStage[slot].allocate(take);
-      cache->nnzValStage[slot].allocate(take);
-      size_t written = 0;
-      while (written < take) {
-        while (seg < slice.segments.size() &&
-               within >= static_cast<size_t>(slice.segments[seg].nnz)) {
-          ++seg;
-          within = 0;
-        }
-        if (seg >= slice.segments.size()) {
-          throw std::runtime_error(
-              "compact pixel-subset slice ran out of segments while staging.");
-        }
-        const io::CSRSegment &segment = slice.segments[seg];
-        const size_t count =
-            std::min(static_cast<size_t>(segment.nnz) - within, take - written);
-        std::memcpy(cache->nnzColStage[slot].data() + written,
-                    segment.col_idx + within, count * sizeof(int32_t));
-        std::memcpy(cache->nnzValStage[slot].data() + written,
-                    segment.val + within, count * sizeof(float));
-        written += count;
-        within += count;
-      }
-      CUDA_CHECK(cudaMemcpyAsync(cache->dColIdx.get() + sent,
-                                 cache->nnzColStage[slot].data(),
-                                 take * sizeof(int32_t),
-                                 cudaMemcpyHostToDevice, stream));
-      CUDA_CHECK(cudaMemcpyAsync(cache->dValues.get() + sent,
-                                 cache->nnzValStage[slot].data(),
-                                 take * sizeof(float), cudaMemcpyHostToDevice,
-                                 stream));
-      cache->nnzStageDone[slot].record(stream);
-      cache->nnzStagePending[slot] = true;
-      cache->nnzStageNext = 1u - slot;
-      sent += take;
-    }
-    return sent;
   }
 
   void validateIoCsrViewForUpload(const io::CSRView &matrix) const {
@@ -2054,27 +1961,13 @@ private:
     return *target;
   }
 
-  // Ratio parameters for a pass over `cached`: an angle slice carries its
-  // block -> angle table, a pixel slice its per-row canonical index; a
-  // CSRView upload keeps the caller's contiguous mapping.
+  // Ratio parameters for a pass over `cached`: a slice carries its own block
+  // -> angle table; a CSRView upload keeps the caller's contiguous mapping.
   static cuda::CompactDeviceRatioParams sliceRatioParams(
       const cuda::CompactDeviceRatioParams &common, const CachedMatrix &cached) {
     cuda::CompactDeviceRatioParams p = common;
     p.blockAngles = cached.blockAngles.empty() ? nullptr : cached.dBlockAngles.get();
-    p.rowCompactIndex = cached.rowCompactIndex.empty()
-                            ? nullptr
-                            : cached.dRowCompactIndex.get();
-    if (p.blockAngles != nullptr && p.rowCompactIndex != nullptr) {
-      throw std::runtime_error(
-          "compact slice carries both angle blocks and pixel row indices.");
-    }
-    if (p.rowCompactIndex != nullptr &&
-        cached.rowCompactIndex.size() != static_cast<size_t>(cached.rows)) {
-      throw std::runtime_error(
-          "compact pixel slice row index does not match its row count.");
-    }
-    if (cached.rowsPerBlock != 0 &&
-        cached.rowsPerBlock != p.compactRaysPerAngle) {
+    if (p.blockAngles != nullptr && cached.rowsPerBlock != p.compactRaysPerAngle) {
       throw std::runtime_error(
           "compact slice rows per block does not match compactRaysPerAngle.");
     }
@@ -2802,12 +2695,16 @@ public:
                     cuda::CompactDeviceRatioTiming *ratioTimingOut,
                     cuda::CompactDeviceBackwardTiming *backwardTimingOut,
                     const uint16_t *const *bedAttFactors, size_t attCount,
-                    double attPower) {
+                    double attPower, int subsetCount, int subsetIndex) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
     const float power = csrqCheckedAttPower(attPower);
+    if (subsetCount < 1 || subsetIndex < 0 || subsetIndex >= subsetCount ||
+        commonRatioParams.compactNumAngles % subsetCount != 0) {
+      throw std::runtime_error("Invalid CSRQ angle subset.");
+    }
     if (bedCount <= 0 || bedCount > spect::core::kMaxBeds ||
         accumulatorBase < 0 || cacheSlotBase < 0 ||
         accumulatorBase + bedCount > kCompactDeviceBackwardMaxAccumulators ||
@@ -2859,6 +2756,9 @@ public:
 
     // Timer slots: one per (chunk, bed) pass, or per (chunk, bed, compact
     // angle) launch group on the attenuated path.
+    if (hasAtten && subsetCount > 1) {
+      throw std::runtime_error("CSRQ ordered subsets with CTAC are not supported.");
+    }
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
     const size_t maxAngles =
@@ -2869,6 +2769,9 @@ public:
     size_t pass = 0;
     size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
+      const auto selected = csrqSubsetRows(chunk.ptrs(), chunk.compactRowBase,
+          commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
+      if (selected.selectedRows() == 0) return;
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
@@ -2887,13 +2790,13 @@ public:
           const size_t t = usedTimers++;
           csrqForwardTimers_[t].recordStart(nullptr);
           launchCsrqForwardRatioK8Kernel(
-              chunk.ptrs(), dCsrqX_.get(), ratio, dProjections[bed],
+              selected, dCsrqX_.get(), ratio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
               dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
           csrqForwardTimers_[t].recordStop(nullptr);
 
           csrqBackwardTimers_[t].recordStart(nullptr);
-          csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+          csrqBackwardChunkLocked(selected, ratio, nvox, commonTransformParams,
                                   accums[bed]->get());
           csrqBackwardTimers_[t].recordStop(nullptr);
           continue;
@@ -2935,7 +2838,7 @@ public:
         }
         csrqReleaseAttenSlotLocked(slot);
       }
-    });
+    }, commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const double forwardSeconds =
         accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers);
@@ -2968,12 +2871,16 @@ public:
       const double *rowWeights, size_t rowWeightCount,
       size_t fullProjectionCount,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      const uint16_t *attFactors, size_t attCount, double attPower) {
+      const uint16_t *attFactors, size_t attCount, double attPower, int subsetCount, int subsetIndex) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     CsrqResidentMatrix &matrix = csrqRequireReadyLocked(matrixIndex, branchCount);
     const size_t nvox = static_cast<size_t>(matrix.cols);
     const float power = csrqCheckedAttPower(attPower);
+    if (subsetCount < 1 || subsetIndex < 0 || subsetIndex >= subsetCount ||
+        commonRatioParams.compactNumAngles % subsetCount != 0) {
+      throw std::runtime_error("Invalid CSRQ angle subset.");
+    }
     if (rowWeights != nullptr && rowWeightCount != fullProjectionCount) {
       throw std::runtime_error(
           "CSRQ sensitivity row weights must hold one value per full row.");
@@ -2994,6 +2901,9 @@ public:
     ensureProjDomainKernelsLoaded();
 
     const bool hasAtten = attFactors != nullptr;
+    if (hasAtten && subsetCount > 1) {
+      throw std::runtime_error("CSRQ ordered subsets with CTAC are not supported.");
+    }
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
     const size_t maxAngles =
@@ -3002,6 +2912,9 @@ public:
     csrqEnsureTimersLocked(passes * maxAngles);
     size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
+      const auto selected = csrqSubsetRows(chunk.ptrs(), chunk.compactRowBase,
+          commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
+      if (selected.selectedRows() == 0) return;
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get() +
@@ -3014,7 +2927,7 @@ public:
       if (!hasAtten) {
         const size_t t = usedTimers++;
         csrqBackwardTimers_[t].recordStart(nullptr);
-        csrqBackwardChunkLocked(chunk, ratio, nvox, commonTransformParams,
+        csrqBackwardChunkLocked(selected, ratio, nvox, commonTransformParams,
                                 accum.get());
         csrqBackwardTimers_[t].recordStop(nullptr);
         return;
@@ -3038,7 +2951,7 @@ public:
         csrqBackwardTimers_[t].recordStop(nullptr);
       }
       csrqReleaseAttenSlotLocked(slot);
-    });
+    }, commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const double backwardSeconds =
         accumulateTimedCudaPairs(csrqBackwardTimers_, usedTimers);
@@ -3601,11 +3514,6 @@ private:
   const CsrbAttenChunk &csrbEnsureAttenChunkLocked(
       const uint32_t *hostRowPtr, const std::vector<int> &compactAngles,
       const CachedMatrix &cached, const cuda::CompactDeviceRatioParams &p) {
-    if (!cached.rowCompactIndex.empty()) {
-      throw std::runtime_error(
-          "compact CTAC per-angle batches do not support pixel (POSEM) subsets "
-          "yet; run pixel subsets without attenuation.");
-    }
     CsrbAttenChunk &chunk =
         csrbAttenChunks_[std::make_pair(cached.key.rowPtr, cached.key.tag)];
     if (chunk.rows == static_cast<int>(cached.rows) &&
@@ -3799,6 +3707,24 @@ private:
   // Rows [rowBase, rowBase + rows) of a chunk as a chunk view of their own:
   // the row pointer arrays are absolute within the chunk, so offsetting them
   // is enough (runs / values stay whole).
+  static CsrqDeviceChunkPtrs csrqSubsetRows(
+      CsrqDeviceChunkPtrs rows, int compactRowBase, int raysPerAngle,
+      int subsetCount, int subsetIndex) {
+    if (subsetCount < 1 || subsetIndex < 0 || subsetIndex >= subsetCount ||
+        raysPerAngle <= 0 || compactRowBase % raysPerAngle != 0 ||
+        rows.rows % raysPerAngle != 0) {
+      throw std::runtime_error("CSRQ subset needs valid angle-aligned rows.");
+    }
+    if (subsetCount > 1) {
+      const int firstAngle = compactRowBase / raysPerAngle;
+      rows.rowOffset = ((subsetIndex - firstAngle % subsetCount + subsetCount) %
+                        subsetCount) * raysPerAngle;
+      rows.rowGroupSize = raysPerAngle;
+      rows.rowGroupStride = subsetCount;
+    }
+    return rows;
+  }
+
   static CsrqDeviceChunkPtrs csrqRowRange(const CsrqDeviceChunk &chunk,
                                           int rowBase, int rows) {
     CsrqDeviceChunkPtrs p = chunk.ptrs();
@@ -3893,11 +3819,11 @@ private:
   // Packed mode (csrqPackedBackward_) scatters all eight branches in one pass
   // into [nvox][8] with float4 atomics (sm_90+; scalar fallback elsewhere)
   // and consumes it with the packed transform-add.
-  void csrqBackwardChunkLocked(const CsrqDeviceChunk &chunk, const float *ratio,
+  void csrqBackwardChunkLocked(const CsrqDeviceChunkPtrs &chunk, const float *ratio,
                                size_t nvox,
                                const cuda::CompactDeviceTransformParams &tp,
                                double *accum) {
-    csrqScatterBackwardLocked(chunk.ptrs(), ratio, nvox);
+    csrqScatterBackwardLocked(chunk, ratio, nvox);
     if (csrqPackedBackward_) {
       launchCompactTransformBackwardAddPacked8Kernel(
           dCsrqY_.get(), accum, nvox, tp, dBatchSymIds_.get(),
@@ -3941,7 +3867,9 @@ private:
   // while chunk c computes, and a slot is refilled only after the default
   // stream has finished reading it.
   template <typename Fn>
-  void csrqForEachChunkLocked(CsrqResidentMatrix &matrix, Fn &&fn) {
+  void csrqForEachChunkLocked(CsrqResidentMatrix &matrix, Fn &&fn,
+                              int raysPerAngle = 1, int subsetCount = 1,
+                              int subsetIndex = 0) {
     if (!matrix.streamed) {
       for (size_t chunkIndex = 0; chunkIndex < matrix.chunks.size(); ++chunkIndex) {
         fn(*matrix.chunks[chunkIndex], chunkIndex);
@@ -3962,10 +3890,33 @@ private:
       dev.dRowRunPtr.copyFromHostAsync(host.rowRunPtr.data(), ptrCount, upload);
       dev.dRowMax.copyFromHostAsync(host.rowMax.data(),
                                     static_cast<size_t>(shape.rows), upload);
-      dev.dRuns.copyFromHostAsync(host.runs.data(),
-                                  static_cast<size_t>(shape.runCount), upload);
-      dev.dValuesQ.copyFromHostAsync(host.valuesQ.data(),
-                                     static_cast<size_t>(shape.nnz), upload);
+      if (subsetCount == 1) {
+        dev.dRuns.copyFromHostAsync(host.runs.data(),
+                                    static_cast<size_t>(shape.runCount), upload);
+        dev.dValuesQ.copyFromHostAsync(host.valuesQ.data(),
+                                       static_cast<size_t>(shape.nnz), upload);
+      } else {
+        CsrqDeviceChunkPtrs rows;
+        rows.rows = shape.rows;
+        const auto selected = csrqSubsetRows(rows, shape.compactRowBase,
+                                             raysPerAngle, subsetCount, subsetIndex);
+        // Preserve physical offsets in the existing slots. Only the selected
+        // angles' run/value spans cross PCIe; pinned source data is not repacked.
+        for (int row = selected.rowOffset; row < shape.rows;
+             row += raysPerAngle * subsetCount) {
+          const int end = row + raysPerAngle;
+          const size_t runBegin = host.rowRunPtr.data()[row];
+          const size_t runCount = host.rowRunPtr.data()[end] - runBegin;
+          const size_t valBegin = host.rowNnzPtr.data()[row];
+          const size_t valCount = host.rowNnzPtr.data()[end] - valBegin;
+          if (runCount != 0) CUDA_CHECK(cudaMemcpyAsync(
+              dev.dRuns.get() + runBegin, host.runs.data() + runBegin,
+              runCount * sizeof(uint32_t), cudaMemcpyHostToDevice, upload));
+          if (valCount != 0) CUDA_CHECK(cudaMemcpyAsync(
+              dev.dValuesQ.get() + valBegin, host.valuesQ.data() + valBegin,
+              valCount * sizeof(uint16_t), cudaMemcpyHostToDevice, upload));
+        }
+      }
       csrqUploadReady_[slot].record(upload);
       csrqSlotUsed_[slot] = true;
     };

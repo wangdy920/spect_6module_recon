@@ -1,10 +1,6 @@
 # SPECT_recon RC __PACKAGE_NAME__
 
-This Windows x64 CUDA RC build is self-contained under `bin/`.
-
-CSRB is the production matrix path. CSRQ, joint dual-window reconstruction
-and the default-off packed backward trial remain experimental. See
-`RELEASE_NOTES.md` for this candidate's validation scope and open gates.
+Windows x64, CUDA only; EXE and app-local DLLs reside in `bin/`. This template describes the current configuration interface. A frozen RC retains its original executable, configuration and validation scope; see its `RELEASE_NOTES.md`.
 
 ## Layout
 
@@ -15,10 +11,11 @@ __PACKAGE_NAME__/
     *.dll
     config/
       spect_config.ini
-      algo_mlem.conf
+      profiles/                 five reconstruction recipes
+      algo_mlem.conf            legacy compatibility configurations
       algo_bsrem.conf
-    matrix/
-      <matrix_name>/          optional, not bundled in this package
+    matrix/<isotope>/<matrix_id>/  deploy required matrices separately
+    cache/compact_denom/         generated sensitivity cache
   README.md
   PARAMETERS_CN.md
   RELEASE_NOTES.md
@@ -26,60 +23,35 @@ __PACKAGE_NAME__/
   docs/SPECT_recon_help.txt
 ```
 
-## Default Discovery
+## Configuration and discovery
 
-Run `bin/SPECT_recon.exe` directly. The executable first searches its own
-directory for `config/spect_config.ini` and `config/algo_<alg>.conf`, so normal
-commands do not need `-config`.
+The EXE discovers its local `config/spect_config.ini`. The global INI selects **one** recipe via `default_config_Tc99m`, `default_config_Lu177` or `default_config`. `-algoConf <file>` replaces that recipe; missing fields inherit global defaults. `-config` accepts a global INI or a complete recipe containing `[Algorithm]` without a global `default_config`.
 
-Use `-config <path>` only when intentionally overriding the packaged config.
-Use `-algoConf <path>` only when intentionally overriding algorithm defaults.
+`recon_sections_override_cli=false` gives explicit CLI > recipe > global. With true, configured reconstruction fields use recipe > global > CLI, including algorithm, iterations, PSF, Mask, Filtering, Regularization, matrix and norm. Runtime input/output, device, threads and logging remain caller-owned. Source defaults use false; the updated 6Module deployment preserves true. `-opti` changes the optimizer without switching the selected recipe. Legacy `algo_<alg>.conf` discovery applies only when no default recipe is configured.
 
-Compact chunk matrix discovery is also exe-local:
+Matrix IDs resolve exactly under `[SystemMatrix] root` as `root/id` or `root/isotope/id`. Missing or ambiguous IDs fail. Matrix/norm/cache config paths are EXE-relative; recipe paths in the global INI are global-config-relative. Explicit matrix and cache CLI flags follow the same priority policy.
 
-1. CLI `-chunkCSRDir <dir>` wins.
-2. Otherwise `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`
-   is resolved relative to `bin/`.
-3. Otherwise, if `bin/matrix/` contains exactly one directory with
-   `metadata.bin`, that matrix is used automatically.
-4. If multiple matrix directories exist, the executable fails fast and lists
-   the candidates.
+## Examples
 
-## Minimal Example
-
-If this package has exactly one matrix under `bin/matrix/<matrix_name>/`:
+Deploy the selected recipe's matrices first. From the package root:
 
 ```powershell
-.\bin\SPECT_recon.exe `
-  -df D:\data\PSC_6module_24pin_10MBq_600s_test_1.bin `
-  -o recon_output `
-  -it 50:5
+# Default Tc OSEM50 x 10
+.\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -o recon_tc
+# Explicit Tc TV recipe
+.\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
+# Default Lu joint RDP30 x 10; independent 208 and 113 projections
+.\bin\SPECT_recon.exe -isotope Lu177 -df "D:\scan\Bed1_208.bin" -df2 "D:\scan\Bed1_113.bin" -o recon_lu
+# Multi-bed Tc: retain real consecutive BedN identities; default physical step 16.8 mm
+.\bin\SPECT_recon.exe -isotope Tc99m -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin" -o recon_multibed
+# Inspect the selected Lu model without reconstruction
+.\bin\SPECT_recon.exe -isotope Lu177 -dumpConf
 ```
 
-For multiple matrix folders, either set `default_chunk_csr_dir = matrix/<name>`
-in `bin/config/spect_config.ini` or add `-chunkCSRDir .\bin\matrix\<name>`.
+`-it A:B` means A full iterations with B angle subsets. `-it A` retains inherited subsets. `-save-every N` controls intermediate saving; default0 saves only the final iteration. OSEM and BSREM share angle subsets, including N10 for single CSRB and joint CSRQ. Subsets with CTAC are not enabled. RDP/TV must be selected in the recipe or explicit regularization parameters; `-opti bsrem` alone does not enable RDP.
 
-For multi-bed input:
+PSF stays enabled (sieve/castor, FWHM1.3mm), with existing Mask/bed processing. Output Gaussian is disabled. Only final primary and a separate output-only Butterworth copy (5cycles/cm, order8) are saved by default. Primary includes the existing sieve/save processing and is not the internal iteration array.
 
-```powershell
-.\bin\SPECT_recon.exe `
-  -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin;D:\scan\Bed3.bin;D:\scan\Bed4.bin" `
-  -bedOverlap 0,0,0,0,0 `
-  -o recon_multibed `
-  -it 50:5
-```
+Lu channel order is 208/113, weights0.1036/0.0617 applied once in the count model. Norm is disabled in all five recipes until matching calibration files are supplied; joint requires independent files for both windows or neither. Do not reuse a merged-window norm. The original merged-Lu/single208 recipe03 remains separate from joint recipe05.
 
-`-dfList` and `-bProjList` are sorted by `BedN` when present. `bedOverlap` is a
-fixed `Bed1..Bed5` table: `b1=Bed1-Bed2`, `b2=Bed2-Bed3`, `b3=Bed3-Bed4`,
-`b4=Bed4-Bed5`, `b5` reserved.
-
-Detailed Chinese parameter notes are in `PARAMETERS_CN.md`.
-
-## Mouse Default
-
-The release default keeps norm-W2 detector weights disabled. Do not pass
-`-detZRowWeightsFile` for the default Mouse reconstruction. The preliminary
-review of Mouse 2 found extra signal in the liver region and judged it likely
-to be an erroneous signal for a bone-seeking tracer; this remains a review
-note pending confirmation by an experienced reader, not a validated biological
-or algorithmic conclusion.
+See [Chinese parameters and five recipes](PARAMETERS_CN.md). These recipes retain their tested data/model scope; they are not universal optima or a completed activity calibration. CSRB remains the protected numerical baseline; joint/CSRQ deployment use does not extend the original experimental evidence to other systems.

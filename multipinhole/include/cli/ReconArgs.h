@@ -40,16 +40,11 @@ struct ReconArgs {
     std::string badDetectorFile;   ///< Global numbers or hardware IDs; empty list disables masking
     bool badDetectorFileExplicit = false; ///< CLI path is resolved from cwd, not config dir
     int numIters = 50;            ///< Total iterations
-    /// Ordered-subset schedule: "N" or "N1:i1,N2:i2,..." (iterations summing
-    /// to numIters; angle mode additionally requires each N to divide the
-    /// compact angle count, and every later N divides the earlier one; N is
-    /// capped at 10 for the Lu-177 zero-bin budget). "1" is the full-data
-    /// update (MLEM / BSREM).
+    /// Ordered-subset schedule over compact angles: "N" or "N1:i1,N2:i2,..."
+    /// (iterations summing to numIters, each N dividing the compact angle
+    /// count and the previous N). "1" is the full-data update (MLEM / BSREM).
     std::string subsetSchedule = "1";
-    /// Subset partition: "angle" (interleaved compact angles, default) or
-    /// "pixel"/"posem" (canonical-row interleave, POSEM).
-    std::string subsetMode = "angle";
-    int saveInterval = 5;         ///< Save every N iterations
+    int saveInterval = 0;         ///< Save every N full iterations; 0 = final only
     int numThreads = 8;           ///< Thread count
     std::string cudaDeviceValue;  ///< Requested CUDA device id from env/CLI
     bool cudaDeviceRequested = false; ///< True if CUDA device selection was requested
@@ -69,7 +64,13 @@ struct ReconArgs {
     bool configExplicit = false;  ///< -config was used explicitly
     bool configFound = false;     ///< Config file exists
     bool configLoaded = false;    ///< Config file loaded successfully
-    bool reconSectionsOverrideCli = false; ///< Global INI owns Reg/PSF/filter/postprocess fields
+    bool reconSectionsOverrideCli = false; ///< Selected recipe/global reconstruction keys override CLI when true
+    std::string isotope;          ///< Optional acquisition isotope; checked against the selected recipe
+    std::string projectionModel;  ///< single, merged or joint; projection contract supplied by wrapper
+    std::string matrixRoot = "matrix"; ///< Executable-relative deployment root
+    std::string matrixId, matrixId2; ///< Stable directory IDs, never guessed from isotope
+    bool chunkCSRDir2Explicit = false;
+    std::string normFactorFile2;   ///< Second channel correction c (never inherit channel 1 norm)
     std::string algoConfPath;     ///< Algorithm config file path (empty = auto-detect)
     bool helpRequested = false;    ///< Print usage and exit successfully
     bool versionRequested = false; ///< Print version and exit successfully
@@ -198,6 +199,7 @@ struct ReconArgs {
     std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
     int detZEdgeCensor = 0;    ///< Censor k detZ edge rows per side in compact numerator+denominator (0 = off)
     std::string detZRowWeightsFile; ///< Detector efficiency weights applied to compact sensitivity only (empty = off)
+    bool normFactorFileExplicit = false;
     std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     double bedStepMm = 0.0;        ///< Scanner bed step in mm (0 = use kMultiBedStepMm default 16.8)
@@ -255,5 +257,4 @@ struct ReconArgs {
 namespace spect::main {
 using ReconArgs = cli::ReconArgs;
 }
-
 

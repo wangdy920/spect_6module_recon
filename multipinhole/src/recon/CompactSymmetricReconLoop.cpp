@@ -548,6 +548,13 @@ std::string buildCompactDenomCacheManifest(
     oss << "normalization_factor_semantics="
            "projection_correction_c_to_efficiency_1_over_c\n";
   }
+  if (!args.normFactorFile2.empty()) {
+    const auto values = spect::io::loadDetZRowWeights(args.normFactorFile2,
+        compactMeta.detNz, compactMeta.detNx, compactMeta.fullNumAngles);
+    appendFileStatIdentity(oss, "normalization_factor2", args.normFactorFile2);
+    oss << "normalization_factor2_values=" << values.size() << ':' << std::hex
+        << fnv1a64Words(values.data(), values.size() * sizeof(double)) << std::dec << '\n';
+  }
   if (!args.badDetectorFile.empty()) {
     const auto badDetectors =
         spect::io::loadBadDetectorList(args.badDetectorFile);
@@ -824,31 +831,16 @@ std::vector<double> runCompactSymmetricReconstruction(
                   "kernels are the plain ones.");
         }
         const bool compactHasAttenuation = !compactAttFactorPtrs.empty();
-        // Ordered subsets (design report 7.10). The schedule is non-increasing,
-        // so the first stage has the finest subset count; every coarser
-        // stage's S_m is an exact sum of the finest ones and stage 1 is the
-        // plain full-data update. Angle subsets interleave compact angles;
-        // pixel subsets (POSEM) interleave the canonical rows themselves.
-        const CompactSubsetMode subsetMode =
-            parseCompactSubsetMode(args.subsetMode);
+        // Ordered subsets over compact angles (design report 7.10). The
+        // schedule is non-increasing, so the first stage has the finest
+        // subset count; every coarser stage's S_m is an exact sum of the
+        // finest ones and stage 1 is the plain full-data update.
         const std::vector<CompactSubsetStage> subsetSchedule =
             parseCompactSubsetSchedule(args.subsetSchedule, args.numIters,
-                                       compactMeta.compactNumAngles,
-                                       subsetMode);
+                                       compactMeta.compactNumAngles);
         const int finestSubsetCount = subsetSchedule.front().subsets;
         const bool useSubsets = finestSubsetCount > 1;
         if (useSubsets) {
-          if (ctx.compactChunks2 != nullptr) {
-            throw std::runtime_error(
-                "-subsets > 1 is not supported with joint dual-window (CSRQ) "
-                "reconstruction; CSRB single window only.");
-          }
-          if (subsetMode == CompactSubsetMode::Pixels && compactHasAttenuation) {
-            throw std::runtime_error(
-                "-subset-mode pixels (POSEM) does not support CTAC yet; the "
-                "per-angle attenuated batches assume whole-angle slices. Use "
-                "angle subsets or run pixels without attenuation.");
-          }
           if (args.bsremDiagnostics || args.bsremMlemEquivalenceMode) {
             throw std::runtime_error(
                 "-subsets > 1 cannot be combined with the BSREM diagnostics or "
@@ -858,14 +850,11 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::ostringstream orderText;
           for (const int k : compactSubsetOrder(finestSubsetCount))
             orderText << (orderText.tellp() > 0 ? "," : "") << k;
-          logInfo("compact ordered subsets: mode " +
-                  formatCompactSubsetMode(subsetMode) + ", schedule " +
-                  formatCompactSubsetSchedule(subsetSchedule) + " over " +
-                  std::to_string(compactMeta.compactNumAngles) +
-                  " compact angles and " +
-                  std::to_string(compactMeta.compactRaysPerAngle) +
-                  " rays (visiting order of the finest stage: " +
-                  orderText.str() + ")");
+          logInfo("compact ordered subsets: schedule " +
+                  formatCompactSubsetSchedule(subsetSchedule) +
+                  " over " + std::to_string(compactMeta.compactNumAngles) +
+                  " compact angles (interleaved; visiting order of the finest "
+                  "stage: " + orderText.str() + ")");
         }
         std::vector<double> denom(globalNvox, 0.0);
         const bool compactPsfActive = needs_psf_blur(opts, psfPtr);
@@ -1017,6 +1006,25 @@ std::vector<double> runCompactSymmetricReconstruction(
             !detZSensWeights.empty() &&
             !std::all_of(detZSensWeights.begin(), detZSensWeights.end(),
                          [](double w) { return w == 1.0; });
+        // A calibrated joint model requires a distinct correction for each
+        // window. The numerator cancels the efficiency for background-free EM;
+        // the sensitivity retains w_k A_k^T (1/c_k), with shared masks.
+        std::vector<double> detZSensWeights2;
+        if (!args.normFactorFile2.empty()) {
+          const auto correction1 = spect::io::loadDetZRowWeights(
+              args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
+              compactMeta.fullNumAngles);
+          const auto correction2 = spect::io::loadDetZRowWeights(
+              args.normFactorFile2, compactMeta.detNz, compactMeta.detNx,
+              compactMeta.fullNumAngles);
+          if (correction1.size() != static_cast<size_t>(compactMeta.fullRows()) ||
+              correction2.size() != correction1.size() || channels.size() != 2)
+            throw std::runtime_error("Joint normalization requires two full projection correction arrays.");
+          detZSensWeights2.resize(correction2.size());
+          for (size_t i = 0; i < correction2.size(); ++i)
+            detZSensWeights2[i] = detZSensWeights[i] == 0.0 ? 0.0 : 1.0 / correction2[i];
+          channels[1].sensitivityRowWeights = detZSensWeights2.data();
+        }
         const auto sensStart = ProfileClock::now();
         std::filesystem::path compactDenomCachePath =
             resolveCompactDenomCacheMhdPath(args);
@@ -1140,11 +1148,9 @@ std::vector<double> runCompactSymmetricReconstruction(
           finestSubsetDenoms.assign(static_cast<size_t>(finestSubsetCount),
                                     std::vector<double>(globalNvox, 0.0));
           for (int k = 0; k < finestSubsetCount; ++k) {
-            const CompactSubsetSpec spec{finestSubsetCount, k, subsetMode};
+            const CompactSubsetSpec spec{finestSubsetCount, k};
             const std::string subsetManifest =
-                compactDenomManifest + "subset_mode=" +
-                formatCompactSubsetMode(subsetMode) + "\nsubset=" +
-                std::to_string(k) + "/" +
+                compactDenomManifest + "subset=" + std::to_string(k) + "/" +
                 std::to_string(finestSubsetCount) + "\n";
             std::filesystem::path subsetCachePath;
             if (explicitDenomCachePath) {
@@ -1424,15 +1430,13 @@ std::vector<double> runCompactSymmetricReconstruction(
             -> std::optional<CompactSubsetSpec> {
           if (sub + 1 < stageSubsetCount) {
             return CompactSubsetSpec{stageSubsetCount,
-                                     stageOrder[static_cast<size_t>(sub + 1)],
-                                     subsetMode};
+                                     stageOrder[static_cast<size_t>(sub + 1)]};
           }
           if (iteration >= args.numIters)
             return std::nullopt;
           const int nextCount =
               subsetSchedule[stageIndexOfIteration(iteration + 1)].subsets;
-          return CompactSubsetSpec{nextCount, compactSubsetOrder(nextCount)[0],
-                                   subsetMode};
+          return CompactSubsetSpec{nextCount, compactSubsetOrder(nextCount)[0]};
         };
 
         for (int it = 1; it <= args.numIters; ++it) {
@@ -1442,8 +1446,7 @@ std::vector<double> runCompactSymmetricReconstruction(
             enterStage(stageIndexOfIteration(it));
           for (int sub = 0; sub < stageSubsetCount; ++sub) {
           const CompactSubsetSpec subsetSpec{
-              stageSubsetCount, stageOrder[static_cast<size_t>(sub)],
-              subsetMode};
+              stageSubsetCount, stageOrder[static_cast<size_t>(sub)]};
           const std::optional<CompactSubsetSpec> nextSpec =
               nextSubsetSpec(it, sub);
           // -1 selects the global S on the device (full-data step).
@@ -1739,7 +1742,6 @@ std::vector<double> runCompactSymmetricReconstruction(
           if (recordDiag)
             imagePrev = image;
           if (!useBsremUpdate) {
-            // Global S carries the subset skip rule (S_m <= 0, S > 0 keeps).
             applyMlemUpdate(image, numer, subsetDenom, maskPtr, opts.nonneg,
                             opts.threads, &denom);
           } else {

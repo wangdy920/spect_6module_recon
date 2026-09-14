@@ -377,3 +377,8 @@ if(MSVC)
         >
     )
 endif()
+
+add_custom_command(TARGET SPECT_recon POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${SPECT_RECON_SOURCE_DIR}/config/profiles"
+          "$<TARGET_FILE_DIR:SPECT_recon>/config/profiles")

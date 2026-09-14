@@ -41,7 +41,7 @@ if ([string]::IsNullOrWhiteSpace($PackageName)) {
 $distRoot = Join-Path $repo "dist\release_candidates"
 $packageRoot = Join-Path $distRoot $PackageName
 $packageBin = Join-Path $packageRoot "bin"
-$packageConfig = Join-Path $packageRoot "config"
+$packageConfig = Join-Path $packageBin "config"
 $packageDocs = Join-Path $packageRoot "docs"
 
 $runtimeDlls = @(
@@ -117,6 +117,7 @@ Get-ChildItem -LiteralPath (Join-Path $StagingRoot "bin") -Force | ForEach-Objec
     # its workstation-local source path into a frozen package.
     if ($_.Name -eq "matrix") { return }
     if ($_.Name -eq "output") { return }
+    if ($_.Name -eq "config") { return } # copied once from the authoritative source below
     if ($_.PSIsContainer) {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageBin $_.Name) -Recurse -Force
     } else {
@@ -143,8 +144,11 @@ foreach ($dll in $runtimeDlls) {
 
 Write-Step "copy authoritative reconstruction configs"
 Get-ChildItem -LiteralPath (Join-Path $repo "multipinhole\config") -File | ForEach-Object {
+    if ($_.Name -in @("spect_config.ct_guided.ini", "spect_config.experiment.ini")) { return }
     Copy-Item -LiteralPath $_.FullName -Destination $packageConfig -Force
 }
+
+Copy-Item -LiteralPath (Join-Path $repo "multipinhole/config/profiles") -Destination $packageConfig -Recurse -Force
 
 Write-Step "generate docs/SPECT_recon_help.txt and version.txt"
 $helpPath = Join-Path $packageDocs "SPECT_recon_help.txt"
@@ -215,4 +219,4 @@ Write-Step "done: $packageRoot"
 Write-Step "zip:   $zipPath"
 Write-Step "invoke:"
 Write-Host "  cd `"$packageRoot`""
-Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -o recon_output -it 50:5"
+Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -o recon_output -it 50:1"

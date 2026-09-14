@@ -277,7 +277,7 @@ TEST(IOTest, DetZEdgeCensorEchoesInDumpConf) {
     spect::cli::ArgumentParser parser;
     spect::cli::ReconArgs args;
     std::vector<std::string> storage = {
-        "SPECT_recon", "-detZEdgeCensor", "3", "-dumpConf"};
+        "SPECT_recon", "-chunkCSRDir", "chunks", "-detZEdgeCensor", "3", "-dumpConf"};
     std::vector<char*> argv;
     for (std::string& arg : storage)
         argv.push_back(arg.data());
@@ -464,7 +464,7 @@ TEST(IOTest, DetZRowWeightsEchoesInDumpConf) {
     spect::cli::ArgumentParser parser;
     spect::cli::ReconArgs args;
     std::vector<std::string> storage = {
-        "SPECT_recon", "-detZRowWeightsFile", "weights.txt", "-dumpConf"};
+        "SPECT_recon", "-chunkCSRDir", "chunks", "-detZRowWeightsFile", "weights.txt", "-dumpConf"};
     std::vector<char*> argv;
     for (std::string& arg : storage)
         argv.push_back(arg.data());

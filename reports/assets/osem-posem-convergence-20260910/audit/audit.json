@@ -1,0 +1,616 @@
+{
+  "scope": "saved outputs; no reconstruction rerun",
+  "coordinate_check": "PASS",
+  "subset_strategy_figures": {
+    "paper_P16": [
+      [
+        9,
+        13,
+        1,
+        5
+      ],
+      [
+        0,
+        4,
+        8,
+        12
+      ],
+      [
+        6,
+        10,
+        14,
+        2
+      ],
+      [
+        15,
+        3,
+        7,
+        11
+      ]
+    ],
+    "paper_source": "Branderhorst et al. 2010, section 2.4, printed page 2027",
+    "current_formula": "(a%90 + x + 48*min(z,47-z))%N",
+    "checks": "PASS"
+  },
+  "manifest_differences": {
+    ".timestamp_utc": {
+      "mlem1000": "2026-09-10T04:44:55Z",
+      "a5": "2026-09-10T04:53:44Z",
+      "a10": "2026-09-10T04:59:17Z",
+      "p5": "2026-09-10T05:14:36Z",
+      "p10": "2026-09-10T05:23:52Z",
+      "asched": "2026-09-10T05:28:05Z",
+      "psched": "2026-09-10T05:34:00Z"
+    },
+    ".algorithm.iterations": {
+      "mlem1000": 1000,
+      "a5": 200,
+      "a10": 100,
+      "p5": 200,
+      "p10": 100,
+      "asched": 100,
+      "psched": 100
+    },
+    ".algorithm.save_interval": {
+      "mlem1000": 50,
+      "a5": 10,
+      "a10": 5,
+      "p5": 10,
+      "p10": 5,
+      "asched": 5,
+      "psched": 5
+    },
+    ".algorithm.subsets": {
+      "mlem1000": "1",
+      "a5": "5",
+      "a10": "10",
+      "p5": "5",
+      "p10": "10",
+      "asched": "10:20,5:20,1:60",
+      "psched": "10:20,5:20,1:60"
+    },
+    ".algorithm.subset_mode": {
+      "mlem1000": "angle",
+      "a5": "angle",
+      "a10": "angle",
+      "p5": "pixels",
+      "p10": "pixels",
+      "asched": "angle",
+      "psched": "pixels"
+    },
+    ".output.dir": {
+      "mlem1000": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\mlem1000",
+      "a5": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a5",
+      "a10": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a10",
+      "p5": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p5",
+      "p10": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p10",
+      "asched": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\asched",
+      "psched": "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\psched"
+    },
+    ".output.saved_iteration": {
+      "mlem1000": 1000,
+      "a5": 200,
+      "a10": 100,
+      "p5": 200,
+      "p10": 100,
+      "asched": 100,
+      "psched": 100
+    },
+    ".output.files": {
+      "mlem1000": [
+        "recon_it1000.mhd",
+        "recon_it1000.raw",
+        "recon_it1000_smooth.mhd",
+        "recon_it1000_smooth.raw",
+        "recon_it1000_butter.mhd",
+        "recon_it1000_butter.raw"
+      ],
+      "a5": [
+        "recon_it200.mhd",
+        "recon_it200.raw",
+        "recon_it200_smooth.mhd",
+        "recon_it200_smooth.raw",
+        "recon_it200_butter.mhd",
+        "recon_it200_butter.raw"
+      ],
+      "a10": [
+        "recon_it100.mhd",
+        "recon_it100.raw",
+        "recon_it100_smooth.mhd",
+        "recon_it100_smooth.raw",
+        "recon_it100_butter.mhd",
+        "recon_it100_butter.raw"
+      ],
+      "p5": [
+        "recon_it200.mhd",
+        "recon_it200.raw",
+        "recon_it200_smooth.mhd",
+        "recon_it200_smooth.raw",
+        "recon_it200_butter.mhd",
+        "recon_it200_butter.raw"
+      ],
+      "p10": [
+        "recon_it100.mhd",
+        "recon_it100.raw",
+        "recon_it100_smooth.mhd",
+        "recon_it100_smooth.raw",
+        "recon_it100_butter.mhd",
+        "recon_it100_butter.raw"
+      ],
+      "asched": [
+        "recon_it100.mhd",
+        "recon_it100.raw",
+        "recon_it100_smooth.mhd",
+        "recon_it100_smooth.raw",
+        "recon_it100_butter.mhd",
+        "recon_it100_butter.raw"
+      ],
+      "psched": [
+        "recon_it100.mhd",
+        "recon_it100.raw",
+        "recon_it100_smooth.mhd",
+        "recon_it100_smooth.raw",
+        "recon_it100_butter.mhd",
+        "recon_it100_butter.raw"
+      ]
+    }
+  },
+  "endpoint": {
+    "primary": {
+      "mlem1000": {
+        "relL2_to_mlem1000": 0.0,
+        "axial_cv": 1.0405744151759906,
+        "annulus_std": 81.0273582553209,
+        "ring_mean": 271.94264540980726,
+        "disk_mean": 224.4829006707075
+      },
+      "a5": {
+        "relL2_to_mlem1000": 0.0011990548920116798,
+        "axial_cv": 1.040466217719168,
+        "annulus_std": 81.1285805222078,
+        "ring_mean": 272.1274373926077,
+        "disk_mean": 224.61714945871705
+      },
+      "a10": {
+        "relL2_to_mlem1000": 0.0037145716752854624,
+        "axial_cv": 1.0403694928531286,
+        "annulus_std": 81.16190746417637,
+        "ring_mean": 271.80000927058694,
+        "disk_mean": 224.3056437730187
+      },
+      "p5": {
+        "relL2_to_mlem1000": 0.001008804153929419,
+        "axial_cv": 1.040485905980539,
+        "annulus_std": 81.06778899053276,
+        "ring_mean": 272.0678221491062,
+        "disk_mean": 224.58318411727373
+      },
+      "p10": {
+        "relL2_to_mlem1000": 0.0017882636037152937,
+        "axial_cv": 1.0406255114451897,
+        "annulus_std": 81.06623614648176,
+        "ring_mean": 271.9844180917252,
+        "disk_mean": 224.53792713430764
+      },
+      "asched": {
+        "relL2_to_mlem1000": 0.19593916233819594,
+        "axial_cv": 1.0356552880709473,
+        "annulus_std": 83.92038438706525,
+        "ring_mean": 275.22223287965954,
+        "disk_mean": 224.68371251119063
+      },
+      "psched": {
+        "relL2_to_mlem1000": 0.19593244700614404,
+        "axial_cv": 1.0356531652970673,
+        "annulus_std": 83.91475618750967,
+        "ring_mean": 275.22102575104503,
+        "disk_mean": 224.68316540119355
+      }
+    }
+  },
+  "subset_balance": {
+    "a5": {
+      "N": 5,
+      "sum_relL2": 1.3232921007484435e-07,
+      "weighted_rms_NSm_minus_S": 0.000558483604894543,
+      "max_abs_NSm_over_S_minus_1": 0.006779822833908655,
+      "supported_voxels": 873936,
+      "missing_subset_support": 0
+    },
+    "a10": {
+      "N": 10,
+      "sum_relL2": 1.3597194800413184e-07,
+      "weighted_rms_NSm_minus_S": 0.001160818734380918,
+      "max_abs_NSm_over_S_minus_1": 0.017475537700957,
+      "supported_voxels": 873936,
+      "missing_subset_support": 0
+    },
+    "p5": {
+      "N": 5,
+      "sum_relL2": 1.3243704914920795e-07,
+      "weighted_rms_NSm_minus_S": 6.657422953630133e-05,
+      "max_abs_NSm_over_S_minus_1": 0.0019612139769327186,
+      "supported_voxels": 873936,
+      "missing_subset_support": 0
+    },
+    "p10": {
+      "N": 10,
+      "sum_relL2": 1.3661025973472966e-07,
+      "weighted_rms_NSm_minus_S": 0.0007013295006282195,
+      "max_abs_NSm_over_S_minus_1": 0.008040279595326383,
+      "supported_voxels": 873936,
+      "missing_subset_support": 0
+    }
+  },
+  "projection_subsets": {
+    "angles5": {
+      "bins": [
+        165888,
+        165888,
+        165888,
+        165888,
+        165888
+      ],
+      "counts": [
+        13274928.2080915,
+        13282799.904107979,
+        13277331.78976169,
+        13288160.680401886,
+        13268339.742917974
+      ],
+      "count_cv": 0.0005096648813186404
+    },
+    "pixels5": {
+      "bins": [
+        165888,
+        165888,
+        165888,
+        165888,
+        165888
+      ],
+      "counts": [
+        13279327.13363786,
+        13273694.835738508,
+        13272105.33939868,
+        13285189.412880117,
+        13281243.603625812
+      ],
+      "count_cv": 0.0003639380280622692
+    },
+    "angles10": {
+      "bins": [
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944
+      ],
+      "counts": [
+        6644768.004265821,
+        6644420.731635942,
+        6642780.028220269,
+        6644561.173880448,
+        6632966.95619735,
+        6630160.203825794,
+        6638379.172472505,
+        6634551.761541593,
+        6643599.506521562,
+        6635372.7867205655
+      ],
+      "count_cv": 0.0007922321682483865
+    },
+    "pixels10": {
+      "bins": [
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944,
+        82944
+      ],
+      "counts": [
+        6640334.812222559,
+        6636221.638920648,
+        6636793.373942138,
+        6640500.83954031,
+        6640668.967945794,
+        6638992.321415122,
+        6637473.196818114,
+        6635311.965456768,
+        6644688.573339923,
+        6640574.635680397
+      ],
+      "count_cv": 0.0003983273906958094
+    }
+  },
+  "timing": {
+    "mlem1000": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 100,
+          "updates": 100,
+          "start_s": 254.0,
+          "completed_by_s": 256.0
+        },
+        "0.23": {
+          "iteration": 300,
+          "updates": 300,
+          "start_s": 828.0,
+          "completed_by_s": 830.0
+        },
+        "0.135": {
+          "iteration": 500,
+          "updates": 500,
+          "start_s": 1140.0,
+          "completed_by_s": 1142.0
+        },
+        "0.05": {
+          "iteration": 800,
+          "updates": 800,
+          "start_s": 1610.0,
+          "completed_by_s": 1611.0
+        }
+      }
+    },
+    "a5": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 20,
+          "updates": 100,
+          "start_s": 47.0,
+          "completed_by_s": 50.0
+        },
+        "0.23": {
+          "iteration": 60,
+          "updates": 300,
+          "start_s": 148.0,
+          "completed_by_s": 151.0
+        },
+        "0.135": {
+          "iteration": 100,
+          "updates": 500,
+          "start_s": 247.0,
+          "completed_by_s": 249.0
+        },
+        "0.05": {
+          "iteration": 160,
+          "updates": 800,
+          "start_s": 385.0,
+          "completed_by_s": 388.0
+        }
+      }
+    },
+    "a10": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 10,
+          "updates": 100,
+          "start_s": 27.0,
+          "completed_by_s": 30.0
+        },
+        "0.23": {
+          "iteration": 30,
+          "updates": 300,
+          "start_s": 86.0,
+          "completed_by_s": 89.0
+        },
+        "0.135": {
+          "iteration": 50,
+          "updates": 500,
+          "start_s": 145.0,
+          "completed_by_s": 148.0
+        },
+        "0.05": {
+          "iteration": 80,
+          "updates": 800,
+          "start_s": 233.0,
+          "completed_by_s": 236.0
+        }
+      }
+    },
+    "p5": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 20,
+          "updates": 100,
+          "start_s": 82.0,
+          "completed_by_s": 87.0
+        },
+        "0.23": {
+          "iteration": 60,
+          "updates": 300,
+          "start_s": 250.0,
+          "completed_by_s": 254.0
+        },
+        "0.135": {
+          "iteration": 100,
+          "updates": 500,
+          "start_s": 426.0,
+          "completed_by_s": 430.0
+        },
+        "0.05": {
+          "iteration": 160,
+          "updates": 800,
+          "start_s": 688.0,
+          "completed_by_s": 692.0
+        }
+      }
+    },
+    "p10": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 10,
+          "updates": 100,
+          "start_s": 47.0,
+          "completed_by_s": 52.0
+        },
+        "0.23": {
+          "iteration": 30,
+          "updates": 300,
+          "start_s": 151.0,
+          "completed_by_s": 156.0
+        },
+        "0.135": {
+          "iteration": 50,
+          "updates": 500,
+          "start_s": 255.0,
+          "completed_by_s": 260.0
+        },
+        "0.05": {
+          "iteration": 80,
+          "updates": 800,
+          "start_s": 411.0,
+          "completed_by_s": 417.0
+        }
+      }
+    },
+    "asched": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 10,
+          "updates": 100,
+          "start_s": 33.0,
+          "completed_by_s": 37.0
+        },
+        "0.23": {
+          "iteration": 40,
+          "updates": 300,
+          "start_s": 122.0,
+          "completed_by_s": 125.0
+        }
+      }
+    },
+    "psched": {
+      "version": "20260910+3dd0942",
+      "path": "input=host, update=host, roi_prunes_matrix=yes",
+      "threshold_bounds_since_iter1": {
+        "0.4": {
+          "iteration": 10,
+          "updates": 100,
+          "start_s": 51.0,
+          "completed_by_s": 57.0
+        },
+        "0.23": {
+          "iteration": 40,
+          "updates": 300,
+          "start_s": 204.0,
+          "completed_by_s": 209.0
+        }
+      }
+    }
+  },
+  "matrix_current_inventory": {
+    "chunk_000.csrb": {
+      "bytes": 5844842228,
+      "mtime_ns": 1786569812000000000
+    },
+    "chunk_001.csrb": {
+      "bytes": 5866773284,
+      "mtime_ns": 1786569888000000000
+    },
+    "chunk_002.csrb": {
+      "bytes": 5886359276,
+      "mtime_ns": 1786569963000000000
+    },
+    "chunk_003.csrb": {
+      "bytes": 5887058972,
+      "mtime_ns": 1786570009000000000
+    },
+    "chunk_004.csrb": {
+      "bytes": 5868321148,
+      "mtime_ns": 1786570075000000000
+    },
+    "chunk_005.csrb": {
+      "bytes": 5846287892,
+      "mtime_ns": 1786570156000000000
+    }
+  },
+  "current_sha256_not_historical_freeze": {
+    "D:\\Projects\\SPECT-recon\\multipinhole\\config\\spect_config.ini": "fd6110e6f1eca36de0f95315e00cf08d91b986e2d64ff933f17bbe0eccf43c1e",
+    "D:\\Projects\\SPECT-recon\\multipinhole\\config\\algo_mlem.conf": "9ffe9957248c5d8ad903288b41992b8c90a3dc776bc29a3604b6a9bab813e783",
+    "D:\\Projects\\SPECT-recon\\multipinhole\\config\\bad_dector": "e5d9ed606ee7fdafe913600cb751dc6a749256229bc11bc2ea47083e60e2acbe",
+    "D:\\Projects\\SPECT-recon\\build\\Release\\bin\\Release\\SPECT_recon.exe": "1d64aeef794ea76fee954d499f5bd1458a894e9c485265a40f2f630ac9b08e81",
+    "E:\\Xiang_Project\\SPECT\\6Module\\experiments\\recon_param_study\\pre\\derenzo_lu_6s\\Bed1.bin": "c0bfb48aa1f1eed62fb97ffadcb9f9977565f37109d6b4c6e68e5141a166fcd3",
+    "E:\\Xiang_Project\\SPECT\\6Module\\experiments\\recon_param_study\\pre\\derenzo_lu_6s\\preprocess_summary.json": "8e09fad7d6565a9ba21495cf5ec7625701aa7d7883199260ed697b7331c765be",
+    "D:\\Projects\\SPECT-recon\\test_data\\6module\\Lu177_sysmat\\matrix_PSC_PIN26x28x20_208keV_120x120x220_ZFOLD\\metadata.bin": "5f541644b5063c501cd98f575b9239f1691bd1ce8d23339d20e20b04443d0756",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a10\\recon_manifest.json": "4a37170791084de6d1fd5a9f4e2be3a3e444a071b93f6f754c0cb1b44762d922",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a5\\recon_manifest.json": "e855e5a8981077730b4b83bd30baa9a9cbab6490fd5508dd6dd7d4d12ef47f82",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\asched\\recon_manifest.json": "269564933306c969d3fafa7a095884f696bee74615b070be429d2c57a9979045",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\mlem1000\\recon_manifest.json": "81e04316c49b067c2b466f0202d0a8122bb88e684c9643afe4851ebd3e7c179c",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p10\\recon_manifest.json": "1d1f8939bbba69cb6a53832d7965d0851d5edfcc815c508c53fc45b5d07953c2",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p5\\recon_manifest.json": "a68e17156218b670e5955bcc6d46ec9a78442525289b4a97230d1a596f8056fa",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\psched\\recon_manifest.json": "44cc94f0134d146e474e02dc555c9d600a46aba737fcff17187a1925c094435f",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\mlem1000\\recon_it1000.raw": "fb1944d7d303b1759b5761c52cfcf96bef81fb91e4a799bf2f30e2155a958c83",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a5\\recon_it200.raw": "3b54e578a1a1d7df4a4df72eaed22ecda693737bae55b82483d2d19ab3d2eac0",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\a10\\recon_it100.raw": "af6df441f61316d6db70cb4a50553bcad72f6b74908b9332358f724e68270955",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p5\\recon_it200.raw": "b6ad9c5cca0596389e47a72f7d11cfa25000741ee1de0fb7d8a1f5f7e31b7242",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\p10\\recon_it100.raw": "7a062d321ed0c8dfbb03e9374dedb3b4889bce625f5ee55e81595b91afc8879e",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\asched\\recon_it100.raw": "46fb578d44feb72c036846dd5f2d5000cd7387256032f2d04dceacdbecd6f854",
+    "D:\\Projects\\SPECT-recon\\recon_out\\subset_convergence_20260910\\psched\\recon_it100.raw": "05288976b34b115da9c537c18d9d0cb0c2e84a257f7b757b4d7e44c0db17effe"
+  },
+  "difference_panels": [
+    {
+      "arm": "a10",
+      "iteration": 50,
+      "mlem_iteration": 500,
+      "slice_max": 14.79052734375,
+      "vmax": 14.79052734375
+    },
+    {
+      "arm": "p10",
+      "iteration": 50,
+      "mlem_iteration": 500,
+      "slice_max": 5.345703125,
+      "vmax": 14.79052734375
+    },
+    {
+      "arm": "a5",
+      "iteration": 100,
+      "mlem_iteration": 500,
+      "slice_max": 6.435302734375,
+      "vmax": 14.79052734375
+    },
+    {
+      "arm": "asched",
+      "iteration": 90,
+      "mlem_iteration": 350,
+      "slice_max": 0.713623046875,
+      "vmax": 0.713623046875
+    },
+    {
+      "arm": "psched",
+      "iteration": 90,
+      "mlem_iteration": 350,
+      "slice_max": 0.4481201171875,
+      "vmax": 0.713623046875
+    },
+    {
+      "arm": "mlem1000",
+      "iteration": 500,
+      "mlem_iteration": 1000,
+      "slice_max": 500.4825439453125,
+      "vmax": 500.4825439453125
+    }
+  ]
+}

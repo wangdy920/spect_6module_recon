@@ -7,25 +7,31 @@ High-performance 3D SPECT reconstruction pipeline with C++17 modular architectur
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, build-time fatbin helper kernels for PSF/RDP/TV on sm_86/89/120. Single GPU.
 - **6-module matrix generation reference**: `6module_bak_src/` holds the CUDA v4 system-matrix generator, the bedmerge reconstruction prototype, and the MAT→BIN projection tool.
 
-## Current optimization status (2026-09-05)
+## Current optimization status (2026-09-13)
+
+The current release candidate adds shared angle subsets for OSEM/BSREM,
+RDP/TV per-subset updates, independent save cadence, and efficient N10 defaults.
+See [the release validation record](reports/2026-09-13-subset-release.md).
 
 The P0–P3 implementation and CSRB CTAC factorisation are in the source tree.
 CSRB remains the production path; CSRQ, dual-window reconstruction and the
 packed backward trial remain experimental. The rejected Phase-B transpose
 variants and `SPECT_COMPACT_T_SPMM` have been removed; the default sparse
-kernels and reconstruction settings are unchanged. Validation and release
+kernels remain in use. Earlier validation and release
 preparation are recorded in
 [the design record](reports/2026-09-04-final-design-poisson-data-term.md#72-2026-09-05-收敛与-release-准备).
+
+Current configuration/deployment interface (2026-09-14): one isotope-selected recipe overlays the global INI; explicit `-algoConf` replaces it. See [parameters and five recipes](multipinhole/doc/PARAMETERS_CN.template.md) and [wrapper integration](multipinhole/doc/Recon_Interface_Migration_Field_CN.md). Tc defaults to OSEM50×10; updated E260903 Lu deployment defaults to joint RDP30×10. This is separate from the immutable September13 RC and retains the joint experiment's validation limits.
 
 ## Historical algorithm/output sign-off (Snapshot: 2026-08-11)
 
 - **Canonical evidence**: `reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html` and local certificate `recon_out/prototype_sieve_castor_fwhm1p3_final_20260811/current_production_parity_metrics.json` record the protected `sieve + CASToR + FWHM 1.3 mm` comparison. All five frozen 50-iteration endpoints pass.
 - **Default system matrix**: 260601 compact chunk (`-chunkCSRDir` / `bin/matrix/260601` auto-discovery). B1 plain 50-iter vs `test_data/sys_260601_recon_ref/recon_iter050.img` remains signed off (`rmse/ref_mean ≈ 1.06×10⁻⁵`).
 - **Multi-bed output**: one canonical path: physical Bed order + `z_bed_flip=1`, center 66 layers per bed, prototype robust gain fit, fixed 56-layer step, and 10-layer normalized cosine blend. There are no selectable stitch or object-aware seam-repair modes.
-- **Output filters**: release default preserves the unfiltered canonical volume and independently derives CASToR Smooth 0.30 mm/3σ and 2× zero-padded Butterworth 5 cycles/cm/order 8 copies. `[InputOutput] output_filters_overwrite_primary=true` instead writes enabled stages to the unsuffixed primary in Smooth→Butterworth order; suffixed copies stay independent and the manifest records the policy.
+- **Output filters**: current release preserves the canonical primary and independently derives a 2× zero-padded Butterworth 5 cycles/cm/order 8 copy; additional output Gaussian is disabled. `[InputOutput] output_filters_overwrite_primary=true` instead writes enabled stages to the unsuffixed primary in Smooth→Butterworth order; suffixed copies stay independent and the manifest records the policy.
 - **Target GPUs** (consumer GeForce RTX): Release builds include sm_86, sm_89, and sm_120; CUDA Toolkit ≥ 12.8 (prefer 13.x), matching runtime DLLs, and a CUDA 13.0+ capable driver are required.
 - **Public backends**: CUDA-only sparse ops; cuFFT Butterworth; PSF `none|operator|sieve` with `adjoint|castor` kernels; TV/RDP regularizers.
-- **Optimization algorithms**: MLEM / BSREM-II, single-subset full update. OSEM/ADMM and multi-GPU paths are removed.
+- **Optimization algorithms**: MLEM/OSEM and BSREM-II share compact-angle subsets; BSREM supports RDP and TV. Defaults: 50 complete iterations with 10 subsets, final primary plus Butterworth output. Full-data MLEM uses `-it A:1`. ADMM and multi-GPU paths are removed.
 - See `multipinhole/doc/Capability_Matrix_CN.md`.
 
 **Reconstruction boundaries**
@@ -47,15 +53,13 @@ preparation are recorded in
 
 ## Typical workflow
 
-1. **Generate or deploy the matrix**: v4 generator (`6module_bak_src/spect_sysmat_PSC_6module_24pin_YSO_v4.cu`) produces `metadata.bin + chunk_*.csrb`; deploy as `bin/matrix/<name>/` next to the exe, or keep the test matrix at `test_data/6module/260601`.
+1. **Deploy the matrix**: install the exact `matrix_id` selected by the isotope recipe under the EXE-local `matrix/` root, keeping metadata and chunks together.
 
-2. **Reconstruct**:
+2. **Reconstruct** (from a standalone RC package root):
 
    ```powershell
-   .\SPECT_recon.exe -df proj.bin -chunkCSRDir bin\matrix\260601 `
-       -dim 120,120,220 -detN 48,48 -ang 360 -it 50:50 -th 8 `
-       -psf 1.3,3 -psfMode sieve -psfKernel castor -cyl 30,21.6 -vox 0.3,0.3,0.3 `
-       -fout recon_output/run1
+   .\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -o recon_output
+   .\bin\SPECT_recon.exe -isotope Lu177 -df Bed1_208.bin -df2 Bed1_113.bin -o recon_joint
    ```
 
    Each run writes a per-reconstruction log file alongside the outputs (`<outputDir>/<outputName>_YYYYMMDD_HHMMSS_mmm.log`). Absolute `-fout`/`-o` (drive letter or UNC) keeps both the `.log` and MHD/RAW under that absolute directory; relative paths resolve against the process CWD. The console prints `Logging console output to: ...` and `Output directory: ...`.
@@ -64,7 +68,7 @@ preparation are recorded in
 
 | Option | Description |
 | --- | --- |
-| `-chunkCSRDir` / `bin/matrix/<name>` | Compact chunk matrix directory containing `metadata.bin` and either `chunk_*.csrb` (canonical fp32 CSR) or `chunk_*.csrq` (derived GPU-resident format, see below); a directory must not mix the two (**only matrix entry**). Resolution priority is: CLI `-chunkCSRDir`, then `[SystemMatrix] default_chunk_csr_dir` in `bin/config/spect_config.ini`, then auto-use the single `bin/matrix/*` directory that contains `metadata.bin`. If multiple candidates exist, pass `-chunkCSRDir` explicitly. |
+| `-chunkCSRDir` / `[SystemMatrix] matrix_id` | Compact CSRB or CSRQ directory. Recipe IDs resolve uniquely under the EXE-relative matrix root; missing/ambiguous IDs fail. Explicit CLI overrides follow `recon_sections_override_cli`, not unconditional CLI precedence. |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
 | `[InputOutput] merge_time_segments=true` | With `-df <case/YYYYMMDD_HHMMSS/SPECT>`, scan sibling timestamp directories, require the same `BedN.bin` set and geometry in each, then sum matching beds in memory before reconstruction. Default is `false`; no merged projection files are written. |
 | `[InputOutput] output_filters_overwrite_primary=true` | Write enabled output-stage filters to `<fout>_it<N>.mhd/.raw` in Smooth→Butterworth order. Default `false` preserves the unfiltered primary; `_smooth` and `_butter` remain independent audit copies in both modes. |
@@ -72,7 +76,9 @@ preparation are recorded in
 | `-detZRowWeightsFile <file>` / `-normFactorFile <file>` | Optional normalization inputs. `-detZRowWeightsFile` contains detector efficiency weights directly. `-normFactorFile` contains full projection correction factors `c` in `<uint32 angles><uint32 rays><float64 values>` BIN form; the background-free MLEM path applies reciprocal efficiency `1/c` to sensitivity. Default is empty/off. |
 | `-psf [fwhm_mm[,N]]` | Image-domain PSF; FWHM is in mm and N truncates the kernel at N*sigma. Release default: `1.3,3`. |
 | `-psfMode none\|operator\|sieve` / `-psfKernel adjoint\|castor` | `operator` applies PSF in-loop; `sieve` also filters save copies without changing the trajectory. `castor` is the release default and uses voxel-integrated erf taps, zero boundaries, Z-only normalization, and forward-reuse backward. |
-| `-opti mlem|bsrem` | Select optimisation algorithm (overrides config). Single-subset full update; there is no `-subsets` switch. |
+| `-opti mlem|bsrem` | Select optimizer without replacing the selected recipe. MLEM with subsets is OSEM; select RDP/TV explicitly through the recipe or regularization options. |
+| `-it A[:B]` / `-save-every N` | A complete iterations, B angle subsets. Save every N iterations; 0 (default) saves the final iteration only. |
+| `-subsets M1:i1,M2:i2,...` | Decreasing subset schedule; use with bare `-it A`, with stage iteration counts summing to A. Each subset count must divide the previous count and the compact angle count. |
 | `-bsrem <alpha0[,gamma]>` | BSREM‑II step parameters (overrides config). |
 | `-reg <type,beta,...>` | Regularisation. Public types: `None`, `TV`/`TVIsotropic`, `RDP`. For TV use `-reg TV,beta,delta`; for RDP use `-reg RDP,beta,gamma,delta`. `beta` is independent of `-bsrem` alpha/gamma. |
 | `-bProj <file>` | Background/scatter projection term (MAT or BIN); added to forward model `yhat`. |
@@ -121,6 +127,7 @@ SPECT_recon_<version>/
     config/
       spect_config.ini
       bad_dector
+      profiles/
       algo_mlem.conf
       algo_bsrem.conf
     matrix/
@@ -135,18 +142,16 @@ SPECT_recon_<version>/
   SHA256SUMS.txt
 ```
 
-Matrix directories are optional in the RC package. When a package contains
-exactly one `bin/matrix/<matrix_name>/metadata.bin`, the executable selects it
-automatically; when multiple matrix directories are present, set
-`default_chunk_csr_dir = matrix/<matrix_name>` in `bin/config/spect_config.ini`
-or pass `-chunkCSRDir bin/matrix/<matrix_name>`.
+Deploy the selected recipe's exact matrix IDs under `bin/matrix/<isotope>/<matrix_id>/`. The global INI chooses one recipe; `-algoConf` replaces it. Source `recon_sections_override_cli=false` allows explicit CLI overrides, while true protects all configured reconstruction fields. See the linked parameter guide for defaults and norm/cache identity.
 
 ### CSRQ: GPU-resident compressed matrix (derived from CSRB) — experimental
 
-Status (2026-09-03): CSRB remains the production matrix path and the
-protected numerical baseline; CSRQ and everything that depends on it (joint
-dual-window MLEM, streamed residency) are experimental and are not part of
-the shipped configuration. `chunk_*.csrq` is an offline derivative of the canonical CSRB chunks
+The 2026-09-13 independent candidate also supports shared angle subsets for
+joint dual-window OSEM and BSREM; RDP/TV use BSREM. CTAC is excluded for subsets.
+See the [joint N10 experiment](reports/2026-09-13-subset-release.md)
+for the tested binary, commands and limits; the frozen release package is unchanged.
+
+Historical status (2026-09-03): CSRB was the production path; CSRQ/joint were experimental and absent from that shipped configuration. Current source and the updated E260903 installation include a separate Lu joint recipe, with the tested scope above; CSRB remains the protected numerical baseline. `chunk_*.csrq` is an offline derivative of the canonical CSRB chunks
 (`python tools/convert_csrb_to_csrq.py <csrb_dir> <csrq_dir>`): columns are
 sorted per row and stored as run-length words (`start << 6 | len-1`, runs of at
 most 64 voxels), values are u16 sqrt-companded against one fp32 row maximum

@@ -11,12 +11,11 @@ cd D:\path\to\<package_root>
 
 正常运行不需要传 `-config`。程序会优先按 exe 所在目录自动识别：
 
-1. `.\bin\config\spect_config.ini`
-2. `.\bin\config\algo_mlem.conf`
-3. `.\bin\config\algo_bsrem.conf`
+1. `.\bin\config\spect_config.ini`（全局配置）。
+2. `[Reconstruction] default_config_<核素>` 或 `default_config` 选择的一份 `profiles/*.conf`。
+3. 仅未配置默认方案的旧全局 INI 才按优化器选择 `algo_<alg>.conf`。
 
-发布配置默认启用 `[Compatibility] recon_sections_override_cli=true`：
-`spect_config.ini` 对 Regularization、PSF、Filtering 和 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级；算法、迭代、几何、输入输出等其他正式 CLI 参数仍按 CLI 优先。未知或已退役 CLI 参数只打印 `[NOTE]` 并忽略，已识别参数的非法取值仍会失败。`-iter` / `-iterations` / `-verbose` / `-verbosity` 以及 `-v <n>` 会失败（请用 `-it` / `-vb`）；单独的 `-v` / `--version` 仍只打印版本后退出。
+配置采用全局 INI＋一份重建方案：`[Reconstruction] default_config` 指定默认方案，`-algoConf` 显式替换；`-opti` 不再另换方案。`recon_sections_override_cli=false` 时命令行 > 方案 > 全局；为 `true` 时方案 > 全局 > 命令行，仅保护配置中已填写的重建字段，输入/输出、设备和日志仍由调用方指定。方案可覆盖 Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix/Normalization 等完整参数。`-config` 若直接指向带 `[Algorithm]` 的方案文件，也会内部按显式方案处理并继承部署全局默认值。`-subset-mode`、`-subset-diagnostics`、`-iter` / `-iterations` / `-verbose` / `-verbosity` 及`-v <n>`会失败；其他未知参数打印`[NOTE]`并忽略。单独的`-v` / `--version`只打印版本后退出。
 
 只有在明确要覆盖发布包默认配置时才传：
 
@@ -25,30 +24,25 @@ cd D:\path\to\<package_root>
 -algoConf D:\custom\algo_mlem.conf
 ```
 
-系统矩阵默认识别规则：
+系统矩阵按合并配置解析：`[SystemMatrix] root` 相对 EXE，`matrix_id/matrix_id2` 精确匹配 `root/id` 或 `root/isotope/id`，缺失或歧义均失败。显式 `-chunkCSRDir/-chunkCSRDir2` 服从上述优先级；旧配置无 ID 时才使用 `default_chunk_csr_dir` 或唯一目录发现。不要为多个核素保留一个无身份的默认矩阵。
 
-1. 显式 `-chunkCSRDir <dir>` 优先。
-2. 否则读取 `.\bin\config\spect_config.ini` 中 `[SystemMatrix] default_chunk_csr_dir`，相对路径按 `.\bin\` 解析。
-3. 否则如果 `.\bin\matrix\` 下只有一个包含 `metadata.bin` 的矩阵目录，自动使用该目录。
-4. 如果有多个矩阵目录且未指定，程序直接报错并列出候选目录。
+denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为固定文件，否则在 `compact_denom_cache_dir` 下按 manifest hash 选择 `auto_<hash>.mhd`；配置相对路径按 EXE 解析，默认 `.\bin\cache\compact_denom\`。CLI 显式相对缓存路径按 CWD 解析。身份绑定实际两矩阵、能窗权重、norm/行权重、PSF、Mask、床位及子集；改迭代数、β、仅输出滤波不要求清缓存。
 
-denom cache 识别规则：显式 `-compactDenomCache <mhd>` 优先（CLI 相对路径按终端 CWD 解析）；否则使用 `[SystemMatrix] compact_denom_cache_path` 的固定文件；再否则在 `compact_denom_cache_dir` 下按 manifest hash 自动选择 `auto_<hash>.mhd`。两个 INI 路径均相对 `SPECT_recon.exe` 目录解析，发布默认目录为 `.\bin\cache\compact_denom\`；不同矩阵、PSF、床位几何或 normfactor 不会误复用。
+## 默认 Tc OSEM 与基础 MLEM
 
-## 推荐基础 MLEM
-
-如果发布包中只有一个 `.\bin\matrix\<matrix_name>\metadata.bin`：
+先按所选方案的 matrix_id 放置矩阵。默认 Tc OSEM 为50×10；以下显式演示全数据 MLEM，需确认优先级允许 CLI 覆盖：
 
 ```powershell
 .\bin\SPECT_recon.exe `
-  -df D:\data\PSC_6module_24pin_10MBq_600s_test_1.bin `
+  -isotope Tc99m -df D:\data\PSC_6module_24pin_10MBq_600s_test_1.bin `
   -o recon_output `
-  -it 50:5
+  -it 50:1 -save-every 5
 ```
 
 说明：
-- `-opti mlem` 可由 `bin/config/algo_mlem.conf` 提供，通常不用显式传；compact 布局恒单 subset，无 `-subsets` 参数。
+- `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。双窗CSRQ也支持N10；N>1与CTAC组合未开放，旧POSEM像素划分已退出当前接口。
 - `-config` 不需要显式传。
-- 多个矩阵目录时，在 `bin/config/spect_config.ini` 设置 `default_chunk_csr_dir = matrix/<matrix_name>`，或在命令行传 `-chunkCSRDir .\bin\matrix\<matrix_name>`。
+- 多矩阵用所选方案的精确 `matrix_id/matrix_id2`；CLI覆盖受优先级开关控制。
 - 投影路径仍需要按实际数据传入。
 
 ## 多床位
@@ -56,9 +50,8 @@ denom cache 识别规则：显式 `-compactDenomCache <mhd>` 优先（CLI 相对
 ```powershell
 .\bin\SPECT_recon.exe `
   -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin;D:\scan\Bed3.bin;D:\scan\Bed4.bin" `
-  -bedOverlap 164,164,164,0,0 `
   -o recon_multibed `
-  -it 50:50
+  -it 50:1 -save-every 50
 ```
 
 固定合同：
@@ -66,7 +59,7 @@ denom cache 识别规则：显式 `-compactDenomCache <mhd>` 优先（CLI 相对
 - `-bedOverlap` 表达重建空间的重叠层数；`-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，默认 `16.8`）声明扫描仪机械步进。输出步进由 `step = round(bed_step_mm / voxel_z)` 自动确定，**overlap 是派生值**：`overlap = baseNz - step`。不传 `-bedOverlap` 时自动推算；传错时自动纠正并打印 `[NOTE]`（`bed_step_mm` 是权威输入）。220 层 0.3 mm 床位为 `overlap = 220 - 56 = 164`（16.8 mm 步进）；其他步进/几何按同一关系换算。
 - `[MultiBed] z_bed_flip=1` 是发布默认，只定义每床 local system-matrix Z 与 reconstruction-storage Z 的关系；`-attMap` 使用前者，`-regCT` 使用后者。不要通过逆序床号或整幅 Z 翻转二次补偿。
 - 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合（沿输出 Z，入口保持上一床；`z_bed_flip` 只反转存储与增益窗）。
-- 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床固定输出为 `100×100×72`，ROI `30 mm × 21.6 mm`；多床 ROI 为 `36 mm × 66 mm`。
+- 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床ROI为 `30 mm × 21.6 mm`，多床ROI为 `36 mm × 66 mm`；最终裁剪还受 `single_bed_step_aligned` 影响，尺寸以实际MHD为准，不固定假设72层。
 - `sigmoid`、`direct`、对象感知 seam/profile 修补、输出 FOV mask 和离线自动拼接均已删除。
 
 ## 输出方向
@@ -97,14 +90,15 @@ seam_xy_align = 0
 
 ## 常用覆盖参数
 
-- `-it N[:save]`：迭代次数与保存间隔，例如 `50:5`。
+- `-it A[:B]`：A次完整迭代、B个子集，例如`100:10`；保存频率独立为`-save-every N`，默认0仅末次。分阶段使用`-it A -subsets N1:i1,N2:i2,...`，不能同时传`-it A:B`和`-subsets`。
 - `-o <dir>` 或 `-fout <dir/name>`：输出目录或输出前缀。
 - `-chunkCSRDir <dir>`：显式指定 compact chunk 矩阵目录；只有多矩阵或外部矩阵目录时通常需要。
-- `-compactDenomCache <mhd>`：显式指定一个 denom cache 文件，覆盖 INI 的固定路径和自动 hash 目录。
+- `-compactDenomCache <mhd>`：显式指定 denom cache，受配置优先级控制。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain PSF；发布默认 `1.3,3`、模式 `sieve`、`psfKernel=castor`。`-psfKernel adjoint` 使用采样 Gaussian + 镜像边界 + 真伴随；`-psfKernel castor` 使用 erf 体素积分核 + 零边界 + Z-only 归一化，反向复用正向。
-- 发布 `[Filtering]` 默认 `smooth_apply_stage=output`、`butter_apply_stage=output`：保留未滤波主输出，并从同一主输出独立写出 `_smooth`（CASToR 0.30 mm/3σ）与 `_butter`（5 cycles/cm、order 8）。`output_nonnegative_clamp=true` 在每个副本滤波后钳为非负；设为 `false` 仅用于原型线性旁瓣对齐。
+- 发布 `[Filtering]` 默认 `smooth_apply_stage=none`、`butter_apply_stage=output`：保留primary，并从同一primary独立写出 `_butter`（5 cycles/cm、order 8）。显式启用输出Gaussian时才另写`_smooth`（CASToR 0.30 mm/3σ）。`output_nonnegative_clamp=true` 在每个副本滤波后钳为非负；设为 `false` 仅用于原型线性旁瓣对齐。
 - `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
-- `-opti mlem|bsrem`：切换算法，并自动搜索 exe 同级 `config/algo_<alg>.conf`。
+- `-opti mlem|bsrem`：切换优化器，已有方案时不另换方案；`-it A`仅改次数，保留继承的子集。
+- 正则化由所选方案决定，不能以为`-opti bsrem`会自动开启RDP。TV方案为02、Lu合并RDP为03、Lu joint RDP为05；用实际调用参数加`-dumpConf`确认。每个子更新使用当前图像重新计算正则梯度，数据梯度乘当前子集数，β不乘子集数。输出Butterworth仅作用于保存副本。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
 性能相关环境变量不属于重建数值合同：`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 默认按矩阵总量和启动时可用内存自动选择，也可显式覆盖；`SPECT_COMPACT_BRANCH_BATCH` 默认开启（packed-K 正向 + CSR_ALG2 转置），设为 `0` 会关闭常驻 MLEM，不是产品 A/B；mmap 默认关闭。16 GB 显存的低时延实测使用 64 GB 主存与 SSD/NVMe 矩阵，32 GB 主存通常只能缓存部分矩阵，性能需重新以交错重复运行的中位数签收。
@@ -115,9 +109,37 @@ seam_xy_align = 0
 .\bin\SPECT_recon.exe -dumpConf
 ```
 
-输出应显示：
+不带核素默认Tc；检查Lu使用 `-isotope Lu177 -dumpConf`。输出来源应显示类似：
 
 ```text
 # global_ini = ...\bin\config\spect_config.ini (loaded)
-# algo_conf  = ...\bin\config\algo_mlem.conf
+# algo_conf  = ...\bin\config\profiles\04_standard_osem50.conf
 ```
+
+## 核素、矩阵及归一化配置（2026-09-14）
+
+`-isotope Tc99m|Lu177` 是可选的采集身份断言；部署 wrapper 自动从预处理记录传入。全局配置用 `default_config_Tc99m` / `default_config_Lu177` 选择核素默认方案。已有显式 `-algoConf` 始终替换默认方案，方案核素与采集不符时失败。
+
+`[SystemMatrix] root` 相对 EXE，`matrix_id` / `matrix_id2` 精确查找 `root/id` 或 `root/isotope/id`；找不到或同时存在两份均失败。旧 `-chunkCSRDir` / `-chunkCSRDir2` 继续支持；配置优先模式下以配置为准。几何仍由矩阵 metadata 检查。
+
+Lu-177 joint 固定本批验证的通道顺序 **208、113 keV**，`energy_window_weights=0.1036,0.0617`。权重进入预测计数一次，并非人为给某张图加权平均，也不能凭权重大小认定某窗的信息量占比。
+
+`[Normalization] factor_file` / `factor_file2` 分别绑定这两个通道的投影校正因子 c；程序使用 1/c 构造灵敏度。Tc-99m 单窗只用第一个文件。joint 要么两份都指定，要么两份均关闭，不继承另一个核素或合并窗的 norm。相对路径以 EXE 为基准。当前方案 norm 留空，因为还没有验证并交付本批分窗标定文件；不代表两核素 norm 相同。当前校正路径只支持无背景项输入。
+
+已有 denom 缓存同时绑定两矩阵、能窗权重、norm 数值、Mask/PSF 和子集；改迭代数、β 或仅输出滤波，不另造缓存层。
+
+部署 wrapper 原来的 `--preprocess-root`、`--output-root`、`--config` 调用不变；`--config` 可传全局 INI 或完整方案，后者由内部转换为 `-algoConf`。可在 `--` 后追加 `-it 40:10` 等参数，其优先级遵守上述开关。日志中的配置来自实际重建 argv 加 `-dumpConf`。
+
+Lu-177 默认预处理保留合并 `BedN.bin`，新增 `BedN_208.bin` / `BedN_113.bin`，两次解码共用固定标定；113 由合并减 208 得到，检查非负与计数守恒。新增一遍固定标定解码会增加预处理时间，不改变原合并 BIN。旧合并输出缺少分窗身份时不能直接用 joint 方案，需重跑预处理或显式用 `03_mouse_rdp100.conf`。
+
+## 方案表与部署接口
+
+| 方案文件（config/profiles） | 模型 | 算法/正则化 | 迭代×子集 | BSREM α₀/γ |
+|---|---|---|---|---|
+| 01_detail_bsrem100.conf | Tc单141 SCALE2 CSRB | BSREM无正则 | 100×10 | 1.5/0 |
+| 02_uniform_tv75.conf | Tc单141 SCALE2 CSRB | BSREM TV β=0.0003 | 75×10 | 1/0.05 |
+| 03_mouse_rdp100.conf | Lu合并窗＋单208 CSRB | BSREM RDP β=0.1 | 100×10 | 1/0.05 |
+| 04_standard_osem50.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
+| 05_mouse_joint_rdp30.conf | Lu独立208/113＋各自CSRQ；Lu默认 | BSREM RDP β=0.03 | 30×10 | 1/0.05 |
+
+这些方案适用于原实验范围，不是所有系统或IQ标定下的全局最优。两种Lu模型的β不直接互换。源配置默认false；2026-09-14的E盘6Module部署保留true。6Module部署EXE位于 `bin/recon/`，独立重建RC位于 `bin/`，两者的相对配置规则相同。详细上位机迁移见 `Recon_Interface_Migration_Field_CN.md`（源码文档），部署包见其wrapper指南。

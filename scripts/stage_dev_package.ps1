@@ -66,4 +66,4 @@ if (Test-Path -LiteralPath $matrixSrc) {
 Write-Host "[stage] package root: $PackageRoot"
 Write-Host "[stage] invoke from package root:"
 Write-Host "  cd $PackageRoot"
-Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -chunkCSRDir `"$matrixSrc`" -o recon_output -it 50:5"
+Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -chunkCSRDir `"$matrixSrc`" -o recon_output -it 50:1"

@@ -9,7 +9,9 @@ param(
     [string]$ConfigPath = "",
     [string]$MatrixDir = "",
     [string]$DenomCachePath = "",
-    [string]$Iterations = "20:20",
+    [string]$Iterations = "20:1",
+    [ValidateRange(0, 2147483647)]
+    [int]$SaveEvery = 0,
     [ValidateRange(1, 9)]
     [int]$Repeats = 1,
     [int]$CudaDevice = 0,
@@ -383,6 +385,7 @@ try {
             $(if ($MultiBedList) { "-dfList" } else { "-df" }), $InputPath,
             "-chunkCSRDir", $MatrixDir,
             "-it", $Iterations,
+            "-save-every", "$SaveEvery",
             "-fout", $runOutputPrefix,
             "-cudaDevice", $CudaDevice.ToString(),
             "-vb", "1"

@@ -17,7 +17,7 @@ powershell -ExecutionPolicy Bypass -File scripts\run_260601_regression.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 `
   -InputPath "D:\data\case\SPECT\Bed1.bin;D:\data\case\SPECT\Bed2.bin" -MultiBedList `
-  -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 `
+  -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:1 `
   -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
 ```
 

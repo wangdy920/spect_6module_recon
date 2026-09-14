@@ -238,7 +238,7 @@ TEST(SieveParserTest, ConfigCanProtectReconPolicyFromCli) {
       "output_smooth_sigmas = 3\noutput_butter_cutoff_cpcm = 5\n"
       "output_butter_order = 8\noutput_nonnegative_clamp = true\n",
       {"-psf", "1.5,4", "-psfMode", "operator", "-butter", "0.35",
-       "-reg", "TVIsotropic,0.01", "-it", "20:5"});
+       "-reg", "TVIsotropic,0.01", "-it", "20:1", "-save-every", "5"});
 
   ASSERT_TRUE(out.ok);
   EXPECT_TRUE(out.args.reconSectionsOverrideCli);
@@ -250,11 +250,11 @@ TEST(SieveParserTest, ConfigCanProtectReconPolicyFromCli) {
   EXPECT_FLOAT_EQ(out.args.butterCutoff, 0.0f);
   EXPECT_EQ(out.args.butterApplyStage, "output");
   EXPECT_TRUE(out.args.outputFiltersOverwritePrimary);
-  EXPECT_EQ(out.args.numIters, 20);
-  EXPECT_EQ(out.args.saveInterval, 5);
+  EXPECT_EQ(out.args.numIters, 50); // auto-selected recipe is protected too
+  EXPECT_EQ(out.args.saveInterval, 0);
 }
 
-TEST(SieveParserTest, ConfigProtectionDropsRegCtKeepsCtac) {
+TEST(SieveParserTest, ConfigProtectionUsesSelectedRecipeAndKeepsCtac) {
   const auto out = parseWithIni(
       "[Compatibility]\nrecon_sections_override_cli = true\n"
       "[Regularization]\ntype = None\nbeta = 0\n"
@@ -268,8 +268,8 @@ TEST(SieveParserTest, ConfigProtectionDropsRegCtKeepsCtac) {
 
   ASSERT_TRUE(out.ok);
   EXPECT_TRUE(out.args.reconSectionsOverrideCli);
-  EXPECT_FALSE(out.args.useReg);
-  EXPECT_TRUE(out.args.regCtPath.empty());
+  EXPECT_TRUE(out.args.useReg); // BSREM recipe overrides global None
+  EXPECT_FALSE(out.args.regCtPath.empty()); // recipe does not configure ct_image
   EXPECT_TRUE(out.args.doCTAC);
   EXPECT_NE(out.args.attMapPath.find("attmap_recon220.mhd"), std::string::npos);
 }

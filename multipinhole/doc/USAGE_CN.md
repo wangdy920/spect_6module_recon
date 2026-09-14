@@ -1,6 +1,6 @@
 # SPECT_recon CLI 使用说明（中文）
 
-> 更新日期：2026-08-13（多床 cosine 沿输出 Z 连续淡入）
+> 更新日期：2026-09-14（方案优先级、角度子集、Lu双窗与独立norm）
 > 对齐来源：`src/cli/ArgumentParser.cpp` 与 `SPECT_recon.exe -help`
 
 本页记录当前可执行文件公开接受的 CLI 参数。运行时最终真相仍以当前二进制：
@@ -17,14 +17,12 @@
 ## 快速开始
 
 ```powershell
-# RC 包内仅有一个 bin/matrix/<name>/metadata.bin 时，可省略矩阵参数
-.\bin\SPECT_recon.exe -df proj.bin -o recon_output -it 50:5
-
-# compact chunk 260601 生产入口（唯一矩阵入口）
-.\bin\SPECT_recon.exe -df proj.bin -chunkCSRDir bin\matrix\260601 -it 50
-
-# BSREM
-.\bin\SPECT_recon.exe -df proj.bin -chunkCSRDir bin\matrix\260601 -opti bsrem -it 50
+# 先按方案的matrix_id部署矩阵；默认Tc OSEM50×10
+.\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -o recon_output
+# 显式方案替换默认方案，未写字段继承全局
+.\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
+# Lu joint通道1=208，通道2=113，默认BSREM RDP30×10
+.\bin\SPECT_recon.exe -isotope Lu177 -df Bed1_208.bin -df2 Bed1_113.bin -o recon_joint
 ```
 
 Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D:/path/file.bin`。
@@ -41,14 +39,11 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 4. 当前工作目录的 `config/spect_config.ini`
 5. 当前工作目录的 `spect_config.ini`
 
-算法默认参数会从同级 `config/algo_<name>.conf`（`algo_mlem.conf` / `algo_bsrem.conf`）加载，也可用 `-algoConf <path>` 指定。CLI 默认覆盖配置文件；当 `[Compatibility] recon_sections_override_cli=true` 时，`spect_config.ini` 仅对 Regularization、PSF、Filtering 与 Postprocess（输出滤波及主输出覆盖策略）具有最终优先级，其他参数仍由 CLI 覆盖。未知或已退役的 CLI 参数只打印 `[NOTE]` 并忽略；已识别参数的非法取值、以及易混淆别名 `-iter` / `-verbose` / `-v <n>` 仍会失败。
+全局 `[Reconstruction] default_config_<核素>` / `default_config` 选择一份方案，`-algoConf` 显式替换；`-config` 也可直接指向含 `[Algorithm]` 且无 `default_config` 的方案。缺失字段继承全局，不叠加另一份默认方案。`-opti`只改优化器，只有无默认方案的旧全局配置才按算法查找 `algo_<name>.conf`。
 
-compact chunk 矩阵默认识别优先级：
+`[Compatibility] recon_sections_override_cli=false`：CLI > 所选方案 > 全局；true：所选方案 > 全局 > CLI，保护配置已填写的Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix/Normalization等重建字段。输入输出、设备、线程和日志仍由调用方指定。源码默认false，当前6Module部署保留true。
 
-1. `-chunkCSRDir <dir>`
-2. `[SystemMatrix] default_chunk_csr_dir`
-3. exe-local `bin/matrix/*` 下唯一包含 `metadata.bin` 的目录
-4. 多个候选且未指定时直接报错
+矩阵以合并配置的 `root + matrix_id/matrix_id2` 精确查找 `root/id` 或 `root/isotope/id`，缺失或歧义失败；`root`相对EXE。显式矩阵/缓存CLI也服从优先级。旧配置无ID时才走 `default_chunk_csr_dir` 和唯一目录发现。完整方案表、norm和wrapper说明见 [参数说明](PARAMETERS_CN.template.md)。
 
 ---
 
@@ -62,8 +57,8 @@ compact chunk 矩阵默认识别优先级：
 | `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，必须是 Bed1..Bed5 的连续子集 |
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
-| `-chunkCSRDir <dir>` | compact chunk 目录，包含 `metadata.bin + chunk_*.csrb`；**唯一矩阵入口** |
-| `-compactDenomCache <mhd>` | 显式复用/保存一个 compact global denominator cache，优先于 `[SystemMatrix]` 的固定路径和自动目录 |
+| `-chunkCSRDir <dir>` | compact chunk 目录，包含 `metadata.bin + chunk_*.csrb`；也可用CSRQ及配置matrix_id |
+| `-compactDenomCache <mhd>` | 显式复用/保存一个 compact global denominator cache，受配置优先级开关控制 |
 | `-ctacFactorCacheDir <dir>` | 复用/保存 CTAC 逐床位、逐角度衰减系数表缓存；默认 `recon_out/ctac_factor_cache` |
 | `-projectionResidual [on\|off]` | 最终迭代后按同一 forward/PSF/CTAC 口径写出逐床、angle×detector-Z 投影残差 CSV；默认关闭，不改变迭代或图像输出 |
 | `-badDetectorFile <path>` / `[Detector] bad_detector_file` | 按全局编号或 `link/FPGA/dector` 跳过硬件探测器；默认读取配置同目录的 `bad_dector`，当前保护配置包含探测器 68 |
@@ -73,7 +68,7 @@ compact chunk 矩阵默认识别优先级：
 
 多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
 
-有无 CTAC 均可复用分母缓存。程序优先使用显式 `-compactDenomCache`，其次使用 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表、normfactor、实际行权重、CTAC 因子表哈希及能窗指数，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。可手动预热默认配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
+有无 CTAC 均可复用分母缓存。按上述CLI/配置优先级解析后，可使用显式 `-compactDenomCache` 或 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表、normfactor、实际行权重、CTAC 因子表哈希及能窗指数，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。以下是旧单矩阵预热工具入口，只用于经dump确认的单矩阵配置；不替代joint两窗缓存准备。可手动预热匹配单矩阵配置的1–5床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
 
 ```powershell
 python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
@@ -113,12 +108,14 @@ python tools\prep_compact_denom_cache.py --help
 
 | 参数 | 说明 |
 |---|---|
-| `-opti <mlem\|bsrem>` | 优化算法；自动加载 `config/algo_<name>.conf` |
-| `-it <N[:save]>` | 迭代次数与保存间隔 |
+| `-opti <mlem\|bsrem>` | 优化器；所选方案不随其自动切换 |
+| `-it <A[:B]>` | A次完整迭代、B个角度子集；裸A保留继承的子集 |
+| `-save-every <N>` | 每N次保存，0默认仅最后一次 |
+| `-subsets <N或N1:i1,N2:i2,...>` | 配合裸 `-it A` 指定子集/阶段，不能与 `-it A:B` 同传 |
 | `-th <N>` / `-threads <N>` / `-t <N>` | OpenMP 线程数 |
 | `-cudaDevice <id>` | 选择 CUDA device，覆盖环境变量 `SPECT_CUDA_DEVICE` |
 
-compact-symmetric 布局恒为 subset=1（MLEM 式全量更新），无 `-subsets` 参数。稀疏投影后端固定为 CUDA；旧 `-sparseBackend` / `-spBackend` 参数会直接报错。
+MLEM加角度子集即OSEM，BSREM共用划分；单CSRB和joint CSRQ均支持N10。N>1不与CTAC组合。子集数整除compact角度数，递减阶段满足整除关系且迭代数之和为A。当前不提供POSEM像素分支。后端固定CUDA；旧后端选择参数已退役。
 
 ### compact CUDA 性能环境变量
 
@@ -141,7 +138,7 @@ python tools\search_compact_perf.py --chunkCSRDir <matrix> --dfList <beds> --com
 部署后的基线采集优先使用安装包内的 collector，一条命令串行执行三次并只回传一个文本文件：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 -InputPath "<Bed1.bin;...>" -MultiBedList -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:20 -Repeats 3 -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
+powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagnostics.ps1 -InputPath "<Bed1.bin;...>" -MultiBedList -OutputPrefix "D:\SPECT_Result\device_test\recon" -Iterations 20:10 -Repeats 3 -ReportPath "D:\SPECT_Result\device_test\spect_device_diagnostics.txt"
 ```
 
 报告末尾必须同时满足 `all_cache_hits=True`、`all_resident_prefix_nonzero=True`，性能采用 `median_full_command_s`。报告也会记录 free RAM、进程累计 I/O/工作集和 matrix/output 磁盘总线；若首次含 cache miss，建立 cache 后原样重跑。
@@ -181,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File .\bin\tools\collect_device_recon_diagno
 | `TV` / `TVIsotropic` | `-reg TV,0.01,1e-6` |
 | `RDP` | `-reg RDP,beta,gamma,delta` |
 
-公开正则化只保留 TV/RDP。`-regBeta` 和 `-regDelta` 可作为简单覆盖；旧 anatomical/NLM/Tikhonov/MRP/LogCosh/Bowsher/PLS 入口与对应细调参数会在 parser 阶段拒绝。
+公开正则化只保留 TV/RDP，由BSREM执行。每个子更新用当前图像计算正则梯度，数据梯度按子集数缩放，β不再乘子集数；不是完整迭代后才加正则。`-regBeta` 和 `-regDelta` 可作为简单覆盖；旧 anatomical/NLM/Tikhonov/MRP/LogCosh/Bowsher/PLS 入口与对应细调参数会在 parser 阶段拒绝。
 
 TV/RDP 可选使用已配准到重建存储网格的 HU CT 作为边缘权重：
 
@@ -205,7 +202,7 @@ TV/RDP 可选使用已配准到重建存储网格的 HU CT 作为边缘权重：
 | `-butter <cutoff[,order]>` | 迭代内 Butterworth 低通（归一化截止），如 `0.35,2`；传入即隐含 `butter_apply_stage=in_recon` |
 | `-butterOrder <n>` | 单独设置迭代内 Butterworth order |
 
-`[Filtering]` 以 `smooth_apply_stage` / `butter_apply_stage`（`none|in_recon|output`）控制施加阶段。CLI `-smooth` / `-butter` 始终选择 `in_recon`（改变迭代轨迹）；`output` 仅由 INI 显式配置，不回写迭代状态。发布默认 `[InputOutput] output_filters_overwrite_primary=false`：保留未滤波主输出 `<fout>_it<N>.mhd/.raw`，并从同一份 canonical stitch + mask 输出独立派生 `<fout>_it<N>_smooth` 与 `<fout>_it<N>_butter`。设为 `true` 时，无后缀主输出依次应用已启用的 Smooth、Butterworth；带后缀副本仍独立派生，便于审计。
+`[Filtering]` 以 `smooth_apply_stage` / `butter_apply_stage`（`none|in_recon|output`）控制施加阶段。CLI `-smooth` / `-butter` 始终选择 `in_recon`（改变迭代轨迹）；`output` 仅由 INI 显式配置，不回写迭代状态。发布默认 `[InputOutput] output_filters_overwrite_primary=false`：保留未滤波主输出 `<fout>_it<N>.mhd/.raw`，默认Gaussian关闭，仅从同一份canonical保存输出独立派生 `<fout>_it<N>_butter`；显式启用输出Gaussian时才另写 `_smooth`。primary包含既定PSF/sieve及保存处理，不等于内部迭代数组。设为 `true` 时，无后缀主输出依次应用已启用的 Smooth、Butterworth；带后缀副本仍独立派生，便于审计。
 
 输出 Smooth 固定使用 CASToR erf 核、`output_smooth_fwhm_mm=0.30`、`output_smooth_sigmas=3`；输出 Butterworth 固定使用 2 倍零填充的径向物理频率响应、`output_butter_cutoff_cpcm=5`、`output_butter_order=8`。`output_nonnegative_clamp=false` 保留原型线性负旁瓣，仅用于同输入数值验证；发布默认 `true`，在每个主/派生副本完成后分别钳为非负。stage 设为 `output` 时对应参数必须为正，否则启动失败。
 
@@ -215,7 +212,7 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 
 ### 原型/主线对比：canonical 输出阶段
 
-主线不包含对象感知 seam/profile 后处理。原型等价比较固定使用同一 Bed 顺序、`z_bed_flip=1`、robust gain-fit、center66/cosine10 拼接；在默认 `output_filters_overwrite_primary=false` 下，主输出与两个派生输出分别对应原型 `stitched`、`stitched_smooth_fwhm0p3` 和 `stitched_butter_fc5cpcm_o8`。带后缀 Smooth/Butterworth 始终从同一未滤波主输出独立计算；覆盖模式是明确的交付输出策略，不替代这项原型等价门槛。
+主线不包含对象感知 seam/profile 后处理。原型等价比较固定使用同一 Bed 顺序、`z_bed_flip=1`、robust gain-fit、center66/cosine10 拼接；在默认 `output_filters_overwrite_primary=false` 下，显式启用两种输出滤波进行历史原型对照时，主输出与两个派生输出分别对应原型 `stitched`、`stitched_smooth_fwhm0p3` 和 `stitched_butter_fc5cpcm_o8`。带后缀 Smooth/Butterworth 始终从同一未滤波主输出独立计算；覆盖模式是明确的交付输出策略，不替代这项原型等价门槛。
 
 ## CTAC / 背景 / 掩码
 
@@ -245,7 +242,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 | 参数 | 说明 |
 |---|---|
-| `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` 物理 overlap 表；**派生值** `overlap = baseNz - round(bed_step_mm / voxel_z)`（260601 为 164），可省略（自动推算）或传错（自动纠正 + warning） |
+| `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` 物理 overlap 表；**派生值** `overlap = baseNz - round(bed_step_mm / voxel_z)`（当前220层、0.3mm、16.8mm步进时为164），可省略（自动推算）或传错（自动纠正 + warning） |
 | `-bedStepMm <mm>` / `[MultiBed] bed_step_mm` | 扫描仪机械床步进（默认 `16.8` mm，权威输入）；输出步进 `step = round(bed_step_mm / voxel_z)`，中心裁剪 `step+10` 层 |
 | `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | 可选 detZ/per-bin/full-projection 效率权重，仅作用于 compact sensitivity denominator；默认空 |
 | `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加 `1/c`；默认空 |
@@ -262,7 +259,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 `crop_method`、`sigmoid`、`direct`、seam/profile 后处理、输出 FOV mask 与对象分类均已退场。Mouse/EP/Derenzo 共用相同生产输出路径，不按对象选择算法。
 
-预处理投影与矩阵必须配对（详见 `Recon_Interface_Migration_Field_CN.md`）：260601 `-chunkCSRDir` 对应 `PROJECTION_VARIANT=identity`，`-zbedflip` 保留包默认 1。
+预处理投影与矩阵必须配对（详见 `Recon_Interface_Migration_Field_CN.md`）：本批Tc/Lu方案均使用 `PROJECTION_VARIANT=identity`，`-zbedflip` 保留包默认 1。
 
 ## 输出与日志
 
@@ -275,7 +272,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件。`-v <n>` 会失败（那是 verbosity，请用 `-vb`） |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
-默认输出主 MHD/RAW、独立 `_smooth`/`_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际六个体文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与矩阵/配置按 exe 目录解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径与 `[ITER]`；其余 INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
+默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径与 `[ITER]`；其余 INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
 
 ---
 
@@ -283,8 +280,11 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 
 | 参数 | 说明 |
 |---|---|
-| `-config <path>` | 全局配置文件 |
-| `-algoConf <path>` | 算法配置文件 |
+| `-config <path>` | 全局INI或完整重建方案 |
+| `-algoConf <path>` | 显式完整方案，替换默认方案 |
+| `-isotope <Tc99m或Lu177>` | 采集身份断言及核素默认方案选择 |
+| `-df2/-dfList2`、`-chunkCSRDir2` | joint第二窗投影及CSRQ矩阵，床号须与第一窗相同 |
+| `-energyWeights <w1,w2>` | 两窗预测计数权重，Lu方案顺序208/113为0.1036/0.0617 |
 | `-dumpConf` | 打印合并配置并退出 |
 | `-h` / `-help` / `--help` | 打印 help |
 
@@ -297,7 +297,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | 已删参数 | 当前行为 |
 |---|---|
 | `-indexMat` / `-weightMat` / `-loadCSR` / `-mapCSR` / `-saveCSR` / `-compactMeta` / `-matrixLayout` | `[NOTE]` 后忽略（矩阵唯一入口 `-chunkCSRDir`） |
-| `-subsets` | `[NOTE]` 后忽略；compact 布局恒单 subset |
+| `-subset-mode` / `-subset-diagnostics` | 已删除的像素分支入口，明确失败；`-subsets`仍是正式调度入口 |
 | `-alg` | `[NOTE]` 后忽略；正式入口为 `-opti mlem\|bsrem` |
 | `-opti admm` | `Unknown optimisation algorithm` |
 | `-sparseBackend` / `-spBackend` | `[NOTE]` 后忽略；稀疏后端固定 CUDA |

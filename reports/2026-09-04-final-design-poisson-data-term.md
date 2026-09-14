@@ -516,6 +516,8 @@ profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。�
 
 ## 7.10 2026-09-09 子集（OSEM / 分块 BSREM）调研结论与设计决定
 
+本节保留9月9日调研与实施前设计。当前实现和发布门以[9月13日验证报告](2026-09-13-subset-release.md)为准：已支持角度子集N1/N5/N10及递减调度，CLI为`-it 迭代次数:子集数`，RDP/TV逐子更新。下文原拟MLEM50形态门不再代表Derenzo收敛验收；用户补充其通常需约600–700次MLEM进展，现有子集收敛比较使用冻结MLEM1000参照。相同子更新数只是记账，不证明算法等价或加速倍数。
+
 用户问题：投影数据如何划分子集、能否加速、子集矩阵如何加载、子集间如何"融合"；主要算法族 MLEM / OSEM / BSREM + RDP / TV。以下为文献与专利检索（PMB、IEEE TMI、PETRIC 2024、CASToR 文档、Google Patents）后的结论；专利部分只是工程认知，不是法律意见。
 
 ### 调研结论
@@ -535,6 +537,14 @@ profile仍有5次resident MLEM更新，图像对预热B relL2 **3.1061e-8**。�
 - **灵敏度**：`computeCompactChunkSensitivityCUDA` 加子集限制，N 份 S_k 进分母缓存（key 含 N 与顺序）；CTAC 同样按子集。
 - **优化器**：统一为 Ahn–Fessler 形式 u_j = α_n [M(n_{k,j} − S_{k,j}) − λ_j r_j] / (S_j + λ_j max(c_j,0) + ε)，M=1 时即现有 BSREM-II；MLEM 类（β=0，α=1）用 `-subsets` 调度串（如 `10:3,5:2,1:5`，末段 1 子集即 MLEM）得到与 MLEM50 可比的终点；BSREM+RDP/TV 用固定 N 加现有 α_n 松弛。TV 仍走现有梯度/曲率接口，不引入 SPDHG。
 - **门**：单元测试（子集分子对 host oracle；ΣS_k = S；N=1 与 MLEM 一致）；Derenzo OSEM 调度 vs MLEM50 的 Branderhorst 式偏差与杆对比度；五床墙钟；不与 MLEM50 做 1e-5 relL2 门。
+
+## 7.11 2026-09-13 角度子集RC与Lu-177继续验证
+
+OSEM/BSREM角度子集、零子集灵敏度保留规则、每子更新RDP/TV、CLI语义和默认输出已通过独立构建与真实数据门；完整套件300通过、4项外部或opt-in跳过。N1/N10同参数对冻结EXE最大primary relL2为5.635e-8（门1e-5），真实五床RDP/TV生效、有限非负，包内TV启动和29项payload哈希通过。最终包为`dist/release_candidates/SPECT_recon_rc_20260913_subsets_final.zip`；旧包、冻结基线及原收敛记录保留。数值/运行验证与不同对象的最佳画质选择分开。
+
+默认50:10、末次primary与独立Butterworth、关闭Gaussian；生产配置恢复CLI优先，避免全局None覆盖BSREM正则。CSRQ双能窗/双矩阵仍为显式N1实验路径。Derenzo100N1四臂及同数据权重敏感性检查仅属早期证据，不能作为收敛后的物理标定。当前按用户要求优先老鼠SPECT观感和norm资料，CT处理/配准/解剖引导/CTAC留待后续；执行状态、原始命令和图像集中在[当前报告](2026-09-13-subset-release.md)，不在此重复实验台账。
+
+9月13日mouse/tumor正则化后续已完成23臂/83个primary及配置身份核查。当前实用补充预设为joint RDP0.03、300N1和sum208 CSRB RDP0.1、100N10；两者不是同一测量模型，β不跨模型移用。正常鼠与tumor2支持弱RDP的观感取舍，早停MLEM仍有竞争力。Tc99m IQ完成描述性对照，但真实结构/填充ROI未核验，不能用于宣布物理最优参数；完整图像、适用范围与复现见[当前报告](2026-09-13-subset-release.md)。冻结RC与通用默认值未改。
 
 ## 8. 当前实现摘要
 

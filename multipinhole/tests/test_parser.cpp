@@ -136,7 +136,7 @@ std::filesystem::path repoRootFromTestParser() {
     return std::filesystem::path(__FILE__).parent_path().parent_path();
 }
 
-TEST(CLITest, CtGuidedTestIniDiffersOnlyByCliUnlock) {
+TEST(CLITest, CtGuidedTestIniMatchesUnlockedProductionDefaults) {
     const auto repo = repoRootFromTestParser();
     const auto production = repo / "config" / "spect_config.ini";
     const auto fixture = repo / "config" / "spect_config.ct_guided.ini";
@@ -147,8 +147,8 @@ TEST(CLITest, CtGuidedTestIniDiffersOnlyByCliUnlock) {
     ConfigParser test;
     ASSERT_TRUE(prod.load(production.string()));
     ASSERT_TRUE(test.load(fixture.string()));
-    EXPECT_TRUE(prod.getBool("Compatibility", "recon_sections_override_cli",
-                             false));
+    EXPECT_FALSE(prod.getBool("Compatibility", "recon_sections_override_cli",
+                             true));
     EXPECT_FALSE(test.getBool("Compatibility", "recon_sections_override_cli",
                               true));
 
@@ -249,7 +249,7 @@ TEST(IOTest, ParserHelpAndDumpConfReturnExitSuccess) {
     {
         std::vector<std::string> storage = {
             "SPECT_recon",
-            "-dumpConf"
+            "-chunkCSRDir", "chunks", "-dumpConf"
         };
         std::vector<char*> argv;
         for (std::string& arg : storage)
@@ -354,7 +354,7 @@ TEST(IOTest, ProjectionResidualDiagnosticIsExplicitlyOptIn) {
     spect::cli::ArgumentParser parser;
     spect::cli::ReconArgs args;
     std::vector<std::string> storage = {
-        "SPECT_recon", "-projectionResidual", "on", "-dumpConf"};
+        "SPECT_recon", "-chunkCSRDir", "chunks", "-projectionResidual", "on", "-dumpConf"};
     std::vector<char*> argv;
     for (std::string& arg : storage)
         argv.push_back(arg.data());
@@ -414,10 +414,18 @@ TEST(IOTest, DenomCacheConfigIsExeRelativeAndCliPathWins) {
     EXPECT_EQ(autoDir.parent_path().filename(), "cache");
     EXPECT_NE(autoDir.parent_path().parent_path(), root);
 
+    { std::ofstream out(config, std::ios::app);
+      out << "[Compatibility]\nrecon_sections_override_cli=true\n"; }
+    spect::cli::ReconArgs protectedArgs;
+    ASSERT_TRUE(parseReconArgsForTest(argv, protectedArgs));
+    EXPECT_EQ(std::filesystem::path(protectedArgs.compactDenomCachePath),
+              autoDir.parent_path()/"from_config.mhd");
+    EXPECT_FALSE(protectedArgs.compactDenomCachePathExplicit);
+
     std::filesystem::remove_all(root);
 }
 
-TEST(IOTest, CliIterationsAndOutputStillOverrideProtectedConfig) {
+TEST(IOTest, ConfiguredIterationsProtectedButRuntimeOutputRemainsCli) {
     const auto root = std::filesystem::temp_directory_path() /
                       "spect_cli_iteration_output_priority_test";
     std::filesystem::create_directories(root);
@@ -439,10 +447,11 @@ TEST(IOTest, CliIterationsAndOutputStillOverrideProtectedConfig) {
     const std::vector<std::string> argv = {
         (root / "SPECT_recon.exe").string(), "-config", config.string(),
         "-df", "proj.bin", "-chunkCSRDir", "chunks", "-opti", "mlem",
-        "-it", "20:5", "-fout", output.string()};
+        "-it", "20:5", "-save-every", "7", "-fout", output.string()};
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.numIters, 20);
-    EXPECT_EQ(args.saveInterval, 5);
+    EXPECT_EQ(args.numIters, 50);
+    EXPECT_EQ(args.subsetSchedule, "10");
+    EXPECT_EQ(args.saveInterval, 0); // auto-selected legacy recipe explicitly requests final-only
     EXPECT_EQ(std::filesystem::path(args.outputDir), output.parent_path());
     EXPECT_EQ(args.outputName, "run");
 
@@ -600,42 +609,62 @@ TEST(IOTest, CompactSymmetricParserAcceptsSubsetSchedule) {
     EXPECT_EQ(args.subsetSchedule, "10:3,5:2,1:5");
 }
 
-TEST(IOTest, CompactSymmetricParserAcceptsSubsetMode) {
+TEST(IOTest, IterationsUseSubsetCountAndIndependentCheckpointFrequency) {
     auto argv = compactBaseArgs();
-    argv.insert(argv.end(), {"-subsets", "6:2,1:3"});
-    argv.insert(argv.end(), {"-subset-mode", "posem"});
-
+    argv.insert(argv.end(), {"-it", "100:10", "-save-every", "5"});
     spect::cli::ReconArgs args;
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.subsetMode, "posem");
-    EXPECT_EQ(args.subsetSchedule, "6:2,1:3");
+    EXPECT_EQ(args.numIters, 100);
+    EXPECT_EQ(args.subsetSchedule, "10");
+    EXPECT_EQ(args.saveInterval, 5);
+
+    argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-it", "100:1"});
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.subsetSchedule, "1");
+    EXPECT_EQ(args.saveInterval, 0);
+    for (const std::string value : {"0:1", "10:0", "10:", "10:2:3", "10x:2"}) {
+        argv = compactBaseArgs();
+        argv.insert(argv.end(), {"-it", value});
+        spect::cli::ReconArgs invalid;
+        EXPECT_FALSE(parseReconArgsForTest(argv, invalid)) << value;
+    }
+    for (const bool reverse : {false, true}) {
+        argv = compactBaseArgs();
+        const std::vector<std::string> extra = reverse
+            ? std::vector<std::string>{"-subsets", "5", "-it", "100:10"}
+            : std::vector<std::string>{"-it", "100:10", "-subsets", "5"};
+        argv.insert(argv.end(), extra.begin(), extra.end());
+        spect::cli::ReconArgs invalid;
+        EXPECT_FALSE(parseReconArgsForTest(argv, invalid));
+    }
 }
 
-TEST(IOTest, CompactSymmetricParserRejectsBadSubsetMode) {
-    auto argv = compactBaseArgs();
-    argv.insert(argv.end(), {"-subset-mode", "spiral"});
+TEST(IOTest, ShippedConfigDefaultsToFinalOnlyAndButterOutput) {
+    const auto config = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                        "config" / "spect_config.ini";
+    const std::vector<std::string> argv = {"SPECT_recon", "-config", config.string(),
+        "-df", "proj.bin", "-chunkCSRDir", "chunks", "-it", "1:1"};
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_EQ(args.saveInterval, 0);
+    EXPECT_EQ(args.smoothApplyStage, "none");
+    EXPECT_EQ(args.butterApplyStage, "output");
+    EXPECT_FALSE(args.outputFiltersOverwritePrimary);
+    auto overridden = argv;
+    overridden.insert(overridden.end(), {"-opti", "bsrem"});
+    spect::cli::ReconArgs bsrem;
+    ASSERT_TRUE(parseReconArgsForTest(overridden, bsrem));
+    EXPECT_EQ(bsrem.algorithm, spect::cli::ReconArgs::Algorithm::BSREM);
+    EXPECT_FALSE(bsrem.useReg); // -opti changes the optimizer, not the selected recipe.
 
+}
+
+TEST(IOTest, CompactSymmetricParserRejectsRemovedPixelMode) {
+    auto argv = compactBaseArgs();
+    argv.insert(argv.end(), {"-subset-mode", "posem"});
     spect::cli::ReconArgs args;
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
-}
-
-TEST(IOTest, CompactSymmetricParserReadsSubsetModeFromConfig) {
-    const auto path = std::filesystem::temp_directory_path() /
-                      "spect_subset_mode_config.ini";
-    {
-        std::ofstream out(path);
-        ASSERT_TRUE(out);
-        out << "[Algorithm]\nsubsets = 4\nsubset_mode = pixels\n";
-    }
-
-    const std::vector<std::string> argv = {
-        "SPECT_recon", "-algoConf", path.string(), "-df", "proj.bin",
-        "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "5",
-        "-vox", "0.3", "-ang", "360"};
-    spect::cli::ReconArgs args;
-    ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.subsetMode, "pixels");
-    std::filesystem::remove(path);
 }
 
 TEST(IOTest, CompactSymmetricParserReadsSubsetScheduleFromConfig) {
@@ -943,3 +972,66 @@ TEST(CLITest, AbsoluteFoutKeepsDriveLetterOutputDir) {
 } // namespace test
 } // namespace io
 } // namespace spect
+
+TEST(IOTest, RecipesCoverDefaultExplicitAndCliWithBothOverridePolicies) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_recipe_priority";
+    std::filesystem::create_directories(root);
+    const auto global = root / "spect_config.ini";
+    const auto selected = root / "selected.conf";
+    const auto fallback = root / "default.conf";
+    { std::ofstream f(fallback); f << "[Algorithm]\nname=MLEM\niterations=50:10\n[Regularization]\ntype=None\n"; }
+    { std::ofstream f(selected); f << "[Algorithm]\nname=BSREM\niterations=75:10\n[BSREM]\nalpha0=1.5\n"
+        "[Regularization]\ntype=TV\nbeta=0.0003\n[PSF]\nmode=none\n[Mask]\nuse_cylinder=false\n"
+        "[Filtering]\nbutter_apply_stage=none\n"; }
+    for (const bool protect : {false, true}) {
+        { std::ofstream f(global); f << "[Reconstruction]\ndefault_config=default.conf\n[Compatibility]\nrecon_sections_override_cli="
+            << (protect ? "true" : "false") << "\n[PSF]\nmode=sieve\nfwhm=1.3\n[Filtering]\nbutter_apply_stage=output\n"; }
+        for (int style=0; style<3; ++style) {
+            std::vector<std::string> argv = {"SPECT_recon", "-config", global.string(), "-df", "proj.bin", "-chunkCSRDir", "chunks", "-o", "caller-output"};
+            if (style) argv.insert(argv.end(), {"-algoConf", selected.string()});
+            if (style==2) argv.insert(argv.end(), {"-it", "4:2", "-reg", "none", "-psfMode", "sieve", "-opti", "mlem"});
+            spect::cli::ReconArgs a;
+            ASSERT_TRUE(spect::io::test::parseReconArgsForTest(argv,a)) << protect << ':' << style;
+            EXPECT_EQ(a.numIters, style==0 ? 50 : (style==2 && !protect ? 4 : 75));
+            EXPECT_EQ(a.subsetSchedule, style==2 && !protect ? "2" : "10");
+            EXPECT_EQ(a.useReg, style!=0 && (style!=2 || protect));
+            EXPECT_EQ(a.usePSF, style==0 || (style==2 && !protect));
+            EXPECT_EQ(a.useCylindricalMask, style==0);
+            EXPECT_EQ(a.butterApplyStage, style==0 ? "output" : "none");
+            EXPECT_EQ(a.outputDir,"caller-output");
+            EXPECT_EQ(std::filesystem::path(a.algoConfPath), style ? selected : fallback);
+        }
+    }
+    spect::cli::ReconArgs directRecipe;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(
+        {"SPECT_recon", "-config", selected.string(), "-df", "proj.bin", "-chunkCSRDir", "chunks"}, directRecipe));
+    EXPECT_EQ(directRecipe.numIters,75);
+    EXPECT_EQ(directRecipe.reg.type,spect::RegType::TVIsotropic);
+    EXPECT_DOUBLE_EQ(directRecipe.reg.beta,.0003);
+    EXPECT_FALSE(directRecipe.usePSF);
+    std::filesystem::remove_all(root);
+}
+
+TEST(IOTest, MatrixIdsSelectUniqueNuclideResourcesAndRejectMismatch) {
+    const auto root=std::filesystem::temp_directory_path()/"spect_matrix_ids";
+    std::filesystem::create_directories(root/"matrix"/"Lu177"/"peak208");
+    std::filesystem::create_directories(root/"matrix"/"Lu177"/"peak113");
+    for (const auto* id : {"peak208","peak113"}) { std::ofstream f(root/"matrix"/"Lu177"/id/"metadata.bin"); f << "fixture"; }
+    const auto config=root/"spect_config.ini";
+    { std::ofstream f(config); f << "[Reconstruction]\ndefault_config=recipe.conf\ndefault_config_Lu177=recipe.conf\n[SystemMatrix]\nroot=" << (root/"matrix").generic_string() << "\n"; }
+    { std::ofstream f(root/"recipe.conf"); f << "[Acquisition]\nisotope=Lu177\nprojection_model=joint\n[Algorithm]\niterations=30:10\n[SystemMatrix]\nmatrix_id=peak208\nmatrix_id2=peak113\nenergy_window_weights=0.1036,0.0617\n"; }
+    const std::vector<std::string> base={"SPECT_recon","-config",config.string(),"-isotope","Lu177","-df","Bed1.bin","-df2","Bed1_113.bin"};
+    spect::cli::ReconArgs a;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(base,a));
+    EXPECT_EQ(std::filesystem::path(a.chunkCSRDir).filename(),"peak208");
+    EXPECT_EQ(std::filesystem::path(a.chunkCSRDir2).filename(),"peak113");
+    EXPECT_EQ(a.energyWindowWeights,(std::vector<double>{.1036,.0617}));
+    auto mismatch=base; mismatch[4]="Tc99m";
+    spect::cli::ReconArgs invalid;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(mismatch,invalid));
+    std::filesystem::create_directories(root/"matrix"/"peak208");
+    { std::ofstream f(root/"matrix"/"peak208"/"metadata.bin"); f << "ambiguous"; }
+    spect::cli::ReconArgs ambiguous;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base,ambiguous));
+    std::filesystem::remove_all(root);
+}

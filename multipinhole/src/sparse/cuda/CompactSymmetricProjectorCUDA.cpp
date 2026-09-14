@@ -816,20 +816,16 @@ struct CompactBranchDescriptor {
 };
 
 // --- Ordered-subset slices -----------------------------------------------------
-// The streaming unit of every CSRB pass is the (chunk, subset) slice. Angle
-// subsets take the chunk's rows of the subset's compact angles; pixel (POSEM)
-// subsets take the chunk's canonical rows whose compactPixelSubsetId selects
-// the subset. The full-data pass is the angle subset of all angles (count 1),
-// whose slice is the whole chunk with tag 0 so it shares the device copy of
-// the chunk's own CSRView. The tag's mode bit keeps a pixel N-subset cache
-// entry from ever aliasing an angle N-subset entry of the same chunk.
+// The streaming unit of every CSRB pass is the (chunk, subset) slice: the
+// chunk's rows of the subset's compact angles. The full-data pass is the
+// subset of all angles (count 1), whose slice is the whole chunk with tag 0
+// so it shares the device copy of the chunk's own CSRView.
 
 struct CompactSubsetSelection {
-  std::vector<int> angles; // angle mode: absolute compact angles, ascending
+  std::vector<int> angles; // absolute compact angles, ascending
   uint64_t tag = 0;
   int count = 1;
   int index = 0;
-  CompactSubsetMode mode = CompactSubsetMode::Angles;
 };
 
 CompactSubsetSelection selectCompactSubset(
@@ -840,22 +836,9 @@ CompactSubsetSelection selectCompactSubset(
   if (subset != nullptr) {
     spec = *subset;
   }
-  if (spec.count <= 0 || spec.index < 0 || spec.index >= spec.count) {
-    throw std::runtime_error("compact subset spec is out of range.");
-  }
-  out.mode = spec.mode;
+  out.angles = compactSubsetAngles(meta.compactNumAngles, spec);
   out.count = spec.count;
   out.index = spec.index;
-  if (spec.mode == CompactSubsetMode::Pixels && spec.count > 1) {
-    // Pixel subsets touch rows of every angle; the per-angle CTAC tables and
-    // the ratio mapping come from the slice's row index instead of angles.
-    out.tag = (1ull << 62) | (static_cast<uint64_t>(spec.count) << 32) |
-              static_cast<uint64_t>(spec.index);
-    return out;
-  }
-  // Angle subsets, and the full-data step of any mode (count 1 = all
-  // angles, the whole chunk, tag 0 sharing the chunk's CSRView cache).
-  out.angles = compactSubsetAngles(meta.compactNumAngles, spec);
   out.tag = spec.count <= 1
                 ? 0u
                 : (static_cast<uint64_t>(spec.count) << 32) |
@@ -867,10 +850,6 @@ spect::io::CSRSubsetView compactChunkSlice(
     const spect::io::CompactChunkCSRData &chunk,
     const spect::io::CompactSymmetryMetadata &meta,
     const CompactSubsetSelection &subset) {
-  if (subset.mode == CompactSubsetMode::Pixels && subset.count > 1) {
-    return chunk.pixelSubsetView(subset.count, subset.index,
-                                 meta.compactRaysPerAngle, subset.tag);
-  }
   return chunk.subsetView(subset.angles, meta.compactRaysPerAngle, subset.tag);
 }
 
@@ -1125,7 +1104,8 @@ bool runCsrqMlemNumerMultiBed(
     const double *const *smoothedImages, int bedCount, int threads,
     double *const *numers, CompactSymmetricStageTiming *timing,
     const uint16_t *const *attFactors, bool refreshProjectionInputs,
-    bool branchBatchInputPrepared, bool downloadBackwardOutputs) {
+    bool branchBatchInputPrepared, bool downloadBackwardOutputs,
+    const CompactSubsetSelection &subset) {
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
@@ -1192,7 +1172,7 @@ bool runCsrqMlemNumerMultiBed(
     }
   }
   // One chunk-outer pass per window over all beds (a streamed matrix then
-  // crosses PCIe once per iteration); windows accumulate into the same
+  // transfers only selected angle payloads); windows accumulate into the same
   // per-bed accumulators.
   for (size_t channel = 0; channel < channelCount; ++channel) {
     const double *const *channelProjections =
@@ -1212,7 +1192,7 @@ bool runCsrqMlemNumerMultiBed(
                           &deviceTiming, &backwardTiming, attFactors,
                           attFactors == nullptr ? 0
                                                 : compactAttenTableCount(meta),
-                          channels[channel].attenPower)) {
+                          channels[channel].attenPower, subset.count, subset.index)) {
       return false;
     }
     if (timing) {
@@ -1256,11 +1236,6 @@ bool computePoissonSensitivityCUDA(
   std::fill(denom, denom + nvox, 0.0);
 
   if (isCsrqChannelSet(channels)) {
-    if (subsetSelection.count > 1) {
-      throw std::runtime_error(
-          "ordered subsets are implemented for CSRB matrices only; CSRQ "
-          "sensitivity cannot be restricted to a subset.");
-    }
     std::vector<int> symIds;
     std::vector<int> zMirrors;
     fillBranchSymmetryTables(branches, symIds, zMirrors);
@@ -1274,10 +1249,13 @@ bool computePoissonSensitivityCUDA(
               static_cast<int>(branches.size()), channels[channel].weight,
               makeCompactDeviceRatioParams(meta, 0, 0, false),
               makeCompactDeviceTransformParams(meta, 0, false), symIds.data(),
-              zMirrors.data(), 0, fullProjectionCount, rowWeights,
+              zMirrors.data(), 0, fullProjectionCount,
+              channels[channel].sensitivityRowWeights != nullptr
+                  ? channels[channel].sensitivityRowWeights : rowWeights,
               &backwardTiming, attFactors,
               attFactors == nullptr ? 0 : compactAttenTableCount(meta),
-              channels[channel].attenPower)) {
+              channels[channel].attenPower, subsetSelection.count,
+              subsetSelection.index)) {
         return false;
       }
       if (timing) {
@@ -1735,16 +1713,11 @@ bool accumulatePoissonBackprojectedRatioCUDA(
       selectCompactSubset(meta, subset);
   const bool csrq = isCsrqChannelSet(channels);
   if (csrq) {
-    if (subsetSelection.count > 1) {
-      throw std::runtime_error(
-          "ordered subsets are implemented for CSRB matrices only; use a CSRB "
-          "matrix directory or -subsets 1 with CSRQ.");
-    }
     return runCsrqMlemNumerMultiBed(
         channels, meta, fullProjections, hasBackground ? fullBackgrounds : nullptr,
         smoothedImages, bedCount, threads, numers, timing,
         hasAtten ? attFactors : nullptr, refreshProjectionInputs,
-        branchBatchInputPrepared, downloadBackwardOutputs);
+        branchBatchInputPrepared, downloadBackwardOutputs, subsetSelection);
   }
 
   // CSRB: one device path for any bed count. The ratio p/(A x + b) and the

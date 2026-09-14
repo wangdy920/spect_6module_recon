@@ -34,11 +34,6 @@ struct CompactDeviceRatioParams {
     /// ordered-subset slice, whose blocks are not consecutive angles; nullptr
     /// keeps the contiguous mapping angle = (compactRowBase + row) / rpa.
     const int* blockAngles = nullptr;
-    /// Device table of the canonical row (absoluteAngle * rpa + ray) of every
-    /// matrix row, for pixel-subset (POSEM) slices whose rows interleave
-    /// within each angle. Mutually exclusive with blockAngles by construction;
-    /// nullptr otherwise.
-    const int* rowCompactIndex = nullptr;
 };
 
 struct CompactDeviceRatioTiming {
@@ -349,7 +344,8 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       CompactDeviceRatioTiming* ratioTiming = nullptr,
                       CompactDeviceBackwardTiming* backwardTiming = nullptr,
                       const uint16_t* const* bedAttFactors = nullptr,
-                      size_t attCount = 0, double attPower = 1.0);
+                      size_t attCount = 0, double attPower = 1.0,
+                            int subsetCount = 1, int subsetIndex = 0);
 /// weight * H^T W 1 over rows with a valid full projection counterpart.
 /// rowWeights (fullProjectionCount doubles: detector masks, censoring,
 /// efficiency) may be nullptr for W = 1; attFactors (one bed's full-angle
@@ -362,7 +358,8 @@ bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             const double* rowWeights = nullptr,
                             CompactDeviceBackwardTiming* backwardTiming = nullptr,
                             const uint16_t* attFactors = nullptr,
-                            size_t attCount = 0, double attPower = 1.0);
+                            size_t attCount = 0, double attPower = 1.0,
+                            int subsetCount = 1, int subsetIndex = 0);
 /// Forward projection of one window over the refreshed single-bed branch
 /// batch; hostYhatPacked receives [compactRow][branch] floats (rows * 8).
 /// With attFactors the projection is H x = A att^attPower x and the angle /

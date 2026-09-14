@@ -177,6 +177,17 @@ public:
      */
     const ConfigMap& getSections() const { return sections; }
 
+    void overlay(const ConfigParser& other) {
+        for (const auto& section : other.sections)
+            for (const auto& entry : section.second)
+                sections[section.first][entry.first] = entry.second;
+    }
+
+    void erase(const std::string& section, const std::string& key) {
+        auto it = sections.find(section);
+        if (it != sections.end()) it->second.erase(key);
+    }
+
 private:
     static void trimInPlace(std::string& s) {
         const size_t first = s.find_first_not_of(" \t\r\n");

@@ -41,6 +41,7 @@ struct CompactMatrixChannel {
   /// under the water-scaled mu model shared by auto-mu and the HU->mu
   /// pipeline, since att = exp(-integral mu).
   double attenPower = 1.0;
+  const double* sensitivityRowWeights = nullptr; ///< Optional channel-specific W, fullRows entries; borrowed during calls.
 };
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)
@@ -53,7 +54,7 @@ struct CompactMatrixChannel {
 // with H_k = w_k A_k. The data gradient is q - S. Nothing below knows which
 // optimizer or penalty will use the result.
 
-// Ordered subsets (CSRB only, design report 7.10): both statistics may be
+// Ordered subsets (CSRB, or CSRQ without CTAC): both statistics may be
 // restricted to one subset of compact angles (CompactSubsetSpec, see
 // CompactSubsets.h). The matrix is then streamed as (chunk, subset) slices —
 // only the subset's rows cross PCIe — and S_m / q_m are the sums over those

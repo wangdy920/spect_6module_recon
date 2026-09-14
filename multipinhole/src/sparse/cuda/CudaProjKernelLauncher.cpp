@@ -544,8 +544,6 @@ void launchCompactRatioBatchKernel(
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(dZMirrors));
   CUdeviceptr blockAnglesPtr =
       reinterpret_cast<CUdeviceptr>(const_cast<int *>(commonParams.blockAngles));
-  CUdeviceptr rowCompactIndexPtr = reinterpret_cast<CUdeviceptr>(
-      const_cast<int *>(commonParams.rowCompactIndex));
   CUdeviceptr ratioPtr = reinterpret_cast<CUdeviceptr>(ratioBatch);
   unsigned long long projectionCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -568,7 +566,6 @@ void launchCompactRatioBatchKernel(
                   &symIdsPtr,
                   &zMirrorsPtr,
                   &blockAnglesPtr,
-                  &rowCompactIndexPtr,
                   &batchSize,
                   &ratioPtr,
                   &rowCount,
@@ -803,7 +800,7 @@ void launchCsrqForwardK8Impl(const CsrqDeviceChunkPtrs &chunk,
                              const int *dSymIds, const int *dZMirrors,
                              double eps, cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
-  if (chunk.rows <= 0) {
+  if (chunk.selectedRows() <= 0) {
     return;
   }
   CUdeviceptr rowNnzPtr = devPtr(chunk.rowNnzPtr);
@@ -844,10 +841,12 @@ void launchCsrqForwardK8Impl(const CsrqDeviceChunkPtrs &chunk,
                   const_cast<int *>(&params.fullRaysPerAngle),
                   &symIds,
                   &zMirrors,
-                  &eps};
+                  &eps, const_cast<int *>(&chunk.rowOffset),
+                  const_cast<int *>(&chunk.rowGroupSize),
+                  const_cast<int *>(&chunk.rowGroupStride)};
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.csrqForwardFunction,
-      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      static_cast<unsigned int>(chunk.selectedRows()), 1, 1, kCsrqBlockSize, 1, 1, 0,
       reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
@@ -882,7 +881,7 @@ void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
                                 size_t nvox, int kFirst, int kCount,
                                 cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
-  if (chunk.rows <= 0 || nvox == 0 || kCount <= 0) {
+  if (chunk.selectedRows() <= 0 || nvox == 0 || kCount <= 0) {
     return;
   }
   if (kFirst < 0 || kFirst + kCount > kCsrqK) {
@@ -900,10 +899,12 @@ void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
   int first = kFirst;
   int count = kCount;
   void *args[] = {&rowNnzPtr, &rowRunPtr, &rowMax, &runs, &valuesQ, &r, &y,
-                  &voxels, &rows, &first, &count};
+                  &voxels, &rows, &first, &count, const_cast<int *>(&chunk.rowOffset),
+                  const_cast<int *>(&chunk.rowGroupSize),
+                  const_cast<int *>(&chunk.rowGroupStride)};
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.csrqBackwardFunction,
-      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      static_cast<unsigned int>(chunk.selectedRows()), 1, 1, kCsrqBlockSize, 1, 1, 0,
       reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
@@ -911,7 +912,7 @@ void launchCsrqBackwardK8PackedKernel(const CsrqDeviceChunkPtrs &chunk,
                                       const float *ratioPacked, float *yPacked,
                                       cudaStream_t stream) {
   ensureProjDomainKernelsLoaded();
-  if (chunk.rows <= 0) {
+  if (chunk.selectedRows() <= 0) {
     return;
   }
   CUdeviceptr rowNnzPtr = devPtr(chunk.rowNnzPtr);
@@ -923,10 +924,12 @@ void launchCsrqBackwardK8PackedKernel(const CsrqDeviceChunkPtrs &chunk,
   CUdeviceptr y = devPtr(yPacked);
   int rows = chunk.rows;
   void *args[] = {&rowNnzPtr, &rowRunPtr, &rowMax, &runs, &valuesQ, &r, &y,
-                  &rows};
+                  &rows, const_cast<int *>(&chunk.rowOffset),
+                  const_cast<int *>(&chunk.rowGroupSize),
+                  const_cast<int *>(&chunk.rowGroupStride)};
   SPECT_CUDRV_CHECK(cuLaunchKernel(
       g_projDomainKernelCache.csrqBackwardPackedFunction,
-      static_cast<unsigned int>(rows), 1, 1, kCsrqBlockSize, 1, 1, 0,
+      static_cast<unsigned int>(chunk.selectedRows()), 1, 1, kCsrqBlockSize, 1, 1, 0,
       reinterpret_cast<CUstream>(stream), args, nullptr));
 }
 
@@ -1135,7 +1138,6 @@ void launchCompactUnitRatioBatchKernel(
   CUdeviceptr symIds = devPtr(dSymIds);
   CUdeviceptr zMirrors = devPtr(dZMirrors);
   CUdeviceptr blockAngles = devPtr(commonParams.blockAngles);
-  CUdeviceptr rowCompactIndex = devPtr(commonParams.rowCompactIndex);
   CUdeviceptr ratio = devPtr(ratioBatch);
   unsigned long long projCount =
       static_cast<unsigned long long>(fullProjectionCount);
@@ -1154,7 +1156,6 @@ void launchCompactUnitRatioBatchKernel(
                   &symIds,
                   &zMirrors,
                   &blockAngles,
-                  &rowCompactIndex,
                   &batchSize,
                   &ratio,
                   &rowCount};

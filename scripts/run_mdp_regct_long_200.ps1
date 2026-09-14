@@ -150,7 +150,7 @@ foreach ($case in $cases) {
         "-vox", "0.3,0.3,0.3",
         "-ang", "360",
         "-detN", "48,48",
-        "-it", "$Iterations`:$SaveEvery",
+        "-it", "$Iterations`:1", "-save-every", "$SaveEvery",
         "-th", "20",
         "-psf", "1.3,3",
         "-psfMode", "sieve",

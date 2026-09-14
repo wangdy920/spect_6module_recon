@@ -13,16 +13,28 @@ namespace cli {
 
 namespace {
 
+int parseInteger(const std::string& value, int minimum, const char* option) {
+    size_t consumed = 0;
+    const int result = std::stoi(value, &consumed);
+    if (consumed != value.size() || result < minimum)
+        throw std::runtime_error(std::string(option) + " has an invalid integer: " + value);
+    return result;
+}
+
 bool isPublicRegularizer(RegType type) {
     return type == RegType::None || type == RegType::TVIsotropic ||
            type == RegType::RDP;
 }
 
 bool rejectedCliAliasError(const std::string& key, std::string& error) {
+    if (key == "-subset-mode" || key == "-subset-diagnostics") {
+        error = "Error: this build supports angle subsets only; use -it A:B or -subsets.\n";
+        return true;
+    }
     if (key == "-iter" || key == "-iters" || key == "-iteration" ||
         key == "-iterations") {
         error = "Error: '" + key +
-                "' is not supported; use -it <N[:save]>.\n";
+                "' is not supported; use -it <iterations[:subsets]>.\n";
         return true;
     }
     if (key == "-verbose" || key == "-verbosity") {
@@ -33,29 +45,13 @@ bool rejectedCliAliasError(const std::string& key, std::string& error) {
     return false;
 }
 
-void restoreConfigOwnedReconSections(ReconArgs& dst, const ReconArgs& src) {
-    dst.useReg = src.useReg;
-    dst.reg = src.reg;
-    dst.regCtPath = src.regCtPath;
 
-    dst.usePSF = src.usePSF;
-    dst.psf = src.psf;
-    dst.psfModeExplicit = src.psfModeExplicit;
-
-    dst.useSmooth = src.useSmooth;
-    dst.smoothSigma = src.smoothSigma;
-    dst.smoothKernel = src.smoothKernel;
-    dst.useButter = src.useButter;
-    dst.butterCutoff = src.butterCutoff;
-    dst.butterOrder = src.butterOrder;
-    dst.smoothApplyStage = src.smoothApplyStage;
-    dst.butterApplyStage = src.butterApplyStage;
-    dst.outputSmoothFwhmMm = src.outputSmoothFwhmMm;
-    dst.outputSmoothSigmas = src.outputSmoothSigmas;
-    dst.outputButterCutoffCpcm = src.outputButterCutoffCpcm;
-    dst.outputButterOrder = src.outputButterOrder;
-    dst.outputNonnegativeClamp = src.outputNonnegativeClamp;
-    dst.outputFiltersOverwritePrimary = src.outputFiltersOverwritePrimary;
+std::string canonicalIsotope(std::string value) {
+    value = toLower(value);
+    if (value == "tc99m" || value == "tc-99m" || value == "99mtc") return "Tc99m";
+    if (value == "lu177" || value == "lu-177" || value == "177lu") return "Lu177";
+    if (value.empty()) return value;
+    throw std::runtime_error("Unsupported isotope: " + value);
 }
 
 } // namespace
@@ -185,6 +181,33 @@ bool ArgumentParser::applyMatrixAutoDiscovery(ReconArgs& args,
                                                      std::string& error) {
     const std::filesystem::path exeDir = executableDir(argv);
 
+    const auto root = (std::filesystem::path(args.matrixRoot).is_absolute()
+        ? std::filesystem::path(args.matrixRoot) : exeDir / args.matrixRoot).lexically_normal();
+    auto resolveId = [&](const std::string& id) {
+        if (id.empty() || id == "." || id == ".." ||
+            id.find_first_of("/\\:") != std::string::npos)
+            throw std::runtime_error("Invalid matrix_id: " + id);
+        std::vector<std::filesystem::path> found;
+        for (const auto& candidate : {root / id, root / args.isotope / id}) {
+            if (std::filesystem::is_regular_file(candidate / "metadata.bin") &&
+                std::find(found.begin(), found.end(), candidate) == found.end())
+                found.push_back(candidate);
+        }
+        if (found.size() != 1)
+            throw std::runtime_error("matrix_id '" + id + "' requires exactly one metadata.bin directory under " + root.string());
+        return found.front().string();
+    };
+    if (!args.matrixId.empty()) args.chunkCSRDir = resolveId(args.matrixId);
+    if (!args.matrixId2.empty()) args.chunkCSRDir2 = resolveId(args.matrixId2);
+    if (!args.chunkCSRDir2.empty())
+        args.chunkCSRDir2 = resolveChunkCSRDirPath(args.chunkCSRDir2, exeDir, args.chunkCSRDir2Explicit).string();
+    if (!args.projectionModel.empty() &&
+        ((args.projectionModel == "joint") != args.dualWindow()))
+        throw std::runtime_error("projection_model disagrees with the number of matrices.");
+    for (auto* file : {&args.normFactorFile, &args.normFactorFile2})
+        if (!file->empty() && !std::filesystem::path(*file).is_absolute())
+            *file = ((file == &args.normFactorFile && args.normFactorFileExplicit)
+                ? std::filesystem::absolute(*file) : exeDir / *file).lexically_normal().string();
     if (!args.chunkCSRDir.empty()) {
         args.chunkCSRDir = resolveChunkCSRDirPath(
             args.chunkCSRDir, exeDir, args.chunkCSRDirExplicit).string();
@@ -217,15 +240,28 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     std::string configPath;
     std::string preScanAlg;
     std::string preScanAlgoConf;
+    std::string requestedIsotope;
     for (int i = 1; i < argc; i++) {
         std::string key = argv[i];
         if (key == "-config" && i + 1 < argc) {
             configPath = argv[++i];
             args.configExplicit = true;
+        } else if (key == "-isotope" && i + 1 < argc) {
+            requestedIsotope = canonicalIsotope(argv[++i]);
         } else if (key == "-opti" && i + 1 < argc) {
             preScanAlg = toLower(std::string(argv[++i]));
         } else if (key == "-algoConf" && i + 1 < argc) {
             preScanAlgoConf = argv[++i];
+        }
+    }
+    if (args.configExplicit && preScanAlgoConf.empty()) {
+        ConfigParser supplied;
+        if (supplied.load(configPath) && supplied.hasSection("Algorithm") &&
+            !supplied.hasKey("Reconstruction", "default_config")) {
+            // Existing -config calls may name a complete recipe. Preserve the
+            // deployed defaults underneath it instead of loading another algo file.
+            preScanAlgoConf = configPath;
+            args.configExplicit = false;
         }
     }
     if (!args.configExplicit)
@@ -243,8 +279,6 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     // 1. Load global config if it exists. Error-code overloads keep an
     // inaccessible optional default from aborting before CLI parsing.
     ConfigParser cfg;
-    ReconArgs globalConfigSnapshot;
-    bool haveGlobalConfigSnapshot = false;
     std::error_code configExistsError;
     const bool configExists =
         std::filesystem::exists(configPath, configExistsError);
@@ -261,8 +295,6 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (cfg.load(configPath)) {
             args.configLoaded = true;
             applyConfig(args, cfg);
-            globalConfigSnapshot = args;
-            haveGlobalConfigSnapshot = true;
         } else if (args.configExplicit) {
             std::cerr << "Error: Cannot load explicit config file '"
                       << configPath << "'.\n";
@@ -279,11 +311,18 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
 
     // 2. Load algorithm config (algo_conf layer)
     //    Priority: explicit -algoConf > auto-detect from -opti > auto-detect from global INI algorithm
+    const std::string defaultRecipe = cfg.getString("Reconstruction",
+        requestedIsotope.empty() ? "default_config" : "default_config_" + requestedIsotope,
+        cfg.getString("Reconstruction", "default_config"));
     std::string algoConfPath;
     if (!preScanAlgoConf.empty()) {
         algoConfPath = preScanAlgoConf;
+    } else if (!defaultRecipe.empty()) {
+        const std::filesystem::path selected(defaultRecipe);
+        algoConfPath = (selected.is_absolute() ? selected :
+            std::filesystem::path(configPath).parent_path() / selected).lexically_normal().string();
     } else {
-        // Determine algorithm name for auto-detect
+        // Legacy configs without default_config keep algorithm auto-detection.
         std::string algName = preScanAlg;
         if (algName.empty()) {
             // Use algorithm set by global config
@@ -298,13 +337,34 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     }
     if (!algoConfPath.empty()) {
         args.algoConfPath = algoConfPath;
-        if (!applyAlgoConf(args, algoConfPath))
-            return ParseResult::ExitFailure;
+        ConfigParser recipe;
+        if (!recipe.load(algoConfPath))
+            throw std::runtime_error("Cannot load reconstruction recipe: " + algoConfPath);
+        if (recipe.hasKey("SystemMatrix", "matrix_id") ||
+            recipe.hasKey("SystemMatrix", "chunk_csr_dir") ||
+            recipe.hasKey("SystemMatrix", "default_chunk_csr_dir") || recipe.hasKey("Matrix", "chunk_csr_dir")) {
+            for (const auto* key : {"matrix_id", "default_chunk_csr_dir", "chunk_csr_dir"})
+                cfg.erase("SystemMatrix", key);
+            cfg.erase("Matrix", "chunk_csr_dir");
+        }
+        if (recipe.hasKey("SystemMatrix", "matrix_id2") || recipe.hasKey("SystemMatrix", "chunk_csr_dir2")) {
+            cfg.erase("SystemMatrix", "matrix_id2");
+            cfg.erase("SystemMatrix", "chunk_csr_dir2");
+        }
+        cfg.overlay(recipe);
+        applyConfig(args, cfg);
     }
 
     // 3. Process command-line arguments (highest priority override)
+    bool cliIterationSubsets = false;
+    bool cliSubsetSchedule = false;
     for (int i = 1; i < argc; i++) {
         std::string key = argv[i];
+        if (key == "-it" && i + 1 < argc)
+            cliIterationSubsets = cliIterationSubsets ||
+                std::string(argv[i + 1]).find(':') != std::string::npos;
+        if (key == "-subsets")
+            cliSubsetSchedule = true;
         auto it = handlers_.find(key);
         if (it != handlers_.end()) {
             if (!it->second(i, argc, argv, args))
@@ -327,9 +387,26 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         }
     }
 
-    if (haveGlobalConfigSnapshot && args.reconSectionsOverrideCli)
-        restoreConfigOwnedReconSections(args, globalConfigSnapshot);
+    if (cliIterationSubsets && cliSubsetSchedule) {
+        std::cerr << "Error: use -it A:B or -it A -subsets <schedule>, not both.\n";
+        return ParseResult::ExitFailure;
+    }
+    if (args.reconSectionsOverrideCli) {
+        // Reapply only configured reconstruction fields. Runtime destinations,
+        // logging and device/CPU-thread selections always remain caller-owned.
+        ConfigParser protectedConfig = cfg;
+        for (const auto* key : {"output_dir", "output_name"})
+            protectedConfig.erase("InputOutput", key);
+        for (const auto* key : {"threads", "verbosity"})
+            protectedConfig.erase("Basic", key);
+        applyConfig(args, protectedConfig);
+    }
 
+    if (!requestedIsotope.empty()) {
+        if (!args.isotope.empty() && args.isotope != requestedIsotope)
+            throw std::runtime_error("Acquisition isotope disagrees with selected reconstruction recipe.");
+        args.isotope = requestedIsotope;
+    }
     // 4. Resolve matrix defaults after all config/CLI layers are known.
     std::string matrixDiscoveryError;
     if (!applyMatrixAutoDiscovery(args, argv, matrixDiscoveryError)) {
@@ -404,6 +481,10 @@ void ArgumentParser::registerHandlers() {
         a.projPath = ArgumentParser::getRequiredArg(i, argc, argv, "-df");
         return true;
     };
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs&) {
+        (void)ArgumentParser::getRequiredArg(i, argc, argv, "-isotope");
+        return true; // Pre-scanned assertion, never an override of recipe identity.
+    }, {"-isotope"});
     bindHandlerAliases(dataHandler, {"-df", "-i", "-input"});
 
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -414,11 +495,14 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.chunkCSRDir = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir");
         a.chunkCSRDirExplicit = true;
+        a.matrixId.clear();
         return true;
     }, {"-chunkCSRDir"});
     // Second energy window (joint dual-window MLEM).
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.chunkCSRDir2 = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir2");
+        a.chunkCSRDir2Explicit = true;
+        a.matrixId2.clear();
         return true;
     }, {"-chunkCSRDir2"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -525,6 +609,12 @@ void ArgumentParser::registerHandlers() {
         return ArgumentParser::parseIterations(
             ArgumentParser::getRequiredArg(i, argc, argv, "-it"), a);
     }, {"-it"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.saveInterval = parseInteger(
+            ArgumentParser::getRequiredArg(i, argc, argv, "-save-every"),
+            0, "-save-every");
+        return true;
+    }, {"-save-every"});
     // Divisibility against the compact angle count is checked once the
     // matrix metadata is known (recon loop, parseCompactSubsetSchedule).
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -535,20 +625,6 @@ void ArgumentParser::registerHandlers() {
         }
         return true;
     }, {"-subsets"});
-    // Token-level check only; the recon loop re-validates once the matrix
-    // metadata is known (parseCompactSubsetMode / parseCompactSubsetSchedule).
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        std::string mode = ArgumentParser::getRequiredArg(i, argc, argv, "-subset-mode");
-        std::transform(mode.begin(), mode.end(), mode.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (mode != "angle" && mode != "angles" && mode != "pixel" &&
-            mode != "pixels" && mode != "posem") {
-            std::cerr << "Error: -subset-mode needs angle(s)|pixel(s)|posem\n";
-            return false;
-        }
-        a.subsetMode = mode;
-        return true;
-    }, {"-subset-mode"});
     auto threadsHandler = [](int& i, int argc, char** argv, ReconArgs& a) {
         const std::string k = argv[i];
         a.numThreads = std::stoi(ArgumentParser::getRequiredArg(i, argc, argv, k));
@@ -749,6 +825,7 @@ void ArgumentParser::registerHandlers() {
             std::cerr << "Error: -psfMode expects none|operator|sieve; got '" << val << "'.\n";
             return false;
         }
+        a.usePSF = a.psf.mode != PSFMode::None;
         return true;
     }, {"-psfMode"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -936,6 +1013,7 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.normFactorFile = ArgumentParser::getRequiredArg(
             i, argc, argv, "-normFactorFile");
+        a.normFactorFileExplicit = true;
         return true;
     }, {"-normFactorFile"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1105,6 +1183,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         "Compatibility", "recon_sections_override_cli",
         a.reconSectionsOverrideCli);
 
+    a.isotope = canonicalIsotope(cfg.getString("Acquisition", "isotope", a.isotope));
+    a.projectionModel = cfg.getString("Acquisition", "projection_model", a.projectionModel);
+    if (!a.projectionModel.empty() && a.projectionModel != "single" &&
+        a.projectionModel != "merged" && a.projectionModel != "joint")
+        throw std::runtime_error("projection_model must be single, merged or joint.");
     // Basic
     std::string dims = cfg.getString("Basic", "dimensions");
     if (!dims.empty()) {
@@ -1160,12 +1243,12 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
 
     std::string iters = cfg.getString("Reconstruction", "iterations");
     if (!iters.empty()) {
-        auto it = split(iters, ':');
-        if (!it.empty())
-            a.numIters = std::stoi(it[0]);
-        if (it.size() > 1)
-            a.saveInterval = std::stoi(it[1]);
+        if (!parseIterations(iters, a))
+            throw std::runtime_error("Invalid [Reconstruction] iterations.");
     }
+    const auto saveEvery = cfg.getString("Reconstruction", "save_interval");
+    if (!saveEvery.empty())
+        a.saveInterval = parseInteger(saveEvery, 0, "save_interval");
     a.bsrem_alpha0 =
         (float)cfg.getDouble("Reconstruction", "bsrem_alpha0", a.bsrem_alpha0);
     a.bsrem_gamma =
@@ -1221,6 +1304,18 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     a.outputDir = cfg.getString("InputOutput", "output_dir", a.outputDir);
     a.outputName = cfg.getString("InputOutput", "output_name", a.outputName);
 
+    // Stable matrix IDs select a deployed directory; explicit legacy paths remain supported.
+    a.matrixRoot = cfg.getString("SystemMatrix", "root", a.matrixRoot);
+    if (cfg.hasKey("SystemMatrix", "matrix_id")) {
+        a.matrixId = cfg.getString("SystemMatrix", "matrix_id");
+        a.chunkCSRDir.clear();
+        a.chunkCSRDirExplicit = false;
+    }
+    if (cfg.hasKey("SystemMatrix", "matrix_id2")) {
+        a.matrixId2 = cfg.getString("SystemMatrix", "matrix_id2");
+        a.chunkCSRDir2.clear();
+        a.chunkCSRDir2Explicit = false;
+    }
     // System Matrix
     std::string chunkDir =
         cfg.getString("SystemMatrix", "default_chunk_csr_dir");
@@ -1228,8 +1323,13 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         chunkDir = cfg.getString("SystemMatrix", "chunk_csr_dir");
     if (chunkDir.empty())
         chunkDir = cfg.getString("Matrix", "chunk_csr_dir");
-    if (!chunkDir.empty())
+    if (!chunkDir.empty()) {
         a.chunkCSRDir = normalizePath(chunkDir);
+        a.matrixId.clear();
+        a.chunkCSRDirExplicit = false;
+    }
+    if (cfg.hasKey("SystemMatrix", "compact_denom_cache_path"))
+        a.compactDenomCachePathExplicit = false;
     a.compactDenomCachePath = normalizePath(cfg.getString(
         "SystemMatrix", "compact_denom_cache_path",
         a.compactDenomCachePath));
@@ -1237,8 +1337,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         "SystemMatrix", "compact_denom_cache_dir", a.compactDenomCacheDir));
     // Joint dual-window: second matrix directory and per-window weights.
     const std::string chunkDir2 = cfg.getString("SystemMatrix", "chunk_csr_dir2");
-    if (!chunkDir2.empty())
+    if (!chunkDir2.empty()) {
         a.chunkCSRDir2 = normalizePath(chunkDir2);
+        a.matrixId2.clear();
+        a.chunkCSRDir2Explicit = false;
+    }
     a.csrqResidency =
         cfg.getString("SystemMatrix", "csrq_residency", a.csrqResidency);
     const std::string windowWeights =
@@ -1251,31 +1354,106 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         }
     }
 
-    // Regularization
+    // [Algorithm] section
+    std::string recipeAlg = cfg.getString("Algorithm", "name");
+    if (!recipeAlg.empty()) {
+        std::string recipeAlgLower = toLower(recipeAlg);
+        if (recipeAlgLower == "mlem")
+            a.algorithm = ReconArgs::Algorithm::MLEM;
+        else if (recipeAlgLower == "bsrem")
+            a.algorithm = ReconArgs::Algorithm::BSREM;
+        else
+            throw std::runtime_error("Unknown [Algorithm] name: " + recipeAlg);
+    }
+    std::string recipeIters = cfg.getString("Algorithm", "iterations");
+    if (!recipeIters.empty()) {
+        if (!parseIterations(recipeIters, a))
+            throw std::runtime_error("Invalid [Algorithm] iterations.");
+    }
+    const auto recipeSaveEvery = cfg.getString("Algorithm", "save_interval");
+    if (!recipeSaveEvery.empty())
+        a.saveInterval = parseInteger(recipeSaveEvery, 0, "save_interval");
+    if (!cfg.getString("Algorithm", "subset_mode").empty())
+        throw std::runtime_error("[Algorithm] subset_mode is no longer supported; this build uses angle subsets.");
+    const std::string subsets = cfg.getString("Algorithm", "subsets");
+    if (!subsets.empty() && recipeIters.find(':') != std::string::npos)
+        throw std::runtime_error("Use iterations=A:B or iterations=A with subsets, not both.");
+    if (!subsets.empty())
+        a.subsetSchedule = subsets;
+
+    // [Regularization] section
     std::string regT = cfg.getString("Regularization", "type");
-    if (regT != "None" && !regT.empty()) {
-        a.useReg = true;
-        a.reg.type = stringToRegType(regT);
-        if (a.reg.type == RegType::Unknown) {
-            throw std::runtime_error("Unknown regularization type '" + regT +
-                                     "' in config file.");
-        }
-        if (!isPublicRegularizer(a.reg.type)) {
+    if (!regT.empty()) {
+        std::string regLower = toLower(regT);
+        if (regLower == "none") {
+            a.useReg = false;
+            a.reg.type = RegType::None;
+            a.regCtPath.clear();
+        } else if (regLower == "tv")
+            regT = "TVIsotropic";
+
+        RegType rt = stringToRegType(regT);
+        if (rt == RegType::Unknown)
+            throw std::runtime_error("Unknown regularization type: " + regT);
+        if (!isPublicRegularizer(rt)) {
             throw std::runtime_error(
-                "Only TV and RDP regularization are supported in config.");
+                "Only TV and RDP regularization are supported in algo config.");
         }
+        if (rt != RegType::Unknown && rt != RegType::None) {
+            a.useReg = true;
+            a.reg.type = rt;
+        }
+    }
+    if (cfg.hasKey("Regularization", "beta"))
         a.reg.beta = cfg.getDouble("Regularization", "beta", a.reg.beta);
+    if (cfg.hasKey("Regularization", "delta"))
+        a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
+    if (cfg.hasKey("Regularization", "gamma"))
+        a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
+    if (cfg.hasKey("Regularization", "epsilon")) {
         double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
         a.reg.tv_eps = eps;
-        a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
-        a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
+    }
+    if (cfg.hasKey("Regularization", "ct_image"))
         a.regCtPath = normalizePath(
             cfg.getString("Regularization", "ct_image", a.regCtPath));
+    if (cfg.hasKey("Regularization", "ct_sigma"))
         a.reg.ct_sigma =
             cfg.getDouble("Regularization", "ct_sigma", a.reg.ct_sigma);
+    if (cfg.hasKey("Regularization", "ct_weight_floor"))
         a.reg.ct_weight_floor = cfg.getDouble(
             "Regularization", "ct_weight_floor", a.reg.ct_weight_floor);
+
+    // [BSREM] section
+    if (cfg.hasSection("BSREM")) {
+        a.bsrem_alpha0 = (float)cfg.getDouble("BSREM", "alpha0", a.bsrem_alpha0);
+        a.bsrem_gamma = (float)cfg.getDouble("BSREM", "gamma", a.bsrem_gamma);
+        a.bsremUseCurvDenom = cfg.getBool("BSREM", "curv_denom", a.bsremUseCurvDenom);
+        a.bsremFreezeCurv = cfg.getBool("BSREM", "curv_freeze", a.bsremFreezeCurv);
+        a.bsremCurvWarmupIters = cfg.getInt("BSREM", "curv_warmup_iters", a.bsremCurvWarmupIters);
+        a.bsremCurvEps = cfg.getDouble("BSREM", "curv_eps", a.bsremCurvEps);
+        a.bsremUseKappaMap = cfg.getBool("BSREM", "kappa_map", a.bsremUseKappaMap);
+        a.bsremKappaEps = cfg.getDouble("BSREM", "kappa_eps", a.bsremKappaEps);
+        a.bsremSensFloorRel = (float)cfg.getDouble(
+            "BSREM", "sens_floor_rel", a.bsremSensFloorRel);
+        std::string kappaClip = cfg.getString("BSREM", "kappa_clip");
+        if (!kappaClip.empty()) {
+            auto kc = split(kappaClip, ',');
+            if (kc.size() == 2) {
+                a.bsremKappaClipMin = std::stod(kc[0]);
+                a.bsremKappaClipMax = std::stod(kc[1]);
+            }
+        }
+        a.bsremSoftMask = cfg.getBool("BSREM", "soft_mask", a.bsremSoftMask);
+        a.bsremSoftMaskLambdaOut = cfg.getDouble("BSREM", "soft_mask_lambda", a.bsremSoftMaskLambdaOut);
+        a.bsremMlemEquivalenceMode = cfg.getBool(
+            "BSREM", "mlem_equivalence", a.bsremMlemEquivalenceMode);
+        a.bsremDiagnostics =
+            cfg.getBool("BSREM", "diagnostics", a.bsremDiagnostics);
+        a.bsremDiagInterval =
+            cfg.getInt("BSREM", "diag_interval", a.bsremDiagInterval);
     }
+
 
     // PSF
     std::string psfModeStr = cfg.getString("PSF", "mode");
@@ -1292,9 +1470,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
                 "PSF mode in config must be none, operator or sieve; got '" +
                 psfModeStr + "'.");
         }
-        // If mode is set to something other than None, enable PSF
-        if (a.psf.mode != PSFMode::None)
-            a.usePSF = true;
+        a.usePSF = a.psf.mode != PSFMode::None;
+        a.psfModeExplicit = true;
     }
     a.psf.fwhm_mm = cfg.getDouble("PSF", "fwhm", a.psf.fwhm_mm);
     a.psf.z_blur = cfg.getBool("PSF", "z_blur", a.psf.z_blur);
@@ -1353,11 +1530,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
 
     // Filtering
     if (cfg.hasSection("Filtering")) {
-        const double bwCut = cfg.getDouble("Filtering", "butterworth_cutoff", 0.0);
+        const double bwCut = cfg.getDouble("Filtering", "butterworth_cutoff", a.useButter ? a.butterCutoff : 0.0);
         a.butterCutoff = static_cast<float>(bwCut);
         a.useButter = bwCut > 0.0;
         a.butterOrder = cfg.getInt("Filtering", "butterworth_order", a.butterOrder);
-        const double gSigma = cfg.getDouble("Filtering", "gaussian_sigma", 0.0);
+        const double gSigma = cfg.getDouble("Filtering", "gaussian_sigma", a.useSmooth ? a.smoothSigma : 0.0);
         a.smoothSigma = static_cast<float>(gSigma);
         a.useSmooth = gSigma > 0.0;
         a.smoothKernel = cfg.getInt("Filtering", "gaussian_kernel", a.smoothKernel);
@@ -1422,111 +1599,13 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
         a.seamXyAlign = cfg.getBool("MultiBed", "seam_xy_align", a.seamXyAlign);
     }
+    if (cfg.hasKey("Normalization", "factor_file") || cfg.hasKey("MultiBed", "normalization_factor_file"))
+        a.normFactorFileExplicit = false;
+    a.normFactorFile = cfg.getString("Normalization", "factor_file", a.normFactorFile);
+    a.normFactorFile2 = cfg.getString("Normalization", "factor_file2", a.normFactorFile2);
+
 }
 
-bool ArgumentParser::applyAlgoConf(ReconArgs& a, const std::string& path) {
-    ConfigParser cfg;
-    if (!cfg.load(path)) {
-        std::cerr << "Error: Cannot load algorithm config '" << path << "'.\n";
-        return false;
-    }
-
-    // [Algorithm] section
-    std::string alg = cfg.getString("Algorithm", "name");
-    if (!alg.empty()) {
-        std::string algLower = toLower(alg);
-        if (algLower == "mlem")
-            a.algorithm = ReconArgs::Algorithm::MLEM;
-        else if (algLower == "bsrem")
-            a.algorithm = ReconArgs::Algorithm::BSREM;
-    }
-    std::string iters = cfg.getString("Algorithm", "iterations");
-    if (!iters.empty()) {
-        auto it = split(iters, ':');
-        if (!it.empty())
-            a.numIters = std::stoi(it[0]);
-        if (it.size() > 1)
-            a.saveInterval = std::stoi(it[1]);
-    }
-    const std::string subsets = cfg.getString("Algorithm", "subsets");
-    if (!subsets.empty())
-        a.subsetSchedule = subsets;
-    const std::string subsetMode = cfg.getString("Algorithm", "subset_mode");
-    if (!subsetMode.empty())
-        a.subsetMode = toLower(subsetMode);
-
-    // [Regularization] section
-    std::string regT = cfg.getString("Regularization", "type");
-    if (!regT.empty()) {
-        std::string regLower = toLower(regT);
-        if (regLower == "none") {
-            a.useReg = false;
-            a.reg.type = RegType::None;
-        } else if (regLower == "tv")
-            regT = "TVIsotropic";
-
-        RegType rt = stringToRegType(regT);
-        if (rt != RegType::Unknown && !isPublicRegularizer(rt)) {
-            throw std::runtime_error(
-                "Only TV and RDP regularization are supported in algo config.");
-        }
-        if (rt != RegType::Unknown && rt != RegType::None) {
-            a.useReg = true;
-            a.reg.type = rt;
-        }
-    }
-    if (cfg.hasKey("Regularization", "beta"))
-        a.reg.beta = cfg.getDouble("Regularization", "beta", a.reg.beta);
-    if (cfg.hasKey("Regularization", "delta"))
-        a.reg.delta = cfg.getDouble("Regularization", "delta", a.reg.delta);
-    if (cfg.hasKey("Regularization", "gamma"))
-        a.reg.gamma = cfg.getDouble("Regularization", "gamma", a.reg.gamma);
-    if (cfg.hasKey("Regularization", "epsilon")) {
-        double eps = cfg.getDouble("Regularization", "epsilon", 1e-6);
-        a.reg.tv_eps = eps;
-    }
-    if (cfg.hasKey("Regularization", "ct_image"))
-        a.regCtPath = normalizePath(
-            cfg.getString("Regularization", "ct_image", a.regCtPath));
-    if (cfg.hasKey("Regularization", "ct_sigma"))
-        a.reg.ct_sigma =
-            cfg.getDouble("Regularization", "ct_sigma", a.reg.ct_sigma);
-    if (cfg.hasKey("Regularization", "ct_weight_floor"))
-        a.reg.ct_weight_floor = cfg.getDouble(
-            "Regularization", "ct_weight_floor", a.reg.ct_weight_floor);
-
-    // [BSREM] section
-    if (cfg.hasSection("BSREM")) {
-        a.bsrem_alpha0 = (float)cfg.getDouble("BSREM", "alpha0", a.bsrem_alpha0);
-        a.bsrem_gamma = (float)cfg.getDouble("BSREM", "gamma", a.bsrem_gamma);
-        a.bsremUseCurvDenom = cfg.getBool("BSREM", "curv_denom", a.bsremUseCurvDenom);
-        a.bsremFreezeCurv = cfg.getBool("BSREM", "curv_freeze", a.bsremFreezeCurv);
-        a.bsremCurvWarmupIters = cfg.getInt("BSREM", "curv_warmup_iters", a.bsremCurvWarmupIters);
-        a.bsremCurvEps = cfg.getDouble("BSREM", "curv_eps", a.bsremCurvEps);
-        a.bsremUseKappaMap = cfg.getBool("BSREM", "kappa_map", a.bsremUseKappaMap);
-        a.bsremKappaEps = cfg.getDouble("BSREM", "kappa_eps", a.bsremKappaEps);
-        a.bsremSensFloorRel = (float)cfg.getDouble(
-            "BSREM", "sens_floor_rel", a.bsremSensFloorRel);
-        std::string kappaClip = cfg.getString("BSREM", "kappa_clip");
-        if (!kappaClip.empty()) {
-            auto kc = split(kappaClip, ',');
-            if (kc.size() == 2) {
-                a.bsremKappaClipMin = std::stod(kc[0]);
-                a.bsremKappaClipMax = std::stod(kc[1]);
-            }
-        }
-        a.bsremSoftMask = cfg.getBool("BSREM", "soft_mask", a.bsremSoftMask);
-        a.bsremSoftMaskLambdaOut = cfg.getDouble("BSREM", "soft_mask_lambda", a.bsremSoftMaskLambdaOut);
-        a.bsremMlemEquivalenceMode = cfg.getBool(
-            "BSREM", "mlem_equivalence", a.bsremMlemEquivalenceMode);
-        a.bsremDiagnostics =
-            cfg.getBool("BSREM", "diagnostics", a.bsremDiagnostics);
-        a.bsremDiagInterval =
-            cfg.getInt("BSREM", "diag_interval", a.bsremDiagInterval);
-    }
-
-    return true;
-}
 
 std::string ArgumentParser::getRequiredArg(int& i, int argc, char** argv,
                                                    const std::string& argName) {
@@ -1596,12 +1675,11 @@ bool ArgumentParser::parseDimensions(const std::string& value, ReconArgs& args) 
 }
 
 bool ArgumentParser::parseIterations(const std::string& value, ReconArgs& args) {
-    auto iterations = split(value, ':');
-    if (iterations.empty())
-        return false;
-    args.numIters = std::stoi(iterations[0]);
-    if (iterations.size() > 1)
-        args.saveInterval = std::stoi(iterations[1]);
+    const auto colon = value.find(':');
+    args.numIters = parseInteger(value.substr(0, colon), 1, "-it iterations");
+    if (colon != std::string::npos)
+        args.subsetSchedule = std::to_string(
+            parseInteger(value.substr(colon + 1), 1, "-it subsets"));
     return true;
 }
 
@@ -1797,7 +1875,7 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         !(args.energyWindowWeights[0] > 0.0) ||
         !(args.energyWindowWeights[1] > 0.0)) {
         std::cerr << "Error: -energyWeights <w1,w2> (both > 0) is required with "
-                     "-chunkCSRDir2; e.g. Lu-177 branching 0.0617,0.1036 when "
+                     "-chunkCSRDir2; Lu recipe channel order 208/113: 0.1036,0.0617 when "
                      "the matrices are per emitted photon.\n";
         return false;
     }
@@ -1877,6 +1955,19 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
             std::cerr << "Error: " << ex.what() << "\n";
             return false;
         }
+    }
+    if ((args.dualWindow() && (args.normFactorFile.empty() != args.normFactorFile2.empty())) ||
+        (!args.dualWindow() && !args.normFactorFile2.empty())) {
+        std::cerr << "Error: joint normalization requires both factor_file and factor_file2; single-window uses factor_file only.\n";
+        return false;
+    }
+    if (!args.normFactorFile2.empty()) {
+        if (!args.bProjPath2.empty() || !args.bProjPaths2.empty())
+            throw std::runtime_error("Joint normalization currently requires background-free reconstruction.");
+        const auto values = spect::io::loadDetZRowWeights(
+            args.normFactorFile2, args.detNz, args.detNx, args.numAngles);
+        if (values.size() != static_cast<size_t>(args.detNz) * args.detNx * args.numAngles)
+            throw std::runtime_error("factor_file2 must contain one correction per projection bin.");
     }
     if (!args.normFactorFile.empty()) {
         if (!args.detZRowWeightsFile.empty()) {
@@ -2159,9 +2250,9 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
 
     std::cout << "[Algorithm]\n";
     std::cout << "name       = " << a.getAlgorithmName() << "\n";
-    std::cout << "iterations = " << a.numIters << ":" << a.saveInterval << "\n";
-    std::cout << "subsets    = " << a.subsetSchedule << "\n";
-    std::cout << "subset_mode = " << a.subsetMode << "\n\n";
+    std::cout << "iterations = " << a.numIters << "\n";
+    std::cout << "save_interval = " << a.saveInterval << "\n";
+    std::cout << "subsets    = " << a.subsetSchedule << "\n\n";
 
     std::cout << "[Regularization]\n";
     std::cout << "type  = " << regTypeToString(a.reg.type) << "\n";
@@ -2264,7 +2355,13 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "sparse = cuda\n";
     std::cout << "butter = cufft\n\n";
 
+    std::cout << "[Acquisition]\n";
+    std::cout << "isotope = " << a.isotope << "\nprojection_model = " << a.projectionModel << "\n";
+    std::cout << "[Normalization]\nfactor_file = " << a.normFactorFile
+              << "\nfactor_file2 = " << a.normFactorFile2 << "\n";
     std::cout << "[SystemMatrix]\n";
+    std::cout << "root = " << a.matrixRoot << "\nmatrix_id = " << a.matrixId
+              << "\nmatrix_id2 = " << a.matrixId2 << "\n";
     std::cout << "compact_denom_cache_path = " << (a.compactDenomCachePath.empty() ? "(auto)" : a.compactDenomCachePath) << "\n";
     std::cout << "compact_denom_cache_dir = " << (a.compactDenomCacheDir.empty() ? "recon_out/compact_denom_cache (cwd legacy)" : a.compactDenomCacheDir) << "\n";
     std::cout << "chunk_csr_dir = " << (a.chunkCSRDir.empty() ? "(none)" : a.chunkCSRDir) << "\n";
@@ -2345,12 +2442,12 @@ void ArgumentParser::printUsage() {
     std::cout << "  merge_time_segments      [InputOutput] true + -df <timestamp/SPECT>: sum matching sibling BedN.bin inputs\n";
     std::cout << "  output_filters_overwrite_primary  [InputOutput] write output Smooth->Butter chain to the unsuffixed volume\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb (or chunk_*.csrq)\n";
-    std::cout << "                           Default: config default_chunk_csr_dir, or the only exe-local bin/matrix/* candidate\n";
-    std::cout << "  -chunkCSRDir2 <dir>      Second energy window matrix (CSRQ) for joint dual-window MLEM;\n";
+    std::cout << "                           Default: selected recipe matrix_id under EXE-local matrix root; explicit CLI follows config priority\n";
+    std::cout << "  -chunkCSRDir2 <dir>      Second energy window CSRQ matrix for joint MLEM/OSEM/BSREM;\n";
     std::cout << "                           pair with -df2/-dfList2 (same beds), optional -bProj2/-bProjList2, and -energyWeights\n";
-    std::cout << "  -energyWeights <w1,w2>   Window weights (mean_k = w_k*A_k*x + b_k), e.g. Lu-177 branching 0.0617,0.1036\n";
+    std::cout << "  -energyWeights <w1,w2>   Window weights (mean_k = w_k*A_k*x + b_k), Lu recipe channel order 208/113: 0.1036,0.0617\n";
     std::cout << "  -csrqResidency <auto|streamed>  CSRQ matrices resident when they fit (auto) or always streamed from pinned host memory\n";
-    std::cout << "  -compactDenomCache <mhd> Exact compact denominator cache path (overrides [SystemMatrix] cache path/dir)\n";
+    std::cout << "  -compactDenomCache <mhd> Exact compact denominator cache path (subject to config priority)\n";
     std::cout << "  -ctacFactorCacheDir <dir> Directory for cached CTAC attenuation factor tables (default: recon_out/ctac_factor_cache)\n";
     std::cout << "  -attMap <path>           Attenuation map (mu, mm^-1) for attenuation correction / Chang's AC\n";
     std::cout << "  -bProj <path>            Background/scatter projection MAT/BIN\n";
@@ -2363,12 +2460,11 @@ void ArgumentParser::printUsage() {
     std::cout << "  -opti <name>             MLEM | BSREM\n";
     std::cout << "                           Auto-loads config/algo_<name>.conf\n";
     std::cout << "  -algoConf <path>         Custom algorithm config file\n";
-    std::cout << "  -it <N[:save]>           Iterations (default: from algo conf)\n";
-    std::cout << "  -subsets <N|N1:i1,...>   Ordered subsets (CSRB); N <= 10,\n";
-    std::cout << "                           angle mode: N | compact angles; later N |\n";
-    std::cout << "                           earlier N; stage iterations sum to -it\n";
-    std::cout << "  -subset-mode <mode>       angle (default) | pixels | posem (POSEM\n";
-    std::cout << "                           canonical-row interleave; no CTAC yet)\n";
+    std::cout << "  -it <A[:B]>             A full iterations, B subsets (not save interval)\n";
+    std::cout << "  -save-every <N>         Save every N full iterations; 0 = final only\n";
+    std::cout << "  -subsets <N|N1:i1,...>   Ordered subsets over compact angles (CSRB or joint CSRQ);\n";
+    std::cout << "                           N | compact angles, later N | earlier N,\n";
+    std::cout << "                           stage iterations sum to -it (default 1)\n";
     std::cout << "  -cudaDevice <id>         Select CUDA device (overrides SPECT_CUDA_DEVICE)\n\n";
 
     std::cout << "=== Algorithm: BSREM ===\n";
@@ -2451,10 +2547,10 @@ void ArgumentParser::printUsage() {
     std::cout << "  -maskFromAtt <thresh>     Body mask from mu-map\n\n";
 
     std::cout << "=== Advanced ===\n";
-    std::cout << "  -config <path>            Global config (default search: exe/config, exe, cwd/config, cwd)\n";
+    std::cout << "  -config <path>            Global INI or complete recipe (default: EXE-local config/spect_config.ini)\n";
     std::cout << "  -dumpConf                 Print merged config and exit\n";
     std::cout << "  Unknown/deprecated CLI arguments are noted and ignored.\n";
-    std::cout << "  INI [Compatibility] recon_sections_override_cli=true protects Regularization/PSF/Filtering/Postprocess from CLI overrides.\n";
+    std::cout << "  INI recon_sections_override_cli=true: recipe > global > CLI for configured reconstruction fields; false: CLI > recipe > global.\n";
     std::cout << "  -projectionResidual [on|off]  Write final compact projection residual CSV\n";
     std::cout << "  -vb <0|1|2>               Verbosity level (default 1)\n";
     std::cout << "  -v                        Print version and complete changelog, then exit\n";

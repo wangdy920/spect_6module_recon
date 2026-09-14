@@ -138,6 +138,16 @@ struct CsrqDeviceChunkPtrs {
   const uint32_t *runs = nullptr;
   const uint16_t *valuesQ = nullptr;
   int rows = 0;
+  // Logical launch rows select interleaved angle groups in the unchanged
+  // chunk. Ratios retain physical row offsets; no matrix/ratio gathering.
+  int rowOffset = 0;
+  int rowGroupSize = 1;
+  int rowGroupStride = 1;
+  int selectedRows() const {
+    if (rowOffset >= rows) return 0;
+    const int span = rowGroupSize * rowGroupStride;
+    return ((rows - rowOffset + span - 1) / span) * rowGroupSize;
+  }
 };
 
 // yPacked[row][8] = A x for the eight branches (prediction output).

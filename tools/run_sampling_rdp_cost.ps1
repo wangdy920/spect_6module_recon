@@ -23,7 +23,7 @@ $ts = Get-Date -Format "yyyyMMdd_HHmmss"
 foreach ($arm in @("mlem", "bsremrdp")) {
     $out = "$root\recon_out\perf_rdpcost_${arm}_$ts"
     New-Item -ItemType Directory -Force $out | Out-Null
-    $common = @("-config", $ini, "-it", "50:50", "-vb", "1",
+    $common = @("-config", $ini, "-it", "50:1", "-save-every", "0", "-vb", "1",
                 "-chunkCSRDir", "$root\test_data\6module\Sampling_Approach",
                 "-dfList", $beds, "-fout", "$out\recon")
     if ($arm -eq "mlem") {

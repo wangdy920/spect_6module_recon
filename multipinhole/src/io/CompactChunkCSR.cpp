@@ -1,7 +1,6 @@
 #include "io/CompactChunkCSR.h"
 
 #include "cuda/CudaLaunchConfig.h"
-#include "sparse/CompactSubsets.h"
 
 #include <algorithm>
 #include <cctype>
@@ -803,75 +802,6 @@ CSRSubsetView CompactChunkCSRData::subsetView(
     out.nnz += nnzEnd - nnzStart;
     out.rows += raysPerAngle;
     previousAngle = angle;
-  }
-  return out;
-}
-
-CSRSubsetView CompactChunkCSRData::pixelSubsetView(
-    int count, int index, int raysPerAngle, uint64_t tag) const {
-  const CSRView full = view();
-  if (count <= 0 || index < 0 || index >= count) {
-    throw std::runtime_error(
-        "pixel subset needs 0 <= index < count.");
-  }
-  if (raysPerAngle <= 0 || info.rows % raysPerAngle != 0) {
-    throw std::runtime_error(
-        "compact chunk rows are not a whole number of angles: " +
-        info.path.string());
-  }
-  CSRSubsetView out;
-  out.cols = cols;
-  out.rowsPerBlock = raysPerAngle;
-  out.sourceRowPtr = full.row_ptr;
-  out.tag = tag;
-  const int firstAngle = info.angleOffset;
-  const int angleCount = info.rows / raysPerAngle;
-  // Exact selected-row total for the reserves: rays r with
-  // (a + r) % count == index in [0, raysPerAngle) start at the smallest
-  // r0 = (index - a) mod count and step by count.
-  size_t totalRows = 0;
-  for (int localAngle = 0; localAngle < angleCount; ++localAngle) {
-    const int a = firstAngle + localAngle;
-    const int r0 = ((index - a) % count + count) % count;
-    if (r0 < raysPerAngle) {
-      totalRows += static_cast<size_t>((raysPerAngle - 1 - r0) / count) + 1u;
-    }
-  }
-  out.row_ptr.reserve(totalRows + 1u);
-  out.rowCompactIndex.reserve(totalRows);
-  out.segments.reserve(totalRows);
-  out.row_ptr.push_back(0u);
-  uint32_t previousRow = std::numeric_limits<uint32_t>::max();
-  for (int localAngle = 0; localAngle < angleCount; ++localAngle) {
-    const int a = firstAngle + localAngle;
-    for (int ray = 0; ray < raysPerAngle; ++ray) {
-      if (spect::compactPixelSubsetId(a, ray, count) != index) {
-        continue;
-      }
-      const size_t row = static_cast<size_t>(localAngle) *
-                             static_cast<size_t>(raysPerAngle) +
-                         static_cast<size_t>(ray);
-      const uint32_t nnzStart = full.row_ptr[row];
-      const uint32_t nnzEnd = full.row_ptr[row + 1u];
-      const uint32_t base = out.row_ptr.back();
-      out.row_ptr.push_back(base + (nnzEnd - nnzStart));
-      out.rowCompactIndex.push_back(a * raysPerAngle + ray);
-      // Selected canonical rows are consecutive rows of the chunk arrays;
-      // interleave patterns make that rare, but a run still merges.
-      if (previousRow != std::numeric_limits<uint32_t>::max() &&
-          row == previousRow + 1u) {
-        out.segments.back().nnz += nnzEnd - nnzStart;
-      } else {
-        CSRSegment segment;
-        segment.col_idx = full.col_idx + nnzStart;
-        segment.val = full.val + nnzStart;
-        segment.nnz = nnzEnd - nnzStart;
-        out.segments.push_back(segment);
-      }
-      out.nnz += nnzEnd - nnzStart;
-      ++out.rows;
-      previousRow = static_cast<uint32_t>(row);
-    }
   }
   return out;
 }

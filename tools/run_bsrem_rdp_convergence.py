@@ -246,7 +246,7 @@ DEFAULT_ARMS = [name for name in ARMS
 # Args owned by the arm definition; strip from the frozen command.
 # -reg is always stripped: the frozen commands carry "-reg none", which
 # would override the RDP settings loaded from algo_bsrem.conf.
-STRIP_WITH_VALUE = {"-fout", "-it", "-opti", "-algoConf", "-reg"}
+STRIP_WITH_VALUE = {"-fout", "-it", "-save-every", "-opti", "-algoConf", "-reg"}
 
 
 def load_frozen_commands():
@@ -274,8 +274,11 @@ def build_command(frozen, dataset, arm_name):
             rewritten = rewritten.replace(old, new)
         cmd.append(rewritten)
         i += 1
+    # Historical arm specifications store iterations:save, not CLI subsets.
+    iterations, save_every = arm["it"].split(":")
     cmd += ["-algoConf", arm["algoConf"], "-opti", arm["opti"],
-            "-it", arm["it"], "-fout", os.path.join(out_dir, "recon"),
+            "-it", iterations + ":1", "-save-every", save_every,
+            "-fout", os.path.join(out_dir, "recon"),
             "-vb", "1"]
     cmd += arm["extra"]
     return cmd, out_dir

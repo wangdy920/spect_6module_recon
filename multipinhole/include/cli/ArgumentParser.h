@@ -87,13 +87,6 @@ private:
     static void applyConfig(ReconArgs& args, const ConfigParser& cfg);
 
     /**
-     * @brief Apply algorithm-specific config file values to ReconArgs.
-     * Only affects algorithm-related sections ([Algorithm], [Regularization],
-     * [BSREM], [BackendHint]). Does NOT override geometry/IO/detector.
-     */
-    static bool applyAlgoConf(ReconArgs& args, const std::string& path);
-
-    /**
      * @brief Print merged configuration to stdout (for -dumpConf).
      */
     static void dumpMergedConfig(const ReconArgs& args);
@@ -109,7 +102,7 @@ private:
     static bool parseDimensions(const std::string& value, ReconArgs& args);
 
     /**
-     * @brief Parse iteration specification (iter[:saveInterval]).
+     * @brief Parse iteration specification (iterations[:subsets]).
      */
     static bool parseIterations(const std::string& value, ReconArgs& args);
 

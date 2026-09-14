@@ -427,7 +427,7 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       CompactDeviceRatioTiming *ratioTiming,
                       CompactDeviceBackwardTiming *backwardTiming,
                       const uint16_t *const *bedAttFactors, size_t attCount,
-                      double attPower) {
+                      double attPower, int subsetCount, int subsetIndex) {
   if (!isCudaAvailable()) {
     return false;
   }
@@ -436,7 +436,7 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                            zMirrors, fullProjections, fullBackgrounds,
                            fullProjectionCount, weight, accumulatorBase,
                            cacheSlotBase, ratioTiming, backwardTiming,
-                           bedAttFactors, attCount, attPower);
+                           bedAttFactors, attCount, attPower, subsetCount, subsetIndex);
   return true;
 }
 
@@ -447,7 +447,7 @@ bool csrqRunSensitivityCUDA(
     const int *symIds, const int *zMirrors, int accumulatorIndex,
     size_t fullProjectionCount, const double *rowWeights,
     CompactDeviceBackwardTiming *backwardTiming, const uint16_t *attFactors,
-    size_t attCount, double attPower) {
+    size_t attCount, double attPower, int subsetCount, int subsetIndex) {
   if (!isCudaAvailable()) {
     return false;
   }
@@ -455,7 +455,7 @@ bool csrqRunSensitivityCUDA(
       matrixIndex, branchCount, weight, commonRatioParams,
       commonTransformParams, symIds, zMirrors, accumulatorIndex, rowWeights,
       rowWeights == nullptr ? 0 : fullProjectionCount, fullProjectionCount,
-      backwardTiming, attFactors, attCount, attPower);
+      backwardTiming, attFactors, attCount, attPower, subsetCount, subsetIndex);
   return true;
 }
 
@@ -688,7 +688,7 @@ bool csrqRunNumerCUDA(int, int, int, const CompactDeviceRatioParams &,
                       const double *const *, size_t, double, int, int,
                       CompactDeviceRatioTiming *,
                       CompactDeviceBackwardTiming *, const uint16_t *const *,
-                      size_t, double) {
+                      size_t, double, int, int) {
   return false;
 }
 
@@ -697,7 +697,7 @@ bool csrqRunSensitivityCUDA(int, int, double,
                             const CompactDeviceTransformParams &, const int *,
                             const int *, int, size_t, const double *,
                             CompactDeviceBackwardTiming *, const uint16_t *,
-                            size_t, double) {
+                            size_t, double, int, int) {
   return false;
 }
 

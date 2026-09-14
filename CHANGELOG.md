@@ -8,6 +8,21 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-09-14: shared angle subsets for CSRB OSEM/BSREM and CSRQ joint
+  dual-window reconstruction; retain per-subset RDP/TV and remove the earlier
+  POSEM pixel branch. `-it A:B` is full iterations:subsets; `-save-every` is
+  separate, default final-only. PSF remains enabled; output Gaussian is off
+  and Butterworth is an independent output copy.
+- One isotope-selected recipe overlays global defaults. Explicit recipes
+  replace defaults; CLI priority follows `recon_sections_override_cli` for
+  all configured reconstruction fields. Five profiles bind their observation
+  model and matrix IDs; Lu joint norm uses two independent correction files
+  or neither. Norm remains disabled pending matching calibration.
+- CLI help and deployment/usage guides describe the current profile and
+  joint N10 interfaces. Prior real-data parity and recipe scope are recorded
+  in `reports/2026-09-13-subset-release.md`; this does not promote the presets
+  to universal quality or quantitative calibration claims.
+
 - CSRB numerator backward: zero-row scatter transpose (2026-09-09). The
   numerator ratio is exactly 0 for zero-count bins (74-90 % of the five-bed
   Lu-177 input), and the per-RHS cuSPARSE transpose still walked every row

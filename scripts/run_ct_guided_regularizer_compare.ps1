@@ -89,7 +89,7 @@ foreach ($dataset in $selected) {
             "-compactDenomCache", $(if ($case.ctac) { $ctDenom } else { $noCtDenom }),
             "-fout", (Join-Path $runDir "recon"),
             "-opti", $case.algorithm,
-            "-it", "$Iterations`:$Iterations",
+            "-it", "$Iterations`:1", "-save-every", "0",
             "-th", "20",
             "-psf", "1.5,4",
             "-psfMode", "Operator",

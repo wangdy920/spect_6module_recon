@@ -168,7 +168,7 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_DOUBLE_EQ(
             parser.getDouble("Filtering", "butterworth_cutoff", 0.0), 0.0);
         EXPECT_EQ(parser.getInt("Filtering", "butterworth_order", 0), 2);
-        EXPECT_EQ(parser.getString("Filtering", "smooth_apply_stage", ""), "output");
+        EXPECT_EQ(parser.getString("Filtering", "smooth_apply_stage", ""), "none");
         EXPECT_EQ(parser.getString("Filtering", "butter_apply_stage", ""), "output");
         EXPECT_DOUBLE_EQ(
             parser.getDouble("Filtering", "output_smooth_fwhm_mm", 0.0), 0.30);

@@ -646,6 +646,92 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   std::filesystem::remove_all(root);
 }
 
+// Different window matrices, background, detector weights, two beds, empty
+// rows/chunk selections and N10 -> N5 -> N1 transitions. The reference uses
+// independently decoded CSRB matrices, never CSRQ's row selector.
+TEST_F(CsrqCompactMatrixTest, JointSubsetsMatchDecodedCsrbResidentAndStreamed) {
+  spect::io::CompactSymmetryMetadata meta;
+  meta.Nx = meta.Ny = 8; meta.Nz = 2; meta.totalVoxels = 128;
+  meta.fullNumAngles = 80; meta.compactNumAngles = 20;
+  meta.detNx = meta.detNz = 4; meta.compactDetZ = 2;
+  meta.compactRaysPerAngle = 8; meta.totalRows = 160;
+  meta.symCode = 90; meta.symmetryOrder = 4;
+  HostCsr src; src.rows = meta.totalRows; src.cols = meta.totalVoxels;
+  src.rowPtr.push_back(0);
+  for (int row = 0; row < src.rows; ++row) {
+    if (row % 17 != 0) for (int col = row % 3; col < src.cols; col += 3) {
+      src.colIdx.push_back(col);
+      src.values.push_back(.1f + .003f * ((row + col) % 29));
+    }
+    src.rowPtr.push_back(static_cast<uint32_t>(src.values.size()));
+  }
+  const auto a = makeMatrixPair("spect_joint_subset_a", meta, src, 4);
+  for (size_t i = 0; i < src.values.size(); ++i)
+    src.values[i] *= .6f + .02f * (i % 19);
+  const auto b = makeMatrixPair("spect_joint_subset_b", meta, src, 5);
+  const size_t n = meta.totalVoxels, nr = meta.fullRows();
+  std::vector<double> x0(n), x1(n), p0(nr), p1(nr), bg(nr), weights(nr);
+  for (size_t j = 0; j < n; ++j) { x0[j] = .7 + .2 * std::sin(j*.13); x1[j] = 1.7*x0[j]; }
+  for (size_t j = 0; j < nr; ++j) {
+    p0[j] = 1 + .02*(j%23); p1[j] = 2 + .03*(j%31);
+    bg[j] = .1 + .001*(j%17); weights[j] = j%7 ? 1.0 : 0.0;
+  }
+  constexpr double w[2] = {.1036, .0617};
+  std::vector<double> scaledBg(nr);
+  for (size_t j = 0; j < nr; ++j) scaledBg[j] = bg[j]/w[1];
+  const double *images[2] = {x0.data(), x1.data()};
+  const double *proj[4] = {p0.data(), p1.data(), p1.data(), p0.data()};
+  const double *bgs[4] = {nullptr, nullptr, bg.data(), bg.data()};
+  const double *refBgs[4] = {nullptr, nullptr, scaledBg.data(), scaledBg.data()};
+  const spect::io::CompactChunkCSRDirectory *refs[2] = {&a.csrb, &b.csrb};
+  std::vector<spect::cuda::CompactMatrixChannel> joint{{&a.csrq,w[0]}, {&b.csrq,w[1]}};
+  std::vector<double> weights2(weights);
+  for (size_t j=0;j<nr;++j) weights2[j] *= 0.4 + 0.03*(j%13);
+  joint[1].sensitivityRowWeights = weights2.data();
+  std::vector<double> globalX(x0); globalX.insert(globalX.end(),x1.begin(),x1.end());
+  const int zStarts[2] = {0, meta.Nz};
+  for (bool streamed : {false,true}) {
+    spect::cuda::setCsrqForceStreamingCUDA(streamed);
+    for (int count : {10,5,2,1}) {
+      std::vector<double> sumS(n,0.0), fullS(n,0.0);
+      for (int index : spect::compactSubsetOrder(count)) {
+        SCOPED_TRACE(::testing::Message() << "stream=" << streamed << " N=" << count << " index=" << index);
+        const spect::CompactSubsetSpec spec{count,index};
+        std::vector<double> expectedS(n,0), expected0(n,0), expected1(n,0);
+        for (int k=0;k<2;++k) {
+          ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+          std::vector<spect::cuda::CompactMatrixChannel> one{{refs[k],1.0}};
+          std::vector<double> sens(n), q0(n), q1(n);
+          double *out[2] = {q0.data(),q1.data()};
+          ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(one,meta,1,sens.data(),nullptr,nullptr,k ? weights2.data() : weights.data(),&spec));
+          ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+              one,meta,proj+2*k,refBgs+2*k,images,2,1,out,false,nullptr,nullptr,true,false,true,&spec));
+          for (size_t j=0;j<n;++j) { expectedS[j]+=w[k]*sens[j]; expected0[j]+=q0[j]; expected1[j]+=q1[j]; }
+        }
+        ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+        std::vector<double> sens(n), q0(n), q1(n); double *out[2]={q0.data(),q1.data()};
+        ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,sens.data(),nullptr,nullptr,weights.data(),&spec));
+        ASSERT_TRUE(spect::cuda::csrqResidentCUDA(0)); // ready includes streamed matrices
+        const bool residentInput = index%2 == 0;
+        if (residentInput) ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+            meta,globalX.data(),globalX.size(),2*meta.Nz,zStarts,2,false));
+        ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+            joint,meta,proj,bgs,residentInput?nullptr:images,2,1,out,false,nullptr,nullptr,true,residentInput,true,&spec));
+        EXPECT_LE(relL2(sens,expectedS),1e-5);
+        EXPECT_LE(relL2(q0,expected0),1e-5); EXPECT_LE(relL2(q1,expected1),1e-5);
+        EXPECT_GT(*std::max_element(q0.begin(),q0.end()),0);
+        for (size_t j=0;j<n;++j) sumS[j]+=sens[j];
+      }
+      ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,fullS.data(),nullptr,nullptr,weights.data()));
+      EXPECT_LE(relL2(sumS,fullS),1e-5) << "voxelwise sum of subset sensitivities";
+    }
+    ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  }
+  spect::cuda::setCsrqForceStreamingCUDA(false);
+  std::filesystem::remove_all(a.csrqDir.parent_path());
+  std::filesystem::remove_all(b.csrqDir.parent_path());
+}
+
 // Residency planner retry: when the second window's matrix reports "does not
 // fit even streamed" after the first was made resident, the first is demoted
 // to streamed and the second retried; the joint result must be unchanged.

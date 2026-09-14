@@ -108,20 +108,12 @@ extern "C" __global__ void compute_compact_ratio_chunk(
 
 // Compact row -> (absolute compact angle, ray within the angle). blockAngles
 // (one entry per compactRaysPerAngle row block) serves ordered-subset slices
-// whose blocks are not consecutive angles; rowCompactIndex (one canonical
-// row = absoluteAngle * compactRaysPerAngle + ray per matrix row) serves
-// pixel-subset (POSEM) slices whose rows interleave within every angle. Both
-// null keeps the contiguous chunk mapping from compactRowBase; rowCompactIndex
-// wins when both are set (they are mutually exclusive by construction).
+// whose blocks are not consecutive angles; null keeps the contiguous chunk
+// mapping from compactRowBase.
 __device__ __forceinline__ void compact_row_angle(
     int compactRowBase, int rowInChunk, int compactRaysPerAngle,
-    const int *blockAngles, const int *rowCompactIndex, int *compactAngle,
-    int *rr) {
-  if (rowCompactIndex != nullptr) {
-    const int compactRow = rowCompactIndex[rowInChunk];
-    *compactAngle = compactRow / compactRaysPerAngle;
-    *rr = compactRow - *compactAngle * compactRaysPerAngle;
-  } else if (blockAngles != nullptr) {
+    const int *blockAngles, int *compactAngle, int *rr) {
+  if (blockAngles != nullptr) {
     const int block = rowInChunk / compactRaysPerAngle;
     *compactAngle = blockAngles[block];
     *rr = rowInChunk - block * compactRaysPerAngle;
@@ -139,8 +131,8 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, const int *symIds, const int *zMirrors,
-    const int *blockAngles, const int *rowCompactIndex, int batchSize,
-    float *ratioBatch, unsigned long long rows, double eps) {
+    const int *blockAngles, int batchSize, float *ratioBatch,
+    unsigned long long rows, double eps) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -156,8 +148,7 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
   int compactAngle = 0;
   int rr = 0;
   compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
-                    compactRaysPerAngle, blockAngles, rowCompactIndex,
-                    &compactAngle, &rr);
+                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -233,8 +224,8 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
     int symmetryMode, int compactRowBase, int compactRaysPerAngle,
     int compactNumAngles, int detNx, int detNz, int compactDetZ,
     int fullNumAngles, int fullRaysPerAngle, const int *symIds,
-    const int *zMirrors, const int *blockAngles, const int *rowCompactIndex,
-    int batchSize, float *ratioBatch, unsigned long long rows) {
+    const int *zMirrors, const int *blockAngles, int batchSize,
+    float *ratioBatch, unsigned long long rows) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -250,8 +241,7 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
   int compactAngle = 0;
   int rr = 0;
   compact_row_angle(compactRowBase, static_cast<int>(rowInBranch),
-                    compactRaysPerAngle, blockAngles, rowCompactIndex,
-                    &compactAngle, &rr);
+                    compactRaysPerAngle, blockAngles, &compactAngle, &rr);
   const int ix = rr % detNx;
   const int izCompact = rr / detNx;
   bool valid = true;
@@ -1248,10 +1238,13 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
     double scale, int symmetryMode, int compactRowBase,
     int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
     int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
-    const int *symIds, const int *zMirrors, double eps) {
+    const int *symIds, const int *zMirrors, double eps, int rowOffset, int rowGroupSize, int rowGroupStride) {
   __shared__ CsrqTile s;
   __shared__ float sRed[CSRQ_BLOCK / 32][CSRQ_K];
-  const int row = static_cast<int>(blockIdx.x);
+  const int logicalRow = static_cast<int>(blockIdx.x);
+  const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
+      (logicalRow / rowGroupSize) * rowGroupSize * rowGroupStride +
+      logicalRow % rowGroupSize);
   if (row >= rows) {
     return;
   }
@@ -1343,9 +1336,12 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *ratioPacked, float *yBranch,
-    unsigned long long nvox, int rows, int kFirst, int kCount) {
+    unsigned long long nvox, int rows, int kFirst, int kCount, int rowOffset, int rowGroupSize, int rowGroupStride) {
   __shared__ CsrqTile s;
-  const int row = static_cast<int>(blockIdx.x);
+  const int logicalRow = static_cast<int>(blockIdx.x);
+  const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
+      (logicalRow / rowGroupSize) * rowGroupSize * rowGroupStride +
+      logicalRow % rowGroupSize);
   if (row >= rows) {
     return;
   }
@@ -1450,9 +1446,12 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *ratioPacked, float4 *yPacked,
-    int rows) {
+    int rows, int rowOffset, int rowGroupSize, int rowGroupStride) {
   __shared__ CsrqTile s;
-  const int row = static_cast<int>(blockIdx.x);
+  const int logicalRow = static_cast<int>(blockIdx.x);
+  const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
+      (logicalRow / rowGroupSize) * rowGroupSize * rowGroupStride +
+      logicalRow % rowGroupSize);
   if (row >= rows) {
     return;
   }
