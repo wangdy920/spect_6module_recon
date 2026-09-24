@@ -202,3 +202,14 @@ cProfile代表性重建样本中native配置预览调用约0.0227秒；预处理
 - 用户随后明确授权全局凭据修复：移除了用户级空 `credential.helper`，继承系统级manager；无需重录账号。未使用命令级helper覆盖的两个普通 `git ls-remote origin HEAD` 均通过，禁止交互提示状态下也成功。没有更改账户令牌或全局Git作者，没有推送。
 
 当前无运行中的重建/预处理任务。本次发布只改变已验证的配置/输入路由与说明，不构成新的定量或画质结论。
+
+### OSEM 进度输出兼容修复（2026-09-24）
+
+旧上位机按完整迭代识别进度，原生循环却同时将子集明细标记为 `[ITER]`。本次仅将子集标签改为 `[SUBSET]`；完整迭代开始行仍是 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`，每轮一条，50:10 对应 50 条而非 500 条。安静模式保留终端完整迭代进度，子集明细仍写原生日志；耗时标签、计算路径、参数和保存时序不变。最后 N/N 是末轮开始，不是输出完成。
+
+wrapper stdout 仍只输出 JSON，未改变调用接口或增加流协议。上位机可增量读取本次状态 JSON 中 `resolved.console_log` 指向的日志，或者直接启动 EXE 读取 stdout。两份现有重建说明已更新。尚未获得实际上位机解析代码，不能把旧格式回归测试称为现场联调通过。
+
+- 代码提交：recon `b9f007c`，preprocess 集成说明/测试 `49e24ce`；本地提交，未推送。干净 EXE `20260924+b9f007c`，SHA256 `f847481048208bbaa153f0e1a30add2ffe63b33e53be84cb660d7d842356c9a7`。预处理二进制未变；集成仓库仍仅保留用户原有两项配置删除，tooling_revision 如实带 dirty。
+- CTest 316 通过、4 既有跳过、0 失败；最终干净构建的 quiet 日志单测通过。候选及正式安装位置的合成 GPU 检查均通过：PSC Tc、PSC Lu、SC60 Tc 的一轮 N10 分别只有一条 ITER / 十条 SUBSET；PSC Tc 两轮 N1/N10 quiet 均只有两条终端 ITER，原生日志保留正确子集数。wrapper stdout 仍可直接 json.loads。原有双窗命名/合并模式回归继续通过。
+- 固定目录及 ZIP 更新为 `E:/Xiang_Project/SPECT/6Module/release/SPECT_Core`，旧包归档 `release/history/20260924_before_b9f007c/`，499 个旧文件 SHA 与旧 ZIP 均保留。新 ZIP 389762794 字节，SHA256 `342c89a6489eb30b3a1aa259d9d346d89002daaff1b69a2cd84a72e50128e7cb`；499 文件 CRC/目录逐文件 SHA 一致。部署校验 0 失败、4 未装矩阵警告，非实采或定量验收。
+- 证据复用 `recon_out/core_publish_20260924/progress_*`：ctest.log、smoke.log、candidate.log、installed.log、verify_installed.json、zip_installed.json、promotion.json。复现入口为 `ctest --test-dir build/csrb-native-20260921 -C Release --output-on-failure`，以及预处理仓库 `python tools/test_universal_release.py --release-root release/SPECT_Core --reconstruct`。测试新增在既有脚本中，不新增生产脚本。
