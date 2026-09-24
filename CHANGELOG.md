@@ -8,6 +8,10 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-09-24: preserve one legacy `[ITER] n/N compact` progress line per
+  full iteration; subset details use `[SUBSET]` instead of `[ITER]`.
+  Quiet mode retains full-iteration progress on stdout and subset details
+  in the native log. Reconstruction math and CLI are unchanged.
 - 2026-09-21: native SC60 SMMD v3/ROT90 CSRB compatibility, uncached
   subset-range reads, native dual-CSRB weighted reconstruction, and explicit
   full-grid multi-bed output with voxel-aligned steps and valid-mask blending.

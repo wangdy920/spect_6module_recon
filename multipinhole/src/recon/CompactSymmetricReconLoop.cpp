@@ -1475,7 +1475,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               *stageDenoms[static_cast<size_t>(
                   stageSubsetCount > 1 ? subsetSpec.index : 0)];
           if (stageSubsetCount > 1) {
-            logInfo("[ITER] " + std::to_string(it) + " subset " +
+            logInfo("[SUBSET] " + std::to_string(it) + " subset " +
                     std::to_string(subsetSpec.index) + "/" +
                     std::to_string(stageSubsetCount) + " (" +
                     std::to_string(sub + 1) + " of " +

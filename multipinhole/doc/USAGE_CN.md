@@ -274,6 +274,8 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件。`-v <n>` 会失败（那是 verbosity，请用 `-vb`） |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
+`[ITER] n/N compact` 只表示完整迭代开始，每轮一条，N 为完整迭代总数，不乘子集数；例如 `50:10` 共 50 条。子集明细使用 `[SUBSET]`，不参与旧进度识别；`[ITER_TIME]` / `[SUBSET_TIME]` 仍为耗时记录。最后一条 `[ITER] N/N compact` 不代表输出写入完成，完成必须以进程退出和产物状态为准。
+
 默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径与 `[ITER]`；其余 INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
 
 ---

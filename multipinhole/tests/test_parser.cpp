@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -313,14 +314,20 @@ TEST(IOTest, CompactDenomCacheJoinsSplitWindowsDriveLetter) {
 
 TEST(IOTest, IterProgressLineReachesStdoutAtQuietVerbosity) {
     const int previous = spect::main::getVerbosity();
+    auto* previousLog = spect::main::getFileLogStream();
+    std::ostringstream fileLog;
     spect::main::setVerbosity(0);
-    spect::main::setFileLogStream(nullptr);
+    spect::main::setFileLogStream(&fileLog);
     testing::internal::CaptureStdout();
     spect::main::logInfo("[ITER] 1/50 compact");
+    spect::main::logInfo("[SUBSET] 1 subset 0/10 (1 of 10)");
     spect::main::logInfo("Loaded configuration from x");
     const std::string out = testing::internal::GetCapturedStdout();
+    spect::main::setFileLogStream(previousLog);
     spect::main::setVerbosity(previous);
     EXPECT_NE(out.find("[ITER] 1/50 compact"), std::string::npos);
+    EXPECT_EQ(out.find("[SUBSET]"), std::string::npos);
+    EXPECT_NE(fileLog.str().find("[SUBSET] 1 subset 0/10 (1 of 10)"), std::string::npos);
     EXPECT_EQ(out.find("Loaded configuration"), std::string::npos);
 }
 
