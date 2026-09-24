@@ -55,6 +55,7 @@ struct ReconArgs {
     std::vector<std::string> projPaths;  ///< Multi-bed projection list
     bool mergeTimeSegments = false;      ///< Sum matching BedN data across sibling timestamp/SPECT directories
     bool outputFiltersOverwritePrimary = false; ///< Write output-filter chain to the unsuffixed volume
+    bool matrixGridOutput = false; ///< Single-bed output without PSC center cropping
     std::vector<std::vector<std::string>> projectionSourceGroups; ///< Actual per-bed sources recorded in the manifest
     std::string outputDir = "output";    ///< Output directory
     std::string outputName;              ///< Output filename base
@@ -202,7 +203,7 @@ struct ReconArgs {
     bool normFactorFileExplicit = false;
     std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
-    double bedStepMm = 0.0;        ///< Scanner bed step in mm (0 = use kMultiBedStepMm default 16.8)
+    double bedStepMm = 0.0;        ///< Bed step in mm; 0 = PSC default, or unknown for matrix-grid output.
     bool singleBedStepAligned = true; ///< Single-bed crop follows step+blend;
                                       ///< false keeps legacy 72 layers
     bool zOutFlip = false;         ///< Flip the final output volume in Z

@@ -309,6 +309,74 @@ TEST(CompactSubsets, ChunkSliceCoalescesAdjacentAnglesAndRebasesRowPointers) {
   std::filesystem::remove_all(dir);
 }
 
+TEST(CompactSubsets, UncachedSliceOwnsStorageAndEmptySliceDoesNotReadPayload) {
+  const auto meta = makeSixAngleMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() / "spect_subset_lifetime";
+  writeChunkDirectory(dir, meta, compact, 3);
+  const auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 0);
+  EXPECT_TRUE(chunks.loadSubset(1, {0}, meta.compactRaysPerAngle, 1).empty());
+  EXPECT_EQ(chunks.readStats().payloadLoads, 0u);
+  auto slice = chunks.loadSubset(0, {0}, meta.compactRaysPerAngle, 1);
+  std::weak_ptr<const void> owner = slice.sourceOwner;
+  ASSERT_FALSE(owner.expired());
+  EXPECT_FLOAT_EQ(slice.segments.front().val[0], compact.values[0]);
+  {
+    const auto reused = chunks.loadSubset(0, {0}, meta.compactRaysPerAngle, 1);
+    EXPECT_EQ(chunks.readStats().payloadLoads, 1u);
+    EXPECT_EQ(reused.segments.front().val, slice.segments.front().val);
+    // A partial read must never be returned as a whole chunk.
+    const auto whole = chunks.loadChunk(0);
+    EXPECT_EQ(chunks.readStats().payloadLoads, 2u);
+    EXPECT_GT(whole->info.nnz, slice.nnz);
+  }
+  slice = {};
+  EXPECT_TRUE(owner.expired());
+  std::filesystem::remove_all(dir);
+}
+
+TEST(CompactSubsets, DiskSlicesMatchWholeChunkAndAccountOnlySelectedPayload) {
+  const auto meta = makeSixAngleMeta();
+  auto compact = makeSixAngleCompactCSR(meta);
+  const int rpa = meta.compactRaysPerAngle;
+  // Include an entirely empty angle and a trailing empty row.
+  const uint32_t keep = compact.rowPtr[5 * rpa - 1];
+  compact.colIdx.resize(keep);
+  compact.values.resize(keep);
+  std::fill(compact.rowPtr.begin() + 5 * rpa - 1, compact.rowPtr.end(), keep);
+  const auto dir = std::filesystem::temp_directory_path() / "spect_subset_disk_ranges";
+  writeChunkDirectory(dir, meta, compact, 6);
+  const auto reference = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 0).loadChunk(0);
+  for (const auto &angles : std::vector<std::vector<int>>{{0,1,2,3,4,5}, {0,2,4}, {0,1,4}, {5}}) {
+    for (uint64_t budget : {0ull, 1048576ull}) {
+      auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, budget);
+      const auto actual = chunks.loadSubset(0, angles, rpa, 17);
+      const auto expected = reference->subsetView(angles, rpa, 17);
+      ASSERT_TRUE(actual.valid());
+      EXPECT_EQ(actual.blockAngles, expected.blockAngles);
+      EXPECT_EQ(actual.row_ptr, expected.row_ptr);
+      ASSERT_EQ(actual.segments.size(), expected.segments.size());
+      for (size_t i = 0; i < actual.segments.size(); ++i) {
+        ASSERT_EQ(actual.segments[i].nnz, expected.segments[i].nnz);
+        for (uint64_t j = 0; j < actual.segments[i].nnz; ++j) {
+          EXPECT_EQ(actual.segments[i].col_idx[j], expected.segments[i].col_idx[j]);
+          EXPECT_EQ(actual.segments[i].val[j], expected.segments[i].val[j]);
+        }
+      }
+      const uint64_t loadedNnz = budget == 0 ? actual.nnz : compact.values.size();
+      EXPECT_EQ(chunks.readStats().payloadReadBytes,
+                8ull * compact.rowPtr.size() + 8ull * loadedNnz);
+      EXPECT_THROW(chunks.loadSubset(0, {2,0}, rpa, 1), std::runtime_error);
+      EXPECT_THROW(chunks.loadSubset(0, {0,0}, rpa, 1), std::runtime_error);
+      EXPECT_THROW(chunks.loadSubset(0, {0}, rpa + 1, 1), std::runtime_error);
+    }
+  }
+  auto truncated = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 0);
+  std::filesystem::resize_file(truncated.chunks()[0].path, 28 + 8 * compact.rowPtr.size());
+  EXPECT_THROW(truncated.loadSubset(0, {0}, rpa, 1), std::runtime_error);
+  std::filesystem::remove_all(dir);
+}
+
 // --- CUDA subset statistics -------------------------------------------------------
 
 class CompactSubsetCudaTest : public ::testing::Test {
@@ -324,6 +392,188 @@ protected:
 // rows; over all subsets they add up to the full-data S and q. Two chunks of
 // three angles exercise slices with several segments, slices spanning both
 // chunks, and (N = 6) chunks without any row of a subset.
+TEST_F(CompactSubsetCudaTest, Rot90N10MatchesIndependentOracleWithPartialCaches) {
+  auto meta = makeSixAngleMeta();
+  meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+  meta.Nz = 3;
+  meta.totalVoxels = 12;
+  meta.compactNumAngles = 90;
+  meta.fullNumAngles = 360;
+  meta.compactDetZ = meta.detNz;
+  meta.compactRaysPerAngle = meta.detNx * meta.detNz;
+  meta.totalRows = meta.compactNumAngles * meta.compactRaysPerAngle;
+  auto compact = makeSixAngleCompactCSR(meta);
+  // Subset 0 selects an all-zero slice from the first chunk. Exercise the
+  // segmented reader's empty payload through CUDA, not just the host view.
+  const uint32_t firstAngleNnz = compact.rowPtr[meta.compactRaysPerAngle];
+  compact.colIdx.erase(compact.colIdx.begin(), compact.colIdx.begin() + firstAngleNnz);
+  compact.values.erase(compact.values.begin(), compact.values.begin() + firstAngleNnz);
+  for (size_t row = 0; row < compact.rowPtr.size(); ++row)
+    compact.rowPtr[row] = row <= static_cast<size_t>(meta.compactRaysPerAngle)
+        ? 0 : compact.rowPtr[row] - firstAngleNnz;
+  const int rows = static_cast<int>(meta.fullRows()), cols = meta.totalVoxels;
+  // Explicit 2x2 rotations, independent of production coordinate/row helpers.
+  const int xy[4][4] = {{0,1,2,3}, {1,3,0,2}, {3,2,1,0}, {2,0,3,1}};
+  std::vector<double> full(static_cast<size_t>(rows) * cols, 0.0);
+  for (int sym = 0; sym < 4; ++sym)
+    for (int r = 0; r < meta.totalRows; ++r)
+      for (uint32_t j = compact.rowPtr[r]; j < compact.rowPtr[r+1]; ++j) {
+        const int c = static_cast<int>(compact.colIdx[j]);
+        full[static_cast<size_t>(sym * meta.totalRows + r) * cols +
+             (c / 4) * 4 + xy[sym][c % 4]] += compact.values[j];
+      }
+  std::vector<double> image(cols), projection(rows), weights(rows);
+  for (int c = 0; c < cols; ++c) image[c] = 0.25 + c * 0.19;
+  for (int r = 0; r < rows; ++r) {
+    weights[r] = r % 7 == 0 ? 0.0 : 0.6 + 0.1 * (r % 3);
+    projection[r] = r % 7 == 0 ? 0.0 : 1.0 + 0.02 * (r % 23);
+  }
+  const auto dir = std::filesystem::temp_directory_path() / "spect_rot90_n10";
+  writeChunkDirectory(dir, meta, compact, 5);
+  for (const uint64_t budget : {0ull, 1000ull, 1048576ull}) {
+    SCOPED_TRACE(budget);
+    const auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, budget);
+    const std::vector<spect::cuda::CompactMatrixChannel> channels{{&chunks, 1.0, 1.0}};
+    std::vector<double> forward(rows), reference(rows, 0.0);
+    ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+        chunks, meta, image.data(), 1, forward.data()));
+    for (int r = 0; r < rows; ++r)
+      for (int c = 0; c < cols; ++c)
+        reference[r] += full[static_cast<size_t>(r) * cols + c] * image[c];
+    EXPECT_LE(relL2(forward, reference), 1e-5);
+    const double *images[] = {image.data()}, *projections[] = {projection.data()};
+    for (const int count : {1, 10}) {
+      const auto order = spect::compactSubsetOrder(count);
+      for (size_t s = 0; s < order.size(); ++s) {
+        const spect::CompactSubsetSpec spec{count, order[s]};
+        const spect::CompactSubsetSpec next{count, order[(s+1) % order.size()]};
+        auto restricted = restrictToSubset(full, meta, count, spec.index);
+        std::vector<double> numer(cols), sensitivity(cols);
+        double *numers[] = {numer.data()};
+        ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+            channels, meta, projections, nullptr, images, 1, 1, numers,
+            s % 2 != 0, nullptr, nullptr, true, false, true, &spec, &next));
+        EXPECT_LE(relL2(numer, spect::io::test::denseNumerator(
+            restricted, projection, image, rows, cols)), 1e-5);
+        ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+            channels, meta, 1, sensitivity.data(), nullptr, nullptr, weights.data(), &spec));
+        for (int r = 0; r < rows; ++r)
+          for (int c = 0; c < cols; ++c)
+            restricted[static_cast<size_t>(r) * cols + c] *= weights[r];
+        EXPECT_LE(relL2(sensitivity, spect::io::test::denseDenom(restricted, rows, cols)), 1e-5);
+      }
+    }
+    EXPECT_GT(chunks.readStats().emptySlicesSkipped, 0u);
+    if (budget == 0)
+      EXPECT_GT(chunks.readStats().payloadLoads, chunks.chunks().size());
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_F(CompactSubsetCudaTest, NativeCsrbWindowsMatchWeightedPoissonOracle) {
+  const auto root = std::filesystem::temp_directory_path() / "spect_csrb_windows";
+  for (const bool useZ : {false, true}) {
+    auto meta = makeSixAngleMeta();
+    if (!useZ) {
+      meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+      meta.detNz = meta.compactDetZ;
+    }
+    auto a = makeSixAngleCompactCSR(meta), b = a;
+    for (size_t j = 0; j < b.values.size(); ++j) {
+      b.values[j] *= 0.3f + 0.1f * static_cast<float>(j % 7);
+      b.colIdx[j] = (b.colIdx[j] + 3) % meta.totalVoxels;
+    }
+    writeChunkDirectory(root / "a", meta, a, 3);
+    writeChunkDirectory(root / "b", meta, b, 2);
+    const int rows = static_cast<int>(meta.fullRows()), cols = meta.totalVoxels;
+    const std::vector<double> full[] = {
+        spect::io::test::expandCompactToyToFullDense(meta, a),
+        spect::io::test::expandCompactToyToFullDense(meta, b)};
+    const double weights[] = {0.37, 1.6}, powers[] = {1.0, 1.27};
+    std::vector<double> image(2 * cols), p[4], bg[4], rowWeights(rows);
+    std::vector<uint16_t> att[2];
+    for (int c = 0; c < 2 * cols; ++c) image[c] = 0.4 + 0.13 * c;
+    for (int r = 0; r < rows; ++r) rowWeights[r] = r % 4 ? 0.8 + 0.05 * (r % 3) : 0;
+    for (int slot = 0; slot < 4; ++slot) {
+      p[slot].resize(rows); bg[slot].resize(rows);
+      for (int r = 0; r < rows; ++r) {
+        p[slot][r] = r % 3 ? 1.0 + slot + 0.02 * r : 0.0;
+        bg[slot][r] = 0.2 + 0.03 * (r % 5) + slot * 0.1;
+      }
+    }
+    for (int bed = 0; bed < 2; ++bed) {
+      att[bed].resize(meta.fullNumAngles * cols);
+      for (size_t i = 0; i < att[bed].size(); ++i)
+        att[bed][i] = static_cast<uint16_t>(22000 + (i * 193 + bed * 717) % 30000);
+    }
+    const double *images[] = {image.data(), image.data() + cols};
+    const double *projections[] = {p[0].data(), p[1].data(), p[2].data(), p[3].data()};
+    const double *backgrounds[] = {nullptr, bg[1].data(), bg[2].data(), nullptr};
+    const uint16_t *attenuation[] = {att[0].data(), att[1].data()};
+    const int bedStarts[] = {0, meta.Nz};
+    for (const uint64_t budget : {0ull, 1048576ull}) {
+      const auto ca = spect::io::openCompactChunkCSRDirectory((root / "a").string(), meta, budget);
+      const auto cb = spect::io::openCompactChunkCSRDirectory((root / "b").string(), meta, budget);
+      for (const int windows : {1, 2}) {
+        std::vector<spect::cuda::CompactMatrixChannel> channels{{&ca, weights[0], powers[0]}};
+        if (windows == 2) {
+          channels.push_back({&cb, weights[1], powers[1]});
+          channels[1].sensitivityRowWeights = rowWeights.data();
+        }
+        for (const bool ctac : {false, true}) {
+          for (const int count : {1, 3}) {
+            for (int subset = 0; subset < count; ++subset) {
+              SCOPED_TRACE(::testing::Message() << useZ << '/' << budget << '/' << windows
+                           << '/' << ctac << '/' << count << '/' << subset);
+              const spect::CompactSubsetSpec spec{count, subset};
+              std::vector<double> q[2], s[2], expectedQ[2], expectedS[2];
+              for (int bed = 0; bed < 2; ++bed) {
+                q[bed].resize(cols); s[bed].resize(cols);
+                expectedQ[bed].assign(cols, 0); expectedS[bed].assign(cols, 0);
+                for (int k = 0; k < windows; ++k) {
+                  auto matrix = restrictToSubset(full[k], meta, count, subset);
+                  for (int r = 0; r < rows; ++r) {
+                    double mean = backgrounds[2*k + bed] ? backgrounds[2*k + bed][r] : 0;
+                    for (int c = 0; c < cols; ++c) {
+                      auto &value = matrix[static_cast<size_t>(r) * cols + c];
+                      value *= weights[k] * (ctac ? std::pow(
+                          att[bed][(r / meta.fullRaysPerAngle()) * cols + c] / 65535.0, powers[k]) : 1.0);
+                      mean += value * images[bed][c];
+                    }
+                    for (int c = 0; c < cols; ++c) {
+                      const double value = matrix[static_cast<size_t>(r) * cols + c];
+                      expectedQ[bed][c] += value * p[2*k + bed][r] / std::max(mean, 1e-10);
+                      expectedS[bed][c] += value * (k == 1 ? rowWeights[r] : 1.0);
+                    }
+                  }
+                }
+                ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
+                    channels, meta, 1, s[bed].data(), nullptr,
+                    ctac ? att[bed].data() : nullptr, nullptr, &spec));
+                EXPECT_LE(relL2(s[bed], expectedS[bed]), 1e-5);
+              }
+              double *numers[] = {q[0].data(), q[1].data()};
+              for (const bool prepared : {false, true}) {
+                if (prepared)
+                  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+                      meta, image.data(), image.size(), 2 * meta.Nz, bedStarts, 2, false, nullptr, true));
+                ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+                    channels, meta, projections, backgrounds, prepared ? nullptr : images,
+                    2, 1, numers, prepared, nullptr, ctac ? attenuation : nullptr,
+                    !prepared, prepared, true, &spec, nullptr));
+                for (int bed = 0; bed < 2; ++bed)
+                  EXPECT_LE(relL2(q[bed], expectedQ[bed]), 1e-5);
+              }
+            }
+          }
+        }
+      }
+      ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+    }
+  }
+  std::filesystem::remove_all(root);
+}
+
 TEST_F(CompactSubsetCudaTest, SubsetSensitivityAndNumeratorMatchRestrictedOracle) {
   const auto meta = makeSixAngleMeta();
   const auto compact = makeSixAngleCompactCSR(meta);
@@ -334,7 +584,7 @@ TEST_F(CompactSubsetCudaTest, SubsetSensitivityAndNumeratorMatchRestrictedOracle
   spect::io::CompactSymmetryMetadata dirMeta = meta;
   dirMeta.totalRows = meta.compactRows();
   const auto chunks =
-      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1 << 20);
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 0);
   ASSERT_EQ(chunks.chunks().size(), 2u);
 
   const int fullRows = meta.fullRows();
@@ -476,7 +726,13 @@ TEST_F(CompactSubsetCudaTest, SubsetSensitivityAndNumeratorMatchRestrictedOracle
 // resident subset sensitivity equals the host update with the same S_m and
 // M = subset count; subset index -1 is the unchanged full-data step.
 TEST_F(CompactSubsetCudaTest, ResidentSubsetUpdatesMatchHost) {
-  const auto meta = makeSixAngleMeta();
+  for (const bool useZ : {true, false}) {
+  SCOPED_TRACE(useZ);
+  auto meta = makeSixAngleMeta();
+  if (!useZ) {
+    meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+    meta.detNz = meta.compactDetZ;
+  }
   const auto compact = makeSixAngleCompactCSR(meta);
   const auto dir = std::filesystem::temp_directory_path() /
                    "spect_compact_subset_update_test";
@@ -636,6 +892,7 @@ TEST_F(CompactSubsetCudaTest, ResidentSubsetUpdatesMatchHost) {
                std::runtime_error);
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   std::filesystem::remove_all(dir);
+  }
 }
 
 } // namespace

@@ -8,6 +8,18 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-09-21: native SC60 SMMD v3/ROT90 CSRB compatibility, uncached
+  subset-range reads, native dual-CSRB weighted reconstruction, and explicit
+  full-grid multi-bed output with voxel-aligned steps and valid-mask blending.
+  Joint host-cache budgets and I/O statistics cover both matrices. SC60 real
+  multi-bed acquisition/step calibration remains pending; CSRQ is experimental.
+- Default Tc and Lu recipes now use standard OSEM50 x 10 without regularization.
+  Lu retains independent 208/113 observations and weights0.1036/0.0617, using
+  native CSRB. Previous BSREM/RDP recipes remain explicit alternatives. SC60
+  has a separate 1000 x 10/PSF1.5mm validation recipe, not a PSC geometry default.
+
+## 2026-09-14 configuration baseline
+
 - 2026-09-14: shared angle subsets for CSRB OSEM/BSREM and CSRQ joint
   dual-window reconstruction; retain per-subset RDP/TV and remove the earlier
   POSEM pixel branch. `-it A:B` is full iterations:subsets; `-save-every` is

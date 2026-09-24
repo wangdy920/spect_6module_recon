@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -575,6 +576,14 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
   channels[1].weight = w2;
 
   std::vector<double> denomJoint(nvox, 0.0);
+  for (double invalid : {std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    channels[1].weight = invalid;
+    EXPECT_THROW(spect::cuda::computePoissonSensitivityCUDA(
+                     channels, meta, 1, denomJoint.data(), nullptr, nullptr),
+                 std::runtime_error);
+  }
+  channels[1].weight = w2;
   ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(
       channels, meta, 1, denomJoint.data(), nullptr, nullptr));
   EXPECT_TRUE(spect::cuda::csrqResidentCUDA(0));

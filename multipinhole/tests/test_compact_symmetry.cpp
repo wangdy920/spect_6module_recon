@@ -39,7 +39,8 @@ TEST(IOTest, CompactChunkHostCacheBudgetAdaptsToMatrixAndRam) {
 void writeCompactMetadata(const std::filesystem::path &path, int use90,
                           int useZ, int use45, int symCode,
                           int symmetryOrder,
-                          bool legacyDoubleVoxelSize = false) {
+                          bool legacyDoubleVoxelSize = false,
+                          bool smmdV3 = false, const std::string &decimal = "0.4") {
     std::ofstream out(path, std::ios::binary);
     ASSERT_TRUE(out);
     auto scalar = [&](const auto &value) {
@@ -58,10 +59,14 @@ void writeCompactMetadata(const std::filesystem::path &path, int use90,
     const int nz = 80;
     const float voxelSize = 0.3f;
     const int detNxDuplicate = 48;
-    const int detNz = 48;
+    const int detNz = useZ ? 48 : 24;
     const float pixelSize = 1.0f;
     const float detectorY = 1.0f;
     const float detectorThickness = 1.0f;
+    if (smmdV3) {
+        scalar(uint32_t{0x444D4D53u});
+        scalar(uint32_t{3});
+    }
     scalar(totalRows);
     scalar(totalVoxels);
     scalar(maxNnz);
@@ -73,7 +78,11 @@ void writeCompactMetadata(const std::filesystem::path &path, int use90,
     scalar(nx);
     scalar(ny);
     scalar(nz);
-    if (legacyDoubleVoxelSize) {
+    if (smmdV3) {
+        char field[32]{};
+        std::copy_n(decimal.begin(), std::min(decimal.size(), sizeof(field)), field);
+        out.write(field, sizeof(field));
+    } else if (legacyDoubleVoxelSize) {
         const double legacyVoxelSize = 0.3;
         scalar(legacyVoxelSize);
     } else {
@@ -104,8 +113,88 @@ TEST(IOTest, CompactSymmetryMetadataAcceptsCanonical90ZContract) {
     EXPECT_EQ(meta.xySymmetryCount(), 4);
     EXPECT_EQ(meta.zBranchCount(), 2);
     EXPECT_FALSE(meta.legacyDoubleVoxelSizeLayout);
-    EXPECT_STREQ(spect::io::compactSymmetryModeName(), "90z");
+    EXPECT_STREQ(spect::io::compactSymmetryModeName(meta), "90z");
     std::filesystem::remove(path);
+}
+
+TEST(IOTest, JointMetadataChecksCoordinatesNotPayloadOrEncoding) {
+    const auto path = std::filesystem::temp_directory_path() / "spect_joint_meta.bin";
+    writeCompactMetadata(path, 1, 1, 0, 90, 4);
+    const auto reference = loadCompactSymmetryMetadata(path.string());
+    for (const bool decimal : {false, true}) {
+        writeCompactMetadata(path, 1, 1, 0, 90, 4, !decimal, decimal, "0.3");
+        auto other = loadCompactSymmetryMetadata(path.string());
+        other.maxNnz += 17;
+        EXPECT_NO_THROW(validateCompactMetadataCompatibility(reference, other));
+    }
+    for (auto field : {&CompactSymmetryMetadata::voxelSize,
+                       &CompactSymmetryMetadata::pixelSize,
+                       &CompactSymmetryMetadata::detectorY,
+                       &CompactSymmetryMetadata::detectorThickness}) {
+        auto other = reference;
+        other.*field = std::nextafter(other.*field, 10.0f);
+        EXPECT_THROW(validateCompactMetadataCompatibility(reference, other), std::runtime_error);
+    }
+    auto other = reference;
+    other.Nx = 54; other.Ny = 54; other.Nz = 320; // Same voxel count, different grid.
+    EXPECT_THROW(validateCompactMetadataCompatibility(reference, other), std::runtime_error);
+    other = reference;
+    other.detNx = 24; other.detNz = 96; other.compactDetZ = 48; // Same row count.
+    EXPECT_THROW(validateCompactMetadataCompatibility(reference, other), std::runtime_error);
+    other = reference;
+    other.fullNumAngles += 4;
+    EXPECT_THROW(validateCompactMetadataCompatibility(reference, other), std::runtime_error);
+    other = reference;
+    other.profile = CompactSymmetryProfile::Rot90;
+    EXPECT_THROW(validateCompactMetadataCompatibility(reference, other), std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, SmmdV3ProfileAndStrictDecimalValidation) {
+    const auto path = std::filesystem::temp_directory_path() / "spect_smmd_v3.bin";
+    for (const int useZ : {0, 1}) {
+        writeCompactMetadata(path, 1, useZ, 0, 90, 4, false, true);
+        ASSERT_EQ(std::filesystem::file_size(path), 124u);
+        const auto meta = loadCompactSymmetryMetadata(path.string());
+        EXPECT_EQ(meta.metadataVersion, 3u);
+        EXPECT_EQ(meta.zBranchCount(), useZ + 1);
+        EXPECT_EQ(meta.profile, useZ ? CompactSymmetryProfile::Rot90Z
+                                    : CompactSymmetryProfile::Rot90);
+        EXPECT_FLOAT_EQ(meta.voxelSize, 0.4f);
+    }
+    for (const auto &decimal : {"", "0", "-0.4", "nan", "inf", "0,4", "0.4x",
+                               "12345678901234567890123456789012"}) {
+        writeCompactMetadata(path, 1, 0, 0, 90, 4, false, true, decimal);
+        EXPECT_THROW(loadCompactSymmetryMetadata(path.string()), std::runtime_error);
+    }
+    writeCompactMetadata(path, 1, 0, 0, 90, 4, false, true);
+    {
+        std::fstream out(path, std::ios::binary | std::ios::in | std::ios::out);
+        const uint32_t unsupported = 4;
+        out.seekp(4);
+        out.write(reinterpret_cast<const char *>(&unsupported), sizeof(unsupported));
+    }
+    EXPECT_THROW(loadCompactSymmetryMetadata(path.string()), std::runtime_error);
+    std::filesystem::remove(path);
+}
+
+TEST(IOTest, RealSc60MetadataAndChunkInventoryWhenPresent) {
+    const auto dir = std::filesystem::path("test_data/SC60_luzhou/matrix/") /
+        "matrix_3module_18pin_YSO_90x90x240_141keV";
+    if (!std::filesystem::exists(dir / "metadata.bin"))
+        GTEST_SKIP() << "SC60 metadata not available";
+    const auto meta = loadCompactSymmetryMetadata((dir / "metadata.bin").string());
+    EXPECT_EQ(meta.profile, CompactSymmetryProfile::Rot90);
+    EXPECT_EQ(meta.Nx, 90);
+    EXPECT_EQ(meta.Ny, 90);
+    EXPECT_EQ(meta.Nz, 240);
+    EXPECT_FLOAT_EQ(meta.voxelSize, 0.4f);
+    EXPECT_EQ(meta.detNz, 96);
+    EXPECT_EQ(meta.compactDetZ, 96);
+    const auto chunks = openCompactChunkCSRDirectory(dir.string(), meta, 0);
+    EXPECT_EQ(chunks.chunks().size(), 18u);
+    EXPECT_EQ(chunks.totalRows(), 829440u);
+    EXPECT_EQ(chunks.readStats().payloadLoads, 0u);
 }
 
 TEST(IOTest, CompactSymmetryMetadataLegacyDoubleVoxelMatchesCanonical) {

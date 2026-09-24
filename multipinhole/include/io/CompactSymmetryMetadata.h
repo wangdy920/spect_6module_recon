@@ -10,9 +10,12 @@ namespace spect::io {
 
 // Canonical v4 metadata.bin layout: 22 int32/float fields, no magic prefix.
 // Legacy matrices may store only voxelSize as float64, shifting the remaining
-// fields by four bytes. Both layouts map to the same validated memory model.
+// fields by four bytes. SMMD v3 adds an 8-byte prefix and a 32-byte decimal voxel.
 constexpr std::size_t kCompactMetadataBytes = 88;
 constexpr std::size_t kLegacyDoubleVoxelMetadataBytes = 92;
+constexpr std::size_t kSmmdV3MetadataBytes = 124;
+
+enum class CompactSymmetryProfile : uint32_t { Rot90 = 4, Rot90Z = 5 };
 
 struct CompactSymmetryMetadata {
   int totalRows = 0;
@@ -35,6 +38,8 @@ struct CompactSymmetryMetadata {
   int symCode = 0;
   int symmetryOrder = 0;
   bool legacyDoubleVoxelSizeLayout = false;
+  uint32_t metadataVersion = 0; // 0 = unversioned legacy, 3 = SMMD v3
+  CompactSymmetryProfile profile = CompactSymmetryProfile::Rot90Z;
 
   int fullRaysPerAngle() const { return detNx * detNz; }
   int64_t fullRows() const {
@@ -50,7 +55,9 @@ struct CompactSymmetryMetadata {
            static_cast<int64_t>(Nz);
   }
   int xySymmetryCount() const { return 4; }
-  int zBranchCount() const { return 2; }
+  int zBranchCount() const {
+    return profile == CompactSymmetryProfile::Rot90Z ? 2 : 1;
+  }
 };
 
 struct CompactVoxelCoord {
@@ -105,9 +112,15 @@ inline size_t mapCompactVoxelIndex(size_t linearIndex, int nx, int ny, int nz,
       mapCompactVoxelCoord(x, y, z, nx, nz, symId, zMirror), nx, ny);
 }
 
-const char *compactSymmetryModeName();
+const char *compactSymmetryModeName(const CompactSymmetryMetadata &meta);
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path);
+
+// Both inputs must have passed the metadata reader. Compare the normalized
+// shared coordinate system, not payload identity or unrecorded energy physics.
+void validateCompactMetadataCompatibility(
+    const CompactSymmetryMetadata &reference,
+    const CompactSymmetryMetadata &candidate);
 
 int fullAngleFromCompactAngle(const CompactSymmetryMetadata &meta,
                               int compactAngle, int symId, bool &valid);

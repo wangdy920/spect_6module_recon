@@ -530,6 +530,7 @@ CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
       g_cudaChunkStageTiming.transformBackwardCalls;
   snapshot.compactMatrixUploadCalls =
       g_cudaChunkStageTiming.compactMatrixUploadCalls;
+  snapshot.csrbMatrixH2DBytes = g_cudaChunkStageTiming.csrbMatrixH2DBytes;
   snapshot.compactMatrixReuseCalls =
       g_cudaChunkStageTiming.compactMatrixReuseCalls;
   snapshot.compactInputH2DCalls =

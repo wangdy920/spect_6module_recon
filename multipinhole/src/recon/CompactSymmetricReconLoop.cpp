@@ -440,7 +440,7 @@ std::string buildCompactDenomCacheManifest(
       << '\n';
   appendFileStatIdentity(oss, "compact_meta", compactMetaPath);
   oss << "compact_mode="
-      << spect::io::compactSymmetryModeName() << '\n';
+      << spect::io::compactSymmetryModeName(compactMeta) << '\n';
   oss << "compact_dims=" << compactMeta.Nx << ',' << compactMeta.Ny << ','
       << compactMeta.Nz << '\n';
   oss << "compact_voxel_size=" << compactMeta.voxelSize << '\n';
@@ -1170,17 +1170,20 @@ std::vector<double> runCompactSymmetricReconstruction(
                                      &spec);
           }
           // Consistency gate: the subset rows partition the matrix rows.
-          double sumAll = 0.0;
-          double sumSubsets = 0.0;
+          double squaredNorm = 0.0;
+          double squaredError = 0.0;
           for (size_t j = 0; j < globalNvox; ++j) {
-            sumAll += denom[j];
+            double sumSubsets = 0.0;
             for (const auto &subsetDenom : finestSubsetDenoms)
               sumSubsets += subsetDenom[j];
+            squaredNorm += denom[j] * denom[j];
+            const double error = sumSubsets - denom[j];
+            squaredError += error * error;
           }
           const double relDiff =
-              std::abs(sumSubsets - sumAll) / std::max(sumAll, 1e-300);
-          logInfo("compact subset sensitivities: sum_m S_m vs S total relative "
-                  "difference " + std::to_string(relDiff));
+              std::sqrt(squaredError / std::max(squaredNorm, 1e-300));
+          logInfo("compact subset sensitivities: sum_m S_m vs S voxelwise relL2 " +
+                  std::to_string(relDiff));
           if (!(relDiff < 1e-4)) {
             throw std::runtime_error(
                 "compact subset sensitivities do not add up to the global "
@@ -1265,8 +1268,8 @@ std::vector<double> runCompactSymmetricReconstruction(
         {
           // Pre-upload every window's projections and backgrounds so the
           // first numerator does not pay the H2D inside iteration_core_s;
-          // the device ratio kernels of both formats read them from their
-          // slots for the rest of the run.
+          // CSRQ and single-window CSRB reuse these slots. Joint CSRB currently
+          // refreshes the per-bed slots when switching windows.
           const size_t fullProjectionCount =
               static_cast<size_t>(compactMeta.fullRows());
           for (size_t channel = 0; channel < channelCount; ++channel) {
@@ -1356,6 +1359,20 @@ std::vector<double> runCompactSymmetricReconstruction(
           metricsCsv << bsremIterationMetricsCsvHeader() << '\n';
         }
 
+        const auto matrixReadStats = [&]() {
+          auto reads = compactChunks.readStats();
+          if (ctx.compactChunks2 && ctx.compactChunks2 != ctx.compactChunks) {
+            const auto second = ctx.compactChunks2->readStats();
+            reads.payloadLoads += second.payloadLoads;
+            reads.payloadReadBytes += second.payloadReadBytes;
+            reads.hostReuseBytes += second.hostReuseBytes;
+            reads.emptySlicesSkipped += second.emptySlicesSkipped;
+          }
+          return reads;
+        };
+        const auto readsBeforeIterations = matrixReadStats();
+        const auto h2dBeforeIterations =
+            spect::cuda::getCudaChunkStageTimingSnapshotCUDA().csrbMatrixH2DBytes;
         {
         // Host numerator payloads stay empty on resident iterations. Reuse
         // capacity on host updates, then release it before final output work.
@@ -1440,11 +1457,13 @@ std::vector<double> runCompactSymmetricReconstruction(
         };
 
         for (int it = 1; it <= args.numIters; ++it) {
+          const auto iterationWallStart = ProfileClock::now();
           logInfo("[ITER] " + std::to_string(it) + "/" +
                   std::to_string(args.numIters) + " compact");
           if (stageIndexOfIteration(it) != currentStage)
             enterStage(stageIndexOfIteration(it));
           for (int sub = 0; sub < stageSubsetCount; ++sub) {
+          const auto subsetWallStart = ProfileClock::now();
           const CompactSubsetSpec subsetSpec{
               stageSubsetCount, stageOrder[static_cast<size_t>(sub)]};
           const std::optional<CompactSubsetSpec> nextSpec =
@@ -1833,8 +1852,15 @@ std::vector<double> runCompactSymmetricReconstruction(
                               : std::string()));
           imageResident = false;
           }
+          logInfo("[SUBSET_TIME] iteration=" + std::to_string(it) +
+                  " subset=" + std::to_string(subsetSpec.index) + " wall_s=" +
+                  std::to_string(std::chrono::duration<double>(
+                      ProfileClock::now() - subsetWallStart).count()));
           } // sub-iterations
           lastIterationDone = ProfileClock::now();
+          logInfo("[ITER_TIME] iteration=" + std::to_string(it) + " wall_s=" +
+                  std::to_string(std::chrono::duration<double>(
+                      lastIterationDone - iterationWallStart).count()));
           observeCompactMemory();
 
           if (args.saveInterval > 0 &&
@@ -2018,6 +2044,18 @@ std::vector<double> runCompactSymmetricReconstruction(
                     << " full_command_s="
                     << compactTiming.fullCommandWallSeconds;
         logInfo(perfSummary.str());
+        const auto reads = matrixReadStats();
+        logInfo("[MATRIX_IO] scope=iterations csrb_matrix_h2d_bytes=" +
+                std::to_string(spect::cuda::getCudaChunkStageTimingSnapshotCUDA().csrbMatrixH2DBytes -
+                               h2dBeforeIterations));
+        logInfo("[MATRIX_IO] scope=iterations application_payload_read_bytes=" +
+                std::to_string(reads.payloadReadBytes - readsBeforeIterations.payloadReadBytes) +
+                " payload_loads=" + std::to_string(reads.payloadLoads - readsBeforeIterations.payloadLoads) +
+                " host_reuse_bytes=" + std::to_string(reads.hostReuseBytes - readsBeforeIterations.hostReuseBytes) +
+                " empty_slices_skipped=" + std::to_string(reads.emptySlicesSkipped - readsBeforeIterations.emptySlicesSkipped));
+        logInfo("[MATRIX_IO] scope=run application_payload_read_bytes=" +
+                std::to_string(reads.payloadReadBytes) +
+                " payload_loads=" + std::to_string(reads.payloadLoads));
 
         logDebug(formatProfileEntry("projection_load",
                                    compactTiming.projectionLoadSeconds, 1));

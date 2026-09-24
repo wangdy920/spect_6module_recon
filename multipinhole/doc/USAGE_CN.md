@@ -1,6 +1,6 @@
 # SPECT_recon CLI 使用说明（中文）
 
-> 更新日期：2026-09-14（方案优先级、角度子集、Lu双窗与独立norm）
+> 更新日期：2026-09-21（原生 CSRB 双窗与完整网格多床候选）
 > 对齐来源：`src/cli/ArgumentParser.cpp` 与 `SPECT_recon.exe -help`
 
 本页记录当前可执行文件公开接受的 CLI 参数。运行时最终真相仍以当前二进制：
@@ -21,7 +21,7 @@
 .\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -o recon_output
 # 显式方案替换默认方案，未写字段继承全局
 .\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
-# Lu joint通道1=208，通道2=113，默认BSREM RDP30×10
+# Lu joint通道1=208，通道2=113，默认原生CSRB OSEM50×10，无正则
 .\bin\SPECT_recon.exe -isotope Lu177 -df Bed1_208.bin -df2 Bed1_113.bin -o recon_joint
 ```
 
@@ -115,7 +115,7 @@ python tools\prep_compact_denom_cache.py --help
 | `-th <N>` / `-threads <N>` / `-t <N>` | OpenMP 线程数 |
 | `-cudaDevice <id>` | 选择 CUDA device，覆盖环境变量 `SPECT_CUDA_DEVICE` |
 
-MLEM加角度子集即OSEM，BSREM共用划分；单CSRB和joint CSRQ均支持N10。N>1不与CTAC组合。子集数整除compact角度数，递减阶段满足整除关系且迭代数之和为A。当前不提供POSEM像素分支。后端固定CUDA；旧后端选择参数已退役。
+MLEM加角度子集即OSEM，BSREM共用划分；单/双窗同格式CSRB和实验joint CSRQ均支持N10。N>1不与CTAC组合。子集数整除compact角度数，递减阶段满足整除关系且迭代数之和为A。当前不提供POSEM像素分支。后端固定CUDA；旧后端选择参数已退役。
 
 ### compact CUDA 性能环境变量
 
@@ -225,7 +225,7 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 | `-ctacAutoMuThresh <f>` | auto-mu 阈值，相对 P99.9，范围 `(0,1)`，默认 0.05 |
 | `-ctacAutoMuValue <mu>` | 调试覆盖 body fill mu，单位 `mm^-1`；默认由 `[CTAC] auto_mu_nuclide` 查表 |
 | `-ctacMapEnergy <keV>` | μ 图（或 auto-mu 填充值）对应的光子能量；默认取 `auto_mu_nuclide` 预设能量（INI `[CTAC] mu_map_energy_kev`） |
-| `-ctacWindowEnergies <keV,...>` | 每个能窗的光电峰能量；衰减表按 `att^(μ_w(E_k)/μ_w(E_map))`（NIST 液态水表 log-log 插值）逐窗缩放。双窗 `-ctac` 必填，如 Lu-177 `208.4,112.9`；CSRB 和 CSRQ 的因子分解路径均支持能量指数；双窗联合重建仍仅限实验 CSRQ（INI `[CTAC] window_energies_kev`） |
+| `-ctacWindowEnergies <keV,...>` | 每个能窗的光电峰能量；衰减表按 `att^(μ_w(E_k)/μ_w(E_map))`（NIST 液态水表 log-log 插值）逐窗缩放。双窗 `-ctac` 必填，如 Lu-177 `208.4,112.9`；CSRB 和 CSRQ 的因子分解路径均支持能量指数（INI `[CTAC] window_energies_kev`）；候选已支持双 CSRB，混合格式拒绝 |
 | `-cyl <diam,height>` / `-cylMask <diam,height>` | 圆柱掩码，单位 mm |
 | `-cylc <cx,cy,cz>` / `-cylCenter <cx,cy,cz>` | 圆柱中心，1-based voxel |
 | `-maskFromAtt <threshold>` | 从 mu-map 生成 body mask |
@@ -237,6 +237,8 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 ---
 
 ## 多床位与输出变换
+
+下面的固定裁剪/gain-fit 是 **PSC 默认合同**。SC60 recipe 使用 `[InputOutput] matrix_grid_output=true`，完整保留每床矩阵网格及 ROI 设置，输出 Z 为 `baseNz+(床数-1)*step`，按有效掩膜做 cosine 融合，不拟合床间增益。多床必须给出有限正、整数体素层对齐的 `-bedStepMm`，不能有网格间隙；不支持 seam XY alignment。SC60 系统尚未组装完成，recipe 的 `bed_step_mm=0` 表示未知，不继承 PSC 16.8 mm。详见 [现行格式合同](Format_Reader_Matrix_CN.md#sc60-网格输出)。该候选未替换已发布 EXE。
 
 固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、默认输出 `100×100×66`（`step+10`）；`-singleBedStepAligned 0` 恢复旧 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
 
@@ -283,7 +285,7 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-config <path>` | 全局INI或完整重建方案 |
 | `-algoConf <path>` | 显式完整方案，替换默认方案 |
 | `-isotope <Tc99m或Lu177>` | 采集身份断言及核素默认方案选择 |
-| `-df2/-dfList2`、`-chunkCSRDir2` | joint第二窗投影及CSRQ矩阵，床号须与第一窗相同 |
+| `-df2/-dfList2`、`-chunkCSRDir2` | joint第二窗投影及同格式矩阵（CSRB/CSRB 或实验 CSRQ/CSRQ），床号及 metadata 共享坐标须与第一窗相同 |
 | `-energyWeights <w1,w2>` | 两窗预测计数权重，Lu方案顺序208/113为0.1036/0.0617 |
 | `-dumpConf` | 打印合并配置并退出 |
 | `-h` / `-help` / `--help` | 打印 help |

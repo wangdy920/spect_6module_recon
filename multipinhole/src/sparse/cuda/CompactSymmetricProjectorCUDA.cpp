@@ -272,7 +272,7 @@ bool compactBranchBatchEnabled() {
 
 CompactDeviceRatioParams makeCompactDeviceRatioParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
-    int symId, bool zMirror) {
+    int symId, bool zMirror, double windowWeight = 1.0) {
   CompactDeviceRatioParams params;
   params.symmetryMode = 90;
   params.compactRowBase = compactRowBase;
@@ -285,6 +285,7 @@ CompactDeviceRatioParams makeCompactDeviceRatioParams(
   params.fullRaysPerAngle = meta.fullRaysPerAngle();
   params.symId = symId;
   params.zMirror = zMirror;
+  params.windowWeight = windowWeight;
   return params;
 }
 
@@ -386,7 +387,7 @@ void warmCompactChunkResidentDeviceCache(
     residentPrefixCount = 1;
   }
   residentPrefixCount =
-      std::min(residentPrefixCount, chunks.chunks().size());
+      std::min({residentPrefixCount, chunks.chunks().size(), size_t{2}});
   std::vector<std::shared_ptr<const spect::io::CompactChunkCSRData>> loaded;
   std::vector<spect::io::CSRView> views;
   loaded.reserve(residentPrefixCount);
@@ -523,6 +524,7 @@ void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
 }
 
 int csrqAssignedSlot(const spect::io::CompactChunkCSRDirectory &chunks) {
+  if (!isCsrqDirectory(chunks)) return -1;
   auto lease = std::static_pointer_cast<CsrqResidentLease>(
       chunks.acceleratorLease());
   return (lease && lease->complete) ? lease->matrixIndex : -1;
@@ -676,14 +678,13 @@ void validateChannels(const std::vector<CompactMatrixChannel> &channels,
       throw std::runtime_error(std::string("compact ") + what +
                                " matrix/metadata mismatch.");
     }
-    if (!(channel.weight > 0.0)) {
+    if (!std::isfinite(channel.weight) || !(channel.weight > 0.0)) {
       throw std::runtime_error(std::string("compact ") + what +
-                               " channel weight must be positive.");
+                               " channel weight must be finite and positive.");
     }
-    if (channels.size() > 1 && !isCsrqDirectory(*channel.chunks)) {
+    if (channel.chunks->format() != channels.front().chunks->format()) {
       throw std::runtime_error(
-          "joint multi-window reconstruction requires CSRQ matrices for "
-          "every channel; convert the CSRB directories first.");
+          "joint multi-window reconstruction requires the same format for every channel.");
     }
   }
   if (meta.Nx != meta.Ny) {
@@ -846,13 +847,6 @@ CompactSubsetSelection selectCompactSubset(
   return out;
 }
 
-spect::io::CSRSubsetView compactChunkSlice(
-    const spect::io::CompactChunkCSRData &chunk,
-    const spect::io::CompactSymmetryMetadata &meta,
-    const CompactSubsetSelection &subset) {
-  return chunk.subsetView(subset.angles, meta.compactRaysPerAngle, subset.tag);
-}
-
 // First non-empty slice of `subset` walking the chunks from `start` in the
 // given direction (a subset with fewer angles than a chunk has no rows in
 // some chunks). Returns false when none is left.
@@ -864,7 +858,8 @@ bool nextNonEmptyCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
   const size_t chunkCount = chunks.chunks().size();
   for (size_t index = start; index < chunkCount;
        index = reverseChunkOrder ? index - 1 : index + 1) {
-    slice = compactChunkSlice(*chunks.loadChunk(index), meta, subset);
+    slice = chunks.loadSubset(index, subset.angles, meta.compactRaysPerAngle,
+                              subset.tag);
     if (!slice.empty()) {
       return true;
     }
@@ -1274,8 +1269,6 @@ bool computePoissonSensitivityCUDA(
     return true;
   }
 
-  const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
-  const size_t chunkCount = chunks.chunks().size();
   const bool useBranchBatch =
       compactBranchBatchEnabled() && branches.size() > 1;
   if (attFactors != nullptr && !useBranchBatch) {
@@ -1296,67 +1289,76 @@ bool computePoissonSensitivityCUDA(
   fillBranchSymmetryTables(branches, symIds, zMirrors);
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
-  const double attenPower = channels.front().attenPower;
-
   std::vector<float> ratio;
-  for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-    const auto chunk = chunks.loadChunk(chunkIndex);
-    const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
-    if (useBranchBatch) {
-      const spect::io::CSRSubsetView slice =
-          compactChunkSlice(*chunk, meta, subsetSelection);
-      if (slice.empty()) {
+  for (const auto &channel : channels) {
+    const auto &chunks = *channel.chunks;
+    const size_t chunkCount = chunks.chunks().size();
+    const double attenPower = channel.attenPower;
+    const double *channelRowWeights = channel.sensitivityRowWeights != nullptr
+                                        ? channel.sensitivityRowWeights : rowWeights;
+    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+      const int compactRowBase =
+          chunks.chunks()[chunkIndex].angleOffset * meta.compactRaysPerAngle;
+      if (useBranchBatch) {
+        const spect::io::CSRSubsetView slice =
+            chunks.loadSubset(chunkIndex, subsetSelection.angles,
+                              meta.compactRaysPerAngle, subsetSelection.tag);
+        if (slice.empty()) {
+          continue;
+        }
+        CompactDeviceBackwardTiming backwardTiming;
+        const CompactDeviceRatioParams commonRatio =
+            makeCompactDeviceRatioParams(meta, compactRowBase, 0, false, channel.weight);
+        const bool ok =
+            attFactors != nullptr
+                ? compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
+                      slice, commonRatio, commonTransform, symIds.data(),
+                      zMirrors.data(), static_cast<int>(branches.size()),
+                      attFactors, compactAttenTableCount(meta), attenPower,
+                      channelRowWeights, fullProjectionCount, &backwardTiming, 0)
+                : compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
+                      slice, commonTransform, symIds.data(), zMirrors.data(),
+                      static_cast<int>(branches.size()), &backwardTiming, 0, 0,
+                      &commonRatio, channelRowWeights, fullProjectionCount);
+        if (!ok) {
+          return false;
+        }
+        if (timing) {
+          timing->backwardSeconds += backwardTiming.backwardSeconds;
+          timing->transformBackwardSeconds +=
+              backwardTiming.transformBackwardSeconds;
+        }
         continue;
       }
-      CompactDeviceBackwardTiming backwardTiming;
-      const CompactDeviceRatioParams commonRatio =
-          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
-      const bool ok =
-          attFactors != nullptr
-              ? compactSensitivityBranchBatchAttenSpmvTAccumulateFloatCUDA(
-                    slice, commonRatio, commonTransform, symIds.data(),
-                    zMirrors.data(), static_cast<int>(branches.size()),
-                    attFactors, compactAttenTableCount(meta), attenPower,
-                    rowWeights, fullProjectionCount, &backwardTiming, 0)
-              : compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
-                    slice, commonTransform, symIds.data(), zMirrors.data(),
-                    static_cast<int>(branches.size()), &backwardTiming, 0, 0,
-                    &commonRatio, rowWeights,
-                    rowWeights == nullptr ? 0 : fullProjectionCount);
-      if (!ok) {
-        return false;
-      }
-      if (timing) {
-        timing->backwardSeconds += backwardTiming.backwardSeconds;
-        timing->transformBackwardSeconds +=
-            backwardTiming.transformBackwardSeconds;
-      }
-      continue;
-    }
-    const spect::io::CSRView view = chunk->view();
-    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-      const auto &branch = branches[branchIndex];
-      auto stageStart = Clock::now();
-      makeUnitRatioChunkFloat(meta, compactRowBase, chunk->info.rows,
-                              branch.symId, branch.zMirror, rowWeights, ratio,
-                              threads);
-      if (timing)
-        addTiming(timing->ratioSeconds, stageStart);
-      CompactDeviceBackwardTiming deviceTiming;
-      const CompactDeviceTransformParams transformParams =
-          makeCompactDeviceTransformParams(meta, branch.symId, branch.zMirror);
-      if (!compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-              view, ratio.data(), transformParams, &deviceTiming, 0)) {
-        return false;
-      }
-      if (timing) {
-        timing->backwardSeconds += deviceTiming.backwardSeconds;
-        timing->transformBackwardSeconds +=
-            deviceTiming.transformBackwardSeconds;
+      const auto chunk = chunks.loadChunk(chunkIndex);
+      const spect::io::CSRView view = chunk->view();
+      for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+        const auto &branch = branches[branchIndex];
+        auto stageStart = Clock::now();
+        makeUnitRatioChunkFloat(meta, compactRowBase, chunk->info.rows,
+                                branch.symId, branch.zMirror, channelRowWeights, ratio,
+                                threads);
+        if (channel.weight != 1.0)
+          for (float &value : ratio)
+            value = static_cast<float>(value * channel.weight);
+        if (timing)
+          addTiming(timing->ratioSeconds, stageStart);
+        CompactDeviceBackwardTiming deviceTiming;
+        const CompactDeviceTransformParams transformParams =
+            makeCompactDeviceTransformParams(meta, branch.symId, branch.zMirror);
+        if (!compactDeviceBackwardSpmvTAccumulateFloatCUDA(
+                view, ratio.data(), transformParams, &deviceTiming, 0)) {
+          return false;
+        }
+        if (timing) {
+          timing->backwardSeconds += deviceTiming.backwardSeconds;
+          timing->transformBackwardSeconds +=
+              deviceTiming.transformBackwardSeconds;
+        }
       }
     }
-  }
 
+  }
   if (!compactDeviceBackwardDownloadCUDA(denom, nvox, 0)) {
     return false;
   }
@@ -1720,18 +1722,14 @@ bool accumulatePoissonBackprojectedRatioCUDA(
         branchBatchInputPrepared, downloadBackwardOutputs, subsetSelection);
   }
 
-  // CSRB: one device path for any bed count. The ratio p/(A x + b) and the
+  // CSRB: one device path for any bed/channel count. The ratio w*p/(w*A*x+b) and the
   // backward accumulation always stay on the device; CTAC selects the
   // attenuated branch-batch pass (factor per compact angle in the image
   // domain) instead of the plain one.
-  const spect::io::CompactChunkCSRDirectory &chunks = *channels.front().chunks;
-  applyCompactCsrLocalityHint(chunks, meta);
-
   const auto totalStart = Clock::now();
   const size_t nvox = static_cast<size_t>(meta.totalVoxels);
   const auto branches = enumerateCompactBranches(meta);
   const size_t branchCount = branches.size();
-  const size_t chunkCount = chunks.chunks().size();
 
   const bool useBranchBatch = compactBranchBatchEnabled() && branchCount > 1;
   if (branchBatchInputPrepared && !useBranchBatch) {
@@ -1752,17 +1750,7 @@ bool accumulatePoissonBackprojectedRatioCUDA(
   if (nextSubset != nullptr) {
     nextSubsetSelection = selectCompactSubset(meta, nextSubset);
   }
-  const double attenPower = channels.front().attenPower;
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-  if (refreshProjectionInputs) {
-    for (int bed = 0; bed < bedCount; ++bed) {
-      if (!refreshCompactProjectionCUDA(
-              fullProjections[bed], fullProjectionCount, bed,
-              fullBackgrounds == nullptr ? nullptr : fullBackgrounds[bed])) {
-        return false;
-      }
-    }
-  }
 
   std::vector<float> rotatedImages;
   if (!branchBatchInputPrepared) {
@@ -1803,69 +1791,54 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     branchZMirrors[branchIndex] = branches[branchIndex].zMirror ? 1 : 0;
   }
 
-  const auto processChunk = [&](size_t chunkIndex) -> bool {
-    const auto chunk = chunks.loadChunk(chunkIndex);
-    const int compactRowBase = chunk->info.angleOffset * meta.compactRaysPerAngle;
-    const spect::io::CSRSubsetView slice =
-        compactChunkSlice(*chunk, meta, subsetSelection);
-    if (slice.empty()) {
-      return true;
-    }
-    prefetchNextCompactSlice(
-        chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
-        nextSubsetSelection ? &*nextSubsetSelection : nullptr, slice);
-    if (useBranchBatch) {
-      CompactDeviceRatioTiming deviceTiming;
-      CompactDeviceBackwardTiming backwardTiming;
-      const CompactDeviceRatioParams commonRatio =
-          makeCompactDeviceRatioParams(meta, compactRowBase, 0, false);
-      const CompactDeviceTransformParams commonTransform =
-          makeCompactDeviceTransformParams(meta, 0, false);
-      const bool ok =
-          hasAtten
-              ? compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
-                    slice, fullProjections, fullProjectionCount, commonRatio,
-                    commonTransform, branchSymIds.data(), branchZMirrors.data(),
-                    static_cast<int>(branchCount), bedCount, attFactors,
-                    compactAttenTableCount(meta), attenPower, &deviceTiming,
-                    &backwardTiming)
-              : compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
-                    slice, fullProjections, fullProjectionCount, commonRatio,
-                    commonTransform, branchSymIds.data(), branchZMirrors.data(),
-                    static_cast<int>(branchCount), bedCount, &deviceTiming,
-                    &backwardTiming);
-      if (!ok) {
-        return false;
+  for (size_t channel = 0; channel < channelCount; ++channel) {
+    const auto &chunks = *channels[channel].chunks;
+    const size_t chunkCount = chunks.chunks().size();
+    const double attenPower = channels[channel].attenPower;
+    const double *const *channelProjections = fullProjections + channel * bedCount;
+    applyCompactCsrLocalityHint(chunks, meta);
+    // Projection slots are per bed, so changing windows must refresh them even
+    // when the iteration loop keeps single-window inputs resident.
+    if (refreshProjectionInputs || channelCount > 1) {
+      for (int bed = 0; bed < bedCount; ++bed) {
+        if (!refreshCompactProjectionCUDA(
+                channelProjections[bed], fullProjectionCount, bed,
+                fullBackgrounds == nullptr ? nullptr : fullBackgrounds[channel * bedCount + bed]))
+          return false;
       }
-      if (timing) {
-        timing->forwardSeconds += deviceTiming.forwardSeconds;
-        timing->ratioSeconds += deviceTiming.ratioSeconds;
-        timing->backwardSeconds += deviceTiming.backwardSeconds;
-        timing->transformBackwardSeconds +=
-            backwardTiming.transformBackwardSeconds;
-      }
-      return true;
     }
-    // Per-branch fallback (SPECT_COMPACT_BRANCH_BATCH=0): whole chunks only;
-    // the whole-chunk slice above shares the device copy (tag 0).
-    const spect::io::CSRView view = chunk->view();
-    for (int bed = 0; bed < bedCount; ++bed) {
-      const double *fullProjection = fullProjections[bed];
-      for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
-        const auto &branch = branches[branchIndex];
-        const float *imgRot =
-            rotatedImages.data() +
-            (static_cast<size_t>(bed) * branchCount + branchIndex) * nvox;
+    const auto processChunk = [&](size_t chunkIndex) -> bool {
+      const int compactRowBase =
+          chunks.chunks()[chunkIndex].angleOffset * meta.compactRaysPerAngle;
+      const spect::io::CSRSubsetView slice =
+          chunks.loadSubset(chunkIndex, subsetSelection.angles,
+                            meta.compactRaysPerAngle, subsetSelection.tag);
+      if (slice.empty()) {
+        return true;
+      }
+      prefetchNextCompactSlice(
+          chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
+          nextSubsetSelection ? &*nextSubsetSelection : nullptr, slice);
+      if (useBranchBatch) {
         CompactDeviceRatioTiming deviceTiming;
         CompactDeviceBackwardTiming backwardTiming;
-        const CompactDeviceRatioParams params = makeCompactDeviceRatioParams(
-            meta, compactRowBase, branch.symId, branch.zMirror);
-        const CompactDeviceTransformParams transformParams =
-            makeCompactDeviceTransformParams(meta, branch.symId,
-                                             branch.zMirror);
-        const bool ok = compactDeviceRatioSpmvTAccumulateFloatCUDA(
-            view, imgRot, fullProjection, fullProjectionCount, params,
-            transformParams, &deviceTiming, &backwardTiming, bed, bed);
+        const CompactDeviceRatioParams commonRatio =
+            makeCompactDeviceRatioParams(meta, compactRowBase, 0, false, channels[channel].weight);
+        const CompactDeviceTransformParams commonTransform =
+            makeCompactDeviceTransformParams(meta, 0, false);
+        const bool ok =
+            hasAtten
+                ? compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
+                      slice, channelProjections, fullProjectionCount, commonRatio,
+                      commonTransform, branchSymIds.data(), branchZMirrors.data(),
+                      static_cast<int>(branchCount), bedCount, attFactors,
+                      compactAttenTableCount(meta), attenPower, &deviceTiming,
+                      &backwardTiming)
+                : compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
+                      slice, channelProjections, fullProjectionCount, commonRatio,
+                      commonTransform, branchSymIds.data(), branchZMirrors.data(),
+                      static_cast<int>(branchCount), bedCount, &deviceTiming,
+                      &backwardTiming);
         if (!ok) {
           return false;
         }
@@ -1876,21 +1849,55 @@ bool accumulatePoissonBackprojectedRatioCUDA(
           timing->transformBackwardSeconds +=
               backwardTiming.transformBackwardSeconds;
         }
+        return true;
       }
-    }
-    return true;
-  };
+      // Per-branch fallback (SPECT_COMPACT_BRANCH_BATCH=0): whole chunks only;
+      // the whole-chunk slice above shares the device copy (tag 0).
+      const auto chunk = chunks.loadChunk(chunkIndex);
+      const spect::io::CSRView view = chunk->view();
+      for (int bed = 0; bed < bedCount; ++bed) {
+        const double *fullProjection = channelProjections[bed];
+        for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
+          const auto &branch = branches[branchIndex];
+          const float *imgRot =
+              rotatedImages.data() +
+              (static_cast<size_t>(bed) * branchCount + branchIndex) * nvox;
+          CompactDeviceRatioTiming deviceTiming;
+          CompactDeviceBackwardTiming backwardTiming;
+          const CompactDeviceRatioParams params = makeCompactDeviceRatioParams(
+              meta, compactRowBase, branch.symId, branch.zMirror, channels[channel].weight);
+          const CompactDeviceTransformParams transformParams =
+              makeCompactDeviceTransformParams(meta, branch.symId,
+                                               branch.zMirror);
+          const bool ok = compactDeviceRatioSpmvTAccumulateFloatCUDA(
+              view, imgRot, fullProjection, fullProjectionCount, params,
+              transformParams, &deviceTiming, &backwardTiming, bed, bed);
+          if (!ok) {
+            return false;
+          }
+          if (timing) {
+            timing->forwardSeconds += deviceTiming.forwardSeconds;
+            timing->ratioSeconds += deviceTiming.ratioSeconds;
+            timing->backwardSeconds += deviceTiming.backwardSeconds;
+            timing->transformBackwardSeconds +=
+                backwardTiming.transformBackwardSeconds;
+          }
+        }
+      }
+      return true;
+    };
 
-  if (reverseChunkOrder) {
-    for (size_t chunkIndex = chunkCount; chunkIndex-- > 0;) {
-      if (!processChunk(chunkIndex)) {
-        return false;
+    if (reverseChunkOrder) {
+      for (size_t chunkIndex = chunkCount; chunkIndex-- > 0;) {
+        if (!processChunk(chunkIndex)) {
+          return false;
+        }
       }
-    }
-  } else {
-    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-      if (!processChunk(chunkIndex)) {
-        return false;
+    } else {
+      for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+        if (!processChunk(chunkIndex)) {
+          return false;
+        }
       }
     }
   }

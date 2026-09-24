@@ -327,6 +327,35 @@ TEST(ReconSetupTest, PrepareBedSetupRejectsNonContinuousBeds) {
   EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
 }
 
+TEST(ReconSetupTest, MatrixGridOutputRequiresExplicitAlignedMultiBedStep) {
+  ReconArgs args;
+  args.Nx = args.Ny = 90;
+  args.Nz = 240;
+  args.dz = 0.4;
+  args.matrixGridOutput = true;
+  args.singleBedStepAligned = true;
+  args.projPaths = {"Bed1.bin"};
+  const auto result = prepareBedSetup(args);
+  EXPECT_EQ(args.Nz, 240);
+  EXPECT_EQ(result.canonicalGeom.cropLayers, 0);
+  EXPECT_NE(result.summary.find("full matrix-grid"), std::string::npos);
+  args.projPaths.push_back("Bed2.bin");
+  EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
+  args.bedStepMm = 8.1;
+  EXPECT_THROW((void)prepareBedSetup(args), std::runtime_error);
+  args.bedStepMm = 8.0;
+  args.cylinderDiameterMM = 32.8f;
+  args.cylinderHeightMM = 12.0f;
+  const auto multi = prepareBedSetup(args);
+  EXPECT_EQ(args.Nz, 480);
+  EXPECT_EQ(multi.canonicalGeom.cropLayers, 240);
+  EXPECT_EQ(multi.canonicalGeom.stepLayers, 20);
+  EXPECT_EQ(multi.canonicalGeom.blendOverlap, 220);
+  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0}));
+  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{220}));
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 12.0f);
+}
+
 TEST(ReconSetupTest, PrepareBedSetupCorrectsLegacyOverlapForSmallMatrixNz) {
   // Device scenario: sampling-system matrix with Nz=100 (metadata override),
   // while the deployment config still carries the 220-layer overlap 164.

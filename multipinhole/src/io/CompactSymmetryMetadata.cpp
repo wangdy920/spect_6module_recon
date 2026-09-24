@@ -1,6 +1,8 @@
 #include "io/CompactSymmetryMetadata.h"
 
 #include <cmath>
+#include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -34,18 +36,26 @@ std::size_t metadataFileSize(const std::string &path) {
 
 } // namespace
 
-const char *compactSymmetryModeName() { return "90z"; }
+const char *compactSymmetryModeName(const CompactSymmetryMetadata &meta) {
+  switch (meta.profile) {
+  case CompactSymmetryProfile::Rot90: return "90";
+  case CompactSymmetryProfile::Rot90Z: return "90z";
+  }
+  throw std::runtime_error("Unsupported compact symmetry profile.");
+}
 
 CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   const std::size_t fileSize = metadataFileSize(path);
   const bool legacyDoubleVoxel = fileSize == kLegacyDoubleVoxelMetadataBytes;
-  if (fileSize != kCompactMetadataBytes && !legacyDoubleVoxel) {
+  const bool smmdV3 = fileSize == kSmmdV3MetadataBytes;
+  if (fileSize != kCompactMetadataBytes && !legacyDoubleVoxel && !smmdV3) {
     throw std::runtime_error(
         "Compact metadata size mismatch (" + std::to_string(fileSize) +
-        " bytes, supported SYM_90Z metadata layouts are canonical float32 " +
+        " bytes, supported metadata layouts are canonical float32 " +
         std::to_string(kCompactMetadataBytes) +
         " or legacy float64-voxelSize " +
-        std::to_string(kLegacyDoubleVoxelMetadataBytes) + "): " + path);
+        std::to_string(kLegacyDoubleVoxelMetadataBytes) +
+        " or SMMD v3 124): " + path);
   }
 
   std::ifstream in(path, std::ios::binary);
@@ -55,6 +65,14 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
 
   CompactSymmetryMetadata meta;
   meta.legacyDoubleVoxelSizeLayout = legacyDoubleVoxel;
+  if (smmdV3) {
+    uint32_t magic = 0, version = 0;
+    if (!readScalar(in, magic) || !readScalar(in, version) ||
+        magic != 0x444D4D53u || version != 3u) {
+      throw std::runtime_error("Invalid SMMD v3 magic/version: " + path);
+    }
+    meta.metadataVersion = version;
+  }
   int detNxDuplicate = 0;
   int use90 = 0;
   int useZ = 0;
@@ -68,7 +86,19 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
       !readScalar(in, meta.Ny) || !readScalar(in, meta.Nz)) {
     throw std::runtime_error("Compact metadata is truncated: " + path);
   }
-  if (legacyDoubleVoxel) {
+  if (smmdV3) {
+    char decimal[32];
+    if (!in.read(decimal, sizeof(decimal)))
+      throw std::runtime_error("Truncated SMMD voxel size: " + path);
+    const char *end = std::find(decimal, decimal + sizeof(decimal), '\0');
+    double voxel = 0.0;
+    const auto parsed = std::from_chars(decimal, end, voxel);
+    if (end == decimal + sizeof(decimal) || parsed.ec != std::errc{} ||
+        parsed.ptr != end || !std::isfinite(voxel) || voxel <= 0.0 ||
+        voxel > std::numeric_limits<float>::max())
+      throw std::runtime_error("Invalid SMMD decimal voxel size: " + path);
+    meta.voxelSize = static_cast<float>(voxel);
+  } else if (legacyDoubleVoxel) {
     double voxelSize = 0.0;
     if (!readScalar(in, voxelSize) || !std::isfinite(voxelSize) ||
         voxelSize <= 0.0 ||
@@ -107,13 +137,20 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
   }
 
   auto reject = [&](const std::string &reason) {
-    throw std::runtime_error("Compact metadata is not canonical v4 SYM_90Z (" +
+    throw std::runtime_error("Unsupported compact metadata (" +
                              reason + "): " + path);
   };
-  if (use90 != 1 || useZ != 1 || use45 != 0 || meta.symCode != 90 ||
+  if (use90 != 1 || (useZ != 0 && useZ != 1) || use45 != 0 || meta.symCode != 90 ||
       meta.symmetryOrder != 4) {
-    reject("requires use90=1, useZ=1, use45=0, symCode=90, symmetryOrder=4");
+    reject("requires use90=1, useZ=0/1, use45=0, symCode=90, symmetryOrder=4");
   }
+  meta.profile = useZ ? CompactSymmetryProfile::Rot90Z
+                     : CompactSymmetryProfile::Rot90;
+  const int limit = std::numeric_limits<int>::max();
+  if (meta.Nx > limit / meta.Ny || meta.Nx * meta.Ny > limit / meta.Nz ||
+      meta.detNx > limit / meta.detNz ||
+      meta.detNx * meta.detNz > limit / meta.fullNumAngles)
+    reject("image/projection dimensions exceed supported int32 indexing");
   if (detNxDuplicate != meta.detNx) {
     reject("detNx duplicate does not match detNx");
   }
@@ -124,10 +161,10 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
       meta.compactNumAngles != meta.fullNumAngles / 4) {
     reject("compactNumAngles must equal fullNumAngles/4");
   }
-  if (meta.detNz != 2 * meta.compactDetZ) {
-    reject("detNz must equal 2*compactDetZ");
+  if (meta.detNz != static_cast<int64_t>(meta.zBranchCount()) * meta.compactDetZ) {
+    reject("detNz must equal zBranchCount*compactDetZ");
   }
-  if (meta.compactRaysPerAngle != meta.detNx * meta.compactDetZ) {
+  if (meta.compactRaysPerAngle != static_cast<int64_t>(meta.detNx) * meta.compactDetZ) {
     reject("compactRaysPerAngle must equal detNx*compactDetZ");
   }
   if (meta.totalRows != meta.compactRows()) {
@@ -137,6 +174,37 @@ CompactSymmetryMetadata loadCompactSymmetryMetadata(const std::string &path) {
     reject("totalVoxels does not match image geometry");
   }
   return meta;
+}
+
+void validateCompactMetadataCompatibility(
+    const CompactSymmetryMetadata &reference,
+    const CompactSymmetryMetadata &candidate) {
+  const auto require = [](bool compatible, const char *field) {
+    if (!compatible)
+      throw std::runtime_error(std::string("Joint matrix metadata mismatch: ") + field);
+  };
+  require(reference.Nx == candidate.Nx && reference.Ny == candidate.Ny &&
+              reference.Nz == candidate.Nz &&
+              reference.totalVoxels == candidate.totalVoxels, "image dimensions");
+  require(reference.detNx == candidate.detNx && reference.detNz == candidate.detNz &&
+              reference.compactDetZ == candidate.compactDetZ, "detector dimensions");
+  require(reference.fullNumAngles == candidate.fullNumAngles &&
+              reference.compactNumAngles == candidate.compactNumAngles &&
+              reference.compactRaysPerAngle == candidate.compactRaysPerAngle &&
+              reference.totalRows == candidate.totalRows, "projection indexing");
+  require(reference.profile == candidate.profile &&
+              reference.symCode == candidate.symCode &&
+              reference.symmetryOrder == candidate.symmetryOrder, "symmetry profile");
+  // Exact equality after the reader's float32 normalization: the joint path
+  // shares one grid and never resamples or remaps the second channel.
+  const auto sameFloat = [](float a, float b) {
+    return std::isfinite(a) && std::isfinite(b) && a == b;
+  };
+  require(sameFloat(reference.voxelSize, candidate.voxelSize), "voxelSize");
+  require(sameFloat(reference.pixelSize, candidate.pixelSize), "pixelSize");
+  require(sameFloat(reference.detectorY, candidate.detectorY), "detectorY");
+  require(sameFloat(reference.detectorThickness, candidate.detectorThickness),
+          "detectorThickness");
 }
 
 int fullAngleFromCompactAngle(const CompactSymmetryMetadata &meta,
@@ -154,7 +222,8 @@ bool fullProjectionIndexFromCompactRow(const CompactSymmetryMetadata &meta,
                                        bool zMirror,
                                        uint64_t &fullProjectionIndex) {
   if (compactRow < 0 || compactRow >= meta.totalRows ||
-      meta.compactRaysPerAngle <= 0 || meta.detNx <= 0) {
+      meta.compactRaysPerAngle <= 0 || meta.detNx <= 0 ||
+      (zMirror && meta.zBranchCount() != 2)) {
     return false;
   }
 
@@ -196,15 +265,17 @@ void validateCompactSymmetricGeometry(const CompactSymmetryMetadata &meta,
     throw std::runtime_error("Invalid compact-symmetric inputs: " + message);
   };
 
+  (void)compactSymmetryModeName(meta);
+
   if (meta.Nx != meta.Ny) {
     fail("compact XY symmetry requires Nx == Ny.");
   }
   if (meta.fullNumAngles % 4 != 0 ||
       meta.compactNumAngles != meta.fullNumAngles / 4) {
-    fail("SYM_90Z requires compactNumAngles == fullNumAngles / 4.");
+    fail("ROT90 profiles require compactNumAngles == fullNumAngles / 4.");
   }
-  if (meta.detNz != 2 * meta.compactDetZ) {
-    fail("SYM_90Z requires detNz == 2 * compactDetZ.");
+  if (meta.detNz != static_cast<int64_t>(meta.zBranchCount()) * meta.compactDetZ) {
+    fail("profile requires detNz == zBranchCount * compactDetZ.");
   }
   if (meta.compactRaysPerAngle != meta.detNx * meta.compactDetZ) {
     fail("compactRaysPerAngle must equal detNx * compactDetZ.");

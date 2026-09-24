@@ -429,6 +429,14 @@ int runProgram(int argc, char **argv) {
     const std::string compactMetaPath = resolveCompactMetadataPath(args);
     spect::io::CompactSymmetryMetadata compactMeta =
         spect::io::loadCompactSymmetryMetadata(compactMetaPath);
+    if (args.dualWindow()) {
+      const auto secondMetadataPath =
+          (std::filesystem::path(args.chunkCSRDir2) / "metadata.bin").string();
+      const auto secondMeta =
+          spect::io::loadCompactSymmetryMetadata(secondMetadataPath);
+      spect::io::validateCompactMetadataCompatibility(compactMeta, secondMeta);
+      logInfo("Joint matrix metadata validated: " + secondMetadataPath);
+    }
     if (compactMeta.legacyDoubleVoxelSizeLayout) {
       logWarn("Compatibility: loaded 92-byte legacy compact metadata with "
               "float64 voxelSize; converted to the canonical in-memory "
@@ -452,7 +460,7 @@ int runProgram(int argc, char **argv) {
     }
     applyCompactMetadataGeometry(args, compactMeta);
     logDebug("compact metadata geometry loaded from " + compactMetaPath +
-            " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
+            " (mode=" + std::string(spect::io::compactSymmetryModeName(compactMeta)) +
             ", compactRows=" + std::to_string(compactMeta.compactRows()) +
             ", fullRows=" + std::to_string(compactMeta.fullRows()) + ")");
 
@@ -715,17 +723,39 @@ int runProgram(int argc, char **argv) {
                args.chunkCSRDir2);
       auto opened2 = spect::io::openCompactChunkCSRDirectory(args.chunkCSRDir2,
                                                              compactMeta);
-      if (opened2.format() != spect::io::CompactChunkFormat::CsrqRunU16 ||
-          compactChunks->format() != spect::io::CompactChunkFormat::CsrqRunU16) {
+      if (opened2.format() != compactChunks->format()) {
         throw std::runtime_error(
-            "Joint dual-window reconstruction requires CSRQ matrices for both "
-            "windows (tools/convert_csrb_to_csrq.py).");
+            "Joint dual-window reconstruction requires the same matrix format for both windows.");
       }
       logDebug("Second-window chunk directory opened: chunks=" +
                std::to_string(opened2.chunks().size()) +
                ", nnz=" + std::to_string(opened2.totalNnz()));
       compactChunks2 = std::make_unique<spect::io::CompactChunkCSRDirectory>(
           std::move(opened2));
+      if (compactChunks->format() != spect::io::CompactChunkFormat::CsrqRunU16) {
+        uint64_t bytes[2] = {};
+        const spect::io::CompactChunkCSRDirectory *dirs[] = {compactChunks.get(), compactChunks2.get()};
+        for (int k = 0; k < 2; ++k)
+          for (const auto &info : dirs[k]->chunks()) {
+            if (info.fileSizeBytes > std::numeric_limits<uint64_t>::max() - bytes[k])
+              throw std::runtime_error("Joint matrix byte count overflow.");
+            bytes[k] += info.fileSizeBytes;
+          }
+        if (bytes[1] > std::numeric_limits<uint64_t>::max() - bytes[0])
+          throw std::runtime_error("Joint matrix byte count overflow.");
+        const uint64_t total = bytes[0] + bytes[1];
+        const uint64_t budget = std::min(total,
+            spect::io::defaultCompactChunkHostCacheBudgetBytes(total));
+        const uint64_t firstBudget = budget == total ? bytes[0] :
+            static_cast<uint64_t>(static_cast<long double>(budget) * bytes[0] / total);
+        // Divide one host budget, before either directory allocates payloads.
+        compactChunks = std::make_unique<spect::io::CompactChunkCSRDirectory>(
+            compactChunks->directory(), compactChunks->chunks(), compactChunks->cols(), firstBudget);
+        compactChunks2 = std::make_unique<spect::io::CompactChunkCSRDirectory>(
+            compactChunks2->directory(), compactChunks2->chunks(), compactChunks2->cols(), budget - firstBudget);
+        logInfo("Joint CSRB host cache budgets: " + std::to_string(firstBudget) +
+                " + " + std::to_string(budget - firstBudget) + " bytes (one shared cap).");
+      }
     }
     compactTiming.csrMapOrLoadSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
@@ -743,7 +773,7 @@ int runProgram(int argc, char **argv) {
     compactTiming.metadataLoadAndValidateSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
     logDebug("compact-symmetric layout enabled via " + compactMetaPath +
-            " (mode=" + std::string(spect::io::compactSymmetryModeName()) +
+            " (mode=" + std::string(spect::io::compactSymmetryModeName(compactMeta)) +
             ", compactRows=" + std::to_string(compactMeta.totalRows) +
             ", fullRows=" + std::to_string(compactMeta.fullRows()) +
             ", matrix=chunkCSRDir)");
@@ -1032,6 +1062,7 @@ int runProgram(int argc, char **argv) {
         !isCropSettingsValid(outputNzBeforeCrop, crop))
       throw std::runtime_error("Invalid output crop range.");
     OutputTransform outputTransform;
+    outputTransform.matrixGridOutput = args.matrixGridOutput;
     const OutputTransform *outputTransformPtr = nullptr;
     const bool dfListMode = !args.projPaths.empty();
     const bool enableBedZFlip =
@@ -1042,10 +1073,10 @@ int runProgram(int argc, char **argv) {
     outputTransform.seamXyAlign = args.seamXyAlign;
     outputTransform.reverseLocalZInReconStorage =
         reverseLocalZInReconStorage;
-    outputTransform.centerCropNx = spect::core::sixmodule::kOutputMaskNx;
-    outputTransform.centerCropNy = spect::core::sixmodule::kOutputMaskNy;
+    outputTransform.centerCropNx = args.matrixGridOutput ? 0 : spect::core::sixmodule::kOutputMaskNx;
+    outputTransform.centerCropNy = args.matrixGridOutput ? 0 : spect::core::sixmodule::kOutputMaskNy;
     outputTransform.centerCropNz =
-        bedCount == 1
+        bedCount == 1 && !args.matrixGridOutput
             ? (args.singleBedStepAligned
                    ? bedSetup.canonicalGeom.cropLayers
                    : spect::core::sixmodule::kSingleBedMaskNz)
@@ -1064,8 +1095,10 @@ int runProgram(int argc, char **argv) {
       logDebug("Output transform: whole-output X flip enabled.");
     if (args.seamXyAlign)
       logDebug("Output transform: seam XY overlap alignment enabled.");
-    logInfo("Output transform: canonical center66_cosine10 stitch; "
-            "reconstruction beds are non-overlapping.");
+    logInfo(args.matrixGridOutput
+                ? "Output transform: full matrix grids; multi-bed overlap uses cosine weights without gain fitting."
+                : "Output transform: canonical center66_cosine10 stitch; "
+                  "reconstruction beds are non-overlapping.");
     CompactSymmetricReconLoopContext compactContext;
     compactContext.args = &args;
     compactContext.opts = &opts;

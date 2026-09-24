@@ -11,7 +11,7 @@ namespace main {
 
 /// Canonical output geometry derived from baseNz and bedOverlap.
 /// stepLayers = baseNz - bedOverlap  (physical bed step in layers)
-/// cropLayers = stepLayers + blendMargin
+/// cropLayers = stepLayers + blendMargin (PSC), or baseNz (matrix grid)
 /// blendOverlap = cropLayers - stepLayers
 struct CanonicalOutputGeometry {
   int cropLayers = 0;
@@ -45,6 +45,7 @@ struct OutputGeometry {
 };
 
 struct OutputTransform {
+  bool matrixGridOutput = false; // Full bed grids, no prototype gain fitting.
   bool flipZPerBed = false;
   bool flipZWholeOutput = false;
   bool flipXWholeOutput = false;

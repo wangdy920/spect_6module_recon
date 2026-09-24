@@ -239,10 +239,12 @@ std::vector<int> outputBedStarts(const OutputTransform &transform) {
   return starts;
 }
 
-double center66CosineFadeIn(int overlapIndex, int blendOverlap) {
+double center66CosineFadeIn(int overlapIndex, int blendOverlap, bool voxelCentered = false) {
+  if (blendOverlap == 1) return 0.5;
   constexpr double pi = 3.14159265358979323846;
-  const double phase = static_cast<double>(overlapIndex) /
-                       static_cast<double>(blendOverlap - 1);
+  const double phase = voxelCentered
+      ? (overlapIndex + 0.5) / blendOverlap
+      : static_cast<double>(overlapIndex) / static_cast<double>(blendOverlap - 1);
   const double sine = std::sin(0.5 * pi * phase);
   return sine * sine;
 }
@@ -250,6 +252,9 @@ double center66CosineFadeIn(int overlapIndex, int blendOverlap) {
 void validateCenter66CosineTransform(const OutputTransform &transform, int nz) {
   validateBedZFlipTransform(transform, nz);
   const auto& geom = transform.canonicalGeom;
+  if (transform.matrixGridOutput &&
+      (transform.seamXyAlign || geom.cropLayers != transform.baseNz))
+    throw std::invalid_argument("matrix-grid output requires full bed grids without XY seam alignment");
   if (transform.baseNz < geom.cropLayers)
     throw std::invalid_argument(
         "prepareOutputVolume: canonical stitch requires baseNz >= " +
@@ -522,7 +527,7 @@ SeamXyShift estimateOverlapXyShift(const std::vector<double> &source, int nx,
 std::vector<double> center66CosineBlendOutputOverlap(
     const std::vector<double> &source, int nx, int ny, int nz,
     const OutputTransform &transform, double voxelSizeXmm,
-    double voxelSizeYmm) {
+    double voxelSizeYmm, const std::vector<uint8_t> *mask) {
   validateCenter66CosineTransform(transform, nz);
   const auto& geom = transform.canonicalGeom;
   const std::vector<int> starts = outputBedStarts(transform);
@@ -563,7 +568,8 @@ std::vector<double> center66CosineBlendOutputOverlap(
   const int outputNz = starts.back() + geom.cropLayers;
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
   std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
-  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
+  const bool maskedGrid = transform.matrixGridOutput && mask != nullptr;
+  std::vector<double> weights(maskedGrid ? out.size() : static_cast<size_t>(outputNz), 0.0);
   for (size_t bed = 0; bed < starts.size(); ++bed) {
     const int dx = sampleDx[bed];
     const int dy = sampleDy[bed];
@@ -574,12 +580,12 @@ std::vector<double> center66CosineBlendOutputOverlap(
       // these weights produced a paired bed-switch at each 10-layer joint.
       if (bed > 0 && localZ < geom.blendOverlap) {
         const double fade = center66CosineFadeIn(
-            localZ, geom.blendOverlap);
+            localZ, geom.blendOverlap, transform.matrixGridOutput);
         weight *= fade;
       }
       if (bed + 1 < starts.size() && localZ >= geom.stepLayers) {
         const double fade = center66CosineFadeIn(
-            localZ - geom.stepLayers, geom.blendOverlap);
+            localZ - geom.stepLayers, geom.blendOverlap, transform.matrixGridOutput);
         weight *= 1.0 - fade;
       }
       const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
@@ -587,7 +593,16 @@ std::vector<double> center66CosineBlendOutputOverlap(
       const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
       const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
       const double scaled = weight * gains[bed];
-      if (dx == 0 && dy == 0) {
+      if (maskedGrid) {
+        // A masked-out bed is missing support, not a zero-valued observation.
+        // Matrix-grid mode disallows XY seam shifts. Centered taper samples
+        // stay positive when only one bed covers an overlap boundary voxel.
+        for (size_t xy = 0; xy < plane; ++xy) {
+          if (!(*mask)[srcOffset + xy]) continue;
+          out[dstOffset + xy] += scaled * source[srcOffset + xy];
+          weights[dstOffset + xy] += weight;
+        }
+      } else if (dx == 0 && dy == 0) {
         for (size_t xy = 0; xy < plane; ++xy)
           out[dstOffset + xy] += scaled * source[srcOffset + xy];
       } else {
@@ -605,8 +620,13 @@ std::vector<double> center66CosineBlendOutputOverlap(
           }
         }
       }
-      weights[static_cast<size_t>(dstZ)] += weight;
+      if (!maskedGrid) weights[static_cast<size_t>(dstZ)] += weight;
     }
+  }
+  if (maskedGrid) {
+    for (size_t i = 0; i < out.size(); ++i)
+      if (weights[i] > 0) out[i] /= weights[i];
+    return out;
   }
   for (int z = 0; z < outputNz; ++z) {
     const double weight = weights[static_cast<size_t>(z)];
@@ -774,6 +794,8 @@ std::vector<double> fitCenter66BedGains(
     const OutputTransform &transform, int cropStart, double voxelSizeXmm,
     double voxelSizeYmm) {
   const size_t bedCount = transform.bedZStarts.size();
+  if (transform.matrixGridOutput || bedCount < 2)
+    return std::vector<double>(bedCount, 1.0);
   std::vector<double> logGains(bedCount, 0.0);
   for (size_t lowBed = bedCount - 1; lowBed > 0; --lowBed) {
     const size_t highBed = lowBed - 1;
@@ -857,7 +879,7 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
   if (shouldStitchCanonicalOutput(transform)) {
     transformedSource = center66CosineBlendOutputOverlap(
         *sourceForOutput, nx, ny, transformedNz, *transform,
-        voxelSizeXmm, voxelSizeYmm);
+        voxelSizeXmm, voxelSizeYmm, maskForOutput);
     sourceForOutput = &transformedSource;
     const int stitchOutputNz = static_cast<int>(transformedSource.size() /
                                      (static_cast<size_t>(nx) * ny));

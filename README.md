@@ -3,25 +3,31 @@
 High-performance 3D SPECT reconstruction pipeline with C++17 modular architecture and CUDA acceleration. The project provides:
 
 - **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, and Butterworth filtering.
-- **Compact-symmetric backend**: the production `-chunkCSRDir` path loads `metadata.bin` + `chunk_*.csrb` (88-byte canonical or validated 92-byte legacy metadata, Sym90Z). `260601` is the historical profile name; select the actual deployed matrix directory explicitly when it is not discoverable beside the executable. Single-file CSRB/MAT entries have been removed.
+- **Compact-symmetric backend**: `-chunkCSRDir` loads `metadata.bin` + `chunk_*.csrb`: PSC ROT90_Z (88/92-byte legacy metadata) and SC60 ROT90 (124-byte SMMD v3). Metadata owns the image/detector grid; output geometry remains an explicit configuration choice. See the [matrix contract](multipinhole/doc/Format_Reader_Matrix_CN.md). Single-file CSRB/MAT entries have been removed.
 - **CUDA GPU acceleration**: cuSPARSE sparse SpMV, cuFFT Butterworth, build-time fatbin helper kernels for PSF/RDP/TV on sm_86/89/120. Single GPU.
 - **6-module matrix generation reference**: `6module_bak_src/` holds the CUDA v4 system-matrix generator, the bedmerge reconstruction prototype, and the MAT→BIN projection tool.
 
-## Current optimization status (2026-09-13)
+## Current Status (2026-09-24)
 
-The current release candidate adds shared angle subsets for OSEM/BSREM,
-RDP/TV per-subset updates, independent save cadence, and efficient N10 defaults.
-See [the release validation record](reports/2026-09-13-subset-release.md).
+Tc and Lu default to standard OSEM, 50 complete iterations with 10 subsets,
+without regularization. Lu uses native CSRB joint 208/113 keV observations
+with the retained weights 0.1036/0.0617. Historical profile 05 remains an
+explicit BSREM/CSRQ experiment; CSRQ is not the default or a SC60 requirement.
+One isotope-selected recipe overlays the global INI; explicit `-algoConf`
+replaces that recipe. See [parameters](multipinhole/doc/PARAMETERS_CN.template.md).
 
-The P0–P3 implementation and CSRB CTAC factorisation are in the source tree.
-CSRB remains the production path; CSRQ, dual-window reconstruction and the
-packed backward trial remain experimental. The rejected Phase-B transpose
-variants and `SPECT_COMPACT_T_SPMM` have been removed; the default sparse
-kernels remain in use. Earlier validation and release
-preparation are recorded in
-[the design record](reports/2026-09-04-final-design-poisson-data-term.md#72-2026-09-05-收敛与-release-准备).
+SC60 supports native CSRB ROT90 and full-matrix-grid output; no measured
+SC60 bed step or real multi-bed acquisition is available yet. The standalone
+`sc60_osem1000.conf` is the simulation-validation recipe, not a universal
+device default. In the 6Module universal package, SN selects resources and
+matrix bindings; bed step, masks, ROI and output orientation are manual
+deployment settings, not algorithm-profile copies.
 
-Current configuration/deployment interface (2026-09-14): one isotope-selected recipe overlays the global INI; explicit `-algoConf` replaces it. See [parameters and five recipes](multipinhole/doc/PARAMETERS_CN.template.md) and [wrapper integration](multipinhole/doc/Recon_Interface_Migration_Field_CN.md). Tc defaults to OSEM50×10; updated E260903 Lu deployment defaults to joint RDP30×10. This is separate from the immutable September13 RC and retains the joint experiment's validation limits.
+Implementation, numerical checks, ROI long-run evidence and the immutable
+September21 release are recorded in the
+[adaptation implementation record](reports/2026-09-18-spect-matrix-adaptation-implementation-plan.md).
+The [universal integration audit](reports/2026-09-24-universal-integration-audit.md)
+tracks the fresh build and invocation checks separately from image-quality claims.
 
 ## Historical algorithm/output sign-off (Snapshot: 2026-08-11)
 
@@ -86,19 +92,19 @@ Current configuration/deployment interface (2026-09-14): one isotope-selected re
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
-| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window MLEM (MB-JR): a second energy window with its own CSRQ matrix and projections shares the activity estimate in one Poisson likelihood, `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. The second window lists the same beds as the first; `-energyWeights` (window mean scale, e.g. Lu-177 branching `0.0617,0.1036` for per-photon matrices) is required; with `-ctac` add `-ctacWindowEnergies <keV1,keV2>` (per-window attenuation from one μ table); both matrices must be CSRQ. Two channels naming the same directory share one resident copy. |
+| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window reconstruction shares an activity estimate: `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. Both windows must have compatible coordinates and the same beds. Native CSRB is supported; paired CSRQ remains experimental, and mixed CSRB/CSRQ is rejected. Default Lu channel order is 208/113 with weights 0.1036/0.0617. CTAC requires explicit per-window energies; N>1 with CTAC is not supported. |
 | `-csrqResidency <auto|streamed>` | CSRQ device residency (INI `[SystemMatrix] csrq_residency`). `auto` keeps each matrix resident when it fits and streams it from pinned host memory otherwise; `streamed` always streams (two 1–1.6 GiB chunk slots per matrix), for GPUs shared with other work. |
 | `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default. |
 | `-maskFromAtt <th>` | Generate body mask from attenuation map and zero outside mask each iteration. |
-| `-config <file>` | Load INI config. Default search order: exe-local `config/spect_config.ini`, exe-local `spect_config.ini`, parent `config/`, cwd `config/`, cwd `spect_config.ini`. CLI normally wins; `[Compatibility] recon_sections_override_cli=true` makes the global INI authoritative only for Regularization/PSF/Filtering/Postprocess. Unknown or retired CLI arguments are noted and ignored. |
+| `-config <file>` | Load global INI; the isotope-selected recipe overlays it, or explicit `-algoConf` replaces the selected recipe. CLI normally wins; `recon_sections_override_cli=true` protects merged reconstruction parameters, including algorithm and iteration count. Runtime input/output remain caller-owned. Inspect `-dumpConf` for actual precedence. |
 | `-vb 0/1/2` | Verbosity (0=quiet, 1=info default, 2=debug). |
 | `-v` / `--version` | `-v` prints the exact build identity and complete embedded changelog; `--version` prints only the machine-readable build identity. |
 
 
 ## Multi-bed reconstruction
 
-`-dfList` accepts 1–5 projection files and sorts paths containing `BedN` by bed number. The physical contract is fixed: `Bed1` is the maximum-physical-Z bed; subsequent beds step by 16.8 mm toward lower physical Z. `[MultiBed] z_bed_flip=1` is the shipped default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list.
+`-dfList` accepts 1–5 projection files and sorts paths containing `BedN` by bed number. The software coordinate contract is `Bed1=min_physical_z`, with increasing bed number toward +Z, as recorded in the manifest. PSC uses a 16.8 mm step. `[MultiBed] z_bed_flip=1` is the PSC default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list. This is a software coordinate convention, not a validated patient orientation.
 
 For repeated acquisitions of one case, set `[InputOutput] merge_time_segments=true` and pass one timestamp's `SPECT` directory, for example `-df D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT`. Immediate sibling directories named `YYYYMMDD_HHMMSS` are processed chronologically. Every included segment must contain the identical `BedN.bin` set with matching BIN size/header/geometry; mismatches and non-finite sums fail before reconstruction. The run manifest records every source path per bed.
 
@@ -111,7 +117,7 @@ Single-bed output follows that same `step + 10` center-crop geometry when `[Mult
 3. advances by `step_layers` and blends the shared 10 layers with normalized cosine weights;
 4. writes `Z = crop + (bed_count - 1) × step` layers, then applies whole-output Z/X flips and `cropEnd` zeroing.
 
-The fixed output crop is `100×100` in XY. Object-aware seam repair, automatic profile classification, output FOV masking, `sigmoid`, `direct`, and offline auto-stitch controls are not production paths and have been removed.
+The PSC output crop is `100×100` in XY. With `[InputOutput] matrix_grid_output=true`, XY and single-bed Z retain the matrix grid; multiple beds require an explicit positive step aligned to voxel layers and use full-grid cosine blending without gain fitting. Do not use the PSC mask, crop or assumed bed step for SC60. Object-aware seam repair, automatic profile classification, `sigmoid`, `direct`, and offline auto-stitch controls are not production paths.
 
 `-bProjList` follows the same BedN ordering and must match the projection list. `-zoutflip 1` and `-xoutflip 1` are whole-output transforms; the shipped defaults remain zero.
 

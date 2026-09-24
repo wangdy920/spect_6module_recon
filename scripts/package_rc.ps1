@@ -163,6 +163,9 @@ try {
 
 $paramTemplate = Join-Path $repo "multipinhole\doc\PARAMETERS_CN.template.md"
 Copy-Item -LiteralPath $paramTemplate -Destination (Join-Path $packageRoot "PARAMETERS_CN.md") -Force
+foreach ($doc in @("Format_Reader_Matrix_CN.md", "Capability_Matrix_CN.md")) {
+    Copy-Item -LiteralPath (Join-Path $repo "multipinhole/doc/$doc") -Destination $packageDocs -Force
+}
 
 
 $readmeTemplate = Join-Path $repo "multipinhole\doc\README_RC.template.md"
@@ -219,4 +222,4 @@ Write-Step "done: $packageRoot"
 Write-Step "zip:   $zipPath"
 Write-Step "invoke:"
 Write-Host "  cd `"$packageRoot`""
-Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -o recon_output -it 50:1"
+Write-Host "  .\bin\SPECT_recon.exe -df <proj.bin> -o recon_output -it 50:10"

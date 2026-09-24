@@ -43,6 +43,7 @@ struct CudaChunkStageTimingSnapshot {
   size_t cusparseBackwardHostCalls = 0;
   size_t transformBackwardCalls = 0;
   size_t compactMatrixUploadCalls = 0;
+  uint64_t csrbMatrixH2DBytes = 0;
   size_t compactMatrixReuseCalls = 0;
   size_t compactInputH2DCalls = 0;
   size_t compactProjectionH2DCalls = 0;

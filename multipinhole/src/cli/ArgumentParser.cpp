@@ -989,8 +989,8 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const double stepMm = std::stod(
             ArgumentParser::getRequiredArg(i, argc, argv, "-bedStepMm"));
-        if (stepMm <= 0.0) {
-            std::cerr << "Error: -bedStepMm must be positive.\n";
+        if (!std::isfinite(stepMm) || stepMm <= 0.0) {
+            std::cerr << "Error: -bedStepMm must be finite and positive.\n";
             return false;
         }
         a.bedStepMm = stepMm;
@@ -1527,6 +1527,8 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
     a.outputFiltersOverwritePrimary = cfg.getBool(
         "InputOutput", "output_filters_overwrite_primary",
         a.outputFiltersOverwritePrimary);
+    a.matrixGridOutput = cfg.getBool("InputOutput", "matrix_grid_output",
+                                    a.matrixGridOutput);
 
     // Filtering
     if (cfg.hasSection("Filtering")) {
@@ -1591,8 +1593,11 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             "MultiBed", "normalization_factor_file", a.normFactorFile);
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
         const double iniStepMm = cfg.getDouble("MultiBed", "bed_step_mm", 0.0);
-        if (iniStepMm > 0.0)
+        if (cfg.hasKey("MultiBed", "bed_step_mm")) {
+            if (!std::isfinite(iniStepMm) || iniStepMm < 0.0)
+                throw std::runtime_error("[MultiBed] bed_step_mm must be finite and nonnegative.");
             a.bedStepMm = iniStepMm;
+        }
         a.singleBedStepAligned = cfg.getBool(
             "MultiBed", "single_bed_step_aligned", a.singleBedStepAligned);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
@@ -1872,9 +1877,11 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         return false;
     }
     if (args.energyWindowWeights.size() != 2 ||
+        !std::isfinite(args.energyWindowWeights[0]) ||
+        !std::isfinite(args.energyWindowWeights[1]) ||
         !(args.energyWindowWeights[0] > 0.0) ||
         !(args.energyWindowWeights[1] > 0.0)) {
-        std::cerr << "Error: -energyWeights <w1,w2> (both > 0) is required with "
+        std::cerr << "Error: -energyWeights <w1,w2> (both finite and > 0) is required with "
                      "-chunkCSRDir2; Lu recipe channel order 208/113: 0.1036,0.0617 when "
                      "the matrices are per emitted photon.\n";
         return false;
@@ -2328,28 +2335,30 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "[Mask]\n";
     std::cout << "use_cylinder   = " << (a.useCylindricalMask ? "true" : "false") << "\n";
     std::cout << "cylinder_dims  = " << a.cylinderDiameterMM << "," << a.cylinderHeightMM << "\n\n";
-    std::cout << "[Fixed6ModuleGeometry]\n";
-    std::cout << "single_roi_mm = "
-              << spect::core::sixmodule::kSingleBedRoiDiameterMm << ","
-              << spect::core::sixmodule::kSingleBedRoiHeightMm << "\n";
-    std::cout << "single_mask_xyz = "
-              << spect::core::sixmodule::kOutputMaskNx << ","
-              << spect::core::sixmodule::kOutputMaskNy << ","
-              << (a.singleBedStepAligned
-                      ? std::string("step+") + std::to_string(
-                            spect::core::sixmodule::kDefaultBlendMarginLayers)
-                      : std::to_string(
-                            spect::core::sixmodule::kSingleBedMaskNz))
-              << " layers\n";
-    std::cout << "multibed_roi_mm = "
-              << spect::core::sixmodule::kMultiBedRoiDiameterMm << ","
-              << spect::core::sixmodule::kMultiBedRoiHeightMm << "\n";
-    std::cout << "multibed_crop_xyz = "
-              << spect::core::sixmodule::kOutputMaskNx << ","
-              << spect::core::sixmodule::kOutputMaskNy << ","
-              << "step+" << spect::core::sixmodule::kDefaultBlendMarginLayers << " layers\n";
-    std::cout << "multibed_step_mm = "
-              << spect::core::sixmodule::kMultiBedStepMm << "\n";
+    if (!a.matrixGridOutput) {
+        std::cout << "[Fixed6ModuleGeometry]\n";
+        std::cout << "single_roi_mm = "
+                  << spect::core::sixmodule::kSingleBedRoiDiameterMm << ","
+                  << spect::core::sixmodule::kSingleBedRoiHeightMm << "\n";
+        std::cout << "single_mask_xyz = "
+                  << spect::core::sixmodule::kOutputMaskNx << ","
+                  << spect::core::sixmodule::kOutputMaskNy << ","
+                  << (a.singleBedStepAligned
+                          ? std::string("step+") + std::to_string(
+                                spect::core::sixmodule::kDefaultBlendMarginLayers)
+                          : std::to_string(
+                                spect::core::sixmodule::kSingleBedMaskNz))
+                  << " layers\n";
+        std::cout << "multibed_roi_mm = "
+                  << spect::core::sixmodule::kMultiBedRoiDiameterMm << ","
+                  << spect::core::sixmodule::kMultiBedRoiHeightMm << "\n";
+        std::cout << "multibed_crop_xyz = "
+                  << spect::core::sixmodule::kOutputMaskNx << ","
+                  << spect::core::sixmodule::kOutputMaskNy << ","
+                  << "step+" << spect::core::sixmodule::kDefaultBlendMarginLayers << " layers\n";
+        std::cout << "multibed_step_mm = "
+                  << spect::core::sixmodule::kMultiBedStepMm << "\n";
+    }
 
     std::cout << "[Backend]\n";
     std::cout << "sparse = cuda\n";
@@ -2387,11 +2396,12 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
         }
     }
     std::cout << "\n";
-    std::cout << "stitch_method = center66_cosine10  # canonical fixed output stitch\n";
+    std::cout << "stitch_method = "
+              << (a.matrixGridOutput ? "matrix_grid_cosine" : "center66_cosine10") << "\n";
     std::cout << "bed_step_mm   = "
-              << (a.bedStepMm > 0.0 ? a.bedStepMm
+              << (a.bedStepMm > 0.0 || a.matrixGridOutput ? a.bedStepMm
                                     : spect::core::sixmodule::kMultiBedStepMm)
-              << "  # scanner bed step; crop = step+10, stride = step\n";
+              << "  # scanner bed step; matrix-grid 0 means unknown\n";
     std::cout << "single_bed_step_aligned = "
               << (a.singleBedStepAligned ? "true" : "false")
               << "  # single-bed crop = step+10; false keeps legacy 72 layers\n";
@@ -2411,6 +2421,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
               << "  # overlap NCC integer XY shift; 0 keeps unshifted stitch\n\n";
 
     std::cout << "[InputOutput]\n";
+    std::cout << "matrix_grid_output = " << (a.matrixGridOutput ? "true" : "false") << "\n";
     std::cout << "merge_time_segments = "
               << (a.mergeTimeSegments ? "true" : "false") << "\n";
     std::cout << "output_filters_overwrite_primary = "

@@ -1120,7 +1120,8 @@ public:
     dBatchOnes_.allocate(batchedRows);
     const double *dRowWeights =
         ensureCompactRowWeightsUploaded(rowWeights, rowWeightCount);
-    if (dRowWeights != nullptr) {
+    if (dRowWeights != nullptr ||
+        (commonRatioParams != nullptr && commonRatioParams->windowWeight != 1.0)) {
       // S = A^T W 1: the batch input carries W per (row, branch), 0 for rows
       // without a full projection counterpart.
       if (commonRatioParams == nullptr) {
@@ -1326,6 +1327,8 @@ private:
   enum class CachedMatrixValueType { Float };
 
   struct CachedMatrix {
+    // Declared before device arrays so storage also survives their destruction.
+    std::shared_ptr<const void> sourceOwner;
     MatrixCacheKey key;
     int64_t rows = 0;
     int64_t cols = 0;
@@ -1347,6 +1350,10 @@ private:
     mutable std::array<bool, 2> spmmBufferSizeValid{};
 
     void prepareForUpload() {
+      if (compactUploadPending) {
+        CUDA_CHECK(cudaEventSynchronize(compactUploadReady.get()));
+      }
+      sourceOwner.reset();
       key = MatrixCacheKey{};
       rows = 0;
       cols = 0;
@@ -1711,6 +1718,9 @@ private:
   void uploadIoCsrViewAsync(const io::CSRView &matrix, const MatrixCacheKey &key,
                             CachedMatrix *cache, cudaStream_t stream) {
     cache->prepareForUpload();
+    cache->sourceOwner = matrix.sourceOwner;
+    g_cudaChunkStageTiming.csrbMatrixH2DBytes +=
+        4ull * (static_cast<uint64_t>(matrix.rows) + 1) + 8ull * matrix.nnz;
     cache->key = key;
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
@@ -1743,6 +1753,10 @@ private:
                                   const MatrixCacheKey &key,
                                   CachedMatrix *cache, cudaStream_t stream) {
     cache->prepareForUpload();
+    cache->sourceOwner = slice.sourceOwner;
+    g_cudaChunkStageTiming.csrbMatrixH2DBytes +=
+        4ull * (static_cast<uint64_t>(slice.rows) + 1 + slice.blockAngles.size()) +
+        8ull * slice.nnz;
     cache->key = key;
     cache->rows = slice.rows;
     cache->cols = slice.cols;

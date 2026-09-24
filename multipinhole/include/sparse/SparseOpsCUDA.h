@@ -29,6 +29,7 @@ struct CompactDeviceRatioParams {
     int fullRaysPerAngle = 0;
     int symId = 0;
     bool zMirror = false;
+    double windowWeight = 1.0; // A_window = windowWeight * A; background is unscaled.
     /// Device table of the absolute compact angle of every compactRaysPerAngle
     /// row block (rows / compactRaysPerAngle entries). Set by the state for an
     /// ordered-subset slice, whose blocks are not consecutive angles; nullptr

@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace spect {
@@ -29,11 +30,12 @@ struct CSR {
 };
 
 /**
- * @brief Non-owning view of CSR matrix (pointer-based access)
+ * @brief Pointer view of CSR matrix, optionally retaining backing storage
  *
  * Used to avoid data copying
  */
 struct CSRView {
+    std::shared_ptr<const void> sourceOwner; // optional backing-storage lifetime
     int rows = 0;
     int cols = 0;
     const uint32_t* row_ptr = nullptr; // length = rows+1
@@ -70,6 +72,8 @@ struct CSRSegment {
  * device key also carries the first segment's pointers.
  */
 struct CSRSubsetView {
+    // Keep segment storage alive during asynchronous upload and device caching.
+    std::shared_ptr<const void> sourceOwner;
     int rows = 0;
     int cols = 0;
     uint64_t nnz = 0;

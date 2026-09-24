@@ -11,7 +11,7 @@ __PACKAGE_NAME__/
     *.dll
     config/
       spect_config.ini
-      profiles/                 five reconstruction recipes
+      profiles/                 isotope/system reconstruction recipes
       algo_mlem.conf            legacy compatibility configurations
       algo_bsrem.conf
     matrix/<isotope>/<matrix_id>/  deploy required matrices separately
@@ -40,7 +40,7 @@ Deploy the selected recipe's matrices first. From the package root:
 .\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -o recon_tc
 # Explicit Tc TV recipe
 .\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
-# Default Lu joint RDP30 x 10; independent 208 and 113 projections
+# Default Lu joint OSEM50 x 10, native CSRB; independent 208 and 113 projections
 .\bin\SPECT_recon.exe -isotope Lu177 -df "D:\scan\Bed1_208.bin" -df2 "D:\scan\Bed1_113.bin" -o recon_lu
 # Multi-bed Tc: retain real consecutive BedN identities; default physical step 16.8 mm
 .\bin\SPECT_recon.exe -isotope Tc99m -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin" -o recon_multibed
@@ -48,10 +48,12 @@ Deploy the selected recipe's matrices first. From the package root:
 .\bin\SPECT_recon.exe -isotope Lu177 -dumpConf
 ```
 
-`-it A:B` means A full iterations with B angle subsets. `-it A` retains inherited subsets. `-save-every N` controls intermediate saving; default0 saves only the final iteration. OSEM and BSREM share angle subsets, including N10 for single CSRB and joint CSRQ. Subsets with CTAC are not enabled. RDP/TV must be selected in the recipe or explicit regularization parameters; `-opti bsrem` alone does not enable RDP.
+`-it A:B` means A full iterations with B angle subsets. `-it A` retains inherited subsets. `-save-every N` controls intermediate saving; default0 saves only the final iteration. Tc and Lu defaults are standard OSEM50 x 10 without regularization, using native CSRB. OSEM and BSREM share angle subsets, including homogeneous dual CSRB and experimental CSRQ. Subsets with CTAC are not enabled. RDP/TV must be selected explicitly; `-opti bsrem` alone does not enable RDP.
 
 PSF stays enabled (sieve/castor, FWHM1.3mm), with existing Mask/bed processing. Output Gaussian is disabled. Only final primary and a separate output-only Butterworth copy (5cycles/cm, order8) are saved by default. Primary includes the existing sieve/save processing and is not the internal iteration array.
 
-Lu channel order is 208/113, weights0.1036/0.0617 applied once in the count model. Norm is disabled in all five recipes until matching calibration files are supplied; joint requires independent files for both windows or neither. Do not reuse a merged-window norm. The original merged-Lu/single208 recipe03 remains separate from joint recipe05.
+Lu channel order is 208/113, weights0.1036/0.0617 applied once in the count model. Norm is disabled until matching calibration files are supplied; joint requires independent files for both windows or neither. Do not reuse a merged-window norm. The original merged-Lu recipe03 and experimental joint BSREM/CSRQ recipe05 remain explicit alternatives to default native-CSRB recipe06.
 
-See [Chinese parameters and five recipes](PARAMETERS_CN.md). These recipes retain their tested data/model scope; they are not universal optima or a completed activity calibration. CSRB remains the protected numerical baseline; joint/CSRQ deployment use does not extend the original experimental evidence to other systems.
+For SC60, explicitly select `bin/config/profiles/sc60_osem1000.conf` and the matching matrix with `-chunkCSRDir`. This separate validation recipe uses PSF1.5mm, 1000 x 10, save-every50 and full-grid output; `-it 50:10 -save-every 0` selects a shorter final-only run. It must not inherit PSC geometry or the PSC16.8mm bed step. SC60 physical multi-bed acquisition remains unverified.
+
+See [Chinese parameters and recipes](PARAMETERS_CN.md). Matrices and observations are not included. These recipes retain their tested data/model scope; they are not universal optima or a completed activity calibration. CSRQ remains experimental.

@@ -40,12 +40,14 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 ```
 
 说明：
-- `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。双窗CSRQ也支持N10；N>1与CTAC组合未开放，旧POSEM像素划分已退出当前接口。
+- `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。同格式双窗CSRB及实验CSRQ支持N10；N>1与CTAC组合未开放，旧POSEM像素划分已退出当前接口。
 - `-config` 不需要显式传。
 - 多矩阵用所选方案的精确 `matrix_id/matrix_id2`；CLI覆盖受优先级开关控制。
 - 投影路径仍需要按实际数据传入。
 
 ## 多床位
+
+下述固定裁剪/ROI 是 PSC 默认。2026-09-21 源码候选另支持 `[InputOutput] matrix_grid_output=true`：完整每床网格、有效掩膜 cosine 融合、不做床间 gain-fit；多床必须显式给出正且整数体素层对齐的床步进。SC60 recipe 的 `bed_step_mm=0` 为未知，不能当作 PSC 16.8 mm；当前只有合成多床验证，部署须确认包内 EXE 是否包含该候选。完整边界见 `Format_Reader_Matrix_CN.md`，不变更已有发布默认。
 
 ```powershell
 .\bin\SPECT_recon.exe `
@@ -116,7 +118,7 @@ seam_xy_align = 0
 # algo_conf  = ...\bin\config\profiles\04_standard_osem50.conf
 ```
 
-## 核素、矩阵及归一化配置（2026-09-14）
+## 核素、矩阵及归一化配置（2026-09-21）
 
 `-isotope Tc99m|Lu177` 是可选的采集身份断言；部署 wrapper 自动从预处理记录传入。全局配置用 `default_config_Tc99m` / `default_config_Lu177` 选择核素默认方案。已有显式 `-algoConf` 始终替换默认方案，方案核素与采集不符时失败。
 
@@ -140,6 +142,8 @@ Lu-177 默认预处理保留合并 `BedN.bin`，新增 `BedN_208.bin` / `BedN_11
 | 02_uniform_tv75.conf | Tc单141 SCALE2 CSRB | BSREM TV β=0.0003 | 75×10 | 1/0.05 |
 | 03_mouse_rdp100.conf | Lu合并窗＋单208 CSRB | BSREM RDP β=0.1 | 100×10 | 1/0.05 |
 | 04_standard_osem50.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
-| 05_mouse_joint_rdp30.conf | Lu独立208/113＋各自CSRQ；Lu默认 | BSREM RDP β=0.03 | 30×10 | 1/0.05 |
+| 05_mouse_joint_rdp30.conf | Lu独立208/113＋各自CSRQ；显式实验选项 | BSREM RDP β=0.03 | 30×10 | 1/0.05 |
+| 06_standard_joint_osem50.conf | Lu独立208/113＋各自原生CSRB；Lu默认 | OSEM无正则 | 50×10 | — |
+| sc60_osem1000.conf | SC60单窗CSRB、完整矩阵网格；显式兼容验证方案 | OSEM无正则，PSF1.5 mm | 1000×10，每50轮保存 | — |
 
 这些方案适用于原实验范围，不是所有系统或IQ标定下的全局最优。两种Lu模型的β不直接互换。源配置默认false；2026-09-14的E盘6Module部署保留true。6Module部署EXE位于 `bin/recon/`，独立重建RC位于 `bin/`，两者的相对配置规则相同。详细上位机迁移见 `Recon_Interface_Migration_Field_CN.md`（源码文档），部署包见其wrapper指南。

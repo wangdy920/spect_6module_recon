@@ -594,6 +594,59 @@ CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,
   return data;
 }
 
+CompactChunkCSRData loadChunkDataSubset(const CompactChunkCSRInfo &info,
+                                       int cols, const std::vector<int> &angles,
+                                       int raysPerAngle) {
+  std::ifstream in(info.path, std::ios::binary);
+  if (!in)
+    throw std::runtime_error("Cannot open compact chunk CSR: " + info.path.string());
+  in.seekg(kChunkHeaderBytes, std::ios::beg);
+  std::vector<uint32_t> sourceRows;
+  loadChunkRowPtr32(info, in, sourceRows);
+
+  CompactChunkCSRData data;
+  data.info = info;
+  data.cols = cols;
+  data.rowPtr.resize(sourceRows.size());
+  std::vector<std::pair<uint32_t, uint32_t>> ranges;
+  uint32_t packedNnz = 0;
+  for (int angle = 0; angle < info.angleCount; ++angle) {
+    const size_t firstRow = static_cast<size_t>(angle) * raysPerAngle;
+    const size_t lastRow = firstRow + raysPerAngle;
+    const bool selected = std::binary_search(angles.begin(), angles.end(),
+                                             info.angleOffset + angle);
+    for (size_t row = firstRow; row < lastRow; ++row) {
+      data.rowPtr[row] = packedNnz;
+      if (selected) packedNnz += sourceRows[row + 1] - sourceRows[row];
+    }
+    if (selected && sourceRows[lastRow] != sourceRows[firstRow]) {
+      if (!ranges.empty() && ranges.back().second == sourceRows[firstRow])
+        ranges.back().second = sourceRows[lastRow];
+      else
+        ranges.emplace_back(sourceRows[firstRow], sourceRows[lastRow]);
+    }
+  }
+  data.rowPtr.back() = packedNnz;
+  data.info.nnz = packedNnz;
+  data.colIdx.resize(packedNnz);
+  data.values.resize(packedNnz);
+  const uint64_t columnsOffset = kChunkHeaderBytes + 8ull * sourceRows.size();
+  const uint64_t valuesOffset = columnsOffset + 4ull * info.nnz;
+  size_t destination = 0;
+  for (const auto &range : ranges) {
+    const size_t count = range.second - range.first;
+    in.seekg(static_cast<std::streamoff>(columnsOffset + 4ull * range.first));
+    readExact(in, data.colIdx.data() + destination, count, "subset col_idx");
+    in.seekg(static_cast<std::streamoff>(valuesOffset + 4ull * range.first));
+    readExact(in, data.values.data() + destination, count, "subset values");
+    destination += count;
+  }
+  validateChunkColIdxRange(info, data.colIdx.data(), packedNnz, cols);
+  // Preserve the original angle positions with empty unselected rows. This
+  // private backing storage is only exposed through the existing subsetView.
+  return data;
+}
+
 CompactChunkCSRData loadChunkDataMapped(const CompactChunkCSRInfo &info,
                                         int cols) {
   auto mapping = std::make_shared<ReadOnlyChunkPayloadMap>();
@@ -742,6 +795,7 @@ CSRView CompactChunkCSRData::view() const {
         "CSRQ compact chunk has no float CSR view: " + info.path.string());
   }
   CSRView out;
+  out.sourceOwner = weak_from_this().lock();
   out.rows = info.rows;
   out.cols = cols;
   out.row_ptr = rowPtr.data();
@@ -761,6 +815,7 @@ CSRSubsetView CompactChunkCSRData::subsetView(
         info.path.string());
   }
   CSRSubsetView out;
+  out.sourceOwner = full.sourceOwner;
   out.cols = cols;
   out.rowsPerBlock = raysPerAngle;
   out.sourceRowPtr = full.row_ptr;
@@ -793,8 +848,8 @@ CSRSubsetView CompactChunkCSRData::subsetView(
       out.segments.back().nnz += nnzEnd - nnzStart;
     } else {
       CSRSegment segment;
-      segment.col_idx = full.col_idx + nnzStart;
-      segment.val = full.val + nnzStart;
+      segment.col_idx = full.nnz == 0 ? full.col_idx : full.col_idx + nnzStart;
+      segment.val = full.nnz == 0 ? full.val : full.val + nnzStart;
       segment.nnz = nnzEnd - nnzStart;
       out.segments.push_back(segment);
     }
@@ -862,7 +917,8 @@ CompactChunkCSRDirectory::CompactChunkCSRDirectory(
     std::filesystem::path directory, std::vector<CompactChunkCSRInfo> chunks,
     int cols, uint64_t cacheBudgetBytes)
     : directory_(std::move(directory)), chunks_(std::move(chunks)), cols_(cols),
-      cacheBudgetBytes_(cacheBudgetBytes), cache_(chunks_.size()) {
+      cacheBudgetBytes_(cacheBudgetBytes), cache_(chunks_.size()),
+      liveChunks_(chunks_.size()), liveSubsets_(chunks_.size()) {
   cacheMutexes_.reserve(chunks_.size());
   for (size_t i = 0; i < chunks_.size(); ++i)
     cacheMutexes_.push_back(std::make_shared<std::mutex>());
@@ -878,8 +934,10 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
     throw std::runtime_error("Compact chunk index out of range.");
   }
   std::lock_guard<std::mutex> chunkLock(*cacheMutexes_[index]);
-  if (index < cache_.size() && cache_[index]) {
-    return cache_[index];
+  if (auto live = liveChunks_[index].lock()) {
+    std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+    readStats_.hostReuseBytes += live->residentBytes();
+    return live;
   }
 
   auto loaded =
@@ -887,13 +945,74 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
   const uint64_t bytes = loaded->residentBytes();
   if (index < cache_.size()) {
     std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+    ++readStats_.payloadLoads;
+    readStats_.payloadReadBytes += chunks_[index].fileSizeBytes -
+        (chunks_[index].format == CompactChunkFormat::CsrbFloat32 ? 28u : 48u);
     if (cacheBudgetBytes_ == std::numeric_limits<uint64_t>::max() ||
         cachedBytes_ + bytes <= cacheBudgetBytes_) {
       cache_[index] = loaded;
       cachedBytes_ += bytes;
     }
   }
+  liveChunks_[index] = loaded;
   return loaded;
+}
+
+CSRSubsetView CompactChunkCSRDirectory::loadSubset(
+    size_t index, const std::vector<int> &compactAngles,
+    int raysPerAngle, uint64_t tag) const {
+  const auto &info = chunks_.at(index);
+  if (info.format != CompactChunkFormat::CsrbFloat32 || raysPerAngle <= 0 ||
+      static_cast<int64_t>(info.angleCount) * raysPerAngle != info.rows)
+    throw std::runtime_error("Invalid CSRB subset layout: " + info.path.string());
+  if (std::adjacent_find(compactAngles.begin(), compactAngles.end(),
+                        [](int a, int b) { return a >= b; }) != compactAngles.end())
+    throw std::runtime_error("compact subset angles must be strictly ascending.");
+  const auto first = std::lower_bound(compactAngles.begin(), compactAngles.end(),
+                                      info.angleOffset);
+  if (first == compactAngles.end() ||
+      *first >= static_cast<int64_t>(info.angleOffset) + info.angleCount) {
+    std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+    ++readStats_.emptySlicesSkipped;
+    return {};
+  }
+  std::unique_lock<std::mutex> chunkLock(*cacheMutexes_[index]);
+  auto owner = liveChunks_[index].lock();
+  if (!owner && liveSubsets_[index].first == compactAngles)
+    owner = liveSubsets_[index].second.lock();
+  if (owner) {
+    std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+    readStats_.hostReuseBytes += owner->residentBytes();
+  } else {
+    const auto last = std::lower_bound(first, compactAngles.end(),
+                                      info.angleOffset + info.angleCount);
+    bool loadWhole = std::distance(first, last) == info.angleCount;
+    {
+      std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+      const uint64_t bytes = 4ull * (static_cast<uint64_t>(info.rows) + 1) + 8ull * info.nnz;
+      loadWhole = loadWhole || bytes <= cacheBudgetBytes_ - cachedBytes_;
+    }
+    if (loadWhole) {
+      chunkLock.unlock();
+      owner = loadChunk(index);
+    } else {
+      owner = std::make_shared<CompactChunkCSRData>(
+          loadChunkDataSubset(info, cols_, compactAngles, raysPerAngle));
+      liveSubsets_[index] = {compactAngles, owner};
+      std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+      ++readStats_.payloadLoads;
+      readStats_.payloadReadBytes += 8ull * (static_cast<uint64_t>(info.rows) + 1) +
+                                    8ull * owner->info.nnz;
+    }
+  }
+  auto slice = owner->subsetView(compactAngles, raysPerAngle, tag);
+  slice.sourceOwner = std::move(owner);
+  return slice;
+}
+
+CompactChunkCSRDirectory::ReadStats CompactChunkCSRDirectory::readStats() const {
+  std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
+  return readStats_;
 }
 
 uint64_t recommendCompactChunkHostCacheBudgetBytes(
@@ -918,6 +1037,13 @@ uint64_t recommendCompactChunkHostCacheBudgetBytes(
   return std::min(matrixBytes, std::min(totalCap, availableCap));
 }
 
+uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes) {
+  const SystemMemoryInfo memory = querySystemMemoryInfo();
+  return parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"),
+      recommendCompactChunkHostCacheBudgetBytes(
+          matrixBytes, memory.totalBytes, memory.availableBytes));
+}
+
 CompactChunkCSRDirectory openCompactChunkCSRDirectory(
     const std::string &directory, const CompactSymmetryMetadata &meta) {
   const std::filesystem::path dir(directory);
@@ -933,15 +1059,9 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
   // so the host cache would only pin the matrix in RAM for the whole run.
   const bool csrq = !infos.empty() &&
                     infos.front().format == CompactChunkFormat::CsrqRunU16;
-  const SystemMemoryInfo memory = querySystemMemoryInfo();
-  const uint64_t automaticBudget =
-      csrq ? 0ull
-           : recommendCompactChunkHostCacheBudgetBytes(
-                 matrixBytes, memory.totalBytes, memory.availableBytes);
-  const char *overrideValue =
-      std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES");
   const uint64_t cacheBudget =
-      parseByteBudget(overrideValue, automaticBudget);
+      csrq ? parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"), 0)
+           : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
   // ponytail: six 28-byte headers are rescanned to keep one validation path.
   return openCompactChunkCSRDirectory(directory, meta, cacheBudget);
 }
@@ -951,6 +1071,10 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
     uint64_t cacheBudgetBytes) {
   const std::filesystem::path dir(directory);
   std::vector<CompactChunkCSRInfo> infos = discoverChunkInfos(dir);
+
+  if (infos.front().format == CompactChunkFormat::CsrqRunU16 &&
+      meta.profile != CompactSymmetryProfile::Rot90Z)
+    throw std::runtime_error("CSRQ currently requires the ROT90_Z profile.");
 
   int expectedOffset = 0;
   uint64_t rows = 0;

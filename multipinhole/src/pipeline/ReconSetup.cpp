@@ -201,7 +201,8 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     throw std::runtime_error("-dfList supports at most " +
                              std::to_string(spect::core::kMaxBeds) + " beds.");
   args.bedCount = result.bedCount;
-  applyFixedSixModuleRoiDefaults(args, result.bedCount);
+  if (!args.matrixGridOutput)
+    applyFixedSixModuleRoiDefaults(args, result.bedCount);
   result.bedNumbers = inferBedNumbers(result.projectionPaths);
   for (size_t index = 1; index < result.bedNumbers.size(); ++index) {
     if (result.bedNumbers[index] != result.bedNumbers[index - 1] + 1)
@@ -212,6 +213,23 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   const int joints = std::max(0, result.bedCount - 1);
   const double voxelSizeZ =
       args.dz > 0.0 ? args.dz : static_cast<double>(args.Vz);
+  if (args.matrixGridOutput && joints > 0) {
+    if (!std::isfinite(args.bedStepMm) || args.bedStepMm <= 0.0 ||
+        !std::isfinite(voxelSizeZ) || voxelSizeZ <= 0.0 ||
+        args.bedStepMm / voxelSizeZ > result.baseNz + 0.5)
+      throw std::runtime_error("Multi-bed matrix_grid_output requires an explicit finite bed_step_mm in (0, baseNz*voxel_z].");
+    const int step = static_cast<int>(std::llround(args.bedStepMm / voxelSizeZ));
+    if (step < 1 || step > result.baseNz || std::abs(step * voxelSizeZ - args.bedStepMm) > 1e-4)
+      throw std::runtime_error("matrix_grid_output bed_step_mm must align to integer voxel layers (tolerance 1e-4 mm).");
+    if (args.seamXyAlign)
+      throw std::runtime_error("matrix_grid_output does not apply prototype seam XY alignment.");
+    result.canonicalGeom = {result.baseNz, step, result.baseNz - step};
+    args.outputBedOverlaps.assign(joints, result.baseNz - step);
+    args.bedOverlaps.assign(joints, 0);
+    args.Nz = result.baseNz * result.bedCount;
+    result.summary = "Multi-bed reconstruction: full matrix grids, explicit voxel-aligned step, cosine overlap without gain fitting";
+    return result;
+  }
   const double stepMm =
       args.bedStepMm > 0.0 ? args.bedStepMm
                            : spect::core::sixmodule::kMultiBedStepMm;
@@ -220,13 +238,15 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
       : 0;
   const int expectedOverlap = result.baseNz - expectedStep;
   if (joints == 0) {
-    if (args.singleBedStepAligned) {
+    if (args.singleBedStepAligned && !args.matrixGridOutput) {
       result.canonicalGeom = computeCanonicalOutputGeometry(
           result.baseNz, {expectedOverlap}, voxelSizeZ, args.bedStepMm);
     }
     args.bedOverlaps.clear();
     args.outputBedOverlaps.clear();
-    result.summary = args.singleBedStepAligned
+    result.summary = args.matrixGridOutput
+        ? "Single-bed reconstruction: full matrix-grid output"
+        : args.singleBedStepAligned
         ? "Single-bed reconstruction: output crop follows bed step"
         : "Single-bed reconstruction: legacy 72-layer output crop";
     return result;

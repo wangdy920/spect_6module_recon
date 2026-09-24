@@ -49,6 +49,41 @@ TEST(VolumeOutputTest, SanitizesAndValidatesCropRange) {
   EXPECT_FALSE(isCropSettingsValid(4, CropSettings{4, 0}));
 }
 
+TEST(VolumeOutputTest, MatrixGridOverlapPreservesCoordinatesAndDoesNotFitGains) {
+  OutputTransform t;
+  t.matrixGridOutput = true;
+  t.baseNz = 4;
+  t.bedZStarts = {0, 4};
+  t.outputBedOverlaps = {1};
+  t.canonicalGeom = {4, 3, 1};
+  int nz = 0;
+  const auto out = prepareOutputVolume({10, 11, 12, 13, 100, 101, 102, 103},
+                                       1, 1, 8, nullptr, {}, &nz, &t);
+  EXPECT_EQ(nz, 7);
+  EXPECT_EQ(out, (std::vector<double>{10, 11, 12, 56.5, 101, 102, 103}));
+  for (int step : {1, 2, 4}) {
+    t.bedZStarts = {0, 4, 8};
+    t.outputBedOverlaps = {4 - step, 4 - step};
+    t.canonicalGeom = {4, step, 4 - step};
+    std::vector<double> source;
+    for (int bed = 0; bed < 3; ++bed)
+      for (int z = 0; z < 4; ++z) source.push_back(1 + bed * step + z);
+    const auto ramp = prepareOutputVolume(source, 1, 1, 12, nullptr, {}, &nz, &t);
+    EXPECT_EQ(nz, 4 + 2 * step);
+    for (int z = 0; z < nz; ++z) EXPECT_NEAR(ramp[z], 1 + z, 1e-12);
+  }
+  t.bedZStarts = {0, 4};
+  t.outputBedOverlaps = {2};
+  t.canonicalGeom = {4, 2, 2};
+  // In the overlap only bed 0 covers z=2 and only bed 1 covers z=3.
+  const std::vector<uint8_t> mask = {0, 1, 1, 0, 0, 1, 1, 0};
+  const auto masked = prepareOutputVolume({99, 2, 3, 99, 99, 4, 5, 99},
+      1, 1, 8, &mask, {}, &nz, &t);
+  EXPECT_EQ(nz, 6);
+  for (int z = 0; z < nz; ++z)
+    EXPECT_NEAR(masked[z], z == 0 || z == 5 ? 0 : 1 + z, 1e-12);
+}
+
 TEST(VolumeOutputTest, SaveVolumeUsesFixedCenterCrop) {
   namespace fs = std::filesystem;
   const fs::path dir =

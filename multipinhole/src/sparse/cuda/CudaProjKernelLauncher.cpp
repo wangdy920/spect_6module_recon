@@ -276,7 +276,8 @@ void launchCompactRatioKernel(
                   &zMirror,
                   &ratioPtr,
                   &total,
-                  &eps};
+                  &eps,
+                  const_cast<double *>(&params.windowWeight)};
     const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((count + blockSize - 1) / blockSize);
@@ -569,7 +570,8 @@ void launchCompactRatioBatchKernel(
                   &batchSize,
                   &ratioPtr,
                   &rowCount,
-                  &eps};
+                  &eps,
+                  const_cast<double *>(&commonParams.windowWeight)};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned int gridSize =
       static_cast<unsigned int>((total + blockSize - 1) / blockSize);
@@ -1158,7 +1160,8 @@ void launchCompactUnitRatioBatchKernel(
                   &blockAngles,
                   &batchSize,
                   &ratio,
-                  &rowCount};
+                  &rowCount,
+                  const_cast<double *>(&commonParams.windowWeight)};
   const unsigned int blockSize = cuda::kCudaLaunchBlockSize;
   const unsigned long long total =
       rowCount * static_cast<unsigned long long>(batchSize);

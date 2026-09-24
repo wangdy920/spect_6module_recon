@@ -321,6 +321,7 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("timestamp_utc", timestampUtcNow());
   json.string(
       "reference_prototype",
+      args.matrixGridOutput ? "" :
       "6module_bak_src/spect_recon_PSC_6module_24pin_YSO_bedmerge.cu");
 
   json.beginObject("matrix");
@@ -328,12 +329,13 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("metadata_path",
               input.compactMetaPath != nullptr ? *input.compactMetaPath : "");
   json.string("metadata_layout",
+              meta.metadataVersion == 3 ? "smmd_v3_decimal_voxel_124" :
               meta.legacyDoubleVoxelSizeLayout
                   ? "legacy_float64_voxel_92"
                   : "canonical_float32_voxel_88");
   json.integerVector("dims", std::vector<int>{meta.Nx, meta.Ny, meta.Nz});
   json.number("voxel_size_mm", meta.voxelSize);
-  json.string("symmetry_mode", "sym90z");
+  json.string("symmetry_mode", std::string("sym") + spect::io::compactSymmetryModeName(meta));
   json.integer("symmetry_order", meta.symmetryOrder);
   json.integer("full_angles", meta.fullNumAngles);
   json.integer("det_nx", meta.detNx);
@@ -482,22 +484,23 @@ void writeRunManifest(const RunManifestInput &input) {
   json.endObject();
 
   json.beginObject("multibed");
-  json.string("stitch_method", "center66_cosine10");
+  json.string("stitch_method", args.matrixGridOutput ? "matrix_grid_cosine" : "center66_cosine10");
   json.integer("bed_count", static_cast<long long>(bedZStarts.size()));
   json.integerVector("bed_z_starts", bedZStarts);
   json.integerVector("output_bed_overlaps",
                      transform.outputBedOverlaps);
   json.integer("bed_step_layers", transform.canonicalGeom.stepLayers);
   json.number("bed_step_mm",
-              args.bedStepMm > 0.0 ? args.bedStepMm
+              args.bedStepMm > 0.0 || args.matrixGridOutput ? args.bedStepMm
                                    : spect::core::sixmodule::kMultiBedStepMm);
   json.boolean("single_bed_step_aligned", args.singleBedStepAligned);
+  json.boolean("matrix_grid_output", args.matrixGridOutput);
   json.integer("overlap_layers", transform.canonicalGeom.blendOverlap);
   json.numberVector("fitted_bed_gains", fittedGains);
-  json.string("gain_fit_method", "adjacent_overlap_log_median_mad");
+  json.string("gain_fit_method", args.matrixGridOutput ? "disabled" : "adjacent_overlap_log_median_mad");
   json.string("gain_anchor", "Bed1=1");
   json.string("gain_fit_reliability_policy",
-              "prototype_log_chain_no_gate");
+              args.matrixGridOutput ? "not_applied" : "prototype_log_chain_no_gate");
   json.endObject();
 
   json.beginObject("output");

@@ -1035,3 +1035,14 @@ TEST(IOTest, MatrixIdsSelectUniqueNuclideResourcesAndRejectMismatch) {
     EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base,ambiguous));
     std::filesystem::remove_all(root);
 }
+
+TEST(IOTest, JointEnergyWeightsMustBeFiniteAndPositive) {
+    for (const auto &weights : {"inf,1", "1,inf", "nan,1", "1,nan", "0,1", "-1,1", "0.1036,0.0617"}) {
+        auto argv = spect::io::test::compactBaseArgs();
+        argv.insert(argv.end(), {"-chunkCSRDir2", "window2", "-df2", "window2.bin",
+                                 "-energyWeights", weights});
+        spect::cli::ReconArgs args;
+        EXPECT_EQ(spect::io::test::parseReconArgsForTest(argv, args),
+                  std::string(weights) == "0.1036,0.0617") << weights;
+    }
+}

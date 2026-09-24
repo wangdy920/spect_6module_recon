@@ -399,6 +399,56 @@ TEST(IOTest, NormalizationFactorLoadsProjectionBinAndAlias) {
 
     std::filesystem::remove(weightsPath);
 }
+TEST(IOTest, NormalizationRequiresPairedWindowsAndNoBackground) {
+    const auto factors = writeTempProjectionWeights("norm_contract.bin", 2, 6, 0.91);
+    const auto config = factors.parent_path() / "norm_contract.ini";
+    for (bool joint : {false, true}) {
+        {
+            std::ofstream out(config);
+            out << "[Normalization]\nfactor_file=" << factors.generic_string()
+                << "\nfactor_file2=" << (joint ? factors.generic_string() : "") << '\n';
+        }
+        const std::vector<std::string> base = {
+            "SPECT_recon", "-config", config.string(), "-df", "Bed1.bin",
+            "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
+            "-dim", "2,2,2", "-vox", "0.3", "-ang", "2", "-detN", "2,3"
+        };
+        auto argv = base;
+        if (joint)
+            argv.insert(argv.end(), {"-chunkCSRDir2", "chunks2", "-df2", "Bed1_2.bin",
+                                     "-energyWeights", "0.1036,0.0617"});
+        spect::cli::ReconArgs accepted;
+        ASSERT_TRUE(parseReconArgsForTest(argv, accepted)) << joint;
+        for (const auto* flag : {"-bProj", "-bProjList", "-bProj2", "-bProjList2"}) {
+            if (!joint && std::string(flag).back() == '2') continue;
+            auto withBackground = argv;
+            withBackground.insert(withBackground.end(), {flag, "Bed1_bg.bin"});
+            spect::cli::ReconArgs rejected;
+            EXPECT_FALSE(parseReconArgsForTest(withBackground, rejected)) << joint << ':' << flag;
+        }
+        if (joint) {
+            spect::cli::ReconArgs secondWithoutJoint;
+            EXPECT_FALSE(parseReconArgsForTest(base, secondWithoutJoint));
+            for (const auto* field : {"factor_file", "factor_file2"}) {
+                { std::ofstream out(config); out << "[Normalization]\n" << field << '='
+                                                 << factors.generic_string() << '\n'; }
+                spect::cli::ReconArgs incomplete;
+                EXPECT_FALSE(parseReconArgsForTest(argv, incomplete)) << field;
+            }
+        }
+    }
+    std::filesystem::remove(config);
+    std::filesystem::remove(factors);
+}
+
+TEST(IOTest, BedStepMustBeFiniteAndPositiveOnCli) {
+    for (const auto *step : {"0", "-1", "nan", "inf", "8.0"}) {
+        auto argv = compactBaseArgs();
+        argv.insert(argv.end(), {"-bedStepMm", step});
+        spect::cli::ReconArgs args;
+        EXPECT_EQ(parseReconArgsForTest(argv, args), std::string(step) == "8.0");
+    }
+}
 TEST(IOTest, DetZRowWeightsReadsFromMultiBedConfig) {
     const auto weightsPath = writeTempDetZWeights("cfg48.txt", 48, 1.0f);
     const auto dir = std::filesystem::temp_directory_path() / "spect_multibed_config_tests";

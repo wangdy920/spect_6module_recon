@@ -1,6 +1,6 @@
 # Documentation Index
 
-只维护下表的当前合同。过时设计稿、执行计划、历史 release 说明和对象/数据集特定实验文档已删除；历史过程查 git，当前行为以代码、配置和五组数据决策记录为准。
+下表区分当前接口合同与验证记录。当前行为以代码和配置为准；历史发布包及实验输出保留作为证据，不自动代表最新二进制。
 
 ## Maintained
 
@@ -11,9 +11,11 @@
 | `PARAMETERS_CN.template.md` | 发布包参数说明模板 |
 | `README_RC.template.md` | 发布包 README 模板 |
 | `Capability_Matrix_CN.md` | 能力矩阵与耐久决策 |
-| `Format_Reader_Matrix_CN.md` | v4 chunk CSRB 矩阵格式 |
+| `Format_Reader_Matrix_CN.md` | 矩阵字节格式、坐标/物理合同、多能窗能力与执行职责 |
 | `CTAC_AutoMu_Validation_CN.md` | CTAC / auto-mu 调试与 gate |
 | `Recon_Interface_Migration_Field_CN.md` | 现场 ThreeModalities 接口迁移 |
+| `../../reports/2026-09-18-spect-matrix-adaptation-implementation-plan.md` | SC60 / 原生 CSRB 适配、验证与已封存 Release |
+| `../../reports/2026-09-24-universal-integration-audit.md` | 通用包双系统调用审查、编译和验证 |
 
 ## Update rule
 

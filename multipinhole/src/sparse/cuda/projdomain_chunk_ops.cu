@@ -30,7 +30,7 @@ extern "C" __device__ __forceinline__ int mirror_index(int idx, int size) {
   return idx;
 }
 
-// Poisson ratio r = p / max(yhat + b, eps) for one symmetry branch of a compact
+// Poisson ratio r = w*p / max(w*yhat + b, eps) for one symmetry branch of a compact
 // chunk. fullBackground (additive scatter estimate, same layout as the
 // measurement) may be null; the check is per row, not per nnz.
 extern "C" __global__ void compute_compact_ratio_chunk(
@@ -40,7 +40,7 @@ extern "C" __global__ void compute_compact_ratio_chunk(
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, int symId, int zMirror, float *ratio,
-    unsigned long long count, double eps) {
+    unsigned long long count, double eps, double weight) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index >= count || compactRaysPerAngle <= 0 || detNx <= 0) {
@@ -96,14 +96,14 @@ extern "C" __global__ void compute_compact_ratio_chunk(
     ratio[index] = 0.0f;
     return;
   }
-  double denom = static_cast<double>(yhat[index]);
+  double denom = weight * static_cast<double>(yhat[index]);
   if (fullBackground != nullptr) {
     denom += fullBackground[fullIndex];
   }
   if (denom < eps) {
     denom = eps;
   }
-  ratio[index] = static_cast<float>(fullProjection[fullIndex] / denom);
+  ratio[index] = static_cast<float>(weight * fullProjection[fullIndex] / denom);
 }
 
 // Compact row -> (absolute compact angle, ray within the angle). blockAngles
@@ -132,7 +132,7 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
     int fullRaysPerAngle, const int *symIds, const int *zMirrors,
     const int *blockAngles, int batchSize, float *ratioBatch,
-    unsigned long long rows, double eps) {
+    unsigned long long rows, double eps, double weight) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -204,7 +204,7 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     ratioBatch[index] = fullProjection[fullIndex] == 0.0 ? 0.0f : 1.0f;
     return;
   }
-  double denom = static_cast<double>(yhatBatch[index]);
+  double denom = weight * static_cast<double>(yhatBatch[index]);
   if (fullBackground != nullptr) {
     denom += fullBackground[fullIndex];
   }
@@ -212,11 +212,11 @@ extern "C" __global__ void compute_compact_ratio_chunk_batch(
     denom = eps;
   }
   ratioBatch[index] =
-      static_cast<float>(fullProjection[fullIndex] / denom);
+      static_cast<float>(weight * fullProjection[fullIndex] / denom);
 }
 
 // Sensitivity input for the branch batch: ratioBatch[branch*rows + row] =
-// rowWeights[fullIndex] (1 when rowWeights is null) where the (row, branch)
+// weight * rowWeights[fullIndex] (weight when null) where the (row, branch)
 // maps to a full projection row, else 0. S = A^T W 1 then falls out of the
 // ordinary batched backward.
 extern "C" __global__ void compact_unit_ratio_chunk_batch(
@@ -225,7 +225,7 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
     int compactNumAngles, int detNx, int detNz, int compactDetZ,
     int fullNumAngles, int fullRaysPerAngle, const int *symIds,
     const int *zMirrors, const int *blockAngles, int batchSize,
-    float *ratioBatch, unsigned long long rows) {
+    float *ratioBatch, unsigned long long rows, double weight) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -290,9 +290,8 @@ extern "C" __global__ void compact_unit_ratio_chunk_batch(
     ratioBatch[index] = 0.0f;
     return;
   }
-  ratioBatch[index] = rowWeights == nullptr
-                          ? 1.0f
-                          : static_cast<float>(rowWeights[fullIndex]);
+  ratioBatch[index] = static_cast<float>(
+      weight * (rowWeights == nullptr ? 1.0 : rowWeights[fullIndex]));
 }
 
 extern "C" __global__ void compact_gather_bed_double_to_float(

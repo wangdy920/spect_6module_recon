@@ -17,18 +17,21 @@
 | 决策 | 结论 |
 |---|---|
 | 生产矩阵输入 | **`-chunkCSRDir`**（或 `bin/matrix` 唯一目录自动发现）；v4 `metadata.bin`（88B 标准或已校验的 92B legacy）+ `chunk_*.csrb`，SYM_90Z compact-symmetric |
+| SC60 适配候选（2026-09-21） | 同一 CSRB 入口支持 124B SMMD v3、ROT90 无 Z 镜像；`matrix_grid_output=true` 保留完整网格，多床需显式整数层步进；原生双窗 CSRB 已有软件验证。详见当前格式合同及实施报告，不等同实采或生产签收；CSRQ 尚不支持 ROT90 |
 | 唯一布局 | compact-symmetric；standard 布局与单文件 CSRB/MAT 矩阵入口已整体退场 |
-| 算法 | **MLEM / BSREM**；subset=1 语义（全量更新），无 `-subsets` 参数；OSEM/ADMM 退场 |
+| 算法 | **MLEM / OSEM / BSREM**；`-it A:B` 表示 A 个完整迭代、B 个子集；B=1 为全量更新，保存间隔独立。OSEM 使用 MLEM 数据项的子集更新；ADMM 不支持 |
 | 公开正则 | 仅 **TV / RDP**；可选 registered CT 边权，无 CT 时 activity-only |
 | 公开 PSF | image-domain **`operator` / `sieve` / `none`**；`-psf` 为 FWHM mm；`-psfKernel adjoint|castor` 选择真伴随 Gaussian 或严格 CASToR erf/Z-norm/forward-reuse 语义；发布默认 `sieve + castor + 1.3,3` |
 | 稀疏 / 滤波 | 固定 **CUDA-first / cuFFT**；CLI smooth/Butterworth 为显式 `in_recon`；发布默认在保存副本上独立施加 CASToR Smooth 0.30 mm/3σ 与 2× zero-pad Butterworth 5 cpcm/order 8 |
 | CTAC 模型 | **`att[angle, voxel]` 因子分解** line-integral；factor 生成仅 CUDA（16-angle 分批）；AutoMuMap（`-ctacAutoMu` 从早期迭代体生成水 mu-map） |
-| 多床位 | 唯一 canonical stitch：`Bed1=min physical z`、连续 Bed1..Bed5 子集、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。`-attMap` local-Z 与 `-regCT` storage-Z 分离，`z_out_flip` 仅作用于保存输出 |
+| PSC 多床位默认 | canonical stitch：`Bed1=min physical z`、连续 Bed1..Bed5 子集、`z_bed_flip=1`、中心 `step+10` 层（260601 为 66）、prototype robust gain-fit、`step` 层步进（260601 为 56）、10 层 cosine 融合；固定多床 ROI `36×66 mm`、输出 XY `100×100`。`-attMap` local-Z 与 `-regCT` storage-Z 分离，`z_out_flip` 仅作用于保存输出 |
 | 校正权重 | 坏探测器 mask（`-badDetectorFile`）、normFactor 倒数灵敏度（`-normFactorFile`）、detZ 行权重（`-detZRowWeightsFile`，仅 sensitivity） |
 | GPU | **单 GPU**（`-cudaDevice` / `SPECT_CUDA_DEVICE`）；branch/bed 默认合批为 packed-K 正向 + CSR_ALG2 转置；`SPECT_COMPACT_BRANCH_BATCH=0` 关闭常驻 MLEM，不是产品 A/B；不规划多 GPU |
 | 输出 | 默认仅保存末次primary `<prefix>_it<N>`及独立`_butter` MHD/RAW；Gaussian输出默认关闭；各副本后置非负钳制，manifest记录实际输出清单；退出码 `0` 成功/help/dumpConf、`1` CLI/配置错误、`2` runtime |
 
 ## 能力表
+
+输入/物理含义/多窗能力集中维护于 [矩阵读取与多能窗合同](Format_Reader_Matrix_CN.md)。双窗独立读取第二份 metadata 并核对归一坐标，权重要求有限且为正。2026-09-21 候选增加原生 CSRB 双窗，不扩展 CSRQ ROT90，也不补足旧 metadata 未记录的能窗、发射谱和绝对单位。SC60 多床只有合成软件证据，实采数据及机械步进尚无。
 
 | 路径 | 特性 | 实现 | 生产签收 | 备注 |
 |---|---|---:|---:|---|

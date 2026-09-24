@@ -29,9 +29,11 @@ struct CompactSymmetricStageTiming {
 // window mean (w_k * A_k x + b_k), i.e. emission intensity x window efficiency
 // when the matrix is per emitted photon. A single-window run is the
 // one-channel case with weight 1. Channels are measurement groupings, never
-// subsets: every channel and chunk accumulates into the same statistics and
-// the image is updated once per iteration. Only CSRQ directories may be
-// combined; CSRB stays single-channel.
+// subsets: every channel and selected chunk slice accumulates into the same
+// statistics before one image update per subset (per iteration when N=1).
+// Up to two directories of the same format may be combined (CSRB or CSRQ).
+// The pipeline must validate each channel's metadata against the shared grid;
+// a directory alone carries payload dimensions, not the full physical geometry.
 struct CompactMatrixChannel {
   const spect::io::CompactChunkCSRDirectory *chunks = nullptr;
   double weight = 1.0;
@@ -50,8 +52,9 @@ struct CompactMatrixChannel {
 // Every optimizer (MLEM, BSREM-II) consumes the same two sufficient statistics
 // of the Poisson log-likelihood over all channels k:
 //   q = sum_k H_k^T ( p_k / (H_k x + b_k) )   backprojected ratio (per bed)
-//   S = sum_k H_k^T 1                          sensitivity (once, cached)
-// with H_k = w_k A_k. The data gradient is q - S. Nothing below knows which
+//   S = sum_k H_k^T W_k 1                      sensitivity (once, cached)
+// with H_k = w_k A_k and optional sensitivity-only row weights W_k (identity
+// when absent). The implementation's data gradient is q - S. Nothing below knows which
 // optimizer or penalty will use the result.
 
 // Ordered subsets (CSRB, or CSRQ without CTAC): both statistics may be

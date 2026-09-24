@@ -58,7 +58,7 @@ struct CompactRunU16View {
 };
 
 
-struct CompactChunkCSRData {
+struct CompactChunkCSRData : std::enable_shared_from_this<CompactChunkCSRData> {
   CompactChunkCSRInfo info;
   int cols = 0;
   // CSRB: rowPtr/colIdx/values. CSRQ: rowPtr (nnz offsets) + the four arrays
@@ -92,6 +92,12 @@ struct CompactChunkCSRData {
 
 class CompactChunkCSRDirectory {
 public:
+  struct ReadStats {
+    uint64_t payloadLoads = 0;
+    uint64_t payloadReadBytes = 0; // application reads, not physical disk I/O
+    uint64_t hostReuseBytes = 0;
+    uint64_t emptySlicesSkipped = 0;
+  };
   CompactChunkCSRDirectory() = default;
   CompactChunkCSRDirectory(std::filesystem::path directory,
                            std::vector<CompactChunkCSRInfo> chunks,
@@ -108,6 +114,9 @@ public:
   uint64_t cacheBudgetBytes() const { return cacheBudgetBytes_; }
 
   std::shared_ptr<const CompactChunkCSRData> loadChunk(size_t index) const;
+  CSRSubsetView loadSubset(size_t index, const std::vector<int> &compactAngles,
+                          int raysPerAngle, uint64_t tag) const;
+  ReadStats readStats() const;
   std::shared_ptr<void> acceleratorLease() const { return acceleratorLease_; }
   void setAcceleratorLease(std::shared_ptr<void> lease) const {
     acceleratorLease_ = std::move(lease);
@@ -122,6 +131,12 @@ private:
   uint64_t cacheBudgetBytes_ = 0;
   mutable uint64_t cachedBytes_ = 0;
   mutable std::vector<std::shared_ptr<const CompactChunkCSRData>> cache_;
+  // Reuse caller-held chunks without turning the budgeted cache into an LRU.
+  mutable std::vector<std::weak_ptr<const CompactChunkCSRData>> liveChunks_;
+  // Weak reuse lets a prefetched slice reach its consumer without a second read.
+  mutable std::vector<std::pair<std::vector<int>,
+      std::weak_ptr<const CompactChunkCSRData>>> liveSubsets_;
+  mutable ReadStats readStats_;
   mutable std::vector<std::shared_ptr<std::mutex>> cacheMutexes_;
   mutable std::shared_ptr<std::mutex> cacheBudgetMutex_ =
       std::make_shared<std::mutex>();
@@ -139,5 +154,8 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
 uint64_t recommendCompactChunkHostCacheBudgetBytes(
     uint64_t matrixBytes, uint64_t totalMemoryBytes,
     uint64_t availableMemoryBytes);
+
+// System-memory recommendation plus the explicit environment override.
+uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes);
 
 } // namespace spect::io
