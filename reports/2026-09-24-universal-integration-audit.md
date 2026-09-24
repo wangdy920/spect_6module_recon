@@ -191,3 +191,14 @@ Git现场核对：D仓库作者为Codex/codex@local；E仓库缺作者设置，�
 | 预处理回归 | 3次各6个BIN，共18/18逐字节等同旧结果 | 测量未改变计数输出 |
 
 cProfile代表性重建样本中native配置预览调用约0.0227秒；预处理代表性样本13次subprocess.run累计约0.5649秒、导入累计约0.29秒，均为嵌套累计时间，不能直接相加为独立阶段。正式重建源码会先预览、再dumpConf落日志，存在一次重复解析，但本次短样本仅显示几十毫秒量级，未修改。此次不做常驻Python服务、跨任务配置缓存或C++重写；没有大采集规模的profile，不能声称预处理全规模无瓶颈。若后续实测显示明显开销，优先核对原生进程粒度及中间I/O，保留计数守恒/分窗校准与逐字节门。
+
+正式入口更新已完成：
+
+- 本地代码提交：重建 `85056c8`，预处理/集成 `c5cb409`；无推送。重建工作树提交后重新配置、编译和安装，正式EXE版本 `20260924+85056c8`（无dirty），SHA256 `32225aa0f69357311712874f7699fd375903d15fb004d183ee52c662c9e13438`。预处理EXE版本/散列不变。E仓库仅保留用户原有两个根pipeline配置删除，未纳入提交，因此package.tooling_revision如实带dirty；交付tools/文档/模板来自已提交内容。
+- 当前目录与ZIP为 `E:/Xiang_Project/SPECT/6Module/release/SPECT_Core` 和 `SPECT_Core.zip`，同步SHA256旁车。ZIP为389762297字节，SHA256 `5f5d281993490c845bfc4195107cbc79630f2d3ca69117dd94c6272ca879757f`；499个文件CRC与目录逐文件SHA检查通过。
+- 旧目录、ZIP及旁车归档至 `release/history/20260924_before_85056c8/`，502个旧文件散列保留，旧ZIP散列仍为 `b139c350b0512e6a3a99cb48711d74d84ed25dfaf7f993e242db0755bc0a3ef6`。归档中transfer_copy为搬运调试副本，不是当前发布入口。
+- 搬运后第一次复核失败：Codex PID23660持有旧docs目录句柄，exFAT留下待删除目录，incoming被嵌套。只读句柄检查定位后，由用户关闭文件面板释放；未强制关闭句柄或结束进程。修正目录并重新执行全部发布路径检查，不能将中途失败记为首次成功。DEVELOPMENT与搬运脚本补上“归档后确认旧路径已消失”的门。
+- 干净构建CTest：320项中316通过、4既有跳过、0失败。新组装位置及最终E盘位置均通过三设备/核素短CUDA入口、旧/新命名relL2=0、空low的merged检查；最终部署校验0失败/4未装矩阵警告。证据：`recon_out/core_publish_20260924/{ctest.log,universal_installed.log,verify_installed.json,zip_installed.json,promotion.json}`。
+- 用户随后明确授权全局凭据修复：移除了用户级空 `credential.helper`，继承系统级manager；无需重录账号。未使用命令级helper覆盖的两个普通 `git ls-remote origin HEAD` 均通过，禁止交互提示状态下也成功。没有更改账户令牌或全局Git作者，没有推送。
+
+当前无运行中的重建/预处理任务。本次发布只改变已验证的配置/输入路由与说明，不构成新的定量或画质结论。

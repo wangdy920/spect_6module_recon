@@ -122,6 +122,7 @@ test_universal_release用合成矩阵验证PSC Tc、PSC Lu、SC60 Tc的实际一
 后续构建用--output-parent指定新的内部归档父目录（例如release/history/20260925_01），其下仍生成SPECT_Core；
 这个父目录仅是本地归档位置，不作为产品名称或组件版本。对外目录/ZIP仍固定名称，以version.txt辨别版本。
 用户要求更新当前交付时：先在独立目录组装并通过上述校验，再把现有release/SPECT_Core、同名ZIP及散列文件归档到release/history/<时间>/，最后将新包放回release/SPECT_Core及SPECT_Core.zip。不能只留下候选而让固定交付入口继续指向旧包；历史包保留用于回退。替换前确认没有进程使用该目录，并核对归档前后散列及新目录/ZIP一致性。
+E盘为exFAT；替换前关闭指向发布目录的Codex文件预览/文件面板。原生程序退出不等于目录句柄已释放；归档后必须确认旧路径实际消失，否则停止，不能把incoming目录嵌套进残留目录。
 源码、staging和已发release是不同层，不手工改包后忘记回写源模板。
 
 部署在新目录安装同一通用包，按设备指南设置当前SN、SN INI矩阵路径及几何，再运行：
