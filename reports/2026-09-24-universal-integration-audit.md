@@ -19,7 +19,8 @@
 
 共用profile不带矩阵ID；`Runtime.scanner_name`选择SN资源和JSON矩阵绑定；
 矩阵metadata决定网格、体素、探头和角度，部署端负责床距、mask及输出方向。
-SC60仍没有Lu177资源，也没有实采多床步进；不借用PSC资源或16.8 mm假设。
+SC60没有Lu177资源，不借用PSC资源或16.8 mm假设。后续文档复核纠正了此前“没有实采”的描述：
+6Module已有首批三床采集记录21mm；当前0.4mm矩阵不支持52.5层的非整数步进，21.2mm仅为试验近似。
 
 ## 已完成检查
 
@@ -88,3 +89,30 @@ EXE版本 `20260923+00c18b4`（本机时区日期），SHA256
 既有`reports/2026-09-23-lu177-tumor-timeline.md`及两组assets原样归档，
 19个图片引用均存在，4份CSV可严格UTF-8读取，行数分别为2400、40、8、16。
 此处仅确认附件完整性，不代表重新执行计数分析或将其科学结论纳入本轮验证。
+
+## SPECT_Core文档与联合工作入口
+
+用户要求后续完整包固定命名`SPECT_Core`，版本移入`version.txt`，分别管理preprocess/recon。
+交付：`E:/Xiang_Project/SPECT/6Module/release/SPECT_Core`及同级`SPECT_Core.zip`。
+preprocess版本为`SPECT_preprocess 20260924-sn-resources`，recon为`20260923+00c18b4`；
+EXE散列沿用上节。集成源码提交`6d171c2`，version.txt单独记录tooling_revision及组装时间。
+打包器移除--release-name，增加--output-parent；遇已有SPECT_Core目录或ZIP拒绝覆盖，历史包不删除。
+
+包内Markdown由14份缩为3份：README_CN、RECON_CONFIG_AND_CALL_GUIDE_CN、DEVICE_RESOURCES_CN。
+两份指南直接从源码doc复制；历史/实验说明只保留仓库，矩阵目录不再生成重复README。
+算法模板6份及其值未变，重建全局INI只修正过时CSRQ注释。源仓库README更新为主要维护入口；本地WIKI仍不入Git。
+
+验证：test_release_tooling（含三文档引用、版本分区、禁止覆盖目录/ZIP）与overlay测试通过；
+最终包verify_deployment为0失败/4未安装矩阵警告，69项manifest散列通过。
+test_universal_release --reconstruct在最终SPECT_Core上完成PSC Tc、PSC Lu、SC60 Tc三路径，
+同时解析文档中的SC60单床配置及Lu100:10/保存10/PSF1.5示例，确认实际生效值。
+444份EXE/DLL/MAT/BIN/CONF和两个wrapper与r1逐文件相同，全局参数解析值相同。
+ZIP540项、389752020字节，CRC及每个文件与交付目录一致，SHA256：
+`b139c350b0512e6a3a99cb48711d74d84ed25dfaf7f993e242db0755bc0a3ef6`。
+证据：`recon_out/universal_integration_20260924/core_delivery.json`及同目录`verify_core_delivery.py`；后者为本次交付验证脚本，不是生产入口。
+
+统一开发入口`D:/Projects/SPECT-workspace`内preprocess/recon为NTFS目录联接，Git解析仍分别返回E盘/D盘原仓库；
+SPECT.code-workspace以原路径打开双根，未迁移源码、Git或构建缓存。
+scripts/setup_spect_workspace.ps1及test_setup_spect_workspace.ps1覆盖重复执行、目标校验、冲突拒绝；检查通过。
+联合行为规范仅维护根目录DEVELOPMENT.md，定义实验分支、主线采用、构建、打包、部署、文档同步与临时证据边界。
+本轮不自动将6Module发布分支合并main，不推送远端，不重跑影像质量实验。

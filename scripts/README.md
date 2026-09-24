@@ -1,6 +1,7 @@
 # 脚本入口
 
-这里只保留当前生产路径的构建、回归、CTAC/配准与通用输出工具。矩阵唯一入口为 `-chunkCSRDir`；多床输出固定为 canonical `center66_cosine10`。历史 seam/profile 修补与自动拼接实验已删除，当前结论见 `reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html`。
+这里只保留构建、回归、CTAC/配准与通用输出工具。联合预处理/重建的行为、主要维护点和临时证据边界见[开发工作流](../DEVELOPMENT.md)。`setup_spect_workspace.ps1`建立原位双仓库入口，不移动源码或矩阵。
+PSC多床基线为canonical `center66_cosine10`；SC60走matrix_grid_output并需要明确的设备几何，不能沿用PSC裁剪。历史seam/profile修补结论见`reports/2026-08-10-prototype-sieve-castor-fwhm1p3-convergence.html`。
 
 ## Canonical 数值回归
 

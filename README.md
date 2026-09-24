@@ -1,5 +1,9 @@
 # SPECT-recon
 
+Joint preprocessing/reconstruction development: [workflow and maintenance contract](DEVELOPMENT.md).
+Open `D:/Projects/SPECT-workspace/SPECT.code-workspace` for both original repositories;
+`scripts/setup_spect_workspace.ps1` recreates the local junction-based entry without moving sources.
+
 High-performance 3D SPECT reconstruction pipeline with C++17 modular architecture and CUDA acceleration. The project provides:
 
 - **C++ recon engine**: consumes projection data (MAT/BIN) + compact chunk CSRB system matrix and runs MLEM or BSREM-II with PSF, TV/RDP regularisation, masks, and Butterworth filtering.
