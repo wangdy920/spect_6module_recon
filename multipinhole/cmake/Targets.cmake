@@ -266,6 +266,9 @@ add_custom_command(TARGET SPECT_recon POST_BUILD
           "${SPECT_RECON_SOURCE_DIR}/config/bad_dector"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/bad_dector"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${SPECT_RECON_SOURCE_DIR}/config/ct_spect_registration.ini"
+          "$<TARGET_FILE_DIR:SPECT_recon>/config/ct_spect_registration.ini"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "${SPECT_RECON_SOURCE_DIR}/config/algo_mlem.conf"
           "$<TARGET_FILE_DIR:SPECT_recon>/config/algo_mlem.conf"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -381,4 +384,7 @@ endif()
 add_custom_command(TARGET SPECT_recon POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           "${SPECT_RECON_SOURCE_DIR}/config/profiles"
-          "$<TARGET_FILE_DIR:SPECT_recon>/config/profiles")
+          "$<TARGET_FILE_DIR:SPECT_recon>/config/profiles"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${SPECT_RECON_SOURCE_DIR}/config/scanners"
+          "$<TARGET_FILE_DIR:SPECT_recon>/config/scanners")

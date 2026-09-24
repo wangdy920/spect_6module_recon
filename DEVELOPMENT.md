@@ -1,7 +1,7 @@
 # SPECT 联合开发与发布行为
 
 这是预处理与重建两个仓库的唯一联合工作流说明，面向开发维护者，不随终端使用包分发。
-发布包面向软件同伴的说明只有README、完整链路集成指南、设备部署与适配指南三份。
+发布包只保留四份说明：README入口页、面向上位机的预处理调用指南和重建调用指南、设备部署与适配指南。两份调用指南分别说明调用示例、修改场景及无需修改的默认项。
 本文件定义何时调用已有脚本、同步哪些记录；不新增实验平台或自动合并工具。
 
 ## 1. 一个工作入口，两个原位仓库
@@ -33,7 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:/Projects/SPECT-recon/scri
 | 修正与验证 | 受影响单测、实际EXE短运行；数值改动加同输入回归 | 代码/配置及其唯一说明，记录执行命令和证据 | 单测/编译不冒充数值或质量验证 |
 | 合并主线 | 每仓库独立审查、提交、Git merge/cherry-pick | 相关使用指南、格式协议/CHANGELOG（仅确实变化时）、实验结论 | 用户批准采用，主线测试通过，两个仓库对应提交可追溯 |
 | 构建 | 预处理MSBuild；重建CMake/CTest | 构建日志、版本及EXE散列 | 不以旧EXE验证新源码；不能把dirty构建叫正式干净版本 |
-| 通用发布 | preprocess/tools/package_6module_release.py | 三份使用文档、SN资源/JSON、共用模板、version.txt、manifest | 固定包名SPECT_Core，新输出父目录、无原始矩阵、校验及入口短测通过 |
+| 通用发布 | preprocess/tools/package_6module_release.py | 四份使用文档、SN资源/JSON、共用模板、version.txt、manifest | 固定包名SPECT_Core，新输出父目录、无原始矩阵、校验及入口短测通过 |
 | 部署 | verify_deployment.py；必要时install_release_overlay.py | 现场SN/资源根/床距/坏道/ROI/方向，校验报告、短运行记录 | 本SN矩阵齐备；现场改动明确，不忽略二进制异常 |
 | 收尾归档 | Git diff/status，更新原主题结论 | 关键证据和复现入口，CONTINUITY只留跨会话路由 | 不复制另一份长报告，不顺带删除未核对的实验/用户文件 |
 
@@ -104,7 +104,7 @@ cmake --install build/csrb-native-20260921 --config Release --prefix D:/Projects
 version.txt分为[preprocess]、[recon]，独立记录EXE --version及SHA256；[package]记录组装时间和集成脚本Git提交。
 程序未重编的一方版本保持不变，文档/脚本/配置变化由tooling_revision和manifest体现。不得手改版本文件冒充新二进制。
 正式打包输入必须是指定的已验证重建staging目录，不能自动搜最近EXE。
-当前文档整理版可以复用已验证的00c18b4二进制，只改打包文档和校验器；不能宣称它编译自后续文档提交。
+仅文档修改可复用已验证二进制，但必须记录其原编译提交；本轮含原生SN配置解析修改，必须重新编译后交付。
 在预处理仓库执行（重建输入按本次身份替换，路径必须真实存在）：
 ```powershell
 python tools/package_6module_release.py --recon-root D:/Projects/SPECT-recon/staging/SPECT_recon_20260924_clean
@@ -112,7 +112,7 @@ python tools/verify_deployment.py --release-root release/SPECT_Core
 python tools/test_universal_release.py --release-root release/SPECT_Core --reconstruct
 ```
 每条成功才继续。打包器负责复制二进制/依赖/模板/两设备资源、生成README及manifest，不编译EXE，也不包括矩阵和原始数据。
-六份算法CONF从指定重建输入复制；通用包会移除设备matrix_id，按SN JSON绑定，05/06都用原生CSRB。
+六份算法CONF从指定重建输入复制；通用包会移除设备matrix_id，按重建config/scanners/<SN>.ini的核素节绑定，05/06都用原生CSRB。SN模板源在recon/multipinhole/config/scanners；预处理核素JSON只维护资源。构建负责复制SN模板，打包检查路径与资产清单一致；外部矩阵路径在部署时配置。
 不要把独立RC的历史05 CSRQ绑定当成通用包05。CSRQ仍实验性。
 test_universal_release用合成矩阵验证PSC Tc、PSC Lu、SC60 Tc的实际一轮GPU入口/几何，不证明实采质量。
 默认完整矩阵未安装时verify的4个WARN允许用于“包完整性”交付；现场须加require-matrix。
@@ -121,9 +121,10 @@ test_universal_release用合成矩阵验证PSC Tc、PSC Lu、SC60 Tc的实际一
 已有SPECT_Core目录或SPECT_Core.zip会被拒绝覆盖，不自动删除或替换。
 后续构建用--output-parent指定新的内部归档父目录（例如release/history/20260925_01），其下仍生成SPECT_Core；
 这个父目录仅是本地归档位置，不作为产品名称或组件版本。对外目录/ZIP仍固定名称，以version.txt辨别版本。
+用户要求更新当前交付时：先在独立目录组装并通过上述校验，再把现有release/SPECT_Core、同名ZIP及散列文件归档到release/history/<时间>/，最后将新包放回release/SPECT_Core及SPECT_Core.zip。不能只留下候选而让固定交付入口继续指向旧包；历史包保留用于回退。替换前确认没有进程使用该目录，并核对归档前后散列及新目录/ZIP一致性。
 源码、staging和已发release是不同层，不手工改包后忘记回写源模板。
 
-部署在新目录安装同一通用包，按设备指南设置当前SN、JSON矩阵根及几何，再运行：
+部署在新目录安装同一通用包，按设备指南设置当前SN、SN INI矩阵路径及几何，再运行：
 ```powershell
 python tools/verify_deployment.py --release-root D:/SPECT_install --require-matrix --allow-config-overrides
 ```
@@ -136,16 +137,16 @@ python tools/verify_deployment.py --release-root D:/SPECT_install --require-matr
 | 变更类型 | 唯一代码/配置主人 | 同步文档与检查 |
 |---|---|---|
 | 预处理参数/产物/状态 | preprocess/tools/run_6module_preprocess.py、SPECT_2__1原生代码及INI | 完整链路指南；wrapper测试，原生变化加投影回归 |
-| 设备协议、编号、LUT、矩阵绑定 | preprocess/SPECT_2__1/scanners、设备资源、核素JSON打包逻辑 | 设备指南；资源身份、矩阵/跨SN负例、实际设备样本 |
+| 设备协议、编号、LUT、矩阵绑定 | preprocess/SPECT_2__1/scanners、设备资源；recon/multipinhole/config/scanners矩阵路径 | 设备指南；资源身份、矩阵/跨SN负例、实际设备样本 |
 | 算法、配置键/默认、矩阵格式 | recon/multipinhole源码与config/profiles | 对应Format_Reader_Matrix_CN.md或参数模板；实际影响使用接口时同步完整链路指南；测试/构建 |
 | wrapper或优先级 | preprocess/tools/run_6module_recon.py及recon配置解析 | 完整链路指南；两SN/核素dump和入口检查 |
-| 发布内容/依赖/文档数量 | preprocess/tools/package_6module_release.py、verify_deployment.py | README索引、三份包文档、test_release_tooling及最终包验证 |
+| 发布内容/依赖/文档数量 | preprocess/tools/package_6module_release.py、verify_deployment.py | README索引、四份包文档、test_release_tooling及最终包验证 |
 | 联合工作流程 | recon/DEVELOPMENT.md、setup_spect_workspace.ps1 | 两仓库入口索引；不再复制第二份行为说明 |
 | 已批准数值/实验结果 | 该主题原始报告/实验README | 结论、边界、证据/复现命令；阶段结束才同步CONTINUITY路由 |
 
 主要长期维护脚本：两个wrapper、read_preprocess_ini.py、package_6module_release.py、verify_deployment.py、install_release_overlay.py及对应test_*.py；
 重建的CMake/build_release.bat、scripts/package_rc.ps1、stage_dev_package.ps1和数值单测；setup_spect_workspace.ps1只负责本地入口。
-主要文档：本行为说明；preprocess两份使用指南和已跟踪README索引；recon README、multipinhole/doc/README、矩阵格式协议和参数源模板。
+主要文档：本行为说明；preprocess两份调用指南、设备指南和已跟踪README索引；recon README、multipinhole/doc/README、矩阵格式协议和参数源模板。
 preprocess/WIKI.md当前被.gitignore排除，仅为本地历史索引，不作为必须跨机器同步的规范。
 CHANGELOG只记用户可见行为/格式/发布变化；本地文档排版不必为了触发版本重编EXE。
 
@@ -156,7 +157,7 @@ CHANGELOG只记用户可见行为/格式/发布变化；本地文档排版不必
 
 ## 7. 当前已知边界
 
-默认Tc/Lu标准OSEM50:N10；Lu保留独立208/113原生CSRB模型。SC60没有Lu资源。
+默认Tc/Lu标准OSEM50:N10；Lu默认prefer_split，high=208/low=113原生CSRB；仅全床无分窗时选择合并BIN及high矩阵，缺一窗/损坏/床间混用拒绝。空矩阵槽不触发输入切换。SC60没有Lu资源。
 SC60已有首批三床采集报告21mm；当前0.4mm矩阵下为52.5层，整数层限制仍在，21.2mm是试验近似不是正式机械参数。
 早期“尚无实采”的记录是当时状态，不能覆盖现有SC60_ADAPTATION_CN.md及scanner.ini的首批实采证据。
 SC60 draft引导LUT/峰锚、绝对角度/CT对齐及定量边界见当前设备指南；没有实采质量证据时不因短测通过而扩大结论。

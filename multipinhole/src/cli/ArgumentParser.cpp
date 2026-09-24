@@ -176,6 +176,60 @@ ArgumentParser::findExeLocalMatrixDirs(const std::filesystem::path& exeDir) {
     return out;
 }
 
+void ArgumentParser::applyScannerMatrices(ReconArgs& a, char** argv) {
+    if (a.scannerConfig.empty()) return;
+    auto file = std::filesystem::path(a.scannerConfig);
+    if (!file.is_absolute()) file = std::filesystem::path(a.configPath).parent_path() / file;
+    file = std::filesystem::absolute(file).lexically_normal();
+    ConfigParser settings;
+    if (!settings.load(file.string())) throw std::runtime_error("Cannot load scanner config: " + file.string());
+    a.scannerConfig = file.string();
+    a.scannerName = settings.getString("Scanner", "name");
+    if (a.scannerName != file.stem().string())
+        throw std::runtime_error("Scanner identity disagrees with config filename");
+    if (a.scannerName.empty() || !settings.hasSection(a.isotope))
+        throw std::runtime_error("Scanner config has no binding for isotope " + a.isotope);
+    a.projectionInputMode = settings.getString(a.isotope, "input_mode");
+    if (a.projectionInputMode != "single" && a.projectionInputMode != "merged" && a.projectionInputMode != "prefer_split")
+        throw std::runtime_error("input_mode must be single, merged or prefer_split");
+    const bool secondInput = !a.projPath2.empty() || !a.projPaths2.empty();
+    const bool firstInput = !a.projPath.empty() || !a.projPaths.empty();
+    if (a.projectionInputMode == "prefer_split" && firstInput && !secondInput && a.projectionModel != "merged") {
+        auto paths = a.projPaths;
+        if (paths.empty()) paths.push_back(a.projPath);
+        for (const auto& path : paths) {
+            const auto stem = toLower(std::filesystem::path(path).stem().string());
+            for (const std::string suffix : {"_high", "_low", "_208", "_113"})
+                if (stem.size() >= suffix.size() && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
+                    throw std::runtime_error("Split projection requires both input lists; cannot use it as merged data");
+        }
+    }
+    if (a.projectionModel == "merged" || a.projectionInputMode == "merged") a.projectionModel = "merged";
+    else if (a.projectionInputMode == "single") a.projectionModel = "single";
+    else a.projectionModel = (secondInput || !firstInput) ? "joint" : "merged";
+    if (a.projectionModel != "joint" && secondInput)
+        throw std::runtime_error("Single/merged input mode cannot consume a second projection list");
+    auto matrix = [&](const char* key) {
+        const auto value = settings.getString(a.isotope, key);
+        if (value.empty()) throw std::runtime_error(std::string("Selected projection requires ") + key);
+        const auto path = std::filesystem::path(value);
+        return (path.is_absolute() ? path : executableDir(argv) / path).lexically_normal().string();
+    };
+    // Slot order stays high, low to preserve the existing dual-window weights and CLI.
+    if (!a.chunkCSRDirExplicit) a.chunkCSRDir = matrix("sysmat_high");
+    if (a.projectionModel == "joint") {
+        if (!a.chunkCSRDir2Explicit) a.chunkCSRDir2 = matrix("sysmat_low");
+    } else {
+        if (a.chunkCSRDir2Explicit || !a.normFactorFile2.empty() ||
+            (a.projectionInputMode == "prefer_split" && !a.normFactorFile.empty()))
+            throw std::runtime_error("Merged input cannot reuse a second matrix or split-window normalization");
+        a.chunkCSRDir2.clear();
+        a.energyWindowWeights.clear();
+    }
+    a.matrixId.clear();
+    a.matrixId2.clear();
+}
+
 bool ArgumentParser::applyMatrixAutoDiscovery(ReconArgs& args,
                                                      char** argv,
                                                      std::string& error) {
@@ -241,11 +295,14 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
     std::string preScanAlg;
     std::string preScanAlgoConf;
     std::string requestedIsotope;
+    std::string requestedScannerConfig;
     for (int i = 1; i < argc; i++) {
         std::string key = argv[i];
         if (key == "-config" && i + 1 < argc) {
             configPath = argv[++i];
             args.configExplicit = true;
+        } else if (key == "-scannerConf" && i + 1 < argc) {
+            requestedScannerConfig = argv[++i];
         } else if (key == "-isotope" && i + 1 < argc) {
             requestedIsotope = canonicalIsotope(argv[++i]);
         } else if (key == "-opti" && i + 1 < argc) {
@@ -408,6 +465,8 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         args.isotope = requestedIsotope;
     }
     // 4. Resolve matrix defaults after all config/CLI layers are known.
+    if (!requestedScannerConfig.empty()) args.scannerConfig = requestedScannerConfig;
+    applyScannerMatrices(args, argv);
     std::string matrixDiscoveryError;
     if (!applyMatrixAutoDiscovery(args, argv, matrixDiscoveryError)) {
         std::cerr << "Error: " << matrixDiscoveryError << "\n";
@@ -486,6 +545,10 @@ void ArgumentParser::registerHandlers() {
         return true; // Pre-scanned assertion, never an override of recipe identity.
     }, {"-isotope"});
     bindHandlerAliases(dataHandler, {"-df", "-i", "-input"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        a.scannerConfig = ArgumentParser::getRequiredArg(i, argc, argv, "-scannerConf");
+        return true;
+    }, {"-scannerConf"});
 
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.projPaths = spect::core::sortPathsByBedOrder(
@@ -1179,6 +1242,7 @@ void ArgumentParser::registerHandlers() {
 }
 
 void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
+    a.scannerConfig = cfg.getString("SystemMatrix", "scanner_config", a.scannerConfig);
     a.reconSectionsOverrideCli = cfg.getBool(
         "Compatibility", "recon_sections_override_cli",
         a.reconSectionsOverrideCli);
@@ -2366,6 +2430,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
 
     std::cout << "[Acquisition]\n";
     std::cout << "isotope = " << a.isotope << "\nprojection_model = " << a.projectionModel << "\n";
+    std::cout << "scanner_name = " << a.scannerName << "\ninput_mode = " << a.projectionInputMode << "\n";
     std::cout << "[Normalization]\nfactor_file = " << a.normFactorFile
               << "\nfactor_file2 = " << a.normFactorFile2 << "\n";
     std::cout << "[SystemMatrix]\n";

@@ -402,6 +402,9 @@ void writeRunManifest(const RunManifestInput &input) {
   json.string("norm_factor_file2", args.normFactorFile2);
   json.string("isotope", args.isotope);
   json.string("projection_model", args.projectionModel);
+  json.string("scanner_config", args.scannerConfig);
+  json.string("scanner_name", args.scannerName);
+  json.string("input_mode", args.projectionInputMode);
   json.endObject();
 
   json.beginObject("algorithm");

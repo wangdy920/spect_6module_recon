@@ -1046,3 +1046,38 @@ TEST(IOTest, JointEnergyWeightsMustBeFiniteAndPositive) {
                   std::string(weights) == "0.1036,0.0617") << weights;
     }
 }
+
+TEST(IOTest, ScannerMatricesPreserveChannelOrderAndSkipUnusedSlots) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_scanner_matrices";
+    std::filesystem::create_directories(root);
+    const auto config = root / "global.ini";
+    const auto scanner = root / "PSC30-MPH6.ini";
+    { std::ofstream f(config); f << "[Acquisition]\nisotope=Lu177\nprojection_model=joint\n"
+        "[SystemMatrix]\nenergy_window_weights=0.1036,0.0617\n"; }
+    auto writeScanner = [&](const std::string& low) {
+        std::ofstream f(scanner); f << "[Scanner]\nname=PSC30-MPH6\n[Lu177]\ninput_mode=prefer_split\n"
+            "sysmat_high=" << (root / "high").generic_string() << "\nsysmat_low=" << low << "\n";
+    };
+    writeScanner((root / "low").generic_string());
+    std::vector<std::string> base = {"SPECT_recon", "-config", config.string(), "-scannerConf", scanner.string(),
+                                    "-df", "Bed2_high.bin", "-df2", "Bed2_low.bin"};
+    spect::cli::ReconArgs joint;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(base, joint));
+    EXPECT_EQ(joint.projectionModel, "joint");
+    EXPECT_EQ(joint.energyWindowWeights, (std::vector<double>{.1036, .0617}));
+    EXPECT_EQ(std::filesystem::path(joint.chunkCSRDir2), root / "low");
+    writeScanner("");
+    spect::cli::ReconArgs missing;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, missing));
+    base.resize(7);
+    spect::cli::ReconArgs partial;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, partial));
+    base.back() = "Bed2.bin";
+    spect::cli::ReconArgs merged;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(base, merged));
+    EXPECT_EQ(merged.projectionModel, "merged");
+    EXPECT_TRUE(merged.chunkCSRDir2.empty());
+    EXPECT_TRUE(merged.energyWindowWeights.empty());
+    EXPECT_EQ(std::filesystem::path(merged.chunkCSRDir), root / "high");
+    std::filesystem::remove_all(root);
+}

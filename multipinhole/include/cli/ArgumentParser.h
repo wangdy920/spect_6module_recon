@@ -150,6 +150,7 @@ private:
      */
     static bool applyMatrixAutoDiscovery(ReconArgs& args, char** argv,
                                          std::string& error);
+    static void applyScannerMatrices(ReconArgs& args, char** argv);
 
     /**
      * @brief Resolve compact chunk directory paths relative to the executable.

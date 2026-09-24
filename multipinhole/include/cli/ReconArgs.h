@@ -69,6 +69,9 @@ struct ReconArgs {
     std::string isotope;          ///< Optional acquisition isotope; checked against the selected recipe
     std::string projectionModel;  ///< single, merged or joint; projection contract supplied by wrapper
     std::string matrixRoot = "matrix"; ///< Executable-relative deployment root
+    std::string scannerConfig; ///< SN-specific matrix settings, relative to the global config.
+    std::string scannerName;
+    std::string projectionInputMode;
     std::string matrixId, matrixId2; ///< Stable directory IDs, never guessed from isotope
     bool chunkCSRDir2Explicit = false;
     std::string normFactorFile2;   ///< Second channel correction c (never inherit channel 1 norm)
