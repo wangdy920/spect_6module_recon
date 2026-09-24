@@ -28,7 +28,7 @@ SC60仍没有Lu177资源，也没有实采多床步进；不借用PSC资源或16
 - 6Module的`test_release_tooling.py`、`test_run_6module_recon.py`、`test_run_6module_preprocess_wrapper.py`、`test_install_release_overlay.py`通过。
 - 通用包合成测试：PSC Tc与Lu输出100×100×66；SC60 Tc输出90×90×240；均为1完整迭代、N10、有限/非负/非零。
 - 配置测试确认标准默认50:10/None，独立208/113窗、原权重及SN绑定；缺矩阵、跨SN、错误SMMD、SC60缺少部署配置/床距/核素资源均拒绝。
-- 发布校验在初步修复副本通过，0失败；4个预期警告是未随包部署的矩阵。测试中的故意错误注入日志带FAIL，不等于测试失败。
+- 最终`SPECT_Universal_260924_r1`发布校验通过，68项manifest散列一致，0失败；4个预期警告是未随包部署的矩阵。测试中的故意错误注入日志带FAIL，不等于测试失败。
 
 首轮构建是增量检查，数值源码未再改变，EXE仍为原`20260921+635dec6-dirty`，SHA256
 `1d48b48f5ccf1a3b1173b02f6b7032533a6c429fc1b400cf8756677e480ccb94`。
@@ -43,7 +43,8 @@ ctest --test-dir build/csrb-native-20260921 -C Release --output-on-failure
 # E:/Xiang_Project/SPECT/6Module
 python tools/test_release_tooling.py
 python tools/test_run_6module_recon.py
-python tools/test_universal_release.py --release-root release/SPECT_Universal_260924_audit --reconstruct
+python tools/test_universal_release.py --release-root release/SPECT_Universal_260924_r1 --reconstruct
+python tools/verify_deployment.py --release-root release/SPECT_Universal_260924_r1
 ```
 
 合成夹具使用真实探头/图像尺寸、稀疏中心体素和旋转/Z对称映射，不是实际系统矩阵。
@@ -54,5 +55,36 @@ python tools/test_universal_release.py --release-root release/SPECT_Universal_26
 
 ## 最终交付
 
-提交后重新编译、最终修复包和身份校验待本轮完成后填写。
-原`SPECT_Universal_260924`及D盘9月21日封存包保持不变；修复包使用独立目录。
+重建源码提交 `00c18b4` 已创建，执行 `cmake -S . -B build/csrb-native-20260921` 后
+`--clean-first --target SPECT_recon spect_tests` 全量重编译通过。工具链为VS18 2026/CUDA13.2.51，
+三份嵌入fatbin均含sm86/89/120；重新运行CTest仍为315通过、4既有跳过。
+保留既有OpenMP collapse、浮点转换、静态运行库链接警告，未为整理工作树扩大数值修改范围。
+
+EXE版本 `20260923+00c18b4`（本机时区日期），SHA256
+`02df6dc7801c0183f636d7a005d7ea55dc4fc83a3a36ed729441fa595cdafc9a`。
+独立通用修复包为 `E:/Xiang_Project/SPECT/6Module/release/SPECT_Universal_260924_r1`。
+默认PSC，Tc04/Lu06均为标准OSEM50:10；SC60仍须按设备资源说明手动设置几何，矩阵不随包分发。
+
+6Module原生预处理构建也通过。EXE SHA256
+`56f5ba60a601182d8ec69091f7cd05b9d01118a1ed180a3b199ade393009f113`；
+与历史5948f0c6版本进行三个既有三角度输入的投影回归：PSC Tc、PSC Lu双窗、SC60共5份BIN
+逐文件SHA一致，输入hash未变。不将三角度检查扩大为所有原始采集的重验。
+
+真实SC60模拟投影经通用wrapper、32.8×12 mm ROI派生矩阵、N10/PSF1.5一轮重建完成，
+对既有同参数it1参考的relL2为 **5.1682991e-8**，通过事先沿用的1e-5容差。
+最终体积90×90×240、0.4 mm；此项只证明该检查点数值回归。
+运行前后的目录、配方和输入身份分别记录，未修改原始矩阵或投影。
+
+证据集中于 `recon_out/universal_integration_20260924/`：`verify_real.py`、`PASS.json`、
+`preprocess_checks.json`、三组预处理日志、SC60实际命令/配置/输出；
+完整CTest日志位于上一级 `universal_integration_20260924_ctest.log`。
+6Module原生预处理、SN资源迁移、打包器和wrapper修改已整体核对并提交为`849d002`；
+测试缓存隔离修正为`c27b2bd`，测试将缓存写入临时目录，不污染被测发布包。
+最终包实际重建测试通过，日志为`universal_final.log`；最终包不含测试缓存或gtest DLL。
+这些是6Module仓库提交，不是重建EXE来源；后续报告归档提交不改变上述EXE身份。
+原`SPECT_Universal_260924`的manifest散列再次只读核对通过；D盘9月21日封存包未修改。
+修复包使用独立目录，未生成新ZIP，未推送远端。
+
+既有`reports/2026-09-23-lu177-tumor-timeline.md`及两组assets原样归档，
+19个图片引用均存在，4份CSV可严格UTF-8读取，行数分别为2400、40、8、16。
+此处仅确认附件完整性，不代表重新执行计数分析或将其科学结论纳入本轮验证。
