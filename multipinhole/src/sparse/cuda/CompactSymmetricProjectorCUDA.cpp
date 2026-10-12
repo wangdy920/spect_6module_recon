@@ -1478,17 +1478,17 @@ bool computeCompactChunkForwardProjectionCUDA(
   const size_t fullRows = static_cast<size_t>(meta.fullRows());
   std::fill(fullExpected, fullExpected + fullRows, 0.0);
   std::vector<uint8_t> coverage(fullRows, 0);
+  const auto branches = enumerateCompactBranches(meta);
+  std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
+  for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+    transformForwardIntoFloat(smoothedImage,
+                              rotatedImages.data() + branchIndex * nvox, meta,
+                              branches[branchIndex].symId,
+                              branches[branchIndex].zMirror, threads);
+  }
 
   if (isCsrqDirectory(chunks)) {
     const int matrixIndex = csrqMatrixIndexOf(chunks);
-    const auto branches = enumerateCompactBranches(meta);
-    std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
-    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-      transformForwardIntoFloat(smoothedImage,
-                                rotatedImages.data() + branchIndex * nvox, meta,
-                                branches[branchIndex].symId,
-                                branches[branchIndex].zMirror, threads);
-    }
     if (!refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
                                             rotatedImages.size())) {
       return false;
@@ -1543,16 +1543,8 @@ bool computeCompactChunkForwardProjectionCUDA(
   }
 
   if (attFactors != nullptr) {
-    // CSRB CTAC: the eight rotated images as one branch batch, then per
+    // CSRB CTAC: the rotated images as one branch batch, then per
     // chunk the attenuated per-angle forward ([branch][chunkRow] output).
-    const auto branches = enumerateCompactBranches(meta);
-    std::vector<float> rotatedImages(branches.size() * nvox, 0.0f);
-    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-      transformForwardIntoFloat(smoothedImage,
-                                rotatedImages.data() + branchIndex * nvox, meta,
-                                branches[branchIndex].symId,
-                                branches[branchIndex].zMirror, threads);
-    }
     if (!refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
                                             rotatedImages.size())) {
       return false;
@@ -1593,19 +1585,17 @@ bool computeCompactChunkForwardProjectionCUDA(
     return true;
   }
 
-  std::vector<float> imgRot(nvox, 0.0f);
   std::vector<float> y;
-  for (const auto &branch : enumerateCompactBranches(meta)) {
-    transformForwardIntoFloat(smoothedImage, imgRot.data(), meta, branch.symId,
-                              branch.zMirror, threads);
-    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size();
-         ++chunkIndex) {
-      const auto chunk = chunks.loadChunk(chunkIndex);
-      const spect::io::CSRView view = chunk->view();
-      const int compactRowBase =
-          chunk->info.angleOffset * meta.compactRaysPerAngle;
-      y.assign(static_cast<size_t>(view.rows), 0.0f);
-      if (!spmvFloatCUDA(view, imgRot.data(), y.data())) {
+  // Consume all symmetries while this chunk is live, including partial caches.
+  for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
+    const auto chunk = chunks.loadChunk(chunkIndex);
+    const spect::io::CSRView view = chunk->view();
+    const int compactRowBase =
+        chunk->info.angleOffset * meta.compactRaysPerAngle;
+    y.resize(static_cast<size_t>(view.rows));
+    for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
+      const auto &branch = branches[branchIndex];
+      if (!spmvFloatCUDA(view, rotatedImages.data() + branchIndex * nvox, y.data())) {
         return false;
       }
       scatterCompactForwardProjection(meta, compactRowBase, y, branch.symId,

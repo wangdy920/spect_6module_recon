@@ -533,6 +533,71 @@ TEST_F(CompactSubsetCudaTest, SynchronousCsrUploadRetainsBackingStorageUntilEvic
   EXPECT_TRUE(previous.expired());
 }
 
+TEST_F(CompactSubsetCudaTest, FullForwardReadsEachUncachedChunkOncePerPass) {
+  const auto dir = std::filesystem::temp_directory_path() / "spect_forward_one_pass";
+  for (const bool useZ : {false, true}) {
+    auto meta = makeSixAngleMeta();
+    if (!useZ) {
+      meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+      meta.detNz = meta.compactDetZ;
+    }
+    const auto compact = makeSixAngleCompactCSR(meta);
+    const auto full = spect::io::test::expandCompactToyToFullDense(meta, compact);
+    writeChunkDirectory(dir, meta, compact, 2);
+    const auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 0);
+    std::vector<double> image(meta.totalVoxels), forward(meta.fullRows());
+    std::vector<double> reference(meta.fullRows(), 0.0);
+    for (int c = 0; c < meta.totalVoxels; ++c) image[c] = 0.4 + 0.13 * c;
+    for (size_t r = 0; r < reference.size(); ++r)
+      for (int c = 0; c < meta.totalVoxels; ++c)
+        reference[r] += full[r * meta.totalVoxels + c] * image[c];
+    ASSERT_TRUE(spect::cuda::prepareCompactChunkExecutionCUDA(chunks));
+    for (int pass = 0; pass < 2; ++pass) {
+      const auto before = chunks.readStats();
+      ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+          chunks, meta, image.data(), 1, forward.data()));
+      EXPECT_LE(relL2(forward, reference), 1e-5);
+      EXPECT_LE(chunks.readStats().payloadLoads - before.payloadLoads,
+                chunks.chunks().size());
+    }
+    ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_F(CompactSubsetCudaTest, FirstSubsetReleasesWholeChunkDeviceCapacity) {
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  constexpr uint32_t nnz = 8u * 1024u * 1024u;
+  const auto makeChunk = [nnz] {
+    auto chunk = std::make_shared<spect::io::CompactChunkCSRData>();
+    chunk->info.rows = 4;
+    chunk->info.angleCount = 2;
+    chunk->info.nnz = nnz;
+    chunk->cols = nnz / 4;
+    chunk->rowPtr = {0, nnz / 4, nnz / 2, 3 * (nnz / 4), nnz};
+    chunk->colIdx.resize(nnz);
+    for (uint32_t i = 0; i < nnz; ++i) chunk->colIdx[i] = i % chunk->cols;
+    chunk->values.assign(nnz, 1.0f);
+    return chunk;
+  };
+  const auto first = makeChunk(), second = makeChunk();
+  ASSERT_TRUE(spect::cuda::warmupResidentMatrixSetCUDA({first->view()}));
+  const std::vector<float> image(first->cols, 1.0f);
+  std::vector<float> forward(4);
+  ASSERT_TRUE(spect::cuda::spmvFloatCUDA(
+      second->view(), image.data(), forward.data()));
+  const auto whole = second->subsetView({0, 1}, 2, 0);
+  const auto a = first->subsetView({0}, 2, 1);
+  const auto b = first->subsetView({1}, 2, 2);
+  const auto before = spect::cuda::getMemoryInfo().free;
+  ASSERT_TRUE(spect::cuda::prefetchCompactFloatMatrixCUDA(a, whole));
+  ASSERT_TRUE(spect::cuda::prefetchCompactFloatMatrixCUDA(b, a));
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  // Each 64 MiB slot becomes 32 MiB; leave 16 MiB for driver/display noise.
+  EXPECT_GE(spect::cuda::getMemoryInfo().free, before + 48ull * 1024 * 1024);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+}
+
 // Per subset, S_m and q_m equal the dense oracle restricted to the subset's
 // rows; over all subsets they add up to the full-data S and q. Two chunks of
 // three angles exercise slices with several segments, slices spanning both

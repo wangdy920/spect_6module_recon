@@ -1752,11 +1752,17 @@ private:
 
   // Slice upload: re-based row pointers and the block-angle table go through
   // the pinned stage in one shot; the nnz segments are copied back to back
-  // straight from the (page-locked) chunk arrays.
+  // straight from the owned chunk arrays (pageable for partial host caches).
   void uploadIoCsrSubsetViewAsync(const io::CSRSubsetView &slice,
                                   const MatrixCacheKey &key,
                                   CachedMatrix *cache, cudaStream_t stream) {
-    cache->prepareForUpload();
+    // OSEM no longer needs the whole-chunk warmup capacity. Release it once
+    // on this transition; subsequent slices retain the usual reusable buffers.
+    if (cache->key.tag == 0 && key.tag != 0 &&
+        cache->nnz > static_cast<int64_t>(slice.nnz))
+      cache->release();
+    else
+      cache->prepareForUpload();
     cache->sourceOwner = slice.sourceOwner;
     g_cudaChunkStageTiming.csrbMatrixH2DBytes +=
         4ull * (static_cast<uint64_t>(slice.rows) + 1 + slice.blockAngles.size()) +
