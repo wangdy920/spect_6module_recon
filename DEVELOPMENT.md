@@ -103,6 +103,9 @@ cmake --install build/csrb-native-20260921 --config Release --prefix D:/Projects
 两仓库验证并提交后选择输出父目录。整体包固定命名SPECT_Core，不在文件夹/ZIP名中写版本；不再提供--release-name。
 version.txt分为[preprocess]、[recon]，独立记录EXE --version及SHA256；[package]记录组装时间和集成脚本Git提交。
 程序未重编的一方版本保持不变，文档/脚本/配置变化由tooling_revision和manifest体现。不得手改版本文件冒充新二进制。
+正式发布先提交本轮改动，再重新运行CMake配置与构建，核对EXE的`--version`为当前提交且不含`dirty`。
+`package_rc.ps1`会拒绝脏工作树及版本不对应当前提交的暂存EXE；`--allow-dirty-recon`仅供明确标为实验的临时包，不用于正式交付。
+只修改目录名、version.txt或manifest不能消除脏构建。旧包及其原版本记录保留；干净构建另行打包验证后再提升。
 正式打包输入必须是指定的已验证重建staging目录，不能自动搜最近EXE。
 仅文档修改可复用已验证二进制，但必须记录其原编译提交；本轮含原生SN配置解析修改，必须重新编译后交付。
 在预处理仓库执行（重建输入按本次身份替换，路径必须真实存在）：

@@ -25,10 +25,12 @@ if ([string]::IsNullOrWhiteSpace($ReleaseDate)) {
 Push-Location $repo
 try {
     $gitHashRaw = (& $gitExe rev-parse --short HEAD 2>$null)
-    if (-not $gitHashRaw) { $gitHashRaw = "local" }
-    $dirty = (& $gitExe status --porcelain --untracked-files=no 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $gitHashRaw) {
+        throw "Cannot determine the release Git commit."
+    }
+    $dirty = (& $gitExe status --porcelain --untracked-files=normal 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot determine the release Git worktree state." }
     $gitDirty = [bool]$dirty
-    # Package directory/zip names stay clean (no -dirty). Build -v may still report dirty until the tree is committed.
     $gitHash = $gitHashRaw
 } finally {
     Pop-Location
@@ -59,7 +61,7 @@ function Write-Step([string]$Message) {
 }
 
 if ($gitDirty) {
-    Write-Step "WARNING: working tree is dirty; package name uses clean hash '$gitHash' (exe -v may still show -dirty until rebuild on a clean tree)"
+    throw "Release packaging requires a clean Git worktree. Commit the intended changes, then reconfigure and rebuild."
 }
 
 function Resolve-RuntimeDllPath([string]$Name) {
@@ -91,6 +93,14 @@ if (-not $SkipBuild) {
 
 if (-not (Test-Path -LiteralPath (Join-Path $StagingRoot "bin\SPECT_recon.exe"))) {
     throw "Staging exe missing: $StagingRoot\bin\SPECT_recon.exe (run build_release.bat first)"
+}
+
+$stagedExe = Join-Path $StagingRoot "bin\SPECT_recon.exe"
+$exeVersion = (& $stagedExe --version 2>&1)
+if ($LASTEXITCODE -ne 0) { throw "Staging executable --version failed: $exeVersion" }
+$exeVersion = "$exeVersion".Trim()
+if ($exeVersion -notmatch "^\d{8}\+$([regex]::Escape($gitHash))$") {
+    throw "Staging executable version '$exeVersion' does not identify clean commit '$gitHash'. Reconfigure and rebuild; do not edit the version text."
 }
 
 if ($DryRun) {

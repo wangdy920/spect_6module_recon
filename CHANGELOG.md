@@ -8,6 +8,31 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-12: synchronous CSRB uploads retain source storage until device-cache
+  eviction, preventing false pointer-key hits with partial host caches. Output
+  XY rotation is independent of the legacy X flip; configured scanner binding
+  takes priority over a conflicting scanner CLI argument. Native input validity,
+  CTAC subset support and the compact residual/normalization model are covered
+  by the matrix-adaptation regression suite. CSRQ remains experimental.
+- 2026-10-12: RC packaging rejects a dirty worktree or a staged executable whose
+  embedded version does not match the current clean Git commit. Commit,
+  reconfigure and rebuild before release; changing a package name is not enough.
+- 2026-10-11: `matrix_grid_output` multi-bed (SC60) is now one joint
+  reconstruction of a global volume `Nz = baseNz + (N-1)*step`: overlapping
+  beds add sensitivity and backprojection in every update; the output is that
+  volume, with no cosine blend or gain fit. Output size/orientation are as
+  before, the overlap content is not. CTAC/AutoMu/`-maskFromAtt` are rejected
+  in this mode. Matrix-grid runs accept up to 16 beds (PSC stays at 5).
+  New `-beds N|A:B` picks `Bed<k>.bin` from one `-df`/`-df2` directory and
+  fails on a missing bed. Interface change: `-dfList` limit is mode-dependent.
+- 2026-10-11: a refused page lock of the full CSRB host cache no longer
+  aborts with `cudaHostRegister ... out of memory`; chunks locked before the
+  refusal stay locked, the rest upload from the same pageable host cache, and
+  one `[WARNING] compact host cache page-lock refused` line records the split.
+  Shipped configs default to `verbosity = 0`: the console shows only
+  `YYYY-MM-DD HH:MM:SS [ITER] n/N compact` and error lines, while the per-run
+  `.log` remains complete; `-vb 1` restores the previous console output.
+  Reconstruction math, CLI and file formats are unchanged.
 - 2026-09-24: preserve one legacy `[ITER] n/N compact` progress line per
   full iteration; subset details use `[SUBSET]` instead of `[ITER]`.
   Quiet mode retains full-iteration progress on stdout and subset details
