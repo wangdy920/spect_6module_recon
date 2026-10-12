@@ -642,3 +642,19 @@ build/csrb-native-20260921/bin/Release/spect_tests.exe --gtest_filter=CompactSub
 build/csrb-native-20260921/bin/Release/spect_tests.exe
 python recon_out/partial_cache_fix_20261011/verify_psc_config.py
 ```
+
+## 18. 2026-10-12 本地提交与干净构建发布
+
+用户要求继续优化并提交，避免 dirty 版本。本轮收敛已有已验证实现，不增加新算法、内核、运行期矩阵哈希或性能策略；第 16/17 节的“未提交”描述是当时状态。
+
+- `1469d27` 提交矩阵执行、校正、缓存生命周期、多床及对应回归/文档。
+- `0805148` 提交发布入口约束：`package_rc.ps1` 拒绝脏工作树，也拒绝不能用 `--version` 标识当前干净提交的暂存 EXE，包括 `-SkipBuild`。不通过更改包名或手改版本文件掩盖状态。
+- 预处理仓库的独立未提交实验不纳入这次包；包中九份 Python 工具逐项确认与预处理提交 `49e24ce` 的 Git blob 相同。预处理 EXE/DLL/资源沿用旧包，不声称预处理整个工作树已经清理。
+
+在 `0805148` 干净工作树显式重新配置 CMake、构建 EXE/测试/前投影工具后：完整套件 **348 项，344 通过、4 跳过、0 失败**；发布身份隔离检查 6/6；观测模型无背景/有背景各 32 例及两次 operator-PSF/ROI 残差闭合均通过；CT/Mu 几何、针孔参考和 CSRQ 转换器自检通过。四个跳过项仍为未启用的冻结输出滤波数据门和缺少历史 260601 输入的三项检查。链接器既有 LNK4098 警告未在本轮改动。
+
+最终设备包入口为 `E:/Xiang_Project/SPECT/6Module/release/devices/{PSC30-MPH6,SC60-MPH3}/SPECT_Core.zip`；旧 dirty 包留在 `release/history/20261012_device_packages`。仅升级干净重建 EXE 和对应版本/来源记录，设备配置、预处理工具及资源保持原包字节不变。PSC 按用户最新纠正保持 `x_out_flip=0,z_bed_flip=1,z_out_flip=0,xy_out_rotation_deg=0`，不用早期候选的 XY180；SC60 沿用 21.2 mm 和 -60 度的历史试验边界。
+
+本次证据统一保存在 `recon_out/clean_release_20261012/`：`full_suite.xml/log`、两组 observation 结果、`package_smoke_results.json`、设备 verify 日志、`delivery.json`。封包使用记录在该目录的 `refresh_packages.py`，复用既有验收入口；实际封包提交及 EXE 版本以包内 `version.txt/release_manifest.json` 为准。文档提交后再次配置/构建版本身份，不能复用上一提交的旧 EXE。
+
+这是源代码/发布过程收敛，不是新的速度提升结论。真实 SC60 多床、CSRQ 全体积采用门、Lu 五床生产性能门及 RTX 5060 Ti 现场计时仍保留原边界。
