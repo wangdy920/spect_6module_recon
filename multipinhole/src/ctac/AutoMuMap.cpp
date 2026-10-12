@@ -116,7 +116,7 @@ AutoMuMapResult buildAutoMuMapFromActivity(
   if (!(thresholdFrac > 0.0) || thresholdFrac >= 1.0)
     throw std::runtime_error(
         "buildAutoMuMapFromActivity: threshold fraction must be in (0, 1)");
-  if (!(waterMuPerMM > 0.0))
+  if (!std::isfinite(waterMuPerMM) || !(waterMuPerMM > 0.0))
     throw std::runtime_error(
         "buildAutoMuMapFromActivity: water mu must be positive");
 

@@ -275,6 +275,40 @@ TEST(IOTest, VersionFlagWithValueIsRejectedAsVerbosity) {
     EXPECT_NE(err.find("use -vb"), std::string::npos);
 }
 
+TEST(IOTest, BedsOptionParsesCountAndRange) {
+    spect::cli::ArgumentParser parser;
+    auto parseBeds = [&](const std::string &value, spect::cli::ReconArgs &args) {
+        std::vector<std::string> storage = {"SPECT_recon", "-chunkCSRDir", "chunks",
+                                            "-beds", value, "-dumpConf"};
+        std::vector<char*> argv;
+        for (std::string& arg : storage)
+            argv.push_back(arg.data());
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        const auto result = parser.parse(static_cast<int>(argv.size()), argv.data(), args);
+        testing::internal::GetCapturedStdout();
+        testing::internal::GetCapturedStderr();
+        return result;
+    };
+    using Result = spect::cli::ArgumentParser::ParseResult;
+    {
+        spect::cli::ReconArgs args;
+        EXPECT_EQ(parseBeds("12", args), Result::ExitSuccess);
+        EXPECT_EQ(args.bedFirst, 1);
+        EXPECT_EQ(args.bedLast, 12);
+    }
+    {
+        spect::cli::ReconArgs args;
+        EXPECT_EQ(parseBeds("3:7", args), Result::ExitSuccess);
+        EXPECT_EQ(args.bedFirst, 3);
+        EXPECT_EQ(args.bedLast, 7);
+    }
+    for (const std::string bad : {"0", "5:3", "x", "2:", "1:4x", "0:3"}) {
+        spect::cli::ReconArgs args;
+        EXPECT_EQ(parseBeds(bad, args), Result::ExitFailure) << bad;
+    }
+}
+
 TEST(IOTest, IterAndVerboseAliasesAreRejected) {
     spect::cli::ArgumentParser parser;
     {
@@ -1086,5 +1120,45 @@ TEST(IOTest, ScannerMatricesPreserveChannelOrderAndSkipUnusedSlots) {
     EXPECT_TRUE(merged.chunkCSRDir2.empty());
     EXPECT_TRUE(merged.energyWindowWeights.empty());
     EXPECT_EQ(std::filesystem::path(merged.chunkCSRDir), root / "high");
+    std::filesystem::remove_all(root);
+}
+
+TEST(IOTest, ConfiguredScannerOverridesCliAndFailsClosed) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_scanner_priority";
+    std::filesystem::create_directories(root);
+    const auto config = root / "global.ini";
+    const auto scanner = root / "PSC30-MPH6.ini";
+    {
+        std::ofstream f(scanner);
+        f << "[Scanner]\nname=PSC30-MPH6\n[Lu177]\ninput_mode=merged\n"
+             "sysmat_high=" << (root / "high").generic_string() << "\nsysmat_low=\n";
+    }
+    const std::vector<std::string> argv = {"SPECT_recon", "-config", config.string(),
+        "-scannerConf", "SC60-MPH3.ini", "-df", "Bed1.bin"};
+    auto writeConfig = [&](const char* policy, const char* binding) {
+        std::ofstream f(config);
+        f << "[Compatibility]\nrecon_sections_override_cli=" << policy
+          << "\n[Acquisition]\nisotope=Lu177\nprojection_model=joint\n"
+             "[SystemMatrix]\nenergy_window_weights=0.1036,0.0617\nscanner_config=" << binding << '\n';
+    };
+    for (const char* policy : {"true", "false"}) {
+        writeConfig(policy, "PSC30-MPH6.ini");
+        spect::cli::ReconArgs args;
+        ASSERT_TRUE(spect::io::test::parseReconArgsForTest(argv, args));
+        EXPECT_EQ(args.scannerName, "PSC30-MPH6");
+        EXPECT_EQ(args.projectionModel, "merged");
+        EXPECT_EQ(std::filesystem::path(args.chunkCSRDir), root / "high");
+        EXPECT_TRUE(args.chunkCSRDir2.empty());
+        EXPECT_TRUE(args.energyWindowWeights.empty());
+    }
+    writeConfig("true", "missing.ini");
+    auto validCli = argv;
+    validCli[4] = scanner.string();
+    spect::cli::ReconArgs invalid;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(validCli, invalid));
+    writeConfig("true", "");
+    spect::cli::ReconArgs fallback;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(validCli, fallback));
+    EXPECT_EQ(fallback.scannerName, "PSC30-MPH6");
     std::filesystem::remove_all(root);
 }

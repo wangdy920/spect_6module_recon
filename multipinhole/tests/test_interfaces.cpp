@@ -159,7 +159,7 @@ TEST(AppTest, ConfigParserIntegration) {
         
         // Verify some expected values from the config
         EXPECT_EQ(parser.getInt("Basic", "threads", 0), 16);
-        EXPECT_EQ(parser.getInt("Basic", "verbosity", 0), 1);
+        EXPECT_EQ(parser.getInt("Basic", "verbosity", -1), 0);
         EXPECT_EQ(parser.getString("Detector", "channels", ""), "48,48");
         EXPECT_EQ(parser.getInt("Detector", "angles", 0), 360);
         EXPECT_EQ(parser.getString("PSF", "mode", ""), "sieve");

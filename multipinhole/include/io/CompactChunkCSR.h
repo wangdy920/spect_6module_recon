@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,10 +71,6 @@ struct CompactChunkCSRData : std::enable_shared_from_this<CompactChunkCSRData> {
   std::vector<float> rowMax;
   std::vector<uint32_t> runs;
   std::vector<uint16_t> valuesQ;
-  std::shared_ptr<const void> mappedPayloadOwner;
-  const uint32_t *mappedColIdx = nullptr;
-  const float *mappedValues = nullptr;
-  uint64_t mappedPayloadBytes = 0;
 
   CSRView view() const;          // CSRB only; throws for CSRQ
   CompactRunU16View runView() const; // CSRQ only; throws for CSRB
@@ -97,11 +94,12 @@ public:
     uint64_t payloadReadBytes = 0; // application reads, not physical disk I/O
     uint64_t hostReuseBytes = 0;
     uint64_t emptySlicesSkipped = 0;
+    double loaderWorkSeconds = 0.0; // Read + validation; may overlap GPU work.
   };
   CompactChunkCSRDirectory() = default;
   CompactChunkCSRDirectory(std::filesystem::path directory,
                            std::vector<CompactChunkCSRInfo> chunks,
-                           int cols, uint64_t cacheBudgetBytes);
+                           int cols, uint64_t cacheBudgetBytes, int branchCount);
 
   const std::filesystem::path &directory() const { return directory_; }
   const std::vector<CompactChunkCSRInfo> &chunks() const { return chunks_; }
@@ -109,11 +107,15 @@ public:
     return chunks_.empty() ? CompactChunkFormat::CsrbFloat32 : chunks_.front().format;
   }
   int cols() const { return cols_; }
+  int branchCount() const { return branchCount_; }
   uint64_t totalRows() const { return totalRows_; }
   uint64_t totalNnz() const { return totalNnz_; }
   uint64_t cacheBudgetBytes() const { return cacheBudgetBytes_; }
 
   std::shared_ptr<const CompactChunkCSRData> loadChunk(size_t index) const;
+  // Lightweight cache invalidation, not content identity or provenance.
+  // Never reads payload; callers own cache invalidation for same-stat edits.
+  void appendCacheInputs(std::ostream &out, const std::string &prefix) const;
   CSRSubsetView loadSubset(size_t index, const std::vector<int> &compactAngles,
                           int raysPerAngle, uint64_t tag) const;
   ReadStats readStats() const;
@@ -126,6 +128,7 @@ private:
   std::filesystem::path directory_;
   std::vector<CompactChunkCSRInfo> chunks_;
   int cols_ = 0;
+  int branchCount_ = 0;
   uint64_t totalRows_ = 0;
   uint64_t totalNnz_ = 0;
   uint64_t cacheBudgetBytes_ = 0;

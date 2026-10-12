@@ -53,6 +53,8 @@ struct ReconArgs {
     // ========== Input/Output Paths ==========
     std::string projPath;                ///< Single-bed projection file
     std::vector<std::string> projPaths;  ///< Multi-bed projection list
+    int bedFirst = 0;                    ///< -beds: first BedK.bin to search (0 = unset)
+    int bedLast = 0;                     ///< -beds: last BedK.bin to search, inclusive
     bool mergeTimeSegments = false;      ///< Sum matching BedN data across sibling timestamp/SPECT directories
     bool outputFiltersOverwritePrimary = false; ///< Write output-filter chain to the unsuffixed volume
     bool matrixGridOutput = false; ///< Single-bed output without PSC center cropping
@@ -211,6 +213,7 @@ struct ReconArgs {
                                       ///< false keeps legacy 72 layers
     bool zOutFlip = false;         ///< Flip the final output volume in Z
     bool xOutFlip = false;         ///< Flip the final output volume in X
+    double xyOutRotationDeg = 0.0; ///< Output-only rotation: positive maps +X toward +Y
     bool seamXyAlign = false;      ///< Align adjacent beds in XY from overlap NCC; default off
 
     // ========== Output Z-axis Cropping ==========

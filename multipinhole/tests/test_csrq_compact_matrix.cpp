@@ -13,12 +13,15 @@
 #include "tests/common/compact_symmetry_test_helpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -365,8 +368,21 @@ protected:
   }
 };
 
-TEST_F(CsrqCompactMatrixTest, ToyMatrixMatchesDequantizedCsrb) {
-  const auto meta = makeToySym90ZMeta();
+class CsrqProfileTest : public CsrqCompactMatrixTest,
+                        public ::testing::WithParamInterface<bool> {
+protected:
+  void applyProfile(spect::io::CompactSymmetryMetadata &meta) {
+    if (GetParam()) {
+      meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+      meta.detNz = meta.compactDetZ;
+    }
+  }
+};
+INSTANTIATE_TEST_SUITE_P(Rot90AndRot90Z, CsrqProfileTest, ::testing::Bool());
+
+TEST_P(CsrqProfileTest, ToyMatrixMatchesDequantizedCsrb) {
+  auto meta = makeToySym90ZMeta();
+  applyProfile(meta);
   const auto toy = makeToyCompactCSR();
   HostCsr src;
   src.rows = meta.totalRows;
@@ -470,7 +486,7 @@ TEST_F(CsrqCompactMatrixTest, MultiTileRunsMatchDequantizedCsrb) {
   expectCsrqMatchesCsrb(pair3, meta, 1e-5);
   const std::string packedLog = testing::internal::GetCapturedStderr();
   ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(false));
-  EXPECT_NE(packedLog.find("packed [voxel][8] backward"), std::string::npos)
+  EXPECT_NE(packedLog.find("packed [voxel][K] backward"), std::string::npos)
       << packedLog;
   std::filesystem::remove_all(pair3.csrqDir.parent_path());
 }
@@ -656,15 +672,16 @@ TEST_F(CsrqCompactMatrixTest, JointTwoWindowMatchesAnalyticCombination) {
 }
 
 // Different window matrices, background, detector weights, two beds, empty
-// rows/chunk selections and N10 -> N5 -> N1 transitions. The reference uses
-// independently decoded CSRB matrices, never CSRQ's row selector.
-TEST_F(CsrqCompactMatrixTest, JointSubsetsMatchDecodedCsrbResidentAndStreamed) {
+// rows/chunk selections and subset transitions, with and without CTAC. The
+// reference uses independently decoded CSRB matrices, never CSRQ's selector.
+TEST_P(CsrqProfileTest, JointSubsetsWithAndWithoutCtacMatchDecodedCsrb) {
   spect::io::CompactSymmetryMetadata meta;
   meta.Nx = meta.Ny = 8; meta.Nz = 2; meta.totalVoxels = 128;
   meta.fullNumAngles = 80; meta.compactNumAngles = 20;
   meta.detNx = meta.detNz = 4; meta.compactDetZ = 2;
   meta.compactRaysPerAngle = 8; meta.totalRows = 160;
   meta.symCode = 90; meta.symmetryOrder = 4;
+  applyProfile(meta);
   HostCsr src; src.rows = meta.totalRows; src.cols = meta.totalVoxels;
   src.rowPtr.push_back(0);
   for (int row = 0; row < src.rows; ++row) {
@@ -699,44 +716,81 @@ TEST_F(CsrqCompactMatrixTest, JointSubsetsMatchDecodedCsrbResidentAndStreamed) {
   joint[1].sensitivityRowWeights = weights2.data();
   std::vector<double> globalX(x0); globalX.insert(globalX.end(),x1.begin(),x1.end());
   const int zStarts[2] = {0, meta.Nz};
-  for (bool streamed : {false,true}) {
-    spect::cuda::setCsrqForceStreamingCUDA(streamed);
-    for (int count : {10,5,2,1}) {
-      std::vector<double> sumS(n,0.0), fullS(n,0.0);
-      for (int index : spect::compactSubsetOrder(count)) {
-        SCOPED_TRACE(::testing::Message() << "stream=" << streamed << " N=" << count << " index=" << index);
-        const spect::CompactSubsetSpec spec{count,index};
-        std::vector<double> expectedS(n,0), expected0(n,0), expected1(n,0);
-        for (int k=0;k<2;++k) {
-          ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
-          std::vector<spect::cuda::CompactMatrixChannel> one{{refs[k],1.0}};
-          std::vector<double> sens(n), q0(n), q1(n);
-          double *out[2] = {q0.data(),q1.data()};
-          ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(one,meta,1,sens.data(),nullptr,nullptr,k ? weights2.data() : weights.data(),&spec));
-          ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
-              one,meta,proj+2*k,refBgs+2*k,images,2,1,out,false,nullptr,nullptr,true,false,true,&spec));
-          for (size_t j=0;j<n;++j) { expectedS[j]+=w[k]*sens[j]; expected0[j]+=q0[j]; expected1[j]+=q1[j]; }
-        }
-        ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
-        std::vector<double> sens(n), q0(n), q1(n); double *out[2]={q0.data(),q1.data()};
-        ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,sens.data(),nullptr,nullptr,weights.data(),&spec));
-        ASSERT_TRUE(spect::cuda::csrqResidentCUDA(0)); // ready includes streamed matrices
-        const bool residentInput = index%2 == 0;
-        if (residentInput) ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
-            meta,globalX.data(),globalX.size(),2*meta.Nz,zStarts,2,false));
-        ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
-            joint,meta,proj,bgs,residentInput?nullptr:images,2,1,out,false,nullptr,nullptr,true,residentInput,true,&spec));
-        EXPECT_LE(relL2(sens,expectedS),1e-5);
-        EXPECT_LE(relL2(q0,expected0),1e-5); EXPECT_LE(relL2(q1,expected1),1e-5);
-        EXPECT_GT(*std::max_element(q0.begin(),q0.end()),0);
-        for (size_t j=0;j<n;++j) sumS[j]+=sens[j];
-      }
-      ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,fullS.data(),nullptr,nullptr,weights.data()));
-      EXPECT_LE(relL2(sumS,fullS),1e-5) << "voxelwise sum of subset sensitivities";
-    }
+  const size_t attCount = static_cast<size_t>(meta.fullNumAngles) * n;
+  std::vector<uint16_t> att0(attCount), att1(attCount);
+  for (size_t j = 0; j < attCount; ++j) {
+    att0[j] = static_cast<uint16_t>(8000 + (j * 37) % 55000);
+    att1[j] = static_cast<uint16_t>(11000 + (j * 71) % 52000);
+    if (j % 19 == 0) att0[j] = 0;
+    if (j % 23 == 0) att1[j] = 65535;
+  }
+  const uint16_t *att[2] = {att0.data(), att1.data()};
+  for (const bool ctac : {false, true}) {
+    joint[1].attenPower = ctac ? 1.35 : 1.0;
+    // References are retained across device modes so the later modes visit
+    // successive subsets/stages without releasing CSRQ's per-subset plans.
+    std::map<std::pair<int, int>, std::array<std::vector<double>, 3>> expected;
+    std::vector<double> expectedForward(nr);
+    ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+        a.csrb, meta, x0.data(), 1, expectedForward.data(), ctac ? att0.data() : nullptr));
     ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+    for (bool streamed : {false,true}) for (bool packed : {false,true}) {
+      spect::cuda::setCsrqForceStreamingCUDA(streamed);
+      ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(packed));
+      for (int count : {10,5,2,1,10}) {
+        std::vector<double> sumS(n,0.0), fullS(n,0.0);
+        for (int index : spect::compactSubsetOrder(count)) {
+          SCOPED_TRACE(::testing::Message() << "CTAC=" << ctac << " stream=" << streamed
+              << " packed=" << packed << " N=" << count << " index=" << index);
+          const spect::CompactSubsetSpec spec{count,index};
+          const auto key = std::make_pair(count, index);
+          if (expected.count(key) == 0) {
+            auto &ref = expected[key];
+            for (auto &volume : ref) volume.assign(n, 0.0);
+            for (int k=0;k<2;++k) {
+              ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+              std::vector<spect::cuda::CompactMatrixChannel> one{{refs[k],1.0}};
+              one[0].attenPower = joint[k].attenPower;
+              std::vector<double> sens(n), q0(n), q1(n);
+              double *out[2] = {q0.data(),q1.data()};
+              ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(one,meta,1,sens.data(),nullptr,
+                  ctac ? att0.data() : nullptr,k ? weights2.data() : weights.data(),&spec));
+              ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+                  one,meta,proj+2*k,refBgs+2*k,images,2,1,out,false,nullptr,
+                  ctac ? att : nullptr,true,false,true,&spec));
+              for (size_t j=0;j<n;++j) { ref[0][j]+=w[k]*sens[j]; ref[1][j]+=q0[j]; ref[2][j]+=q1[j]; }
+            }
+            ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+          }
+          const auto &ref = expected.at(key);
+          std::vector<double> sens(n), q0(n), q1(n); double *out[2]={q0.data(),q1.data()};
+          ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,sens.data(),nullptr,
+              ctac ? att0.data() : nullptr,weights.data(),&spec));
+          ASSERT_TRUE(spect::cuda::csrqResidentCUDA(0)); // ready includes streamed matrices
+          const bool residentInput = index%2 == 0;
+          if (residentInput) ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+              meta,globalX.data(),globalX.size(),2*meta.Nz,zStarts,2,false));
+          ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
+              joint,meta,proj,bgs,residentInput?nullptr:images,2,1,out,false,nullptr,
+              ctac ? att : nullptr,true,residentInput,true,&spec));
+          EXPECT_LE(relL2(sens,ref[0]),1e-5);
+          EXPECT_LE(relL2(q0,ref[1]),1e-5); EXPECT_LE(relL2(q1,ref[2]),1e-5);
+          EXPECT_GT(*std::max_element(q0.begin(),q0.end()),0);
+          for (size_t j=0;j<n;++j) sumS[j]+=sens[j];
+        }
+        ASSERT_TRUE(spect::cuda::computePoissonSensitivityCUDA(joint,meta,1,fullS.data(),nullptr,
+            ctac ? att0.data() : nullptr,weights.data()));
+        EXPECT_LE(relL2(sumS,fullS),1e-5) << "voxelwise sum of subset sensitivities";
+        std::vector<double> forward(nr);
+        ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
+            a.csrq, meta, x0.data(), 1, forward.data(), ctac ? att0.data() : nullptr));
+        EXPECT_LE(relL2(forward,expectedForward),1e-5) << "full forward after subset pass";
+      }
+      ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+    }
   }
   spect::cuda::setCsrqForceStreamingCUDA(false);
+  ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(false));
   std::filesystem::remove_all(a.csrqDir.parent_path());
   std::filesystem::remove_all(b.csrqDir.parent_path());
 }
@@ -938,7 +992,7 @@ HostCsr readHostCsr(const spect::io::CompactChunkCSRDirectory &csrb) {
 // projection and a two-bed numerator with per-bed tables (host input and
 // resident batch). The adjoint identity <H x, y> = <x, H^T y> is checked on
 // the device paths themselves.
-TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
+TEST_P(CsrqProfileTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   spect::io::CompactSymmetryMetadata meta;
   meta.Nx = 16;
   meta.Ny = 16;
@@ -954,6 +1008,7 @@ TEST_F(CsrqCompactMatrixTest, CtacFactorisationMatchesCsrbAndIsAdjoint) {
   meta.symCode = 90;
   meta.symmetryOrder = 4;
 
+  applyProfile(meta);
   std::mt19937 rng(20260904u);
   std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
   HostCsr src;
@@ -1295,7 +1350,7 @@ TEST_F(CsrqCompactMatrixTest, CtacEnergyExponentMatchesPrePoweredTable) {
 // rounds the per-bed numerator through float before the global accumulate, so
 // the tolerance is fp32-level; the BSREM step must also visibly differ from
 // the plain MLEM step to prove the penalty and relaxation reached the kernel.
-TEST_F(CsrqCompactMatrixTest, ResidentBsremIterationMatchesHostOracle) {
+TEST_P(CsrqProfileTest, ResidentBsremIterationMatchesHostOracle) {
   spect::io::CompactSymmetryMetadata meta;
   meta.Nx = 16;
   meta.Ny = 16;
@@ -1311,6 +1366,7 @@ TEST_F(CsrqCompactMatrixTest, ResidentBsremIterationMatchesHostOracle) {
   meta.symCode = 90;
   meta.symmetryOrder = 4;
 
+  applyProfile(meta);
   std::mt19937 rng(11u);
   std::uniform_real_distribution<float> valueDist(0.05f, 1.0f);
   HostCsr src;
@@ -1451,6 +1507,39 @@ TEST_F(CsrqCompactMatrixTest, ResidentBsremIterationMatchesHostOracle) {
   std::filesystem::remove_all(pair.csrqDir.parent_path());
 }
 
+TEST(CsrqCompactMatrixFormat, CacheInputsDoNotReadPayloadAndPaddingDoesNotChangeValues) {
+  auto meta = makeToySym90ZMeta();
+  meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+  meta.detNz = meta.compactDetZ;
+  HostCsr src;
+  src.rows = meta.totalRows; src.cols = meta.totalVoxels;
+  src.rowPtr.assign(static_cast<size_t>(src.rows) + 1, 1u);
+  src.rowPtr[0] = 0;
+  src.colIdx = {0u}; src.values = {0.7f};
+  const auto pair = makeMatrixPair("spect_csrq_padding", meta, src);
+  const auto &info = pair.csrq.chunks()[0];
+  std::ostringstream inputs;
+  pair.csrq.appendCacheInputs(inputs, "matrix2_");
+  EXPECT_FALSE(inputs.str().empty());
+  EXPECT_EQ(pair.csrq.readStats().payloadLoads, 0u);
+  const auto original = pair.csrq.loadChunk(0);
+  EXPECT_EQ(pair.csrq.readStats().payloadLoads, 1u);
+  // Odd nnz leaves two padding bytes; they are not matrix values.
+  {
+    std::fstream file(info.path, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp(48 + 12ll * info.rows + 8 + 2);
+    file.put('\x31');
+  }
+  const auto next = spect::io::openCompactChunkCSRDirectory(pair.csrqDir.string(), meta, 1 << 20);
+  const auto loaded = next.loadChunk(0);
+  EXPECT_EQ(loaded->rowPtr, original->rowPtr);
+  EXPECT_EQ(loaded->rowRunPtr, original->rowRunPtr);
+  EXPECT_EQ(loaded->rowMax, original->rowMax);
+  EXPECT_EQ(loaded->runs, original->runs);
+  EXPECT_EQ(loaded->valuesQ, original->valuesQ);
+  std::filesystem::remove_all(pair.csrqDir.parent_path());
+}
+
 TEST(CsrqCompactMatrixFormat, RejectsMixedAndTruncatedDirectories) {
   const auto meta = makeToySym90ZMeta();
   const auto toy = makeToyCompactCSR();
@@ -1507,6 +1596,37 @@ TEST(CsrqCompactMatrixFormat, RejectsMixedAndTruncatedDirectories) {
                                                        64u << 20),
                std::runtime_error);
   std::filesystem::remove_all(root);
+}
+
+TEST(CsrqCompactMatrixFormat, RejectsHeaderColumnsThatDisagreeWithMetadata) {
+  const auto meta = makeToySym90ZMeta();
+  const auto toy = makeToyCompactCSR();
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels + 1;
+  src.rowPtr = toy.rowPtr;
+  src.colIdx = toy.colIdx;
+  src.values = toy.values;
+  const auto root = std::filesystem::temp_directory_path() / "spect_csrq_wrong_cols";
+  std::filesystem::create_directories(root);
+  writeCsrq(root / "chunk_000.csrq", src, 0, meta.compactNumAngles);
+  EXPECT_THROW(spect::io::openCompactChunkCSRDirectory(root.string(), meta, 0),
+               std::runtime_error);
+  EXPECT_THROW(spect::io::openCompactChunkCSRDirectory(root.string(), meta),
+               std::runtime_error);
+  std::filesystem::remove_all(root);
+}
+
+TEST(CsrqCompactMatrixFormat, StreamSlotUsesPerArrayMaxima) {
+  const spect::cuda::CsrqChunkShape a{10, 128, 2, 0};
+  const spect::cuda::CsrqChunkShape b{6, 40, 40, 10};
+  EXPECT_EQ(a.deviceBytes(), 392u);
+  EXPECT_EQ(b.deviceBytes(), 320u);
+  spect::cuda::CsrqChunkShape slot;
+  slot.includeDimensions(a);
+  slot.includeDimensions(b);
+  EXPECT_EQ(slot.deviceBytes(), 544u);
+  EXPECT_GT(slot.deviceBytes(), std::max(a.deviceBytes(), b.deviceBytes()));
 }
 
 } // namespace

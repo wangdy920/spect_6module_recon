@@ -53,11 +53,13 @@ struct CompactMatrixChannel {
 // of the Poisson log-likelihood over all channels k:
 //   q = sum_k H_k^T ( p_k / (H_k x + b_k) )   backprojected ratio (per bed)
 //   S = sum_k H_k^T W_k 1                      sensitivity (once, cached)
-// with H_k = w_k A_k and optional sensitivity-only row weights W_k (identity
-// when absent). The implementation's data gradient is q - S. Nothing below knows which
+// with H_k = w_k A_k. The pipeline passes b_k/e_k as the background when
+// efficiency W_k=e_k is present, and zeroes masked measurements upstream.
+// Thus q-S is the measured-count model's gradient away from the existing
+// numerical floor (applied in Hx+b/e units). Nothing below knows which
 // optimizer or penalty will use the result.
 
-// Ordered subsets (CSRB, or CSRQ without CTAC): both statistics may be
+// Ordered subsets (CSRB and CSRQ, with or without CTAC): both statistics may be
 // restricted to one subset of compact angles (CompactSubsetSpec, see
 // CompactSubsets.h). The matrix is then streamed as (chunk, subset) slices —
 // only the subset's rows cross PCIe — and S_m / q_m are the sums over those
@@ -79,6 +81,8 @@ bool computePoissonSensitivityCUDA(
 // q: joint backprojected ratio per bed.
 // fullProjections / fullBackgrounds are indexed [channel * bedCount + bed]
 // (fullBackgrounds may be nullptr, or hold nullptr entries).
+// fullBackgrounds are in Hx units: the pipeline converts measured b to b/e
+// when efficiency is active. This low-level API does not apply W to b again.
 // nextSubset (optional): the subset of the following call, whose first slice
 // is prefetched behind this pass's last one. The caller flips
 // reverseChunkOrder between consecutive calls, so that first slice is the
@@ -115,6 +119,10 @@ bool csrqForceStreamingCUDA();
 // demote-and-retry path of the residency planner without depending on the
 // device's free memory. (0, 0) disables the hook.
 void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count);
+// Test hook: a complete CSRB host cache gets `allowedRegistrations` host-array
+// page locks (two per non-empty chunk), then one refusal; the hook disables
+// itself after that refusal. -1 disables it.
+void setCompactHostPinRefusalForTestsCUDA(int allowedRegistrations);
 
 
 // --- Single-directory forms -------------------------------------------------
@@ -133,12 +141,14 @@ bool computeCompactChunkSensitivityCUDA(
 bool prepareCompactChunkExecutionCUDA(
     const spect::io::CompactChunkCSRDirectory &chunks);
 
+// localSupportMask is a bed-local [z][y][x] mask. It is refreshed with
+// uploadGlobalImage and reused before backward PSF by the resident tail.
 bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const spect::io::CompactSymmetryMetadata &meta,
     const double *globalImage, size_t globalImageCount, int globalNz,
     const int *bedZStarts, int bedCount, bool flipLocalZ,
     const spect::filters::PSFKernels *castorPsf = nullptr,
-    bool uploadGlobalImage = true);
+    bool uploadGlobalImage = true, const uint8_t *localSupportMask = nullptr);
 
 // subsetIndex >= 0 divides by the resident subset sensitivity of that index
 // (setCompactSubsetSensitivitiesCUDA); -1 is the full-data step over denom.

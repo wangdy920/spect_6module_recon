@@ -83,7 +83,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 | `[InputOutput] merge_time_segments=true` | With `-df <case/YYYYMMDD_HHMMSS/SPECT>`, scan sibling timestamp directories, require the same `BedN.bin` set and geometry in each, then sum matching beds in memory before reconstruction. Default is `false`; no merged projection files are written. |
 | `[InputOutput] output_filters_overwrite_primary=true` | Write enabled output-stage filters to `<fout>_it<N>.mhd/.raw` in Smooth→Butterworth order. Default `false` preserves the unfiltered primary; `_smooth` and `_butter` remain independent audit copies in both modes. |
 | `-badDetectorFile <file>` | Skip hardware blocks in both measured projection rows and sensitivity. Entries may be preferred global numbers `0..95` or detailed `link-<3|4>-FPGA-<0..5>-dector-<0..7>` IDs. The shipped list contains detector 68; this protected-prototype exception maps to angles 0..59, z 24..35, x 24..35. |
-| `-detZRowWeightsFile <file>` / `-normFactorFile <file>` | Optional normalization inputs. `-detZRowWeightsFile` contains detector efficiency weights directly. `-normFactorFile` contains full projection correction factors `c` in `<uint32 angles><uint32 rays><float64 values>` BIN form; the background-free MLEM path applies reciprocal efficiency `1/c` to sensitivity. Default is empty/off. |
+| `-detZRowWeightsFile <file>` / `-normFactorFile <file>` | Optional normalization inputs. `-detZRowWeightsFile` contains detector efficiency weights directly. `-normFactorFile` contains full projection correction factors `c` in `<uint32 angles><uint32 rays><float64 values>` BIN form. Efficiency `e=1/c` enters sensitivity; measured-count background is internally converted to `b/e`, while residuals use `e*H*x+b`. Default is empty/off. |
 | `-psf [fwhm_mm[,N]]` | Image-domain PSF; FWHM is in mm and N truncates the kernel at N*sigma. Release default: `1.3,3`. |
 | `-psfMode none\|operator\|sieve` / `-psfKernel adjoint\|castor` | `operator` applies PSF in-loop; `sieve` also filters save copies without changing the trajectory. `castor` is the release default and uses voxel-integrated erf taps, zero boundaries, Z-only normalization, and forward-reuse backward. |
 | `-opti mlem|bsrem` | Select optimizer without replacing the selected recipe. MLEM with subsets is OSEM; select RDP/TV explicitly through the recipe or regularization options. |
@@ -92,11 +92,12 @@ tracks the fresh build and invocation checks separately from image-quality claim
 | `-bsrem <alpha0[,gamma]>` | BSREM‑II step parameters (overrides config). |
 | `-reg <type,beta,...>` | Regularisation. Public types: `None`, `TV`/`TVIsotropic`, `RDP`. For TV use `-reg TV,beta,delta`; for RDP use `-reg RDP,beta,gamma,delta`. `beta` is independent of `-bsrem` alpha/gamma. |
 | `-bProj <file>` | Background/scatter projection term (MAT or BIN); added to forward model `yhat`. |
-| `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds. |
+| `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds (PSC) or 16 beds with `matrix_grid_output=true`. |
+| `-beds <N|A:B>` | Search `Bed1..BedN` or `BedA..BedB` (`BedK.bin`, case-insensitive) in the `-df` directory (or the directory of one `-df`/`-dfList` file); a missing bed in the range fails, beds outside it are ignored. Same rule for `-df2`. |
 | `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
-| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window reconstruction shares an activity estimate: `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. Both windows must have compatible coordinates and the same beds. Native CSRB is supported; paired CSRQ remains experimental, and mixed CSRB/CSRQ is rejected. Default Lu channel order is 208/113 with weights 0.1036/0.0617. CTAC requires explicit per-window energies; N>1 with CTAC is not supported. |
+| `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window reconstruction shares an activity estimate: `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. Both windows must have compatible coordinates and the same beds. Native CSRB is supported; paired CSRQ remains experimental, and mixed CSRB/CSRQ is rejected. Default Lu channel order is 208/113 with weights 0.1036/0.0617. CTAC requires explicit per-window energies. CSRB and CSRQ have subset CTAC paths; CSRQ N>1 was added in the 2026-10-09 worktree candidate with unchanged CLI. Its GPU numerical regression is still pending; this is not a production release. |
 | `-csrqResidency <auto|streamed>` | CSRQ device residency (INI `[SystemMatrix] csrq_residency`). `auto` keeps each matrix resident when it fits and streams it from pinned host memory otherwise; `streamed` always streams (two 1–1.6 GiB chunk slots per matrix), for GPUs shared with other work. |
 | `-cropEnd <top[,end]>` | Zero final output Z top/end slices after output flips; Z size is unchanged. |
 | `-zbedflip <0|1>` / `-zoutflip <0|1>` / `-xoutflip <0|1>` | Per-bed Z / whole-volume Z / whole-volume X flips. Pair with preprocess: `-chunkCSRDir` + `identity` → keep package `[MultiBed] z_bed_flip` default. |
@@ -108,7 +109,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 
 ## Multi-bed reconstruction
 
-`-dfList` accepts 1–5 projection files and sorts paths containing `BedN` by bed number. The software coordinate contract is `Bed1=min_physical_z`, with increasing bed number toward +Z, as recorded in the manifest. PSC uses a 16.8 mm step. `[MultiBed] z_bed_flip=1` is the PSC default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list. This is a software coordinate convention, not a validated patient orientation.
+`-dfList` accepts 1–5 projection files (1–16 with `matrix_grid_output=true`) and sorts paths containing `BedN` by bed number. The software coordinate contract is `Bed1=min_physical_z`, with increasing bed number toward +Z, as recorded in the manifest. PSC uses a 16.8 mm step. `[MultiBed] z_bed_flip=1` is the PSC default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list. This is a software coordinate convention, not a validated patient orientation.
 
 For repeated acquisitions of one case, set `[InputOutput] merge_time_segments=true` and pass one timestamp's `SPECT` directory, for example `-df D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT`. Immediate sibling directories named `YYYYMMDD_HHMMSS` are processed chronologically. Every included segment must contain the identical `BedN.bin` set with matching BIN size/header/geometry; mismatches and non-finite sums fail before reconstruction. The run manifest records every source path per bed.
 
@@ -121,7 +122,7 @@ Single-bed output follows that same `step + 10` center-crop geometry when `[Mult
 3. advances by `step_layers` and blends the shared 10 layers with normalized cosine weights;
 4. writes `Z = crop + (bed_count - 1) × step` layers, then applies whole-output Z/X flips and `cropEnd` zeroing.
 
-The PSC output crop is `100×100` in XY. With `[InputOutput] matrix_grid_output=true`, XY and single-bed Z retain the matrix grid; multiple beds require an explicit positive step aligned to voxel layers and use full-grid cosine blending without gain fitting. Do not use the PSC mask, crop or assumed bed step for SC60. Object-aware seam repair, automatic profile classification, `sigmoid`, `direct`, and offline auto-stitch controls are not production paths.
+The PSC output crop is `100×100` in XY. With `[InputOutput] matrix_grid_output=true`, XY and single-bed Z retain the matrix grid; multiple beds (up to 16) require an explicit positive step aligned to voxel layers and are reconstructed jointly: each bed grid sits at `bed × step` in one global volume of `baseNz + (beds-1) × step` layers, overlapping voxels share sensitivity and backprojection, and that volume is saved without cosine blending or gain fitting. Joint mode does not yet support CTAC, `-ctacAutoMu` or `-maskFromAtt`. Do not use the PSC mask, crop or assumed bed step for SC60. Object-aware seam repair, automatic profile classification, `sigmoid`, `direct`, and offline auto-stitch controls are not production paths.
 
 `-bProjList` follows the same BedN ordering and must match the projection list. `-zoutflip 1` and `-xoutflip 1` are whole-output transforms; the shipped defaults remain zero.
 
@@ -223,7 +224,7 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
 - **[Field recon migration](multipinhole/doc/Recon_Interface_Migration_Field_CN.md)** — ThreeModalities → current canonical executable
 - **[CTAC / auto-mu validation](multipinhole/doc/CTAC_AutoMu_Validation_CN.md)** — CTAC / auto-mu cylinder debug gate
 - **[Compact Chunk CSRB Format](test_data/6module/260601/CompactChunkCSRB_Reconstruction_README_CN.md)** — metadata/chunk layout
-- **[Matrix format (中文)](multipinhole/doc/Format_Reader_Matrix_CN.md)** — v4 chunk CSRB spec
+- **[Matrix format (中文)](multipinhole/doc/Format_Reader_Matrix_CN.md)** — CSRB/CSRQ input contract and support boundaries
 - **[Scripts](scripts/README.md)** — reusable validation and helper scripts
 - **[Tools](tools/README.md)** — standalone CLI tools
 
@@ -231,15 +232,13 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | off (`uint64_t::max`) | Minimum chunk file size to mmap payload; below threshold uses full copy load (2026-06-02 benchmark default) |
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Override the resource-aware host matrix cache; auto keeps the whole matrix only when current RAM leaves safe headroom |
-| `SPECT_COMPACT_BRANCH_BATCH` | on | Resident branch×bed batch (packed-K forward + CSR_ALG2 transpose); set `0` disables resident MLEM and is not a product A/B |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Host matrix cache budget: auto or nonnegative bytes, optional K/M/G/T (powers of 1024); malformed/nonfinite values fail. CSRB auto leaves RAM headroom; CSRQ auto leaves host caching off |
 | `SPECT_CSRB_SCATTER_BACKWARD` | auto | CSRB numerator backward (plain and CTAC per-angle). Auto picks the zero-row pair scatter transpose when >= 40 % of the beds' bins are zero counts (Lu-177 mouse: 74-90 %), else per-RHS cuSPARSE CSR_ALG2; `1`/`0` force either path for A/B on one binary. Sensitivity always uses cuSPARSE. Numerically equivalent (fp32 atomic order only) |
-| `SPECT_CHUNK_VALIDATE` | on | Set to `off` to skip compact chunk validation warnings/checks |
+| `SPECT_CHUNK_VALIDATE` | `sample` | CSRB column-index range checks: `strict`/`full` checks all loaded indices; `off` skips only these checks. Structure and finite/nonnegative weight checks remain active |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
-| `SPECT_CSRQ_BACKWARD_PACKED` | off | CSRQ backward scatters all eight branches in one pass into `[voxel][8]` with `float4` atomics (native on sm_90+, e.g. the RTX 5060 Ti); on sm_86/89 the scalar fallback is 4x slower than the branch-major default. Numerically equivalent; for the sm_120 trial |
+| `SPECT_CSRQ_BACKWARD_PACKED` | off | Experimental packed backward layout. The current shared K=4/8 candidate still needs CUDA regression and paired timing before changing this default |
 
-mmap 失败时会 stderr 输出 `[NOTE] compact-chunk mmap failed ... falling back to full copy load`。16 GB 显存部署保留 6 GiB 给临时矩阵、SpMM、PSF 和输出滤波；50 次迭代的低时延配置建议使用 64 GB 主存及 SSD/NVMe 矩阵。32 GB 主存可通过降低 `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 运行，但无法保证相同吞吐。
+`SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 和 `SPECT_COMPACT_BRANCH_BATCH` 已退役，设置时明确报错。CSRB 使用完整块缓存或按子集分段读取，CSRQ 使用自身驻留/流式路径。主机缓存预算不等于实际占用或 GPU 驻留量；性能结论需要同输入、同缓存状态下的重复测量。
 
 ## Build & Run
 

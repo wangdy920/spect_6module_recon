@@ -48,7 +48,9 @@ python tools\convert_csrb_to_csrq.py <csrb-dir> <csrb-dir>_csrq
 python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
 ```
 
-脚本写入占位 `Bed1.bin`…`Bed5.bin`（几何匹配、填充 1），以 `-it 1` 调用当前 `SPECT_recon.exe` 和 `multipinhole/config/spect_config.ini`。程序按配置把 v4 portable cache 写到 exe 相对的 `cache/compact_denom/auto_<hash>.mhd`；同一 matrix profile 的 source/package 根目录变化不会改变 identity。`--dry-run` 只打印命令；`--self-check` 只检查占位 BIN 与 metadata。
+脚本写入占位 `Bed1.bin`…`Bed5.bin`（几何匹配、填充 1），以 `-it 1` 调用当前 `SPECT_recon.exe` 和 `multipinhole/config/spect_config.ini`。程序按配置把 v6 缓存写到 exe 相对的 `cache/compact_denom/auto_<hash>.mhd`；键包含规范化矩阵路径、大小/mtime、布局和计算参数，不扫描或计算矩阵 SHA，移动矩阵目录会产生新缓存。该辅助脚本目前只解析 88/92B legacy metadata；124B SMMD v3/SC60 使用正常重建入口建立缓存。
+
+`--force` 只清理对应矩阵路径与床数的单窗、无 CTAC 自动缓存及其 subset 缓存，包括 `.mhd/.raw/.manifest.txt` 三个文件；缺少输入路径的旧 manifest 不自动删除。`--dry-run` 打印命令而不启动重建；`--self-check` 检查日志解析、占位 BIN、临时缓存清理范围，以及可解析矩阵的 metadata，不启动 CUDA。
 
 ### 设备诊断与三次中位数
 

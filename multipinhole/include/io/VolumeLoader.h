@@ -28,7 +28,7 @@ namespace io {
  */
 struct VolumeInfo {
     int Nx = 0, Ny = 0, Nz = 0;
-    float dx = 1.0f, dy = 1.0f, dz = 1.0f;
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f; // Missing spacing is not a 1 mm grid.
     std::string rawPath;
     bool isFloat = true;
     bool littleEndian = true;
@@ -38,6 +38,7 @@ struct VolumeInfo {
     std::string spectZLayout;
     std::string spectIntensityUnits;
     std::vector<int> spectBeds;
+    int spectAutoMuCompatible = -1;
 };
 
 /**
@@ -59,7 +60,8 @@ inline VolumeInfo parseMHD(const std::string &path) {
         }
         if (line.rfind("ElementSpacing", 0) == 0) {
             std::stringstream ss(line.substr(line.find('=') + 1));
-            ss >> info.dx >> info.dy >> info.dz;
+            if (!(ss >> info.dx >> info.dy >> info.dz))
+                throw std::runtime_error("Invalid ElementSpacing in " + path);
         }
         if (line.rfind("ElementType", 0) == 0) {
             if (line.find("MET_DOUBLE") != std::string::npos)
@@ -92,6 +94,14 @@ inline VolumeInfo parseMHD(const std::string &path) {
                     throw std::runtime_error("Invalid SPECTBeds value in " + path);
                 info.spectBeds.push_back(bed);
             }
+        }
+        if (line.rfind("SPECTAutoMuCompatible", 0) == 0) {
+            std::stringstream ss(line.substr(line.find('=') + 1));
+            std::string extra;
+            if (!(ss >> info.spectAutoMuCompatible) ||
+                (info.spectAutoMuCompatible != 0 && info.spectAutoMuCompatible != 1) ||
+                (ss >> extra))
+                throw std::runtime_error("Invalid SPECTAutoMuCompatible in " + path);
         }
     }
     auto trim = [](std::string &value) {
@@ -242,13 +252,9 @@ inline bool isBinaryAnalyze(const std::string &path) {
 }
 
 /**
- * @brief Load 3D volume from MHD/HDR/Interfile
- * 
- * @param path Path to header file (.mhd or .hdr)
- * @param Nx, Ny, Nz Output dimensions
- * @return Volume data as double vector (column-major)
+ * @brief Read the geometry and payload path from a supported volume header.
  */
-inline std::vector<double> loadVolume(const std::string &path, int &Nx, int &Ny, int &Nz) {
+inline VolumeInfo readVolumeInfo(const std::string &path) {
     VolumeInfo info;
     std::string ext = std::filesystem::path(path).extension().string();
     
@@ -263,7 +269,13 @@ inline std::vector<double> loadVolume(const std::string &path, int &Nx, int &Ny,
     } else {
         throw std::runtime_error("Unknown volume format: " + ext);
     }
+    if (info.Nx <= 0 || info.Ny <= 0 || info.Nz <= 0)
+        throw std::runtime_error("Invalid volume dimensions: " + path);
+    return info;
+}
 
+inline std::vector<double> loadVolume(const std::string &path, int &Nx, int &Ny, int &Nz) {
+    const auto info = readVolumeInfo(path);
     Nx = info.Nx;
     Ny = info.Ny;
     Nz = info.Nz;
@@ -312,20 +324,7 @@ inline std::vector<double> loadVolumeWithSpacing(
     int &Nx, int &Ny, int &Nz,
     float &dx, float &dy, float &dz
 ) {
-    VolumeInfo info;
-    std::string ext = std::filesystem::path(path).extension().string();
-    
-    if (ext == ".mhd") {
-        info = parseMHD(path);
-    } else if (ext == ".hdr") {
-        if (isBinaryAnalyze(path)) {
-            info = parseHDR(path);
-        } else {
-            info = parseInterfile(path);
-        }
-    } else {
-        throw std::runtime_error("Unknown volume format: " + ext);
-    }
+    const auto info = readVolumeInfo(path);
 
     Nx = info.Nx;
     Ny = info.Ny;

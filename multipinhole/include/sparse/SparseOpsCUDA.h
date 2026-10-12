@@ -8,6 +8,7 @@
 #include "io/CSRTypes.h"
 #include "io/CompactChunkCSR.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -111,7 +112,8 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     int branchCount, int zBranchCount,
     const std::vector<double> *castorKx = nullptr,
     const std::vector<double> *castorKy = nullptr,
-    const std::vector<double> *castorKz = nullptr);
+    const std::vector<double> *castorKz = nullptr,
+    const uint8_t *localSupportMask = nullptr);
 /// Ordered subsets: keeps the subset sensitivities S_0..S_{count-1} (count
 /// host arrays of globalImageCount doubles) resident so the update tails
 /// below can select one by index without a per-sub-iteration upload. count
@@ -207,7 +209,8 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     size_t attCount,
     double attPower = 1.0,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr);
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int cacheSlotBase = 0);
 /// CSRB CTAC sensitivity of one chunk: H^T W 1 for one bed's table added to
 /// accumulatorIndex. fullProjectionCount is the full projection row count
 /// (row -> projection validity); rowWeights (that many doubles) may be
@@ -255,7 +258,8 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     int branchCount,
     int bedCount,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr);
+    CompactDeviceBackwardTiming* backwardTiming = nullptr,
+    int cacheSlotBase = 0);
 /// Branch-batch compact sensitivity accumulator path.  Computes A^T W 1 for all
 /// symmetry branches in one SpMM call and scatters the results into the device
 /// backward accumulator.  symIds/zMirrors describe the branch symmetry for each
@@ -294,6 +298,18 @@ struct CsrqChunkShape {
     uint64_t nnz = 0;
     uint64_t runCount = 0;
     int compactRowBase = 0;
+
+    uint64_t deviceBytes() const {
+        return 2ull * sizeof(uint32_t) * (static_cast<uint64_t>(rows) + 1ull) +
+               sizeof(float) * static_cast<uint64_t>(rows) +
+               sizeof(uint32_t) * runCount + sizeof(uint16_t) * nnz;
+    }
+    // A reusable slot needs each array's maximum, not the largest whole chunk.
+    void includeDimensions(const CsrqChunkShape& other) {
+        rows = std::max(rows, other.rows);
+        nnz = std::max(nnz, other.nnz);
+        runCount = std::max(runCount, other.runCount);
+    }
 };
 /// Thrown by csrqWarmupBeginCUDA when the matrix does not fit on the device
 /// even streamed (two chunk slots + scratch + reserve exceed the free memory).
@@ -305,7 +321,7 @@ struct CsrqDeviceMemoryError : public std::runtime_error {
 /// Announces the matrix; *streamed reports whether it will be streamed
 /// rather than resident (forceStreamed skips the fit test). Drops whatever
 /// slot matrixIndex held.
-bool csrqWarmupBeginCUDA(int matrixIndex, int cols,
+bool csrqWarmupBeginCUDA(int matrixIndex, int cols, int branchCount,
                          const std::vector<CsrqChunkShape>& shapes,
                          uint64_t reserveBytes, bool forceStreamed = false,
                          bool* streamed = nullptr);
@@ -317,7 +333,7 @@ bool csrqWarmupEndCUDA(int matrixIndex);
 /// True while matrix matrixIndex is loaded (cleared by
 /// releaseCompactExecutionCUDA).
 bool csrqResidentCUDA(int matrixIndex);
-/// Packed [nvox][8] CSRQ backward: all eight branches scattered in one pass
+/// Packed [nvox][K] CSRQ backward: all active branches scattered in one pass
 /// with float4 atomics (native on sm_90+, scalar fallback on sm_86/89 where it
 /// is ~5x slower than the branch-major default). Default from
 /// SPECT_CSRQ_BACKWARD_PACKED=1; exposed for the sm_120 trial and tests.
@@ -362,7 +378,7 @@ bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             size_t attCount = 0, double attPower = 1.0,
                             int subsetCount = 1, int subsetIndex = 0);
 /// Forward projection of one window over the refreshed single-bed branch
-/// batch; hostYhatPacked receives [compactRow][branch] floats (rows * 8).
+/// batch; hostYhatPacked receives [compactRow][branch] floats (rows * K).
 /// With attFactors the projection is H x = A att^attPower x and the angle /
 /// branch parameters are required.
 bool csrqRunForwardCUDA(int matrixIndex, int branchCount,

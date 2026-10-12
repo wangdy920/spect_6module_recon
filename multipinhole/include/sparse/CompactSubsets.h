@@ -22,9 +22,11 @@ struct CompactSubsetSpec {
   int index = 0; // this subset (0..N-1)
 };
 
-// Absolute compact angles of subset spec.index out of spec.count.
+// Absolute compact angles of subset spec.index out of spec.count, optionally
+// restricted to [firstAngle, endAngle); -1 uses the full compact range end.
 std::vector<int> compactSubsetAngles(int compactNumAngles,
-                                     const CompactSubsetSpec &spec);
+                                     const CompactSubsetSpec &spec,
+                                     int firstAngle = 0, int endAngle = -1);
 
 // Deterministic processing order of N subsets: greedy maximal circular
 // separation from all previously chosen subsets, ties broken by the distance

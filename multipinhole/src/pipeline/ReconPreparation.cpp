@@ -4,6 +4,7 @@
 #include "filters/ButterworthFilter.h"
 #include "filters/Convolution.h"
 #include "filters/cuda/VolumeOpsCUDA.h"
+#include "recon/BedOffsets.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,10 +25,12 @@ const std::vector<uint8_t> *maybeMakeCylindricalMask(
     return nullptr;
 
   const int bedCount = std::max(1, args.bedCount);
-  if (nz % bedCount != 0)
+  const int stackedNz =
+      nz + spect::app::computeTotalOverlap(bedCount, args.bedOverlaps);
+  if (stackedNz % bedCount != 0)
     throw std::runtime_error(
         "Cylindrical ROI requires an integer local Z size per bed.");
-  const int localNz = nz / bedCount;
+  const int localNz = stackedNz / bedCount;
   const std::vector<uint8_t> localMask = spect::core::makeCylMask_mm(
       nx, ny, localNz, spacing[0], spacing[1], spacing[2],
       args.cylinderDiameterMM, args.cylinderHeightMM, args.cylCenterX,
@@ -37,11 +40,19 @@ const std::vector<uint8_t> *maybeMakeCylindricalMask(
     return &mask;
   }
 
-  mask.resize(localMask.size() * static_cast<size_t>(bedCount));
-  for (int bed = 0; bed < bedCount; ++bed) {
-    std::copy(localMask.begin(), localMask.end(),
-              mask.begin() + static_cast<std::ptrdiff_t>(bed) *
-                                 static_cast<std::ptrdiff_t>(localMask.size()));
+  // Union of the bed grids; overlapping beds share voxels of one volume.
+  const std::vector<int> starts =
+      spect::app::computeBedZOffsets(bedCount, localNz, args.bedOverlaps);
+  if (starts.back() + localNz != nz)
+    throw std::runtime_error("Cylindrical ROI bed layout does not match Nz.");
+  mask.assign(static_cast<size_t>(nx) * static_cast<size_t>(ny) *
+                  static_cast<size_t>(nz),
+              0);
+  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
+  for (int start : starts) {
+    const size_t offset = static_cast<size_t>(start) * plane;
+    for (size_t i = 0; i < localMask.size(); ++i)
+      mask[offset + i] = std::max(mask[offset + i], localMask[i]);
   }
   return &mask;
 }

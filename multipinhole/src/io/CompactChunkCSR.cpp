@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -22,13 +23,11 @@
 #endif
 #include <windows.h>
 #else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
 namespace spect::io {
+
 namespace {
 
 constexpr uint32_t kChunkCSRMagic = 0x42525343u;
@@ -131,16 +130,6 @@ uint64_t fileSize(const std::filesystem::path &path) {
 
 uint64_t parseByteBudget(const char *text, uint64_t fallback);
 
-uint64_t compactChunkMappedPayloadThresholdBytes() {
-  constexpr uint64_t kDefaultThreshold =
-      std::numeric_limits<uint64_t>::max();
-  return parseByteBudget(
-      std::getenv("SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES"), kDefaultThreshold);
-}
-
-bool shouldMapChunkPayload(const CompactChunkCSRInfo &info) {
-  return info.fileSizeBytes >= compactChunkMappedPayloadThresholdBytes();
-}
 
 ChunkColIdxValidationMode chunkColIdxValidationMode() {
   const char *raw = std::getenv("SPECT_CHUNK_VALIDATE");
@@ -164,136 +153,6 @@ void warnChunkValidationOffOnce() {
   }
 }
 
-class ReadOnlyChunkPayloadMap {
-public:
-  ReadOnlyChunkPayloadMap() = default;
-  ~ReadOnlyChunkPayloadMap() { close(); }
-  ReadOnlyChunkPayloadMap(const ReadOnlyChunkPayloadMap &) = delete;
-  ReadOnlyChunkPayloadMap &operator=(const ReadOnlyChunkPayloadMap &) = delete;
-  ReadOnlyChunkPayloadMap(ReadOnlyChunkPayloadMap &&other) noexcept {
-    moveFrom(std::move(other));
-  }
-  ReadOnlyChunkPayloadMap &operator=(ReadOnlyChunkPayloadMap &&other) noexcept {
-    if (this != &other) {
-      close();
-      moveFrom(std::move(other));
-    }
-    return *this;
-  }
-
-  void open(const std::filesystem::path &path) {
-    close();
-#ifdef _WIN32
-    const std::wstring wpath = path.wstring();
-    HANDLE file =
-        CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-      throw std::runtime_error("CreateFile failed: " + path.string());
-    }
-    LARGE_INTEGER size{};
-    if (!GetFileSizeEx(file, &size)) {
-      CloseHandle(file);
-      throw std::runtime_error("GetFileSizeEx failed: " + path.string());
-    }
-    HANDLE mapping =
-        CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!mapping) {
-      CloseHandle(file);
-      throw std::runtime_error("CreateFileMapping failed: " + path.string());
-    }
-    void *base = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
-    if (!base) {
-      CloseHandle(mapping);
-      CloseHandle(file);
-      throw std::runtime_error("MapViewOfFile failed: " + path.string());
-    }
-    fileHandle_ = file;
-    mappingHandle_ = mapping;
-    base_ = base;
-    length_ = static_cast<size_t>(size.QuadPart);
-#else
-    int fd = ::open(path.string().c_str(), O_RDONLY);
-    if (fd < 0) {
-      throw std::runtime_error("open failed: " + path.string());
-    }
-    struct stat st {};
-    if (fstat(fd, &st) != 0) {
-      ::close(fd);
-      throw std::runtime_error("fstat failed: " + path.string());
-    }
-    void *base =
-        mmap(nullptr, static_cast<size_t>(st.st_size), PROT_READ, MAP_SHARED,
-             fd, 0);
-    if (base == MAP_FAILED) {
-      ::close(fd);
-      throw std::runtime_error("mmap failed: " + path.string());
-    }
-    fd_ = fd;
-    base_ = base;
-    length_ = static_cast<size_t>(st.st_size);
-#endif
-  }
-
-  const std::byte *bytes() const {
-    return reinterpret_cast<const std::byte *>(base_);
-  }
-
-  size_t length() const { return length_; }
-
-private:
-  void close() {
-#ifdef _WIN32
-    if (base_) {
-      UnmapViewOfFile(base_);
-      base_ = nullptr;
-    }
-    if (mappingHandle_) {
-      CloseHandle(mappingHandle_);
-      mappingHandle_ = nullptr;
-    }
-    if (fileHandle_ != INVALID_HANDLE_VALUE) {
-      CloseHandle(fileHandle_);
-      fileHandle_ = INVALID_HANDLE_VALUE;
-    }
-#else
-    if (base_) {
-      munmap(base_, length_);
-      base_ = nullptr;
-    }
-    if (fd_ >= 0) {
-      ::close(fd_);
-      fd_ = -1;
-    }
-#endif
-    length_ = 0;
-  }
-
-  void moveFrom(ReadOnlyChunkPayloadMap &&other) {
-    base_ = other.base_;
-    length_ = other.length_;
-    other.base_ = nullptr;
-    other.length_ = 0;
-#ifdef _WIN32
-    fileHandle_ = other.fileHandle_;
-    mappingHandle_ = other.mappingHandle_;
-    other.fileHandle_ = INVALID_HANDLE_VALUE;
-    other.mappingHandle_ = nullptr;
-#else
-    fd_ = other.fd_;
-    other.fd_ = -1;
-#endif
-  }
-
-  void *base_ = nullptr;
-  size_t length_ = 0;
-#ifdef _WIN32
-  HANDLE fileHandle_ = INVALID_HANDLE_VALUE;
-  HANDLE mappingHandle_ = nullptr;
-#else
-  int fd_ = -1;
-#endif
-};
 
 uint64_t parseByteBudget(const char *text, uint64_t fallback) {
   if (text == nullptr || *text == '\0')
@@ -303,21 +162,20 @@ uint64_t parseByteBudget(const char *text, uint64_t fallback) {
             return std::isspace(ch) != 0;
           }),
           s.end());
-  if (s.empty())
+  if (s.empty() || lowerString(s) == "auto")
     return fallback;
 
   char suffix = '\0';
-  if (!std::isdigit(static_cast<unsigned char>(s.back()))) {
+  if (std::isalpha(static_cast<unsigned char>(s.back()))) {
     suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(s.back())));
     s.pop_back();
   }
-  if (s.empty())
-    return fallback;
-
   char *end = nullptr;
   const double value = std::strtod(s.c_str(), &end);
-  if (end == s.c_str() || value < 0.0)
-    return fallback;
+  if (end == s.c_str() || *end != '\0' || !std::isfinite(value) || value < 0.0 ||
+      (suffix != '\0' && suffix != 'k' && suffix != 'm' && suffix != 'g' && suffix != 't'))
+    throw std::runtime_error("Invalid SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES: " +
+                             std::string(text) + "; expected auto or nonnegative bytes with optional K/M/G/T.");
 
   double scale = 1.0;
   switch (suffix) {
@@ -400,7 +258,8 @@ CompactChunkCSRInfo readChunkHeader(const std::filesystem::path &path) {
   return info;
 }
 
-CompactChunkCSRInfo readChunkCSRQHeader(const std::filesystem::path &path) {
+CompactChunkCSRInfo readChunkCSRQHeader(const std::filesystem::path &path,
+                                       int expectedCols) {
   std::ifstream in(path, std::ios::binary);
   if (!in)
     throw std::runtime_error("Cannot open compact chunk CSRQ: " + path.string());
@@ -441,6 +300,10 @@ CompactChunkCSRInfo readChunkCSRQHeader(const std::filesystem::path &path) {
   }
   if (rows <= 0 || angleOffset < 0 || angleCount <= 0 || cols <= 0)
     throw std::runtime_error("Invalid chunk CSRQ dimensions in " + path.string());
+  if (cols != expectedCols)
+    throw std::runtime_error("Chunk CSRQ cols=" + std::to_string(cols) +
+                             " differ from metadata totalVoxels=" +
+                             std::to_string(expectedCols) + " in " + path.string());
   if (nnz > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
       runCount > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
     throw std::runtime_error("Chunk CSRQ nnz/run_count exceed the u32 row "
@@ -470,7 +333,7 @@ CompactChunkCSRInfo readChunkCSRQHeader(const std::filesystem::path &path) {
 }
 
 std::vector<CompactChunkCSRInfo>
-discoverChunkInfos(const std::filesystem::path &directory) {
+discoverChunkInfos(const std::filesystem::path &directory, int cols) {
   if (!std::filesystem::is_directory(directory)) {
     throw std::runtime_error("Compact chunk CSR directory not found: " +
                              directory.string());
@@ -486,7 +349,7 @@ discoverChunkInfos(const std::filesystem::path &directory) {
       infos.push_back(readChunkHeader(entry.path()));
       ++csrbCount;
     } else if (isChunkCSRQFile(entry.path())) {
-      infos.push_back(readChunkCSRQHeader(entry.path()));
+      infos.push_back(readChunkCSRQHeader(entry.path(), cols));
       ++csrqCount;
     }
   }
@@ -566,6 +429,17 @@ void validateChunkColIdxRange(const CompactChunkCSRInfo &info,
   validateAt(nnz - 1);
 }
 
+void validateChunkValues(const CompactChunkCSRInfo &info, const float *values,
+                         uint64_t count, uint64_t sourceOffset = 0) {
+  for (uint64_t i = 0; i < count; ++i) {
+    if (!std::isfinite(values[i]) || values[i] < 0.0f) {
+      throw std::runtime_error("Invalid nonnegative finite chunk value in " +
+                               info.path.string() + " at nnz index " +
+                               std::to_string(sourceOffset + i));
+    }
+  }
+}
+
 CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,
                                         int cols) {
   std::ifstream in(info.path, std::ios::binary);
@@ -573,10 +447,7 @@ CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,
     throw std::runtime_error("Cannot open compact chunk CSR: " +
                              info.path.string());
 
-  in.seekg(28, std::ios::beg);
-  if (!in)
-    throw std::runtime_error("Failed to seek chunk payload: " +
-                             info.path.string());
+  in.seekg(kChunkHeaderBytes, std::ios::beg);
 
   CompactChunkCSRData data;
   data.info = info;
@@ -590,6 +461,7 @@ CompactChunkCSRData loadChunkDataCopied(const CompactChunkCSRInfo &info,
   readExact(in, data.values.data(), data.values.size(), "chunk values");
 
   validateChunkColIdxRange(info, data.colIdx.data(), info.nnz, cols);
+  validateChunkValues(info, data.values.data(), info.nnz);
 
   return data;
 }
@@ -639,6 +511,7 @@ CompactChunkCSRData loadChunkDataSubset(const CompactChunkCSRInfo &info,
     readExact(in, data.colIdx.data() + destination, count, "subset col_idx");
     in.seekg(static_cast<std::streamoff>(valuesOffset + 4ull * range.first));
     readExact(in, data.values.data() + destination, count, "subset values");
+    validateChunkValues(info, data.values.data() + destination, count, range.first);
     destination += count;
   }
   validateChunkColIdxRange(info, data.colIdx.data(), packedNnz, cols);
@@ -647,43 +520,6 @@ CompactChunkCSRData loadChunkDataSubset(const CompactChunkCSRInfo &info,
   return data;
 }
 
-CompactChunkCSRData loadChunkDataMapped(const CompactChunkCSRInfo &info,
-                                        int cols) {
-  auto mapping = std::make_shared<ReadOnlyChunkPayloadMap>();
-  mapping->open(info.path);
-
-  if (mapping->length() != static_cast<size_t>(info.fileSizeBytes)) {
-    throw std::runtime_error("Mapped chunk size mismatch for " +
-                             info.path.string());
-  }
-
-  const size_t row64Bytes =
-      (static_cast<size_t>(info.rows) + 1u) * sizeof(int64_t);
-  const size_t colIdxBytes = static_cast<size_t>(info.nnz) * sizeof(uint32_t);
-  const std::byte *base = mapping->bytes();
-  const std::byte *row64Base = base + kChunkHeaderBytes;
-  const std::byte *colIdxBase = row64Base + row64Bytes;
-
-  CompactChunkCSRData data;
-  data.info = info;
-  data.cols = cols;
-  {
-    std::string rowBytesText(reinterpret_cast<const char *>(row64Base), row64Bytes);
-    std::istringstream rowIn(rowBytesText, std::ios::in | std::ios::binary);
-    loadChunkRowPtr32(info, rowIn, data.rowPtr);
-  }
-  data.mappedPayloadOwner = mapping;
-  data.mappedColIdx = reinterpret_cast<const uint32_t *>(colIdxBase);
-
-  const size_t valuesBytes = static_cast<size_t>(info.nnz) * sizeof(float);
-  const std::byte *valuesBase = colIdxBase + colIdxBytes;
-  data.mappedValues = reinterpret_cast<const float *>(valuesBase);
-  data.mappedPayloadBytes =
-      static_cast<uint64_t>(colIdxBytes + valuesBytes);
-
-  validateChunkColIdxRange(info, data.mappedColIdx, info.nnz, cols);
-  return data;
-}
 
 void loadChunkPtr32(const CompactChunkCSRInfo &info, std::istream &in,
                     uint64_t expectedEnd, const char *label,
@@ -743,9 +579,7 @@ CompactChunkCSRData loadChunkDataCSRQ(const CompactChunkCSRInfo &info,
   if (!in)
     throw std::runtime_error("Cannot open compact chunk CSRQ: " +
                              info.path.string());
-  in.seekg(static_cast<std::streamoff>(kChunkCSRQHeaderBytes), std::ios::beg);
-  if (!in)
-    throw std::runtime_error("Failed to seek CSRQ payload: " + info.path.string());
+  in.seekg(kChunkCSRQHeaderBytes, std::ios::beg);
 
   CompactChunkCSRData data;
   data.info = info;
@@ -756,8 +590,7 @@ CompactChunkCSRData loadChunkDataCSRQ(const CompactChunkCSRInfo &info,
   readExact(in, data.rowMax.data(), data.rowMax.size(), "csrq row_max");
   data.valuesQ.resize(static_cast<size_t>(info.nnz));
   readExact(in, data.valuesQ.data(), data.valuesQ.size(), "csrq values");
-  in.seekg(static_cast<std::streamoff>(csrqValuesPadBytes(info.nnz)),
-           std::ios::cur);
+  in.seekg(static_cast<std::streamoff>(csrqValuesPadBytes(info.nnz)), std::ios::cur);
   data.runs.resize(static_cast<size_t>(info.runCount));
   readExact(in, data.runs.data(), data.runs.size(), "csrq runs");
   for (size_t r = 0; r < data.rowMax.size(); ++r) {
@@ -771,20 +604,14 @@ CompactChunkCSRData loadChunkDataCSRQ(const CompactChunkCSRInfo &info,
 }
 
 CompactChunkCSRData loadChunkData(const CompactChunkCSRInfo &info, int cols) {
-  if (info.format == CompactChunkFormat::CsrqRunU16) {
-    return loadChunkDataCSRQ(info, cols);
-  }
-  if (!shouldMapChunkPayload(info)) {
-    return loadChunkDataCopied(info, cols);
-  }
-  try {
-    return loadChunkDataMapped(info, cols);
-  } catch (const std::exception &ex) {
-    std::cerr << "[NOTE] compact-chunk mmap failed for " << info.path
-              << ": " << ex.what()
-              << "; falling back to full copy load\n";
-    return loadChunkDataCopied(info, cols);
-  }
+  const auto timeBefore = std::filesystem::last_write_time(info.path);
+  auto data = info.format == CompactChunkFormat::CsrqRunU16
+      ? loadChunkDataCSRQ(info, cols)
+      : loadChunkDataCopied(info, cols);
+  if (std::filesystem::file_size(info.path) != info.fileSizeBytes ||
+      std::filesystem::last_write_time(info.path) != timeBefore)
+    throw std::runtime_error("Matrix file changed while loading: " + info.path.string());
+  return data;
 }
 
 } // namespace
@@ -883,9 +710,6 @@ CompactRunU16View CompactChunkCSRData::runView() const {
 uint64_t CompactChunkCSRData::residentBytes() const {
   const uint64_t rowPtrBytes =
       static_cast<uint64_t>(rowPtr.size()) * sizeof(uint32_t);
-  if (mappedPayloadOwner) {
-    return rowPtrBytes + mappedPayloadBytes;
-  }
   return rowPtrBytes +
          static_cast<uint64_t>(colIdx.size()) * sizeof(uint32_t) +
          static_cast<uint64_t>(values.size()) * sizeof(float) +
@@ -896,28 +720,28 @@ uint64_t CompactChunkCSRData::residentBytes() const {
 }
 
 const uint32_t *CompactChunkCSRData::colIdxData() const {
-  return mappedColIdx != nullptr ? mappedColIdx : colIdx.data();
+  return colIdx.data();
 }
 
 const float *CompactChunkCSRData::valuesData() const {
-  return mappedValues != nullptr ? mappedValues : values.data();
+  return values.data();
 }
 
 
 size_t CompactChunkCSRData::colIdxCount() const {
-  return mappedColIdx != nullptr ? static_cast<size_t>(info.nnz) : colIdx.size();
+  return colIdx.size();
 }
 
 size_t CompactChunkCSRData::valuesCount() const {
-  return mappedValues != nullptr ? static_cast<size_t>(info.nnz) : values.size();
+  return values.size();
 }
 
 
 CompactChunkCSRDirectory::CompactChunkCSRDirectory(
     std::filesystem::path directory, std::vector<CompactChunkCSRInfo> chunks,
-    int cols, uint64_t cacheBudgetBytes)
+    int cols, uint64_t cacheBudgetBytes, int branchCount)
     : directory_(std::move(directory)), chunks_(std::move(chunks)), cols_(cols),
-      cacheBudgetBytes_(cacheBudgetBytes), cache_(chunks_.size()),
+      branchCount_(branchCount), cacheBudgetBytes_(cacheBudgetBytes), cache_(chunks_.size()),
       liveChunks_(chunks_.size()), liveSubsets_(chunks_.size()) {
   cacheMutexes_.reserve(chunks_.size());
   for (size_t i = 0; i < chunks_.size(); ++i)
@@ -940,12 +764,15 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
     return live;
   }
 
+  const auto readStart = std::chrono::steady_clock::now();
   auto loaded =
       std::make_shared<CompactChunkCSRData>(loadChunkData(chunks_[index], cols_));
   const uint64_t bytes = loaded->residentBytes();
   if (index < cache_.size()) {
     std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
     ++readStats_.payloadLoads;
+    readStats_.loaderWorkSeconds += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - readStart).count();
     readStats_.payloadReadBytes += chunks_[index].fileSizeBytes -
         (chunks_[index].format == CompactChunkFormat::CsrbFloat32 ? 28u : 48u);
     if (cacheBudgetBytes_ == std::numeric_limits<uint64_t>::max() ||
@@ -956,6 +783,32 @@ CompactChunkCSRDirectory::loadChunk(size_t index) const {
   }
   liveChunks_[index] = loaded;
   return loaded;
+}
+
+void CompactChunkCSRDirectory::appendCacheInputs(
+    std::ostream &out, const std::string &prefix) const {
+  out << prefix << "chunk_count=" << chunks_.size() << '\n';
+  out << prefix << "chunk_total_rows=" << totalRows_ << '\n';
+  out << prefix << "chunk_total_nnz=" << totalNnz_ << '\n';
+  for (size_t i = 0; i < chunks_.size(); ++i) {
+    const auto &chunk = chunks_[i];
+    const auto path = std::filesystem::canonical(chunk.path);
+    const auto size = std::filesystem::file_size(path);
+    if (size != chunk.fileSizeBytes)
+      throw std::runtime_error("Matrix file size changed after opening: " + path.string());
+    const auto key = prefix + "chunk_" + std::to_string(i);
+    out << key << "_path=" << path.generic_string() << '\n';
+    out << key << "_mtime="
+        << std::filesystem::last_write_time(path).time_since_epoch().count() << '\n';
+    out << key << "_format=" << (chunk.format == CompactChunkFormat::CsrbFloat32 ? "csrb" : "csrq") << '\n';
+    out << key << "_version=" << chunk.version << '\n';
+    out << key << "_rows=" << chunk.rows << '\n';
+    out << key << "_angle_offset=" << chunk.angleOffset << '\n';
+    out << key << "_angle_count=" << chunk.angleCount << '\n';
+    out << key << "_nnz=" << chunk.nnz << '\n';
+    out << key << "_run_count=" << chunk.runCount << '\n';
+    out << key << "_file_size_bytes=" << size << '\n';
+  }
 }
 
 CSRSubsetView CompactChunkCSRDirectory::loadSubset(
@@ -996,11 +849,14 @@ CSRSubsetView CompactChunkCSRDirectory::loadSubset(
       chunkLock.unlock();
       owner = loadChunk(index);
     } else {
+      const auto readStart = std::chrono::steady_clock::now();
       owner = std::make_shared<CompactChunkCSRData>(
           loadChunkDataSubset(info, cols_, compactAngles, raysPerAngle));
       liveSubsets_[index] = {compactAngles, owner};
       std::lock_guard<std::mutex> budgetLock(*cacheBudgetMutex_);
       ++readStats_.payloadLoads;
+      readStats_.loaderWorkSeconds += std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - readStart).count();
       readStats_.payloadReadBytes += 8ull * (static_cast<uint64_t>(info.rows) + 1) +
                                     8ull * owner->info.nnz;
     }
@@ -1047,7 +903,7 @@ uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes) {
 CompactChunkCSRDirectory openCompactChunkCSRDirectory(
     const std::string &directory, const CompactSymmetryMetadata &meta) {
   const std::filesystem::path dir(directory);
-  const auto infos = discoverChunkInfos(dir);
+  const auto infos = discoverChunkInfos(dir, meta.totalVoxels);
   uint64_t matrixBytes = 0;
   for (const auto &info : infos) {
     matrixBytes = info.fileSizeBytes >
@@ -1062,7 +918,7 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
   const uint64_t cacheBudget =
       csrq ? parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"), 0)
            : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
-  // ponytail: six 28-byte headers are rescanned to keep one validation path.
+  // ponytail: rescan only the small headers to keep one validation path.
   return openCompactChunkCSRDirectory(directory, meta, cacheBudget);
 }
 
@@ -1070,13 +926,13 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
     const std::string &directory, const CompactSymmetryMetadata &meta,
     uint64_t cacheBudgetBytes) {
   const std::filesystem::path dir(directory);
-  std::vector<CompactChunkCSRInfo> infos = discoverChunkInfos(dir);
+  std::vector<CompactChunkCSRInfo> infos = discoverChunkInfos(dir, meta.totalVoxels);
 
-  if (infos.front().format == CompactChunkFormat::CsrqRunU16 &&
+  if (meta.profile != CompactSymmetryProfile::Rot90 &&
       meta.profile != CompactSymmetryProfile::Rot90Z)
-    throw std::runtime_error("CSRQ currently requires the ROT90_Z profile.");
+    throw std::runtime_error("Unsupported compact matrix symmetry profile.");
 
-  int expectedOffset = 0;
+  int64_t expectedOffset = 0;
   uint64_t rows = 0;
   for (const auto &info : infos) {
     if (info.angleOffset != expectedOffset) {
@@ -1114,7 +970,7 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
   }
 
   return CompactChunkCSRDirectory(dir, std::move(infos), meta.totalVoxels,
-                                  cacheBudgetBytes);
+                                  cacheBudgetBytes, meta.xySymmetryCount() * meta.zBranchCount());
 }
 
 } // namespace spect::io

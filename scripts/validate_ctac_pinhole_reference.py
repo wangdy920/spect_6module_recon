@@ -7,7 +7,9 @@ import argparse
 import csv
 import json
 import math
+import re
 import struct
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,19 +46,9 @@ class CompactMeta:
 
     @property
     def mode(self) -> str:
-        looks45 = (
-            self.full_num_angles % 8 == 0
-            and self.compact_num_angles == self.full_num_angles // 8 + 1
-        )
-        looks90 = (
-            self.full_num_angles % 4 == 0
-            and self.compact_num_angles == self.full_num_angles // 4
-        )
-        if self.use_45 or self.sym_code == 45 or self.symmetry_order == 8 or looks45:
-            return "45z" if self.use_z else "45"
-        if self.use_90 or looks90:
-            return "90z" if self.use_z else "90"
-        return "none"
+        # load_metadata validates the explicit profile; dimensions can be
+        # ambiguous for tiny fixtures and must not override that declaration.
+        return "90z" if self.use_z else "90"
 
 
 @dataclass(frozen=True)
@@ -70,7 +62,7 @@ class ChunkInfo:
 
 def read_mhd_spacing(path: Path) -> tuple[float, float, float] | None:
     header = {}
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
@@ -86,52 +78,32 @@ def read_mhd_spacing(path: Path) -> tuple[float, float, float] | None:
 
 def load_metadata(path: Path) -> CompactMeta:
     data = path.read_bytes()
-    if len(data) < 76:
-        raise ValueError(f"metadata too small: {path}")
-    off = 0
-
-    def i32() -> int:
-        nonlocal off
-        value = struct.unpack_from("<i", data, off)[0]
-        off += 4
-        return value
-
-    def f32() -> float:
-        nonlocal off
-        value = struct.unpack_from("<f", data, off)[0]
-        off += 4
-        return value
-
-    total_rows = i32()
-    total_voxels = i32()
-    _max_nnz = i32()
-    compact_num_angles = i32()
-    det_nx = i32()
-    compact_det_z = i32()
-    compact_rays_per_angle = i32()
-    full_num_angles = i32()
-    nx = i32()
-    ny = i32()
-    nz = i32()
-    voxel_size = f32()
-    _det_nx_dup = i32()
-    det_nz = i32()
-    pixel_size = f32()
-    detector_y = f32()
-    _detector_thickness = f32()
-    use_90 = i32() != 0
-    use_z = i32() != 0
-    use_45 = False
-    sym_code = 0
-    symmetry_order = 1
-    if len(data) >= 88:
-        use_45 = i32() != 0
-        sym_code = i32()
-        symmetry_order = i32()
-    if det_nz <= 0:
-        det_nz = 2 * compact_det_z if use_z else compact_det_z
-    if compact_rays_per_angle <= 0:
-        compact_rays_per_angle = det_nx * compact_det_z
+    if len(data) in (88, 92):
+        values = struct.unpack("<11i" + ("f" if len(data) == 88 else "d") + "2i3f5i", data)
+    elif len(data) == 124 and struct.unpack_from("<II", data) == (0x444D4D53, 3):
+        raw_voxel = data[52:84]
+        if b"\0" not in raw_voxel:
+            raise ValueError("SMMD voxel text is not NUL terminated")
+        voxel = float(raw_voxel.split(b"\0", 1)[0].decode("ascii"))
+        values = (*struct.unpack_from("<11i", data, 8), voxel,
+                  *struct.unpack_from("<2i3f5i", data, 84))
+    else:
+        raise ValueError(f"unsupported compact metadata layout: {path}")
+    (total_rows, total_voxels, _max_nnz, compact_num_angles, det_nx,
+     compact_det_z, compact_rays_per_angle, full_num_angles, nx, ny, nz,
+     voxel_size, det_nx_duplicate, det_nz, pixel_size, detector_y,
+     _thickness, use_90, use_z, use_45, sym_code, symmetry_order) = values
+    voxel_size = float(np.float32(voxel_size))
+    if (not math.isfinite(voxel_size) or voxel_size <= 0 or nx != ny
+            or min(nx, ny, nz, det_nx, compact_det_z, full_num_angles) <= 0
+            or det_nx != det_nx_duplicate or total_voxels != nx * ny * nz
+            or use_90 != 1 or use_z not in (0, 1) or use_45 != 0
+            or sym_code != 90 or symmetry_order != 4
+            or full_num_angles != 4 * compact_num_angles
+            or det_nz != compact_det_z * (2 if use_z else 1)
+            or compact_rays_per_angle != det_nx * compact_det_z
+            or total_rows != compact_num_angles * compact_rays_per_angle):
+        raise ValueError(f"invalid ROT90/ROT90_Z geometry: {path}")
     return CompactMeta(
         total_rows,
         total_voxels,
@@ -466,7 +438,7 @@ def run(args: argparse.Namespace) -> dict:
     chunks = discover_chunks(args.chunk_dir)
     out_rows: list[dict] = []
     branch_list = branches(meta)
-    detector_y = args.detector_y if args.detector_y is not None else float(meta.detector_y)
+    detector_y = float(args.detector_y)
 
     for chunk in chunks:
         row_ptr = np.memmap(chunk.path, dtype="<i8", mode="r", offset=28, shape=(chunk.rows + 1,))
@@ -575,6 +547,77 @@ def run(args: argparse.Namespace) -> dict:
     return summary
 
 
+def geometry_probe(args: argparse.Namespace) -> dict:
+    """Geometry-only comparison: no inferred per-pinhole matrix weights."""
+    meta = load_metadata(args.metadata)
+    audit = args.geometry_audit.read_text(encoding="utf-8")
+    pins = [(int(i), np.array([float(v) for v in xyz.split(",")]))
+            for i, xyz in re.findall(r"pinhole=(\d+) .*?pm_center_mm=\(([^)]+)\)", audit)]
+    if (not pins or len({i for i, _ in pins}) != len(pins)
+            or any(p.shape != (3,) or not np.isfinite(p).all() for _, p in pins)):
+        raise ValueError("geometry audit must contain finite pinhole pm centers")
+    shape = (meta.nz, meta.ny, meta.nx)
+    spacing = (meta.voxel_size,) * 3
+    z, y, x = np.indices(shape, dtype=np.float64)
+    x = (x - (meta.nx - 1) / 2) * spacing[0]
+    y = (y - (meta.ny - 1) / 2) * spacing[1]
+    z = (z - (meta.nz - 1) / 2) * spacing[2]
+    radius = min(meta.nx, meta.ny) * spacing[0] * 0.45
+    half_height = meta.nz * spacing[2] * 0.45
+    support = (x*x + y*y <= radius*radius) & (abs(z) <= half_height)
+    water = support * 0.0152
+    heterogeneous = water.copy()
+    heterogeneous[support & ((x - radius * 0.25)**2 + y*y < (radius * 0.2)**2)] = 0.03
+    rows = []
+    for phantom, mu in (("water_cylinder", water), ("dense_insert", heterogeneous)):
+        for target_z in (-half_height * 0.9, 0.0, half_height * 0.9):
+            for target_x, target_y in ((0, 0), (radius * .75, 0), (-radius * .75, 0),
+                                     (0, radius * .75), (0, -radius * .75)):
+                ix, iy, iz = (int(round(t / s + (n - 1) / 2))
+                              for t, s, n in zip((target_x, target_y, target_z), spacing,
+                                                  (meta.nx, meta.ny, meta.nz)))
+                p0 = voxel_center_mm(ix, iy, iz, shape, spacing)
+                for angle in range(0, meta.full_num_angles, max(1, meta.full_num_angles // 8)):
+                    current = current_parallel_integral(mu, ix, iy, iz, int(angle),
+                                                        meta.full_num_angles, spacing, args.rotation_sign)
+                    theta = args.rotation_sign * int(angle) * 2 * math.pi / meta.full_num_angles
+                    direction = np.array([-math.sin(theta), math.cos(theta), 0.0])
+                    parallel = siddon_integral(mu, p0, p0 + direction * 1000, spacing)
+                    for pin_id, pin in pins:
+                        p1 = pinhole_center_mm(int(angle), meta.full_num_angles, pin[1],
+                                               args.rotation_sign, pin[0], pin[2])
+                        pinhole = siddon_integral(mu, p0, p1, spacing)
+                        rows.append(dict(phantom=phantom, pinhole=pin_id, angle=int(angle),
+                                         x_mm=p0[0], y_mm=p0[1], z_mm=p0[2],
+                                         current_i=current, parallel_siddon_i=parallel, pinhole_i=pinhole,
+                                         current_factor=math.exp(-current), pinhole_factor=math.exp(-pinhole),
+                                         geometry_relative_factor_error=math.expm1(pinhole-parallel),
+                                         total_relative_factor_error=math.expm1(pinhole-current)))
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    with (args.out_dir / "geometry_samples.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = {"evidence": "actual supplied pinhole centers; synthetic mu; unweighted path comparison",
+               "decision": "descriptive_only_not_image_quality_or_adoption",
+               "metadata": str(args.metadata), "geometry_audit": str(args.geometry_audit),
+               "shape_zyx": shape, "spacing_mm": spacing, "radius_mm": radius,
+               "half_height_mm": half_height, "mu_per_mm": [0.0152, 0.03], "samples": len(rows),
+               "limitations": "No per-pinhole contribution weights, real CT, or reconstructed-image error.",
+               "phantoms": {}}
+    for phantom in ("water_cylinder", "dense_insert"):
+        group = [r for r in rows if r["phantom"] == phantom]
+        result = {}
+        for field in ("geometry_relative_factor_error", "total_relative_factor_error"):
+            errors = np.array([r[field] for r in group])
+            result[field] = {"median_abs": float(np.median(abs(errors))),
+                             "p95_abs": float(np.quantile(abs(errors), .95)),
+                             "max_abs": float(max(abs(errors)))}
+        summary["phantoms"][phantom] = result
+    (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
 def self_test() -> None:
     mu = np.ones((3, 3, 3), dtype=np.float64)
     spacing = (1.0, 1.0, 1.0)
@@ -586,6 +629,29 @@ def self_test() -> None:
         nz = 3
         mode = "90z"
     assert map_voxel(M, 13, 1, False) == 13
+    # Physical half-voxel boundary anchor, independent of the sampled integrator.
+    assert abs(siddon_integral(mu, np.zeros(3), np.array([2., 2., 0.]), spacing)
+               - 1.5 * math.sqrt(2)) < 1e-12
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "metadata.bin"
+        prefix = (16, 64, 64, 2, 2, 4, 8, 8, 4, 4, 4)
+        suffix = (2, 4, 1., 29., 9., 1, 0, 0, 90, 4)
+        layouts = [struct.pack("<11if2i3f5i", *prefix, .4, *suffix),
+                   struct.pack("<11id2i3f5i", *prefix, .4, *suffix),
+                   struct.pack("<II11i32s2i3f5i", 0x444D4D53, 3,
+                               *prefix, b"0.4", *suffix)]
+        for data in layouts:
+            path.write_bytes(data)
+            meta = load_metadata(path)
+            assert meta.mode == "90" and meta.total_rows == 16
+            assert meta.voxel_size == float(np.float32(.4))
+        path.write_bytes(layouts[-1][:-1])
+        try:
+            load_metadata(path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("truncated metadata accepted")
 
 
 def parse_args() -> argparse.Namespace:
@@ -593,13 +659,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--self-test", action="store_true")
     p.add_argument("--chunk-dir", type=Path, default=Path("test_data/6module/260601"))
     p.add_argument("--metadata", type=Path, default=None)
+    p.add_argument("--geometry-audit", type=Path,
+                   help="Probe supplied pm centers on synthetic mu phantoms; no matrix payload read")
     p.add_argument("--mu-map", type=Path)
     p.add_argument("--out-dir", type=Path, default=Path("recon_out/ctac_pinhole_reference_validation"))
     p.add_argument("--rows-per-chunk", type=int, default=8)
     p.add_argument("--nnz-per-row", type=int, default=4)
     p.add_argument("--active-voxel-only", action="store_true")
     p.add_argument("--active-mu-min", type=float, default=1e-12)
-    p.add_argument("--detector-y", type=float, default=None)
+    p.add_argument("--detector-y", type=float, default=None,
+                   help="Legacy option name: explicit PINHOLE-plane Y in mm, not detector-plane Y")
     p.add_argument("--pinhole-x", type=float, default=0.0)
     p.add_argument("--pinhole-z", type=float, default=0.0)
     p.add_argument("--rotation-sign", type=int, choices=(-1, 1), default=1)
@@ -611,8 +680,10 @@ def parse_args() -> argparse.Namespace:
         return args
     if args.metadata is None:
         args.metadata = args.chunk_dir / "metadata.bin"
-    if args.mu_map is None:
-        p.error("--mu-map is required unless --self-test is used")
+    if args.mu_map is None and args.geometry_audit is None:
+        p.error("--mu-map or --geometry-audit is required")
+    if args.geometry_audit is None and (args.detector_y is None or not math.isfinite(args.detector_y)):
+        p.error("--detector-y must explicitly supply finite pinhole-plane Y; metadata detectorY is not a pinhole center")
     return args
 
 
@@ -621,6 +692,9 @@ def main() -> int:
     if args.self_test:
         self_test()
         print("self-test passed")
+        return 0
+    if args.geometry_audit is not None:
+        print(json.dumps(geometry_probe(args), indent=2))
         return 0
     summary = run(args)
     print(json.dumps(summary, indent=2, ensure_ascii=False))

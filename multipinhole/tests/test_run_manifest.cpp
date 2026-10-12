@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <cstddef>
 #include <fstream>
+#include <iostream>
+#include <iterator>
 #include <sstream>
 #include <regex>
 #include <string>
@@ -11,6 +13,7 @@
 
 #include "cli/ReconArgs.h"
 #include "io/CompactSymmetryMetadata.h"
+#include "pipeline/RunLogger.h"
 #include "pipeline/RunLogging.h"
 #include "pipeline/RunManifest.h"
 
@@ -267,6 +270,59 @@ TEST(RunLoggingTest, DefaultLogNameUsesSecondTimestampOnly) {
   const std::string name = path.filename().string();
   EXPECT_TRUE(std::regex_match(name,
                                std::regex(R"(recon_\d{8}_\d{6}\.log)")));
+}
+
+TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
+  EXPECT_TRUE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [ITER] 2/20 compact\n"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("[ITER] 20/20 compact"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("Error: -dfList is required\n"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("[FATAL] CUDA error at x.cpp:74: out of memory\n"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("[ERROR] compact host-pin release: x\n"));
+  EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [ITER_TIME] 2 11.0 s\n"));
+  EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [SUBSET] 1/10\n"));
+  EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22  [NOTE] cache\n"));
+  EXPECT_FALSE(main::isMinimalConsoleLine("[WARNING] compact host cache page-lock refused\n"));
+  EXPECT_FALSE(main::isMinimalConsoleLine("CUDA environment: device=0/1\n"));
+
+  const fs::path dir = fs::temp_directory_path() / "spect_minimal_console_test";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const fs::path logPath = dir / "recon.log";
+  const int previousVerbosity = main::getVerbosity();
+  std::ostringstream console;
+  std::streambuf *oldCout = std::cout.rdbuf(console.rdbuf());
+  std::streambuf *oldCerr = std::cerr.rdbuf(console.rdbuf());
+  main::setVerbosity(0);
+  {
+    main::ConsoleTeeGuard tee(logPath);
+    ASSERT_TRUE(tee.enabled());
+    main::logInfo("Output directory: D:/out");
+    main::logInfo("[ITER] 2/20 compact");
+    main::logWarn("compact host cache below matrix size");
+    std::cerr << "[WARNING] compact host cache page-lock refused\n";
+    std::cout << "[ITER_TIME] 2 11.0 s\n";
+    std::cerr << "[FATAL] boom\n";
+    std::cout << "Error: trailing line without newline";
+  }
+  main::setVerbosity(previousVerbosity);
+  std::cout.rdbuf(oldCout);
+  std::cerr.rdbuf(oldCerr);
+
+  const std::regex expectedConsole(
+      R"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[ITER\] 2/20 compact\n)"
+      R"(\[FATAL\] boom\nError: trailing line without newline)");
+  EXPECT_TRUE(std::regex_match(console.str(), expectedConsole)) << console.str();
+  std::ifstream in(logPath, std::ios::binary);
+  const std::string file((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  for (const char *text : {"Output directory: D:/out", "[ITER] 2/20 compact",
+                           "[NOTE] compact host cache below matrix size",
+                           "[WARNING] compact host cache page-lock refused",
+                           "[ITER_TIME] 2 11.0 s", "[FATAL] boom",
+                           "Error: trailing line without newline"})
+    EXPECT_NE(file.find(text), std::string::npos) << text << "\n" << file;
+  in.close();
+  fs::remove_all(dir);
 }
 
 } // namespace test

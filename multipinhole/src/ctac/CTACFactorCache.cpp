@@ -2,6 +2,8 @@
 
 #include "core/AttenuationConstants.h"
 #include "ctac/CTACOps.h"
+#include "cli/ReconArgs.h"
+#include "io/VolumeLoader.h"
 #include "pipeline/RunLogger.h"
 
 #include <fstream>
@@ -30,7 +32,52 @@ std::filesystem::path normalizePathForCache(const std::filesystem::path &path) {
   return canonical;
 }
 
+void appendVolumeIdentity(std::ostringstream &out, const std::string &label,
+                          const std::string &path) {
+  const auto append = [&](const std::string &key, const std::filesystem::path &file) {
+    const auto fullPath = std::filesystem::canonical(file);
+    out << key << '=' << fullPath.generic_string() << '\n'
+        << key << "_size=" << std::filesystem::file_size(fullPath) << '\n'
+        << key << "_mtime="
+        << std::filesystem::last_write_time(fullPath).time_since_epoch().count() << '\n';
+  };
+  append(label, path);
+  const auto info = io::readVolumeInfo(path);
+  append(label + "_data", info.rawPath);
+}
+
 } // namespace
+
+std::string buildCTACFactorManifest(const cli::ReconArgs &args, int baseNx,
+                                    int baseNy, int baseNz,
+                                    const filters::Spacing3 &spacing,
+                                    int bedZStart) {
+  std::ostringstream out;
+  out << std::setprecision(17)
+      << "cache_schema=ctac_atten_factors_v2_source_data\n"
+      << "ctac_model=" << args.ctacModel << '\n'
+      << "nx=" << baseNx << "\nny=" << baseNy << "\nnz=" << baseNz << '\n'
+      << "dx=" << spacing.dx << "\ndy=" << spacing.dy << "\ndz=" << spacing.dz << '\n'
+      << "num_angles=" << args.numAngles << '\n'
+      << "rotation_sign=" << args.ctacRotSign << '\n'
+      << "map_z_layout=local_matrix_z\n"
+      << "z_bed_flip=" << (args.zBedFlip ? 1 : 0) << '\n'
+      << "bed_z_start=" << bedZStart << '\n';
+  if (!args.attMapPath.empty())
+    appendVolumeIdentity(out, "att_map", args.attMapPath);
+  if (!args.ctacAutoMuFrom.empty()) {
+    appendVolumeIdentity(out, "auto_mu_from", args.ctacAutoMuFrom);
+    out << "auto_mu_thresh=" << args.ctacAutoMuThresh << '\n'
+        << "auto_mu_value=" << args.ctacAutoMuValue << '\n'
+        << "auto_mu_cylinder=" << args.useCylindricalMask << '\n';
+    if (args.useCylindricalMask)
+      out << "cylinder_diameter_mm=" << args.cylinderDiameterMM << '\n'
+          << "cylinder_height_mm=" << args.cylinderHeightMM << '\n'
+          << "cylinder_center=" << args.cylCenterX << ',' << args.cylCenterY
+          << ',' << args.cylCenterZ << '\n';
+  }
+  return out.str();
+}
 
 CTACFactorCache::CTACFactorCache(std::filesystem::path cacheDir)
     : cacheDir_(normalizePathForCache(std::move(cacheDir))) {}

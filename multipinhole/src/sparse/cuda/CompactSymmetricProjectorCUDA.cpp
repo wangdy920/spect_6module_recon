@@ -33,6 +33,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr uint64_t kCompactChunkResidentReserveBytes =
     kCompactChunkResidentDeviceReserveBytes;
+// Test hook (setCompactHostPinRefusalForTestsCUDA): registrations still
+// allowed before one is refused; negative disables the hook.
+std::atomic<int> g_compactHostPinTestRegistrations{-1};
 
 struct CompactChunkResidentCacheLease {
   uint64_t cacheBudget = 0;
@@ -61,19 +64,44 @@ struct CompactChunkResidentCacheLease {
     }
   }
 
-  void pin(const std::shared_ptr<const spect::io::CompactChunkCSRData> &chunk) {
+  // Registers both nnz arrays of one chunk, or none of them: a refused
+  // registration (Windows can refuse a page lock while the pageable copy
+  // already fits in RAM) is rolled back and returned so the caller can keep
+  // the remaining chunks on the pageable upload path.
+  cudaError_t pin(const std::shared_ptr<const spect::io::CompactChunkCSRData> &chunk) {
     // Reserve bookkeeping before registering so allocation failure cannot
     // leave a registration untracked. No second copy of the payload is made.
     pinnedArrays.reserve(pinnedArrays.size() + 2);
-    pinnedChunks.push_back(chunk);
-    if (chunk->info.nnz == 0)
-      return;
+    pinnedChunks.reserve(pinnedChunks.size() + 1);
+    if (chunk->info.nnz == 0) {
+      pinnedChunks.push_back(chunk);
+      return cudaSuccess;
+    }
     const size_t bytes = static_cast<size_t>(chunk->info.nnz) * sizeof(uint32_t);
+    const size_t firstArray = pinnedArrays.size();
     for (void *ptr : {static_cast<void *>(const_cast<uint32_t *>(chunk->colIdxData())),
                       static_cast<void *>(const_cast<float *>(chunk->valuesData()))}) {
-      CUDA_CHECK(cudaHostRegister(ptr, bytes, cudaHostRegisterPortable));
+      const cudaError_t status = registerHostArray(ptr, bytes);
+      if (status != cudaSuccess) {
+        (void)cudaGetLastError();
+        while (pinnedArrays.size() > firstArray) {
+          CUDA_CHECK(cudaHostUnregister(pinnedArrays.back()));
+          pinnedArrays.pop_back();
+        }
+        return status;
+      }
       pinnedArrays.push_back(ptr);
     }
+    pinnedChunks.push_back(chunk);
+    return cudaSuccess;
+  }
+
+private:
+  static cudaError_t registerHostArray(void *ptr, size_t bytes) {
+    if (g_compactHostPinTestRegistrations.load() >= 0 &&
+        g_compactHostPinTestRegistrations.fetch_sub(1) <= 0)
+      return cudaErrorMemoryAllocation;
+    return cudaHostRegister(ptr, bytes, cudaHostRegisterPortable);
   }
 };
 
@@ -261,15 +289,6 @@ void addTiming(double &target, Clock::time_point start) {
 }
 
 
-bool compactBranchBatchEnabled() {
-  const char *value = std::getenv("SPECT_COMPACT_BRANCH_BATCH");
-  if (value == nullptr || value[0] == '\0') {
-    return true;
-  }
-  return value[0] != '0' && value[0] != 'n' && value[0] != 'N' &&
-         value[0] != 'f' && value[0] != 'F';
-}
-
 CompactDeviceRatioParams makeCompactDeviceRatioParams(
     const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
     int symId, bool zMirror, double windowWeight = 1.0) {
@@ -430,11 +449,32 @@ void warmCompactChunkResidentDeviceCache(
   // Only register a complete host cache. Transient chunks in a partial cache
   // keep the existing pageable upload path and cannot acquire stale pins.
   if (hostCacheCoversMatrix) {
-    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex)
-      lease->pin(chunks.loadChunk(chunkIndex));
-    std::cerr << "[NOTE] compact host cache page-locked: "
-              << lease->pinnedChunks.size() << " chunks, "
-              << (matrixBytes / kMiB) << " MiB; registration owns chunk storage.\n";
+    uint64_t pinnedBytes = 0;
+    cudaError_t refusal = cudaSuccess;
+    for (size_t chunkIndex = 0; chunkIndex < chunks.chunks().size(); ++chunkIndex) {
+      refusal = lease->pin(chunks.loadChunk(chunkIndex));
+      if (refusal != cudaSuccess)
+        break;
+      pinnedBytes += chunks.chunks()[chunkIndex].fileSizeBytes;
+    }
+    // Registration can also surface earlier asynchronous CUDA failures.
+    // Only resource exhaustion is a recoverable page-lock refusal.
+    if (refusal != cudaSuccess && refusal != cudaErrorMemoryAllocation)
+      CUDA_CHECK(refusal);
+    if (refusal == cudaSuccess) {
+      std::cerr << "[NOTE] compact host cache page-locked: "
+                << lease->pinnedChunks.size() << " chunks, "
+                << (matrixBytes / kMiB) << " MiB; registration owns chunk storage.\n";
+    } else {
+      std::cerr << "[WARNING] compact host cache page-lock refused ("
+                << cudaGetErrorString(refusal) << "): page-locked "
+                << lease->pinnedChunks.size() << " / " << chunks.chunks().size()
+                << " chunks, " << (pinnedBytes / kMiB) << " / "
+                << (matrixBytes / kMiB)
+                << " MiB; the remaining chunks stay in the host cache and "
+                   "upload from pageable memory (slower transfers, same "
+                   "results).\n";
+    }
   }
   chunks.setAcceleratorLease(lease);
 }
@@ -453,14 +493,6 @@ std::atomic<int> g_csrqTestFitFailures{0};
 
 bool isCsrqDirectory(const spect::io::CompactChunkCSRDirectory &chunks) {
   return chunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
-}
-
-// Device bytes of one CSRQ chunk (row pointers, run pointers, row max, run
-// words, u16 values); mirrors the state's estimate.
-uint64_t csrqChunkDeviceBytes(const spect::io::CompactChunkCSRInfo &info) {
-  const uint64_t rows = static_cast<uint64_t>(info.rows);
-  return 2ull * sizeof(uint32_t) * (rows + 1ull) + sizeof(float) * rows +
-         sizeof(uint32_t) * info.runCount + sizeof(uint16_t) * info.nnz;
 }
 
 void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
@@ -500,7 +532,7 @@ void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
           "CSRQ matrix does not fit on the device even streamed (test hook).");
     }
   }
-  if (!csrqWarmupBeginCUDA(matrixIndex, chunks.cols(), shapes,
+  if (!csrqWarmupBeginCUDA(matrixIndex, chunks.cols(), chunks.branchCount(), shapes,
                            kCsrqResidentDeviceReserveBytes, forced,
                            &streamed)) {
     throw std::runtime_error(
@@ -602,16 +634,16 @@ std::vector<bool> planCsrqStreaming(
     }
     Pending p;
     p.channel = index;
-    uint64_t largest = 0;
+    CsrqChunkShape maxDims;
     for (const auto &info : chunks.chunks()) {
-      const uint64_t bytes = csrqChunkDeviceBytes(info);
-      p.bytes += bytes;
-      largest = std::max(largest, bytes);
+      const CsrqChunkShape shape{info.rows, info.nnz, info.runCount, 0};
+      p.bytes += shape.deviceBytes();
+      maxDims.includeDimensions(shape);
     }
-    p.twoSlots = static_cast<uint64_t>(kCsrqStreamSlots) * largest;
+    p.twoSlots = static_cast<uint64_t>(kCsrqStreamSlots) * maxDims.deviceBytes();
     pending.push_back(p);
     nvox = std::max<uint64_t>(nvox, static_cast<uint64_t>(chunks.cols()));
-    maxRows = std::max<uint64_t>(maxRows, chunks.totalRows());
+    maxRows = std::max<uint64_t>(maxRows, static_cast<uint64_t>(maxDims.rows));
   }
   if (pending.size() < 2) {
     return streamed; // the state decides alone for a single matrix
@@ -624,8 +656,8 @@ std::vector<bool> planCsrqStreaming(
   } catch (...) {
     return streamed;
   }
-  const uint64_t scratch = 2ull * nvox * kCsrqBranchCount * sizeof(float) +
-                           maxRows * kCsrqBranchCount * sizeof(float);
+  const int branchCount = channels.front().chunks->branchCount();
+  const uint64_t scratch = (2ull * nvox + maxRows) * branchCount * sizeof(float);
   const uint64_t fixed = kCsrqResidentDeviceReserveBytes + scratch;
   uint64_t budget = freeBytes > fixed ? freeBytes - fixed : 0ull;
   constexpr uint64_t kMiB = 1024ull * 1024ull;
@@ -674,7 +706,8 @@ void validateChannels(const std::vector<CompactMatrixChannel> &channels,
     }
     if (channel.chunks->totalRows() !=
             static_cast<uint64_t>(meta.compactRows()) ||
-        channel.chunks->cols() != meta.totalVoxels) {
+        channel.chunks->cols() != meta.totalVoxels ||
+        channel.chunks->branchCount() != meta.xySymmetryCount() * meta.zBranchCount()) {
       throw std::runtime_error(std::string("compact ") + what +
                                " matrix/metadata mismatch.");
     }
@@ -734,15 +767,16 @@ std::vector<int> csrqChannelMatrixIndices(
 // streamed (re-read from their directories into pinned memory) and the
 // failed one is retried with the freed memory, instead of aborting the run.
 void warmCompactChunks(const std::vector<CompactMatrixChannel> &channels) {
+  if (!isCsrqChannelSet(channels)) {
+    for (const auto &channel : channels)
+      warmCompactChunkResidentDeviceCache(*channel.chunks);
+    return;
+  }
   const std::vector<int> slots = csrqChannelMatrixIndices(channels);
   std::vector<bool> streamed = planCsrqStreaming(channels, slots);
   std::vector<size_t> warmedHere;
   for (size_t index = 0; index < channels.size(); ++index) {
     const auto &chunks = *channels[index].chunks;
-    if (!isCsrqDirectory(chunks)) {
-      warmCompactChunkResidentDeviceCache(chunks);
-      continue;
-    }
     bool aliased = false;
     for (size_t earlier = 0; earlier < index && !aliased; ++earlier) {
       aliased = slots[earlier] == slots[index];
@@ -1024,29 +1058,6 @@ void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
   }
 }
 
-// Host sensitivity input for one branch: rowWeights[fullIndex] (1 when null)
-// where the row maps to a full projection row, else 0.
-void makeUnitRatioChunkFloat(
-    const spect::io::CompactSymmetryMetadata &meta, int compactRowBase,
-    int rows, int symId, bool zMirror, const double *rowWeights,
-    std::vector<float> &ratio, int threads) {
-  ratio.resize(static_cast<size_t>(rows));
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t row = 0; row < static_cast<ptrdiff_t>(rows); ++row) {
-    uint64_t fullIndex = 0;
-    float value = 0.0f;
-    if (spect::io::fullProjectionIndexFromCompactRow(
-            meta, compactRowBase + static_cast<int>(row), symId, zMirror,
-            fullIndex)) {
-      value = rowWeights == nullptr
-                  ? 1.0f
-                  : static_cast<float>(rowWeights[fullIndex]);
-    }
-    ratio[static_cast<size_t>(row)] = value;
-  }
-}
 
 template <typename ValueType>
 void scatterCompactForwardProjection(
@@ -1269,18 +1280,6 @@ bool computePoissonSensitivityCUDA(
     return true;
   }
 
-  const bool useBranchBatch =
-      compactBranchBatchEnabled() && branches.size() > 1;
-  if (attFactors != nullptr && !useBranchBatch) {
-    throw std::runtime_error(
-        "compact CTAC sensitivity needs the branch-batch device path "
-        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
-  }
-  if (subsetSelection.count > 1 && !useBranchBatch) {
-    throw std::runtime_error(
-        "compact subset sensitivity needs the branch-batch device path "
-        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
-  }
   if (!compactDeviceBackwardBeginCUDA(nvox, 0)) {
     return false;
   }
@@ -1289,7 +1288,6 @@ bool computePoissonSensitivityCUDA(
   fillBranchSymmetryTables(branches, symIds, zMirrors);
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
-  std::vector<float> ratio;
   for (const auto &channel : channels) {
     const auto &chunks = *channel.chunks;
     const size_t chunkCount = chunks.chunks().size();
@@ -1299,7 +1297,7 @@ bool computePoissonSensitivityCUDA(
     for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
       const int compactRowBase =
           chunks.chunks()[chunkIndex].angleOffset * meta.compactRaysPerAngle;
-      if (useBranchBatch) {
+      {
         const spect::io::CSRSubsetView slice =
             chunks.loadSubset(chunkIndex, subsetSelection.angles,
                               meta.compactRaysPerAngle, subsetSelection.tag);
@@ -1330,32 +1328,7 @@ bool computePoissonSensitivityCUDA(
         }
         continue;
       }
-      const auto chunk = chunks.loadChunk(chunkIndex);
-      const spect::io::CSRView view = chunk->view();
-      for (size_t branchIndex = 0; branchIndex < branches.size(); ++branchIndex) {
-        const auto &branch = branches[branchIndex];
-        auto stageStart = Clock::now();
-        makeUnitRatioChunkFloat(meta, compactRowBase, chunk->info.rows,
-                                branch.symId, branch.zMirror, channelRowWeights, ratio,
-                                threads);
-        if (channel.weight != 1.0)
-          for (float &value : ratio)
-            value = static_cast<float>(value * channel.weight);
-        if (timing)
-          addTiming(timing->ratioSeconds, stageStart);
-        CompactDeviceBackwardTiming deviceTiming;
-        const CompactDeviceTransformParams transformParams =
-            makeCompactDeviceTransformParams(meta, branch.symId, branch.zMirror);
-        if (!compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-                view, ratio.data(), transformParams, &deviceTiming, 0)) {
-          return false;
-        }
-        if (timing) {
-          timing->backwardSeconds += deviceTiming.backwardSeconds;
-          timing->transformBackwardSeconds +=
-              deviceTiming.transformBackwardSeconds;
-        }
-      }
+
     }
 
   }
@@ -1393,6 +1366,10 @@ void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count) {
   g_csrqTestFitFailures.store(std::max(0, count));
 }
 
+void setCompactHostPinRefusalForTestsCUDA(int allowedRegistrations) {
+  g_compactHostPinTestRegistrations.store(std::max(-1, allowedRegistrations));
+}
+
 bool csrqForceStreamingCUDA() { return g_csrqForceStreaming.load(); }
 
 bool prepareCompactChunkExecutionCUDA(
@@ -1405,8 +1382,9 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const spect::io::CompactSymmetryMetadata &meta,
     const double *globalImage, size_t globalImageCount, int globalNz,
     const int *bedZStarts, int bedCount, bool flipLocalZ,
-    const spect::filters::PSFKernels *castorPsf, bool uploadGlobalImage) {
-  if (bedCount < 1 || !compactBranchBatchEnabled())
+    const spect::filters::PSFKernels *castorPsf, bool uploadGlobalImage,
+    const uint8_t *localSupportMask) {
+  if (bedCount < 1)
     return false;
   const CompactDeviceTransformParams commonTransform =
       makeCompactDeviceTransformParams(meta, 0, false);
@@ -1416,7 +1394,7 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
       meta.xySymmetryCount() * meta.zBranchCount(), meta.zBranchCount(),
       castorPsf == nullptr ? nullptr : &castorPsf->kx,
       castorPsf == nullptr ? nullptr : &castorPsf->ky,
-      castorPsf == nullptr ? nullptr : &castorPsf->kz);
+      castorPsf == nullptr ? nullptr : &castorPsf->kz, localSupportMask);
 }
 
 bool finishCompactResidentMlemIterationCUDA(
@@ -1731,27 +1709,10 @@ bool accumulatePoissonBackprojectedRatioCUDA(
   const auto branches = enumerateCompactBranches(meta);
   const size_t branchCount = branches.size();
 
-  const bool useBranchBatch = compactBranchBatchEnabled() && branchCount > 1;
-  if (branchBatchInputPrepared && !useBranchBatch) {
-    throw std::runtime_error(
-        "compact resident branch-batch input requires the batch CUDA path.");
-  }
-  if (hasAtten && !useBranchBatch) {
-    throw std::runtime_error(
-        "compact CTAC needs the branch-batch device path "
-        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
-  }
-  if (subsetSelection.count > 1 && !useBranchBatch) {
-    throw std::runtime_error(
-        "compact ordered subsets need the branch-batch device path "
-        "(SPECT_COMPACT_BRANCH_BATCH must not be disabled).");
-  }
   std::optional<CompactSubsetSelection> nextSubsetSelection;
-  if (nextSubset != nullptr) {
+  if (nextSubset != nullptr)
     nextSubsetSelection = selectCompactSubset(meta, nextSubset);
-  }
   const size_t fullProjectionCount = static_cast<size_t>(meta.fullRows());
-
   std::vector<float> rotatedImages;
   if (!branchBatchInputPrepared) {
     rotatedImages.assign(static_cast<size_t>(bedCount) * branchCount * nvox,
@@ -1778,7 +1739,7 @@ bool accumulatePoissonBackprojectedRatioCUDA(
         addTiming(timing->transformForwardSeconds, stageStart);
     }
   }
-  if (useBranchBatch && !branchBatchInputPrepared &&
+  if (!branchBatchInputPrepared &&
       !refreshCompactBranchBatchInputCUDA(rotatedImages.data(),
                                           rotatedImages.size())) {
     return false;
@@ -1797,12 +1758,11 @@ bool accumulatePoissonBackprojectedRatioCUDA(
     const double attenPower = channels[channel].attenPower;
     const double *const *channelProjections = fullProjections + channel * bedCount;
     applyCompactCsrLocalityHint(chunks, meta);
-    // Projection slots are per bed, so changing windows must refresh them even
-    // when the iteration loop keeps single-window inputs resident.
-    if (refreshProjectionInputs || channelCount > 1) {
+    const int cacheSlotBase = static_cast<int>(channel) * spect::core::kMaxBeds;
+    if (refreshProjectionInputs) {
       for (int bed = 0; bed < bedCount; ++bed) {
         if (!refreshCompactProjectionCUDA(
-                channelProjections[bed], fullProjectionCount, bed,
+                channelProjections[bed], fullProjectionCount, cacheSlotBase + bed,
                 fullBackgrounds == nullptr ? nullptr : fullBackgrounds[channel * bedCount + bed]))
           return false;
       }
@@ -1819,7 +1779,7 @@ bool accumulatePoissonBackprojectedRatioCUDA(
       prefetchNextCompactSlice(
           chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
           nextSubsetSelection ? &*nextSubsetSelection : nullptr, slice);
-      if (useBranchBatch) {
+      {
         CompactDeviceRatioTiming deviceTiming;
         CompactDeviceBackwardTiming backwardTiming;
         const CompactDeviceRatioParams commonRatio =
@@ -1833,12 +1793,12 @@ bool accumulatePoissonBackprojectedRatioCUDA(
                       commonTransform, branchSymIds.data(), branchZMirrors.data(),
                       static_cast<int>(branchCount), bedCount, attFactors,
                       compactAttenTableCount(meta), attenPower, &deviceTiming,
-                      &backwardTiming)
+                      &backwardTiming, cacheSlotBase)
                 : compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
                       slice, channelProjections, fullProjectionCount, commonRatio,
                       commonTransform, branchSymIds.data(), branchZMirrors.data(),
                       static_cast<int>(branchCount), bedCount, &deviceTiming,
-                      &backwardTiming);
+                      &backwardTiming, cacheSlotBase);
         if (!ok) {
           return false;
         }
@@ -1851,40 +1811,6 @@ bool accumulatePoissonBackprojectedRatioCUDA(
         }
         return true;
       }
-      // Per-branch fallback (SPECT_COMPACT_BRANCH_BATCH=0): whole chunks only;
-      // the whole-chunk slice above shares the device copy (tag 0).
-      const auto chunk = chunks.loadChunk(chunkIndex);
-      const spect::io::CSRView view = chunk->view();
-      for (int bed = 0; bed < bedCount; ++bed) {
-        const double *fullProjection = channelProjections[bed];
-        for (size_t branchIndex = 0; branchIndex < branchCount; ++branchIndex) {
-          const auto &branch = branches[branchIndex];
-          const float *imgRot =
-              rotatedImages.data() +
-              (static_cast<size_t>(bed) * branchCount + branchIndex) * nvox;
-          CompactDeviceRatioTiming deviceTiming;
-          CompactDeviceBackwardTiming backwardTiming;
-          const CompactDeviceRatioParams params = makeCompactDeviceRatioParams(
-              meta, compactRowBase, branch.symId, branch.zMirror, channels[channel].weight);
-          const CompactDeviceTransformParams transformParams =
-              makeCompactDeviceTransformParams(meta, branch.symId,
-                                               branch.zMirror);
-          const bool ok = compactDeviceRatioSpmvTAccumulateFloatCUDA(
-              view, imgRot, fullProjection, fullProjectionCount, params,
-              transformParams, &deviceTiming, &backwardTiming, bed, bed);
-          if (!ok) {
-            return false;
-          }
-          if (timing) {
-            timing->forwardSeconds += deviceTiming.forwardSeconds;
-            timing->ratioSeconds += deviceTiming.ratioSeconds;
-            timing->backwardSeconds += deviceTiming.backwardSeconds;
-            timing->transformBackwardSeconds +=
-                backwardTiming.transformBackwardSeconds;
-          }
-        }
-      }
-      return true;
     };
 
     if (reverseChunkOrder) {

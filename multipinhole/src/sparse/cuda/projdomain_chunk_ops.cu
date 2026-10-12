@@ -8,7 +8,7 @@ static constexpr float kAttenUint16Scale = 65535.0f;
 // run). K = 8 right-hand sides (4 xy symmetries x 2 z branches). The forward
 // gathers x as [voxel][8] floats (one 32-byte sector per nnz); the backward
 // scatters into branch-major [8][voxel] so warp atomics coalesce.
-#define CSRQ_K 8
+#define CSRQ_MAX_K 8
 #define CSRQ_BLOCK 256
 #define CSRQ_RUN_LEN_BITS 6
 #define CSRQ_MAX_RUN_LEN 64
@@ -318,11 +318,13 @@ extern "C" __global__ void compact_gather_bed_double_to_float(
 }
 
 extern "C" __global__ void compact_convert_double_to_float(
-    const double *input, float *output, unsigned long long count) {
+    const double *input, float *output, unsigned long long count,
+    const unsigned char *mask) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index < count) {
-    output[index] = static_cast<float>(input[index]);
+    output[index] = mask != nullptr && mask[index] == 0
+                        ? 0.0f : static_cast<float>(input[index]);
   }
 }
 
@@ -474,7 +476,7 @@ extern "C" __global__ void compact_bsrem_update(
 extern "C" __global__ void compact_transform_forward_batch(
     const float *bedImage, float *rotatedBatch, unsigned long long nvox,
     int branchCount, int zBranchCount, int symmetryMode,
-    int nx, int ny, int nz) {
+    int nx, int ny, int nz, const unsigned char *mask) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
@@ -526,7 +528,7 @@ extern "C" __global__ void compact_transform_forward_batch(
       static_cast<unsigned long long>(z) * plane +
       static_cast<unsigned long long>(y) * static_cast<unsigned long long>(nx) +
       static_cast<unsigned long long>(x);
-  rotatedBatch[index] = bedImage[mapped];
+  rotatedBatch[index] = mask != nullptr && mask[mapped] == 0 ? 0.0f : bedImage[mapped];
 }
 
 extern "C" __global__ void compact_transform_backward_add(
@@ -1228,7 +1230,7 @@ __device__ __forceinline__ int csrq_full_projection_index(
 // mode 0). scale is the window weight of a joint multi-window model
 // (mean = scale * A x + background); scale = 1 and no background is the plain
 // MLEM ratio. fullBackground may be null.
-extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward(
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *xPacked, float *yPacked,
@@ -1237,9 +1239,9 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
     double scale, int symmetryMode, int compactRowBase,
     int compactRaysPerAngle, int compactNumAngles, int detNx, int detNz,
     int compactDetZ, int fullNumAngles, int fullRaysPerAngle,
-    const int *symIds, const int *zMirrors, double eps, int rowOffset, int rowGroupSize, int rowGroupStride) {
+    const int *symIds, const int *zMirrors, double eps, int rowOffset, int rowGroupSize, int rowGroupStride, int branchCount) {
   __shared__ CsrqTile s;
-  __shared__ float sRed[CSRQ_BLOCK / 32][CSRQ_K];
+  __shared__ float sRed[CSRQ_BLOCK / 32][CSRQ_MAX_K];
   const int logicalRow = static_cast<int>(blockIdx.x);
   const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
       (logicalRow / rowGroupSize) * rowGroupSize * rowGroupStride +
@@ -1251,9 +1253,9 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
   const unsigned int runEnd = rowRunPtr[row + 1];
   unsigned int valBase = rowNnzPtr[row];
   const float m = rowMax[row];
-  float acc[CSRQ_K];
+  float acc[CSRQ_MAX_K];
 #pragma unroll
-  for (int k = 0; k < CSRQ_K; ++k) acc[k] = 0.0f;
+  for (int k = 0; k < CSRQ_MAX_K; ++k) acc[k] = 0.0f;
 
   for (unsigned int tileBase = runBegin; tileBase < runEnd;
        tileBase += CSRQ_RUN_TILE) {
@@ -1265,16 +1267,18 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
       const unsigned int col = s.start[j] + (p - s.off[j]);
       const float t = static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
       const float v = m * (t * t);
-      const float4 x0 = xPacked[2u * col];
-      const float4 x1 = xPacked[2u * col + 1u];
+      const float4 x0 = xPacked[(branchCount / 4u) * col];
       acc[0] = fmaf(v, x0.x, acc[0]);
       acc[1] = fmaf(v, x0.y, acc[1]);
       acc[2] = fmaf(v, x0.z, acc[2]);
       acc[3] = fmaf(v, x0.w, acc[3]);
-      acc[4] = fmaf(v, x1.x, acc[4]);
-      acc[5] = fmaf(v, x1.y, acc[5]);
-      acc[6] = fmaf(v, x1.z, acc[6]);
-      acc[7] = fmaf(v, x1.w, acc[7]);
+      if (branchCount == 8) {
+        const float4 x1 = xPacked[2u * col + 1u];
+        acc[4] = fmaf(v, x1.x, acc[4]);
+        acc[5] = fmaf(v, x1.y, acc[5]);
+        acc[6] = fmaf(v, x1.z, acc[6]);
+        acc[7] = fmaf(v, x1.w, acc[7]);
+      }
     }
     valBase += tileNnz;
     __syncthreads();
@@ -1283,7 +1287,8 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
   const int lane = static_cast<int>(threadIdx.x) & 31;
   const int warp = static_cast<int>(threadIdx.x) >> 5;
 #pragma unroll
-  for (int k = 0; k < CSRQ_K; ++k) {
+  for (int k = 0; k < CSRQ_MAX_K; ++k) {
+    if (k >= branchCount) continue;
     float v = acc[k];
     for (int offset = 16; offset > 0; offset >>= 1) {
       v += __shfl_down_sync(0xffffffffu, v, offset);
@@ -1291,10 +1296,10 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
     if (lane == 0) sRed[warp][k] = v;
   }
   __syncthreads();
-  if (threadIdx.x < CSRQ_K) {
+  if (threadIdx.x < branchCount) {
     float sum = 0.0f;
     for (int w = 0; w < CSRQ_BLOCK / 32; ++w) sum += sRed[w][threadIdx.x];
-    const size_t out = static_cast<size_t>(row) * CSRQ_K + threadIdx.x;
+    const size_t out = static_cast<size_t>(row) * branchCount + threadIdx.x;
     if (ratioMode == 0) {
       yPacked[out] = sum;
       return;
@@ -1331,11 +1336,11 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_forward_k8(
 // the matrix per pass is cheap next to the atomic traffic. Rows whose
 // selected ratios are all zero (no valid full projection index, or a masked
 // row) are skipped entirely.
-extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward(
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *ratioPacked, float *yBranch,
-    unsigned long long nvox, int rows, int kFirst, int kCount, int rowOffset, int rowGroupSize, int rowGroupStride) {
+    unsigned long long nvox, int rows, int kFirst, int kCount, int rowOffset, int rowGroupSize, int rowGroupStride, int branchCount) {
   __shared__ CsrqTile s;
   const int logicalRow = static_cast<int>(blockIdx.x);
   const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
@@ -1344,9 +1349,9 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
   if (row >= rows) {
     return;
   }
-  const float4 r0 = ratioPacked[2 * row];
-  const float4 r1 = ratioPacked[2 * row + 1];
-  const float r[CSRQ_K] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w};
+  const float4 r0 = ratioPacked[(branchCount / 4) * row];
+  const float4 r1 = branchCount == 8 ? ratioPacked[2 * row + 1] : make_float4(0, 0, 0, 0);
+  const float r[CSRQ_MAX_K] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w};
   const int kEnd = kFirst + kCount;
   // Selected ratios into registers (a runtime index into r[] would spill to
   // local memory); the two-branch pass is the production configuration.
@@ -1367,7 +1372,7 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
   } else {
     bool anyNonZero = false;
 #pragma unroll
-    for (int k = 0; k < CSRQ_K; ++k) {
+    for (int k = 0; k < CSRQ_MAX_K; ++k) {
       anyNonZero = anyNonZero || (k >= kFirst && k < kEnd && r[k] != 0.0f);
     }
     if (!anyNonZero) {
@@ -1405,7 +1410,7 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8(
         const float v = m * (t * t);
         float *dst = yBranch + col;
 #pragma unroll
-        for (int k = 0; k < CSRQ_K; ++k) {
+        for (int k = 0; k < CSRQ_MAX_K; ++k) {
           if (k >= kFirst && k < kEnd) {
             atomicAdd(dst + static_cast<unsigned long long>(k) * nvox,
                       v * r[k]);
@@ -1441,11 +1446,11 @@ __device__ __forceinline__ void csrq_atomic_add_float4(float4 *dst, float4 v) {
 // (SPECT_CSRQ_BACKWARD_PACKED=1): on sm_86/89 the scalar fallback is the
 // [voxel][8] layout that measured 715 ms per pass (32 scattered sectors per
 // warp atomic); it exists for the sm_120 vector-atomic trial.
-extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed(
+extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_packed(
     const unsigned int *rowNnzPtr, const unsigned int *rowRunPtr,
     const float *rowMax, const unsigned int *runs,
     const unsigned short *valuesQ, const float4 *ratioPacked, float4 *yPacked,
-    int rows, int rowOffset, int rowGroupSize, int rowGroupStride) {
+    int rows, int rowOffset, int rowGroupSize, int rowGroupStride, int branchCount) {
   __shared__ CsrqTile s;
   const int logicalRow = static_cast<int>(blockIdx.x);
   const int row = rowOffset + (rowGroupStride == 1 ? logicalRow :
@@ -1454,8 +1459,8 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed
   if (row >= rows) {
     return;
   }
-  const float4 r0 = ratioPacked[2 * row];
-  const float4 r1 = ratioPacked[2 * row + 1];
+  const float4 r0 = ratioPacked[(branchCount / 4) * row];
+  const float4 r1 = branchCount == 8 ? ratioPacked[2 * row + 1] : make_float4(0, 0, 0, 0);
   if (r0.x == 0.0f && r0.y == 0.0f && r0.z == 0.0f && r0.w == 0.0f &&
       r1.x == 0.0f && r1.y == 0.0f && r1.z == 0.0f && r1.w == 0.0f) {
     return;
@@ -1474,9 +1479,9 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed
       const unsigned int col = s.start[j] + (p - s.off[j]);
       const float t = static_cast<float>(valuesQ[valBase + p]) * kCsrqInvQScale;
       const float v = m * (t * t);
-      csrq_atomic_add_float4(yPacked + 2u * col,
+      csrq_atomic_add_float4(yPacked + (branchCount / 4u) * col,
                              make_float4(v * r0.x, v * r0.y, v * r0.z, v * r0.w));
-      csrq_atomic_add_float4(yPacked + 2u * col + 1u,
+      if (branchCount == 8) csrq_atomic_add_float4(yPacked + 2u * col + 1u,
                              make_float4(v * r1.x, v * r1.y, v * r1.z, v * r1.w));
     }
     valBase += tileNnz;
@@ -1487,23 +1492,24 @@ extern "C" __global__ void __launch_bounds__(CSRQ_BLOCK) csrq_backward_k8_packed
 // Consumer of the packed backward output: accum[M_k(v)] += y[v][k] (times the
 // branch's CTAC factor^power when attSlices is given), one thread per voxel
 // reading its two float4 and issuing eight double atomics.
-extern "C" __global__ void compact_transform_backward_add_packed8(
+extern "C" __global__ void compact_transform_backward_add_packed(
     const float4 *yPacked, double *accum, unsigned long long nvox,
     int symmetryMode, int nx, int ny, int nz, const int *symIds,
     const int *zMirrors, const unsigned short *attSlices, const int *sliceIndex,
-    float power) {
+    float power, int branchCount) {
   const unsigned long long v =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (v >= nvox || nx <= 0 || ny <= 0 || nz <= 0) {
     return;
   }
-  const float4 a = yPacked[2 * v];
-  const float4 b = yPacked[2 * v + 1];
-  const float vals[CSRQ_K] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  const float4 a = yPacked[(branchCount / 4) * v];
+  const float4 b = branchCount == 8 ? yPacked[2 * v + 1] : make_float4(0, 0, 0, 0);
+  const float vals[CSRQ_MAX_K] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
   const unsigned long long plane =
       static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
 #pragma unroll
-  for (int k = 0; k < CSRQ_K; ++k) {
+  for (int k = 0; k < CSRQ_MAX_K; ++k) {
+    if (k >= branchCount) continue;
     float value = vals[k];
     if (value == 0.0f) {
       continue;
@@ -1526,24 +1532,6 @@ extern "C" __global__ void compact_transform_backward_add_packed8(
   }
 }
 
-// [8][nvox] branch-major input (one bed of the branch batch) -> [nvox][8].
-extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
-                                             float4 *packed,
-                                             unsigned long long nvox) {
-  const unsigned long long v =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (v >= nvox) {
-    return;
-  }
-  packed[2 * v] = make_float4(branchMajor[v], branchMajor[nvox + v],
-                              branchMajor[2 * nvox + v],
-                              branchMajor[3 * nvox + v]);
-  packed[2 * v + 1] = make_float4(branchMajor[4 * nvox + v],
-                                  branchMajor[5 * nvox + v],
-                                  branchMajor[6 * nvox + v],
-                                  branchMajor[7 * nvox + v]);
-}
-
 // CTAC pack for one compact angle: packed[v][k] = branchMajor[k*nvox + v] *
 // (att[slice_k * nvox + M_k(v)] / 65535)^power, where M_k maps the rotated
 // voxel v of branch k back to the unrotated frame (compact_atten_mapped_voxel)
@@ -1551,11 +1539,11 @@ extern "C" __global__ void csrq_pack_branch8(const float *branchMajor,
 // angle (-1: the branch has no full angle at this compact angle -> factor 1).
 // The factor is applied once per voxel in the image domain instead of once
 // per nnz inside the SpMV.
-extern "C" __global__ void csrq_pack_branch8_atten(
+extern "C" __global__ void csrq_pack_branch_atten(
     const float *branchMajor, const unsigned short *attSlices,
     const int *sliceIndex, float4 *packed, unsigned long long nvox,
     int symmetryMode, int nx, int ny, int nz, const int *symIds,
-    const int *zMirrors, float power) {
+    const int *zMirrors, float power, int branchCount) {
   const unsigned long long v =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (v >= nvox) {
@@ -1563,11 +1551,12 @@ extern "C" __global__ void csrq_pack_branch8_atten(
   }
   const unsigned long long plane =
       static_cast<unsigned long long>(nx) * static_cast<unsigned long long>(ny);
-  float f[CSRQ_K];
+  float f[CSRQ_MAX_K];
 #pragma unroll
-  for (int k = 0; k < CSRQ_K; ++k) {
+  for (int k = 0; k < CSRQ_MAX_K; ++k) {
+    if (k >= branchCount) continue;
     float factor = 1.0f;
-    const int slice = sliceIndex[k];
+    const int slice = attSlices == nullptr ? -1 : sliceIndex[k];
     if (slice >= 0) {
       int valid = 0;
       const unsigned long long mapped = compact_atten_mapped_voxel(
@@ -1580,14 +1569,14 @@ extern "C" __global__ void csrq_pack_branch8_atten(
     }
     f[k] = branchMajor[static_cast<unsigned long long>(k) * nvox + v] * factor;
   }
-  packed[2 * v] = make_float4(f[0], f[1], f[2], f[3]);
-  packed[2 * v + 1] = make_float4(f[4], f[5], f[6], f[7]);
+  packed[(branchCount / 4) * v] = make_float4(f[0], f[1], f[2], f[3]);
+  if (branchCount == 8) packed[2 * v + 1] = make_float4(f[4], f[5], f[6], f[7]);
 }
 
 // CTAC pre-scaling of a branch-major batch (the CSRB layout, one dense column
 // per branch): out[k*nvox + v] = in[k*nvox + v] * (att[slice_k][M_k(v)] /
 // 65535)^power for k < batchSize; factor 1 where sliceIndex[k] < 0. Same
-// factor and index as csrq_pack_branch8_atten, without the [voxel][8]
+// factor and index as csrq_pack_branch_atten, without the [voxel][8]
 // interleave, so cuSPARSE consumes the result unchanged.
 extern "C" __global__ void compact_branch_batch_atten_scale(
     const float *branchMajor, const unsigned short *attSlices,
@@ -1623,7 +1612,7 @@ extern "C" __global__ void compact_branch_batch_atten_scale(
 
 // compact_transform_backward_add_batch with the CTAC factor applied at the
 // unrotated voxel: accum[M_k(v)] += rotated[k][v] * (att[slice_k * nvox +
-// M_k(v)] / 65535)^power. Together with csrq_pack_branch8_atten this is the
+// M_k(v)] / 65535)^power. Together with csrq_pack_branch_atten this is the
 // exact adjoint of the attenuated forward (same table, same index, same
 // exponent on both sides).
 extern "C" __global__ void compact_transform_backward_add_batch_atten(
@@ -1667,21 +1656,21 @@ extern "C" __global__ void compact_transform_backward_add_batch_atten(
 // else 0: the sensitivity value * A^T W 1 over valid rows only (value is the
 // window weight of a joint multi-window model, 1 otherwise; W carries detector
 // masks and efficiency weights).
-extern "C" __global__ void csrq_unit_ratio_k8(
+extern "C" __global__ void csrq_unit_ratio(
     float *ratioPacked, float value, const double *rowWeights,
     unsigned long long fullProjectionCount, int symmetryMode,
     int compactRowBase, int compactRaysPerAngle, int compactNumAngles,
     int detNx, int detNz, int compactDetZ, int fullNumAngles,
-    int fullRaysPerAngle, const int *symIds, const int *zMirrors, int rows) {
+    int fullRaysPerAngle, const int *symIds, const int *zMirrors, int rows, int branchCount) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   const unsigned long long total =
-      static_cast<unsigned long long>(rows) * CSRQ_K;
+      static_cast<unsigned long long>(rows) * branchCount;
   if (index >= total || compactRaysPerAngle <= 0 || detNx <= 0) {
     return;
   }
-  const int row = static_cast<int>(index / CSRQ_K);
-  const int b = static_cast<int>(index % CSRQ_K);
+  const int row = static_cast<int>(index / branchCount);
+  const int b = static_cast<int>(index % branchCount);
   unsigned long long fullIndex = 0;
   float out = 0.0f;
   if (csrq_full_projection_index(compactRowBase + row, symmetryMode,

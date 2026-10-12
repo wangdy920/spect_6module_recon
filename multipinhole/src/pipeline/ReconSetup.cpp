@@ -44,17 +44,18 @@ spect::io::VolumeInfo readVolumeInfoForRecon(const std::string &path) {
                            path);
 }
 
-std::vector<int> inferBedNumbers(const std::vector<std::string> &paths) {
+std::vector<int> inferBedNumbers(const std::vector<std::string> &paths,
+                                 int maxBed) {
   std::vector<int> bedNumbers;
   bedNumbers.reserve(paths.size());
-  std::vector<bool> seen(static_cast<size_t>(spect::core::kMaxBeds) + 1u, false);
+  std::vector<bool> seen(static_cast<size_t>(maxBed) + 1u, false);
   for (size_t idx = 0; idx < paths.size(); ++idx) {
     int bed = spect::core::extractBedNumberFromPath(paths[idx]);
     if (bed < 0)
       bed = static_cast<int>(idx) + 1;
-    if (bed < 1 || bed > spect::core::kMaxBeds)
+    if (bed < 1 || bed > maxBed)
       throw std::runtime_error("Bed number must be in fixed range Bed1..Bed" +
-                               std::to_string(spect::core::kMaxBeds) + ".");
+                               std::to_string(maxBed) + ".");
     if (seen[static_cast<size_t>(bed)])
       throw std::runtime_error("Duplicate bed number in -dfList.");
     seen[static_cast<size_t>(bed)] = true;
@@ -65,7 +66,8 @@ std::vector<int> inferBedNumbers(const std::vector<std::string> &paths) {
 
 std::vector<int> normalizeFixedBedOverlapTable(
     const std::vector<int> &input, std::vector<std::string> &warnings) {
-  std::vector<int> fixedTable(static_cast<size_t>(spect::core::kMaxBeds), 0);
+  std::vector<int> fixedTable(
+      static_cast<size_t>(spect::core::kSixModuleMaxBeds), 0);
   if (input.empty())
     return fixedTable;
   if (input.size() == 1) {
@@ -74,7 +76,7 @@ std::vector<int> normalizeFixedBedOverlapTable(
   }
   if (input.size() > fixedTable.size())
     throw std::runtime_error("-bedOverlap supports at most " +
-                             std::to_string(spect::core::kMaxBeds) +
+                             std::to_string(spect::core::kSixModuleMaxBeds) +
                              " fixed bed slots.");
   std::copy(input.begin(), input.end(), fixedTable.begin());
   if (input.size() < fixedTable.size()) {
@@ -197,17 +199,21 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
       args.projPaths.empty() ? std::vector<std::string>{args.projPath}
                              : args.projPaths);
   result.bedCount = std::max(1, static_cast<int>(result.projectionPaths.size()));
-  if (result.bedCount > spect::core::kMaxBeds)
+  const int maxBeds = args.matrixGridOutput ? spect::core::kMaxBeds
+                                            : spect::core::kSixModuleMaxBeds;
+  if (result.bedCount > maxBeds)
     throw std::runtime_error("-dfList supports at most " +
-                             std::to_string(spect::core::kMaxBeds) + " beds.");
+                             std::to_string(maxBeds) + " beds" +
+                             (args.matrixGridOutput ? "." : " without matrix_grid_output."));
   args.bedCount = result.bedCount;
   if (!args.matrixGridOutput)
     applyFixedSixModuleRoiDefaults(args, result.bedCount);
-  result.bedNumbers = inferBedNumbers(result.projectionPaths);
+  result.bedNumbers = inferBedNumbers(result.projectionPaths, maxBeds);
   for (size_t index = 1; index < result.bedNumbers.size(); ++index) {
     if (result.bedNumbers[index] != result.bedNumbers[index - 1] + 1)
       throw std::runtime_error(
-          "-dfList beds must be one continuous increasing subset of Bed1..Bed5.");
+          "-dfList beds must be one continuous increasing subset of Bed1..Bed" +
+          std::to_string(maxBeds) + ".");
   }
 
   const int joints = std::max(0, result.bedCount - 1);
@@ -223,11 +229,24 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
       throw std::runtime_error("matrix_grid_output bed_step_mm must align to integer voxel layers (tolerance 1e-4 mm).");
     if (args.seamXyAlign)
       throw std::runtime_error("matrix_grid_output does not apply prototype seam XY alignment.");
+    // CTAC and -maskFromAtt read mu maps stacked as one local-matrix-Z block
+    // per bed; the joint volume has no such blocks.
+    if (args.doCTAC || !std::isnan(args.maskFromAttThreshold) ||
+        !args.ctacAutoMuFrom.empty())
+      throw std::runtime_error(
+          "Multi-bed matrix_grid_output (joint volume) does not support CTAC, "
+          "-ctacAutoMu or -maskFromAtt yet.");
+    // Joint reconstruction: every bed grid is placed at bed*step in one global
+    // volume, so overlapping beds update the same voxels (sensitivities and
+    // backprojections add). The saved volume is that global volume; no
+    // per-bed output blending.
     result.canonicalGeom = {result.baseNz, step, result.baseNz - step};
     args.outputBedOverlaps.assign(joints, result.baseNz - step);
-    args.bedOverlaps.assign(joints, 0);
-    args.Nz = result.baseNz * result.bedCount;
-    result.summary = "Multi-bed reconstruction: full matrix grids, explicit voxel-aligned step, cosine overlap without gain fitting";
+    args.bedOverlaps.assign(joints, result.baseNz - step);
+    args.Nz = result.baseNz + joints * step;
+    result.totalOverlap = joints * (result.baseNz - step);
+    result.summary = "Multi-bed reconstruction: joint global volume of full matrix grids, explicit voxel-aligned step " +
+                     std::to_string(step) + " layers";
     return result;
   }
   const double stepMm =

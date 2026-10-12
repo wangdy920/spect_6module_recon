@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/ReconLimits.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -36,20 +38,19 @@ constexpr uint64_t kCompactChunkHostCacheFallbackBytes = 26ull * kCudaGiB;
 constexpr uint64_t kCompactChunkHostCacheMinReserveBytes = 8ull * kCudaGiB;
 constexpr uint64_t kCompactChunkResidentDeviceReserveBytes = 6ull * kCudaGiB;
 // CSRQ keeps the whole matrix resident and runs custom kernels; its working
-// set is the [bed][branch][voxel] batch input plus two [voxel][8] scratch
+// set is the [bed][branch][voxel] batch input plus two [voxel][K] scratch
 // vectors, accumulators and volumes (~1 GiB at 120x120x220, 5 beds), so the
 // reserve only needs to cover those and the PSF/regularizer volume helpers.
 constexpr uint64_t kCsrqResidentDeviceReserveBytes = 2ull * kCudaGiB;
 // Energy windows (system matrices) that may be resident at once for joint
 // multi-window MLEM (Lu-177: 113 keV + 208 keV).
 constexpr int kCsrqMaxMatrices = 2;
-// CSRQ kernels process exactly this many right-hand sides (4 xy symmetries x
-// 2 z branches) and a streamed matrix double-buffers through this many
-// device chunk slots.
-constexpr int kCsrqBranchCount = 8;
+// Streamed CSRQ matrices use two device chunk slots; active symmetry K is
+// selected from the validated matrix profile (4 or 8), not a device constant.
 constexpr int kCsrqStreamSlots = 2;
 
-constexpr int kCompactDeviceBackwardMaxAccumulators = 5;
+// One backward accumulator per bed.
+constexpr int kCompactDeviceBackwardMaxAccumulators = spect::core::kMaxBeds;
 
 // Packed-K forward: use ~60% of L2 for ROW-packed X; leave ~40% for CSR
 // streaming. K is chosen from {1,2,4}. packed-4 also needs sorted_hint

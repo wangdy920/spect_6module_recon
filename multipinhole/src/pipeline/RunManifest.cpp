@@ -279,7 +279,7 @@ void writeRunManifest(const RunManifestInput &input) {
   // final save. This also covers a transient sieve save copy without retaining
   // that full-volume copy after the manifest has been written.
   std::vector<double> fittedGains;
-  if (bedCount > 1 && input.finalSaveVolume != nullptr &&
+  if (bedCount > 1 && !args.matrixGridOutput && input.finalSaveVolume != nullptr &&
       !input.finalSaveVolume->empty() &&
       transform.baseNz >= transform.canonicalGeom.cropLayers && geometry.nx > 0 &&
       geometry.ny > 0) {
@@ -487,7 +487,7 @@ void writeRunManifest(const RunManifestInput &input) {
   json.endObject();
 
   json.beginObject("multibed");
-  json.string("stitch_method", args.matrixGridOutput ? "matrix_grid_cosine" : "center66_cosine10");
+  json.string("stitch_method", args.matrixGridOutput ? "joint_global_volume" : "center66_cosine10");
   json.integer("bed_count", static_cast<long long>(bedZStarts.size()));
   json.integerVector("bed_z_starts", bedZStarts);
   json.integerVector("output_bed_overlaps",
@@ -517,7 +517,10 @@ void writeRunManifest(const RunManifestInput &input) {
       std::vector<double>{savedGeometry.vx, savedGeometry.vy,
                           savedGeometry.vz});
   json.boolean("z_out_flip", transform.flipZWholeOutput);
+  json.boolean("z_per_bed_flip", transform.flipZPerBed);
   json.boolean("x_out_flip", transform.flipXWholeOutput);
+  json.number("xy_out_rotation_deg", transform.xyRotationDeg);
+  json.string("xy_rotation_convention", "positive_x_toward_y_after_flips_crop_mask");
   json.boolean("seam_xy_align", transform.seamXyAlign);
   json.string("increasing_z_index_direction",
               transform.flipZWholeOutput ? "-physical_z" : "+physical_z");

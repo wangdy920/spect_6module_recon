@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "pipeline/VolumeOutput.h"
+#include "pipeline/ReconDataLoader.h"
+#include "io/VolumeLoader.h"
+#include "io/MHDWriter.h"
 #include "recon/ReconLoopHelpers.h"
 
 #include <algorithm>
@@ -9,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -49,39 +53,122 @@ TEST(VolumeOutputTest, SanitizesAndValidatesCropRange) {
   EXPECT_FALSE(isCropSettingsValid(4, CropSettings{4, 0}));
 }
 
-TEST(VolumeOutputTest, MatrixGridOverlapPreservesCoordinatesAndDoesNotFitGains) {
+TEST(VolumeOutputTest, AutoMuOnlyAcceptsDeclaredInternalGridOutputs) {
+  const auto dir = std::filesystem::temp_directory_path() / "spect_automu_coords";
+  std::filesystem::create_directories(dir);
+  const std::vector<double> source(32, 1.0);
+  const OutputGeometry geom{4, 4, 2, 0.4, 0.4, 0.4};
+  const auto path = (dir / "image_it1.mhd").string();
+  const auto load = [&] { return loadAutoMuActivity(path, 4, 4, 2, {0.4, 0.4, 0.4}); };
+  io::writeMHD((dir / "image_it1").string(), source, 4, 4, 2, 0.4f, 0.4f, 0.4f);
+  EXPECT_THROW(load(), std::runtime_error); // Untagged legacy output is ambiguous.
+  OutputTransform t;
+  const auto save = [&](CropSettings crop = {}) {
+    saveVolumeOutput(source, geom, dir.string(), "image", 1, nullptr, crop, true, &t);
+  };
+  save();
+  EXPECT_EQ(load(), source);
+  for (double angle : {90.0, -45.5}) {
+    t.xyRotationDeg = angle;
+    save();
+    EXPECT_EQ(io::readVolumeInfo(path).spectAutoMuCompatible, 0);
+    EXPECT_THROW(load(), std::runtime_error);
+  }
+  t = {};
+  t.flipXWholeOutput = true;
+  save();
+  EXPECT_THROW(load(), std::runtime_error);
+  t = {};
+  t.flipZWholeOutput = true;
+  save();
+  EXPECT_THROW(load(), std::runtime_error);
+  t = {};
+  t.centerCropNx = 2;
+  t.centerCropNy = 2;
+  save();
+  EXPECT_EQ(io::readVolumeInfo(path).spectAutoMuCompatible, 0);
+  t = {};
+  save({1, 0});
+  EXPECT_THROW(load(), std::runtime_error);
+  t.matrixGridOutput = true;
+  t.baseNz = 1;
+  t.bedZStarts = {0, 1};
+  t.outputBedOverlaps = {0};
+  t.canonicalGeom = {1, 1, 0};
+  save();
+  EXPECT_THROW(load(), std::runtime_error); // Multi-bed volumes are not auto-mu storage.
+  std::filesystem::remove(path);
+  std::filesystem::remove(dir / "image_it1.raw");
+  std::filesystem::remove(dir);
+}
+
+TEST(VolumeOutputTest, OutputXYRotationPreservesLegacyAndPhysicalCoordinates) {
+  const std::vector<double> source{1, 2, 3, 4, 5, 6, 7, 8, 9};
+  OutputTransform t;
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t), source);
+  t.flipXWholeOutput = true;
+  const std::vector<double> flipped{3, 2, 1, 6, 5, 4, 9, 8, 7};
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t), flipped);
+  t.xyRotationDeg = 360;
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t), flipped);
+  t.xyRotationDeg = 90;
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t),
+            (std::vector<double>{9, 6, 3, 8, 5, 2, 7, 4, 1}));
+  t.flipXWholeOutput = false;
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t),
+            (std::vector<double>{7, 4, 1, 8, 5, 2, 9, 6, 3}));
+  t.xyRotationDeg = -90;
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t),
+            (std::vector<double>{3, 6, 9, 2, 5, 8, 1, 4, 7}));
+  t.xyRotationDeg = 180;
+  EXPECT_EQ(prepareOutputVolume({1, 2, 3, 4}, 2, 2, 1, nullptr, {}, nullptr, &t),
+            (std::vector<double>{4, 3, 2, 1}));
+
+  // Independent physical anchor: +2 mm on X rotates to +2 mm on Y.
+  std::vector<double> impulse(5 * 5 * 2, 0.0);
+  impulse[2 * 5 + 3] = 1;
+  impulse[25 + 2 * 5 + 3] = 2;
+  t.xyRotationDeg = 90;
+  const auto physical = prepareOutputVolume(impulse, 5, 5, 2, nullptr, {}, nullptr, &t, 2, 1);
+  EXPECT_DOUBLE_EQ(physical[4 * 5 + 2], 1);
+  EXPECT_DOUBLE_EQ(physical[25 + 4 * 5 + 2], 2);
+
+  // A linear field is reproduced by bilinear interpolation away from edges.
+  std::vector<double> ramp(25);
+  for (int y = 0; y < 5; ++y)
+    for (int x = 0; x < 5; ++x) ramp[y * 5 + x] = x + 10 * y;
+  t.xyRotationDeg = 45;
+  const auto rotated = prepareOutputVolume(ramp, 5, 5, 1, nullptr, {}, nullptr, &t);
+  EXPECT_NEAR(rotated[2 * 5 + 3], 22 - 9 / std::sqrt(2.0), 1e-12);
+  EXPECT_NEAR(rotated[0], 20 * (3 - 2 * std::sqrt(2.0)), 1e-12);
+  EXPECT_EQ(ramp[0], 0); // Saving must not modify reconstruction state.
+
+  t.xyRotationDeg = 90;
+  const std::vector<uint8_t> mask{1, 0, 0, 0, 0, 0, 0, 0, 0};
+  EXPECT_EQ(prepareOutputVolume(source, 3, 3, 1, &mask, {}, nullptr, &t),
+            (std::vector<double>{0, 0, 1, 0, 0, 0, 0, 0, 0}));
+  t.xyRotationDeg = std::numeric_limits<double>::infinity();
+  EXPECT_THROW(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t), std::invalid_argument);
+  t.xyRotationDeg = 45;
+  EXPECT_THROW(prepareOutputVolume(source, 3, 3, 1, nullptr, {}, nullptr, &t, 0, 1), std::invalid_argument);
+}
+
+TEST(VolumeOutputTest, MatrixGridJointVolumeIsSavedWithoutStitching) {
+  // Joint matrix-grid beds already share one global volume: the output keeps
+  // its Z size and voxels (no cosine blend, no gain fit); the mask still zeros.
   OutputTransform t;
   t.matrixGridOutput = true;
   t.baseNz = 4;
-  t.bedZStarts = {0, 4};
+  t.bedZStarts = {0, 3};
   t.outputBedOverlaps = {1};
   t.canonicalGeom = {4, 3, 1};
+  const std::vector<double> source{10, 11, 12, 13, 14, 15, 16};
   int nz = 0;
-  const auto out = prepareOutputVolume({10, 11, 12, 13, 100, 101, 102, 103},
-                                       1, 1, 8, nullptr, {}, &nz, &t);
+  EXPECT_EQ(prepareOutputVolume(source, 1, 1, 7, nullptr, {}, &nz, &t), source);
   EXPECT_EQ(nz, 7);
-  EXPECT_EQ(out, (std::vector<double>{10, 11, 12, 56.5, 101, 102, 103}));
-  for (int step : {1, 2, 4}) {
-    t.bedZStarts = {0, 4, 8};
-    t.outputBedOverlaps = {4 - step, 4 - step};
-    t.canonicalGeom = {4, step, 4 - step};
-    std::vector<double> source;
-    for (int bed = 0; bed < 3; ++bed)
-      for (int z = 0; z < 4; ++z) source.push_back(1 + bed * step + z);
-    const auto ramp = prepareOutputVolume(source, 1, 1, 12, nullptr, {}, &nz, &t);
-    EXPECT_EQ(nz, 4 + 2 * step);
-    for (int z = 0; z < nz; ++z) EXPECT_NEAR(ramp[z], 1 + z, 1e-12);
-  }
-  t.bedZStarts = {0, 4};
-  t.outputBedOverlaps = {2};
-  t.canonicalGeom = {4, 2, 2};
-  // In the overlap only bed 0 covers z=2 and only bed 1 covers z=3.
-  const std::vector<uint8_t> mask = {0, 1, 1, 0, 0, 1, 1, 0};
-  const auto masked = prepareOutputVolume({99, 2, 3, 99, 99, 4, 5, 99},
-      1, 1, 8, &mask, {}, &nz, &t);
-  EXPECT_EQ(nz, 6);
-  for (int z = 0; z < nz; ++z)
-    EXPECT_NEAR(masked[z], z == 0 || z == 5 ? 0 : 1 + z, 1e-12);
+  const std::vector<uint8_t> mask{0, 1, 1, 1, 1, 1, 0};
+  EXPECT_EQ(prepareOutputVolume(source, 1, 1, 7, &mask, {}, &nz, &t),
+            (std::vector<double>{0, 11, 12, 13, 14, 15, 0}));
 }
 
 TEST(VolumeOutputTest, SaveVolumeUsesFixedCenterCrop) {
@@ -119,6 +206,15 @@ TEST(VolumeOutputTest, SaveVolumeUsesFixedCenterCrop) {
   raw.read(reinterpret_cast<char *>(&first), sizeof(first));
   raw.close();
   EXPECT_DOUBLE_EQ(first, 91.0);
+
+  transform.xyRotationDeg = 180;
+  saveVolumeOutput(source, OutputGeometry{nx, ny, nz, 0.3, 0.3, 0.3},
+                   dir.string(), "rotated", 2, nullptr, CropSettings{}, true, &transform);
+  std::ifstream rotatedRaw(dir / "rotated_it2.raw", std::ios::binary);
+  rotatedRaw.read(reinterpret_cast<char *>(&first), sizeof(first));
+  rotatedRaw.close();
+  EXPECT_NEAR(first, 148.0, 1e-12);
+  EXPECT_EQ(fs::file_size(dir / "rotated_it2.raw"), fs::file_size(dir / "crop_it2.raw"));
 
   fs::remove_all(dir);
 }

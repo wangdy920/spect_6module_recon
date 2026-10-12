@@ -16,6 +16,10 @@ A2 / B1 / B5 的主验收使用均匀圆柱、slab、overlap profile 和 mu-map 
 
 ## 当前调试入口
 
+2026-10-08 输入合同更新：当前 EXE 的 `-ctacAutoMu` 只接收 `SPECTAutoMuCompatible=1` 的未变换全网格 MHD。下面 `qa_ctac_automu_cylinder.py` 从旧 headerless IMG 生成的 activity 没有坐标标记，不能直接传给新 EXE；这些历史命令和数值须用相应冻结版本复现。新验证需先按 `USAGE_CN.md` 生成合格参考体，不给旧图盲目补标记。当前源码的 78 项非 GPU 检查与合成 CT 网格检查不替代本文圆柱 CUDA 验收。
+
+2026-10-09 已补跑当前 CUDA 套件：CSRB/CSRQ K4/K8、N1/N>1、驻留/流式、双床双窗 CTAC 的数值回归通过。SC60 逐针孔路径比较使用矩阵随附 `pinhole_geometry_audit.txt` 的 PM 中心，不使用探测器平面位置冒充针孔；合成 μ 图上的路径差异只用于模型诊断，不是图像偏差或物理 PSF 标定。最新证据集中在根目录 `reports/2026-09-27-cuda-matrix-design-review.md` 第 15 节，不改写下面历史测量。
+
 基于 260601 release reference 的 FOV 满圆柱：
 
 ```powershell

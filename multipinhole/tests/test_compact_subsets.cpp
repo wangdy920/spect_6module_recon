@@ -13,16 +13,21 @@
 #include "sparse/CompactSubsets.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
+#include "sparse/ProjDomainChunked.h"
 #include "tests/common/compact_symmetry_test_helpers.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -55,6 +60,35 @@ TEST(CompactSubsets, InterleavedAnglesPartitionTheCompactRange) {
                std::runtime_error);
   EXPECT_THROW(spect::compactSubsetAngles(90, spect::CompactSubsetSpec{3, 3}),
                std::runtime_error);
+}
+
+TEST(CompactSubsets, ChunkRangesPreserveGlobalSubsetAngles) {
+  for (const int count : {10, 5, 2, 1}) {
+    for (int index = 0; index < count; ++index) {
+      const spect::CompactSubsetSpec spec{count, index};
+      std::vector<int> joined;
+      // Boundaries deliberately differ from subset boundaries; some chunks
+      // contain no selected angle at all.
+      const std::vector<int> bounds{0, 1, 4, 9, 15, 20};
+      for (size_t c = 1; c < bounds.size(); ++c) {
+        const auto angles = spect::compactSubsetAngles(20, spec, bounds[c - 1], bounds[c]);
+        for (const int angle : angles) {
+          EXPECT_GE(angle, bounds[c - 1]);
+          EXPECT_LT(angle, bounds[c]);
+        }
+        joined.insert(joined.end(), angles.begin(), angles.end());
+      }
+      EXPECT_EQ(joined, spect::compactSubsetAngles(20, spec));
+    }
+  }
+  EXPECT_EQ(spect::compactSubsetAngles(20, {10, 0}, 4, 15), (std::vector<int>{10}));
+  EXPECT_TRUE(spect::compactSubsetAngles(20, {10, 9}, 4, 9).empty());
+  EXPECT_TRUE(spect::compactSubsetAngles(20, {1, 0}, 20, 20).empty());
+  EXPECT_EQ(spect::compactSubsetAngles(20, {5, 4}, 15), (std::vector<int>{19}));
+  EXPECT_THROW(spect::compactSubsetAngles(20, {1, 0}, -1, 2), std::runtime_error);
+  EXPECT_THROW(spect::compactSubsetAngles(20, {1, 0}, 5, 4), std::runtime_error);
+  EXPECT_THROW(spect::compactSubsetAngles(20, {1, 0}, 0, 21), std::runtime_error);
+  EXPECT_THROW(spect::compactSubsetAngles(20, {3, 0}, 0, 6), std::runtime_error);
 }
 
 TEST(CompactSubsets, VisitingOrderMaximisesSeparationAndIsAPermutation) {
@@ -309,6 +343,86 @@ TEST(CompactSubsets, ChunkSliceCoalescesAdjacentAnglesAndRebasesRowPointers) {
   std::filesystem::remove_all(dir);
 }
 
+TEST(CompactSubsets, RejectsInvalidWeightsInWholeAndDiskSlices) {
+  const auto meta = makeSixAngleMeta();
+  auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() / "spect_invalid_csrb_weights";
+  for (float value : {0.0f, 1.0f, -1.0f,
+                      std::numeric_limits<float>::quiet_NaN(),
+                      std::numeric_limits<float>::infinity()}) {
+    compact.values[0] = value;
+    writeChunkDirectory(dir, meta, compact, 6);
+    for (uint64_t budget : {0ull, 1048576ull}) {
+      auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, budget);
+      if (std::isfinite(value) && value >= 0) {
+        EXPECT_NO_THROW(chunks.loadSubset(0, {0}, meta.compactRaysPerAngle, 1));
+        EXPECT_NO_THROW(chunks.loadChunk(0));
+      } else {
+        EXPECT_THROW(chunks.loadSubset(0, {0}, meta.compactRaysPerAngle, 1), std::runtime_error);
+        EXPECT_THROW(chunks.loadChunk(0), std::runtime_error);
+      }
+    }
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST(CompactSubsets, CacheInputsUseCurrentPathAndStatWithoutReadingPayload) {
+  const auto meta = makeSixAngleMeta();
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const auto root = std::filesystem::temp_directory_path() / "spect_cache_inputs";
+  writeChunkDirectory(root / "a", meta, compact, 6);
+  writeChunkDirectory(root / "b", meta, compact, 6);
+  const auto a = spect::io::openCompactChunkCSRDirectory((root / "a").string(), meta, 0);
+  const auto b = spect::io::openCompactChunkCSRDirectory((root / "b").string(), meta, 0);
+  const auto file = a.chunks()[0].path;
+  const auto timestamp = std::filesystem::last_write_time(file);
+  std::filesystem::last_write_time(b.chunks()[0].path, timestamp);
+  const auto inputs = [](const auto &chunks) {
+    std::ostringstream out;
+    chunks.appendCacheInputs(out, "");
+    return out.str();
+  };
+  const auto initial = inputs(a);
+  EXPECT_NE(initial, inputs(b)); // Same basename and stats, different input path.
+  const auto alias = spect::io::openCompactChunkCSRDirectory((root / "a" / ".").string(), meta, 0);
+  EXPECT_EQ(initial, inputs(alias));
+  std::filesystem::last_write_time(file, timestamp + std::chrono::seconds(1));
+  EXPECT_NE(initial, inputs(a));
+  EXPECT_EQ(a.readStats().payloadLoads, 0u);
+  EXPECT_EQ(b.readStats().payloadReadBytes, 0u);
+  std::filesystem::resize_file(file, a.chunks()[0].fileSizeBytes + 4);
+  EXPECT_THROW(inputs(a), std::runtime_error);
+  std::filesystem::remove(file);
+  EXPECT_THROW(inputs(a), std::filesystem::filesystem_error);
+  std::filesystem::remove_all(root);
+}
+
+TEST(CompactSubsets, CacheInputsDoNotCertifyPayloadHistory) {
+  const auto meta = makeSixAngleMeta();
+  auto compact = makeSixAngleCompactCSR(meta);
+  const auto dir = std::filesystem::temp_directory_path() / "spect_current_matrix_input";
+  writeChunkDirectory(dir, meta, compact, 6);
+  const auto chunks = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 1 << 20);
+  const auto file = chunks.chunks()[0].path;
+  const auto timestamp = std::filesystem::last_write_time(file);
+  std::ostringstream initial;
+  chunks.appendCacheInputs(initial, "");
+  EXPECT_EQ(chunks.readStats().payloadLoads, 0u);
+  compact.values[0] *= 2.0f;
+  writeChunkDirectory(dir, meta, compact, 6);
+  std::filesystem::last_write_time(file, timestamp);
+  for (uint64_t budget : {0ull, 1048576ull}) {
+    const auto next = spect::io::openCompactChunkCSRDirectory(dir.string(), meta, budget);
+    std::ostringstream current;
+    next.appendCacheInputs(current, "");
+    // Replacing data while preserving stats requires caller cache invalidation.
+    EXPECT_EQ(current.str(), initial.str());
+    EXPECT_FLOAT_EQ(next.loadChunk(0)->values.front(), compact.values.front());
+    EXPECT_EQ(next.readStats().payloadLoads, 1u);
+  }
+  std::filesystem::remove_all(dir);
+}
+
 TEST(CompactSubsets, UncachedSliceOwnsStorageAndEmptySliceDoesNotReadPayload) {
   const auto meta = makeSixAngleMeta();
   const auto compact = makeSixAngleCompactCSR(meta);
@@ -387,6 +501,37 @@ protected:
     }
   }
 };
+
+TEST_F(CompactSubsetCudaTest, SynchronousCsrUploadRetainsBackingStorageUntilEviction) {
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::weak_ptr<const spect::io::CompactChunkCSRData> previous;
+  for (int scale : {1, 2}) {
+    std::weak_ptr<const spect::io::CompactChunkCSRData> current;
+    {
+      auto chunk = std::make_shared<spect::io::CompactChunkCSRData>();
+      chunk->info.rows = 2;
+      chunk->cols = 2;
+      chunk->rowPtr = {0, 1, 2};
+      chunk->colIdx = {1, 0};
+      chunk->values = {2.0f * scale, 3.0f * scale};
+      current = chunk;
+      const float x[] = {5.0f, 7.0f};
+      float y[2] = {};
+      ASSERT_TRUE(spect::cuda::spmvFloatCUDA(chunk->view(), x, y));
+      EXPECT_FLOAT_EQ(y[0], 14.0f * scale);
+      EXPECT_FLOAT_EQ(y[1], 15.0f * scale);
+      ASSERT_TRUE(spect::cuda::spmvTFloatCUDA(chunk->view(), x, y));
+      EXPECT_FLOAT_EQ(y[0], 21.0f * scale);
+      EXPECT_FLOAT_EQ(y[1], 10.0f * scale);
+    }
+    // A pointer-keyed device cache must prevent reuse of its source addresses.
+    EXPECT_FALSE(current.expired());
+    EXPECT_TRUE(previous.expired());
+    previous = current;
+  }
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  EXPECT_TRUE(previous.expired());
+}
 
 // Per subset, S_m and q_m equal the dense oracle restricted to the subset's
 // rows; over all subsets they add up to the full-data S and q. Two chunks of
@@ -557,13 +702,26 @@ TEST_F(CompactSubsetCudaTest, NativeCsrbWindowsMatchWeightedPoissonOracle) {
                 if (prepared)
                   ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
                       meta, image.data(), image.size(), 2 * meta.Nz, bedStarts, 2, false, nullptr, true));
+                const auto before = spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
                 ASSERT_TRUE(spect::cuda::accumulatePoissonBackprojectedRatioCUDA(
                     channels, meta, projections, backgrounds, prepared ? nullptr : images,
                     2, 1, numers, prepared, nullptr, ctac ? attenuation : nullptr,
                     !prepared, prepared, true, &spec, nullptr));
+                if (prepared) {
+                  const auto after = spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
+                  EXPECT_EQ(after.compactProjectionH2DCalls, before.compactProjectionH2DCalls);
+                  EXPECT_EQ(after.compactProjectionH2DBytes, before.compactProjectionH2DBytes);
+                } else {
+                  EXPECT_GT(spect::cuda::getCudaChunkStageTimingSnapshotCUDA().compactProjectionH2DCalls,
+                            before.compactProjectionH2DCalls);
+                }
                 for (int bed = 0; bed < 2; ++bed)
                   EXPECT_LE(relL2(q[bed], expectedQ[bed]), 1e-5);
               }
+              // The next explicit refresh must see in-place changes and clear
+              // absent backgrounds, even though the host addresses are reused.
+              for (double &value : p[2]) value += 0.125;
+              backgrounds[1] = backgrounds[1] == nullptr ? bg[1].data() : nullptr;
             }
           }
         }

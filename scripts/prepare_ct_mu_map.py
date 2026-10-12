@@ -119,11 +119,58 @@ def write_registration_ini(path: Path, fields: dict[str, str]) -> None:
 
 
 def _fixed_bed_origins(bed1_origin: np.ndarray, normal: np.ndarray,
-                       bed_step_mm: float) -> dict[int, np.ndarray]:
+                       bed_step_mm: float, beds=DEVICE_PHYSICAL_BEDS) -> dict[int, np.ndarray]:
     return {
         bed: bed1_origin + (bed - 1) * bed_step_mm * normal
-        for bed in DEVICE_PHYSICAL_BEDS
+        for bed in beds
     }
+
+
+def load_recon_grid(path: Path) -> dict:
+    """Use the effective grid, not scanner-specific constants or matrix identity."""
+    run = json.loads(path.read_text(encoding="utf-8"))
+    if run.get("schema") != "spect_recon_run_manifest_v1":
+        raise RuntimeError("Unsupported reconstruction manifest schema")
+    matrix, multi, output, projection = (
+        run[key] for key in ("matrix", "multibed", "output", "projection"))
+    dims = matrix["dims"]
+    spacing = np.asarray(output["voxel_mm"], dtype=float)
+    beds = sorted(int(key) for key in projection if key.isdigit())
+    if (len(dims) != 3 or any(type(v) is not int or v <= 0 for v in dims) or
+            spacing.shape != (3,) or not np.all(np.isfinite(spacing)) or
+            np.any(spacing <= 0) or not np.isfinite(matrix["voxel_size_mm"]) or
+            not np.allclose(spacing, matrix["voxel_size_mm"], rtol=0, atol=1e-6)):
+        raise RuntimeError("Invalid or inconsistent reconstruction manifest grid")
+    if (not beds or beds != list(range(beds[0], beds[0] + len(beds))) or
+            beds[0] <= 0 or multi["bed_count"] != len(beds) or
+            multi["bed_z_starts"] != [i * dims[2] for i in range(len(beds))]):
+        raise RuntimeError("Manifest requires consecutive beds in separate storage blocks")
+    angle = float(output.get("xy_out_rotation_deg", 0.0))
+    per_bed_flip = output.get("z_per_bed_flip", projection["z_bed_flip"] and len(beds) == 1)
+    if (not multi["matrix_grid_output"] or output["x_out_flip"] or
+            output["z_out_flip"] or per_bed_flip or output["seam_xy_align"] or
+            output["crop_end_start"] or output["crop_end_end"] or
+            not np.isfinite(angle) or angle % 360.0 != 0):
+        raise RuntimeError(
+            "--recon-manifest requires full matrix-grid SPECT DICOM without output "
+            "rotation, flips, cropping or seam alignment; regenerate an untransformed reference")
+    step_mm = float(multi["bed_step_mm"])
+    if not np.isfinite(step_mm) or step_mm < 0:
+        raise RuntimeError("Manifest bed_step_mm must be finite and nonnegative")
+    step = dims[2]
+    if len(beds) > 1:
+        step = round(step_mm / spacing[2])
+        if (not 1 <= step <= dims[2] or abs(step * spacing[2] - step_mm) > 1e-4 or
+                multi["bed_step_layers"] != step or
+                multi["output_bed_overlaps"] != [dims[2] - step] * (len(beds) - 1)):
+            raise RuntimeError("Manifest multi-bed step must be explicit and voxel-aligned")
+    expected = [dims[0], dims[1], dims[2] + (len(beds) - 1) * step]
+    if output["dimensions"] != expected:
+        raise RuntimeError("Manifest saved dimensions are not the full matrix grid")
+    return {"bed_nz": dims[2], "overlap": dims[2] - step,
+            "xy": (dims[1], dims[0]), "xy_pad_vox": 0, "z_pad_vox": 0,
+            "spacing": spacing, "beds": beds, "bed_step_mm": step_mm,
+            "z_bed_flip": bool(projection["z_bed_flip"]) and len(beds) > 1}
 
 
 def _coverage_summary(coords: np.ndarray, ct_shape: tuple[int, int, int],
@@ -1026,9 +1073,13 @@ def main() -> int:
     parser.add_argument("--spect-dicom-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--profile", choices=sorted(PROFILES), default="device160",
+        "--profile", choices=sorted(PROFILES), default=None,
         help="device160: 108x108x160 stitch (SPECT DICOM grid). "
              "recon220: 120x120x220 per-bed stack for SPECT_recon -attMap/-regCT")
+    parser.add_argument(
+        "--recon-manifest", type=Path,
+        help="Effective full matrix-grid geometry (e.g. SC60); replaces the PSC profile. "
+             "SPECT DICOM must be exported from this untransformed reference run")
     parser.add_argument(
         "--hu-output", type=Path,
         help="Optional HU volume on the same grid as --output")
@@ -1046,14 +1097,14 @@ def main() -> int:
         "--regct-hu-output", type=Path,
         help="Optional HU volume for -regCT in reconstruction-storage Z order")
     parser.add_argument(
-        "--z-bed-flip", action="store_true",
+        "--z-bed-flip", action="store_true", default=None,
         help="Reverse each -attMap bed block to match reconstruction -zbedflip 1; "
              "does not change -regCT or whole-output orientation")
-    parser.add_argument("--beds", default="1,2,3,4",
+    parser.add_argument("--beds", default=None,
                         help="Consecutive physical bed numbers, e.g. 2,3,4")
     parser.add_argument("--bed-nz", type=int, default=None)
     parser.add_argument("--overlap", type=int, default=None)
-    parser.add_argument("--bed-step-mm", type=float, default=DEVICE_BED_STEP_MM)
+    parser.add_argument("--bed-step-mm", type=float, default=None)
     parser.add_argument("--water-mu", type=float, default=.0152)
     parser.add_argument("--activity", type=Path)
     parser.add_argument(
@@ -1078,7 +1129,7 @@ def main() -> int:
     parser.add_argument("--bed-step-tolerance-mm", type=float, default=0.75,
                         help="Diagnostic tolerance for per-bed DICOM origin checks")
     parser.add_argument(
-        "--spect-reference-bed", type=int, default=1,
+        "--spect-reference-bed", type=int, default=None,
         help="Physical bed represented by a flat --spect-dicom-dir [1]")
     parser.add_argument(
         "--bed1-origin-xyz", type=_parse_xyz,
@@ -1091,29 +1142,54 @@ def main() -> int:
         help="Write CT/SPECT/fusion DICOM series on the SPECT DICOM grid "
              "(shared FoR and IPP; registration is in the CT voxels)")
     args = parser.parse_args()
+    grid = load_recon_grid(args.recon_manifest) if args.recon_manifest else None
+    if grid:
+        if args.profile is not None:
+            raise RuntimeError("--recon-manifest and --profile are mutually exclusive")
+        if isinstance(args.fixed_translation_xyz, str) and args.registration_ini == MDP_DEVICE_REGISTRATION_INI:
+            raise RuntimeError("Manifest mode requires device-specific registration; do not reuse the PSC MDP preset")
+        args.profile = "recon_manifest"
+        profile = grid
+        for key in ("bed_nz", "overlap", "bed_step_mm", "z_bed_flip"):
+            value = getattr(args, key)
+            if value is not None and value != grid[key]:
+                raise RuntimeError(f"--{key.replace('_', '-')} conflicts with reconstruction manifest")
+            setattr(args, key, grid[key])
+        if args.beds is not None and [int(v) for v in args.beds.split(",")] != grid["beds"]:
+            raise RuntimeError("--beds conflicts with reconstruction manifest")
+        args.beds = ",".join(str(bed) for bed in grid["beds"])
+    else:
+        args.profile = args.profile or "device160"
+        profile = PROFILES[args.profile]
+        args.beds = args.beds or "1,2,3,4"
+        args.bed_step_mm = DEVICE_BED_STEP_MM if args.bed_step_mm is None else args.bed_step_mm
+        args.z_bed_flip = bool(args.z_bed_flip)
     if isinstance(args.fixed_translation_xyz, str):
         try:
             args.fixed_translation_xyz = load_frozen_translation(args.registration_ini)
         except (RuntimeError, configparser.Error, argparse.ArgumentTypeError) as exc:
             raise SystemExit(f"--fixed-translation-xyz mdp_device: {exc}") from exc
-    profile = PROFILES[args.profile]
     if args.bed_nz is None:
         args.bed_nz = int(profile["bed_nz"])
     if args.overlap is None:
         args.overlap = int(profile["overlap"])
 
     beds = [int(value) for value in args.beds.split(",")]
+    if args.spect_reference_bed is None:
+        args.spect_reference_bed = beds[0] if grid else 1
     if (not beds or beds != list(range(beds[0], beds[0] + len(beds))) or
-            not all(bed in DEVICE_PHYSICAL_BEDS for bed in beds)):
-        raise RuntimeError("--beds must be a consecutive subset of 1..5")
-    if not np.isclose(args.bed_step_mm, DEVICE_BED_STEP_MM, atol=1e-9):
+            not all(bed in (grid["beds"] if grid else DEVICE_PHYSICAL_BEDS) for bed in beds)):
+        raise RuntimeError("--beds must be consecutive and match the selected geometry")
+    if not grid and not np.isclose(args.bed_step_mm, DEVICE_BED_STEP_MM, atol=1e-9):
         raise RuntimeError("6Module bed_step_mm is fixed at 16.8")
     if args.bed_nz != int(profile["bed_nz"]) or args.overlap != int(profile["overlap"]):
         raise RuntimeError(
             f"profile {args.profile} requires bed_nz={profile['bed_nz']}, "
             f"overlap={profile['overlap']}; got bed_nz={args.bed_nz}, overlap={args.overlap}")
-    if args.spect_reference_bed not in DEVICE_PHYSICAL_BEDS:
-        raise RuntimeError("--spect-reference-bed must be in 1..5")
+    if args.spect_reference_bed not in (beds if grid else DEVICE_PHYSICAL_BEDS):
+        raise RuntimeError("--spect-reference-bed must belong to the selected geometry")
+    if not np.isfinite(args.water_mu) or args.water_mu <= 0:
+        raise RuntimeError("--water-mu must be finite and positive (mm^-1)")
     if args.apply_residual and not args.measure_residual:
         raise RuntimeError("--apply-residual requires --measure-residual")
     nz = args.bed_nz + (len(beds) - 1) * (args.bed_nz - args.overlap)
@@ -1157,16 +1233,32 @@ def main() -> int:
     target_spacing = np.array([spect_geom["pixel_spacing"][1],
                                spect_geom["pixel_spacing"][0],
                                spect_geom["slice_spacing"]])
-    if not np.allclose(target_spacing, DEVICE_TARGET_SPACING_XYZ_MM, atol=1e-5):
+    required_spacing = grid["spacing"] if grid else DEVICE_TARGET_SPACING_XYZ_MM
+    if not np.allclose(target_spacing, required_spacing, rtol=0, atol=1e-5):
         raise RuntimeError(
-            f"6Module target spacing must be 0.3 mm isotropic, got {target_spacing.tolist()}")
+            f"SPECT DICOM spacing {target_spacing.tolist()} does not match target {required_spacing.tolist()}")
     spect_xy = (int(s0.Rows), int(s0.Columns))
-    if spect_xy != DEVICE_IMAGE_SHAPE_XY:
+    required_xy = grid["xy"] if grid else DEVICE_IMAGE_SHAPE_XY
+    if spect_xy != required_xy:
         raise RuntimeError(
-            f"6Module SPECT DICOM grid must be 108x108 in XY, got {spect_xy[0]}x{spect_xy[1]}")
+            f"SPECT DICOM XY grid {spect_xy} does not match target {required_xy}")
+    if grid:
+        if not bed_series and args.spect_reference_bed != beds[0]:
+            raise RuntimeError("Flat manifest DICOM must start at the first selected bed")
+        for series, geometry in ([(bed_series[b], bed_geometries[b]) for b in beds]
+                                 if bed_series else [(spect, spect_geom)]):
+            spacing = [geometry["pixel_spacing"][1], geometry["pixel_spacing"][0],
+                       geometry["slice_spacing"]]
+            expected_nz = args.bed_nz if bed_series else nz
+            if (len(series) != expected_nz or
+                    (int(series[0].Rows), int(series[0].Columns)) != required_xy or
+                    not np.allclose(spacing, required_spacing, rtol=0, atol=1e-5) or
+                    not np.allclose(geometry["iop"], spect_geom["iop"], rtol=0, atol=1e-5)):
+                raise RuntimeError("Every SPECT DICOM bed must match the manifest full-grid geometry")
     target_xy = tuple(int(v) for v in profile["xy"])
     target_grid_stride = (args.bed_nz - args.overlap) * target_spacing[2]
-    if not np.isclose(target_grid_stride, args.bed_step_mm, atol=1e-6):
+    if (not grid or len(beds) > 1) and not np.isclose(
+            target_grid_stride, args.bed_step_mm, rtol=0, atol=1e-4 if grid else 1e-6):
         raise RuntimeError(
             f"bed step {args.bed_step_mm:.6f} mm does not match grid stride "
             f"{target_grid_stride:.6f} mm")
@@ -1188,7 +1280,8 @@ def main() -> int:
         bed1_origin = (spect_geom["origin"] -
                        (reference_bed - 1) * args.bed_step_mm * normal)
         bed_origin_source = f"inferred_from_flat_Bed{reference_bed}_dicom_ipp"
-    fixed_bed_origins = _fixed_bed_origins(bed1_origin, normal, args.bed_step_mm)
+    fixed_bed_origins = _fixed_bed_origins(
+        bed1_origin, normal, args.bed_step_mm, beds if grid else DEVICE_PHYSICAL_BEDS)
     origin_shift = (
         float(profile["xy_pad_vox"]) * target_spacing[0] * spect_geom["col_dir"]
         + float(profile["xy_pad_vox"]) * target_spacing[1] * spect_geom["row_dir"]
@@ -1365,11 +1458,11 @@ def main() -> int:
         "decision": "geometry_ready_mu_calibration_provisional",
         "device_geometry_profile": args.profile,
         "device_geometry": {
-            "physical_beds": list(DEVICE_PHYSICAL_BEDS),
+            "physical_beds": beds if grid else list(DEVICE_PHYSICAL_BEDS),
             "bed_nz": args.bed_nz,
-            "voxel_xyz_mm": DEVICE_TARGET_SPACING_XYZ_MM.tolist(),
+            "voxel_xyz_mm": target_spacing.tolist(),
             "bed_overlap": args.overlap,
-            "bed_step_mm": DEVICE_BED_STEP_MM,
+            "bed_step_mm": args.bed_step_mm,
             "image_shape_xy": list(target_xy),
             "spect_dicom_shape_xy": list(spect_xy),
             "xy_pad_vox": int(profile["xy_pad_vox"]),
@@ -1413,11 +1506,14 @@ def main() -> int:
         "hu_to_mu": "mu=water_mu*clip(1+HU/1000,0,3)", "water_mu_mm-1": args.water_mu,
         "registration_assumption": (
             "shared FrameOfReferenceUID + ImagePosition/Orientation/PixelSpacing; "
-            "fixed absolute Bed1..Bed5 device mapping; frozen device translation; "
+            "explicit bed grid mapping; optional frozen device translation; "
             "per-scan clamped 3-DOF spine+knee refine using CT-anchored local "
             "SPECT COM; no rotation; no per-bed registration"),
         "mu_map": str(args.output),
     }
+    if args.recon_manifest:
+        manifest["reconstruction_manifest"] = str(args.recon_manifest.resolve())
+        manifest["reference_requirement"] = "untransformed full matrix-grid DICOM; no extra export flips"
     if residual_metrics is not None:
         manifest["dicom_translation_residual"] = residual_metrics
         before = float(residual_metrics["magnitude_mm"])

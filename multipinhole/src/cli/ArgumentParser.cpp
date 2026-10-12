@@ -412,6 +412,10 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         applyConfig(args, cfg);
     }
 
+    // Installation scanner binding is authoritative, independently of the
+    // reconstruction parameter override policy. CLI remains a fallback.
+    const std::string configuredScannerConfig = cfg.getString("SystemMatrix", "scanner_config");
+
     // 3. Process command-line arguments (highest priority override)
     bool cliIterationSubsets = false;
     bool cliSubsetSchedule = false;
@@ -465,7 +469,20 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         args.isotope = requestedIsotope;
     }
     // 4. Resolve matrix defaults after all config/CLI layers are known.
-    if (!requestedScannerConfig.empty()) args.scannerConfig = requestedScannerConfig;
+    if (!configuredScannerConfig.empty()) {
+        const auto scannerPath = [&configPath](const std::string& value) {
+            const std::filesystem::path path(value);
+            return std::filesystem::absolute(path.is_absolute() ? path :
+                std::filesystem::path(configPath).parent_path() / path).lexically_normal();
+        };
+        if (!requestedScannerConfig.empty() &&
+            scannerPath(requestedScannerConfig) != scannerPath(configuredScannerConfig))
+            std::cerr << "[WARNING] Configured scanner_config=" << configuredScannerConfig
+                      << " overrides CLI -scannerConf=" << requestedScannerConfig << "\n";
+        args.scannerConfig = configuredScannerConfig;
+    } else if (!requestedScannerConfig.empty()) {
+        args.scannerConfig = requestedScannerConfig;
+    }
     applyScannerMatrices(args, argv);
     std::string matrixDiscoveryError;
     if (!applyMatrixAutoDiscovery(args, argv, matrixDiscoveryError)) {
@@ -555,6 +572,31 @@ void ArgumentParser::registerHandlers() {
             splitPathList(ArgumentParser::getRequiredArg(i, argc, argv, "-dfList")));
         return true;
     }, {"-dfList"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const std::string value = ArgumentParser::getRequiredArg(i, argc, argv, "-beds");
+        const size_t colon = value.find(':');
+        size_t used = 0, used2 = 0;
+        try {
+            if (colon == std::string::npos) {
+                a.bedFirst = 1;
+                a.bedLast = std::stoi(value, &used);
+                used2 = 0;
+                if (used != value.size()) throw std::invalid_argument(value);
+            } else {
+                const std::string first = value.substr(0, colon);
+                const std::string last = value.substr(colon + 1);
+                a.bedFirst = std::stoi(first, &used);
+                a.bedLast = std::stoi(last, &used2);
+                if (used != first.size() || used2 != last.size())
+                    throw std::invalid_argument(value);
+            }
+        } catch (const std::exception&) {
+            throw std::runtime_error("-beds expects N or A:B (bed numbers), got '" + value + "'");
+        }
+        if (a.bedFirst < 1 || a.bedLast < a.bedFirst)
+            throw std::runtime_error("-beds expects 1 <= A <= B, got '" + value + "'");
+        return true;
+    }, {"-beds"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         a.chunkCSRDir = ArgumentParser::getRequiredArg(i, argc, argv, "-chunkCSRDir");
         a.chunkCSRDirExplicit = true;
@@ -1107,6 +1149,14 @@ void ArgumentParser::registerHandlers() {
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.xOutFlip);
     }, {"-xoutflip"});
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
+        const auto value = ArgumentParser::getRequiredArg(i, argc, argv, "-xyoutrot");
+        size_t consumed = 0;
+        a.xyOutRotationDeg = std::stod(value, &consumed);
+        if (consumed != value.size() || !std::isfinite(a.xyOutRotationDeg))
+            throw std::runtime_error("-xyoutrot requires a finite angle in degrees.");
+        return true;
+    }, {"-xyoutrot"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(i, argc, argv, a.seamXyAlign);
     }, {"-seamXyAlign"});
@@ -1666,6 +1716,10 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             "MultiBed", "single_bed_step_aligned", a.singleBedStepAligned);
         a.zOutFlip = cfg.getBool("MultiBed", "z_out_flip", a.zOutFlip);
         a.xOutFlip = cfg.getBool("MultiBed", "x_out_flip", a.xOutFlip);
+        a.xyOutRotationDeg = cfg.getDouble(
+            "MultiBed", "xy_out_rotation_deg", a.xyOutRotationDeg);
+        if (!std::isfinite(a.xyOutRotationDeg))
+            throw std::runtime_error("[MultiBed] xy_out_rotation_deg must be finite.");
         a.seamXyAlign = cfg.getBool("MultiBed", "seam_xy_align", a.seamXyAlign);
     }
     if (cfg.hasKey("Normalization", "factor_file") || cfg.hasKey("MultiBed", "normalization_factor_file"))
@@ -1856,19 +1910,23 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         std::cerr << "Error: Projection data path (-df) is required.\n";
         return false;
     }
-    if (args.projPaths.size() > static_cast<size_t>(spect::core::kMaxBeds)) {
-        std::cerr << "Error: -dfList supports at most "
-                  << spect::core::kMaxBeds << " beds.\n";
+    const int maxBeds = args.matrixGridOutput ? spect::core::kMaxBeds
+                                              : spect::core::kSixModuleMaxBeds;
+    if (args.bedFirst > 0 && args.bedLast - args.bedFirst + 1 > maxBeds) {
+        std::cerr << "Error: -beds selects more than " << maxBeds << " beds.\n";
         return false;
     }
-    if (args.bProjPaths.size() > static_cast<size_t>(spect::core::kMaxBeds)) {
-        std::cerr << "Error: -bProjList supports at most "
-                  << spect::core::kMaxBeds << " beds.\n";
+    if (args.projPaths.size() > static_cast<size_t>(maxBeds)) {
+        std::cerr << "Error: -dfList supports at most " << maxBeds << " beds.\n";
         return false;
     }
-    if (args.bedOverlaps.size() > static_cast<size_t>(spect::core::kMaxBeds)) {
+    if (args.bProjPaths.size() > static_cast<size_t>(maxBeds)) {
+        std::cerr << "Error: -bProjList supports at most " << maxBeds << " beds.\n";
+        return false;
+    }
+    if (args.bedOverlaps.size() > static_cast<size_t>(spect::core::kSixModuleMaxBeds)) {
         std::cerr << "Error: -bedOverlap supports at most "
-                  << spect::core::kMaxBeds << " fixed bed slots.\n";
+                  << spect::core::kSixModuleMaxBeds << " fixed bed slots.\n";
         return false;
     }
     if (args.csrqResidency != "auto" && args.csrqResidency != "streamed") {
@@ -1993,8 +2051,8 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
                   << spect::core::supportedWaterMuNuclides() << ".\n";
         return false;
     }
-    if (!(args.ctacAutoMuValue > 0.0)) {
-        std::cerr << "Error: CTAC auto-mu value must be positive.\n";
+    if (!std::isfinite(args.ctacAutoMuValue) || !(args.ctacAutoMuValue > 0.0)) {
+        std::cerr << "Error: CTAC auto-mu value must be finite and positive.\n";
         return false;
     }
     if (args.detZEdgeCensor < 0) {
@@ -2033,8 +2091,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         return false;
     }
     if (!args.normFactorFile2.empty()) {
-        if (!args.bProjPath2.empty() || !args.bProjPaths2.empty())
-            throw std::runtime_error("Joint normalization currently requires background-free reconstruction.");
         const auto values = spect::io::loadDetZRowWeights(
             args.normFactorFile2, args.detNz, args.detNx, args.numAngles);
         if (values.size() != static_cast<size_t>(args.detNz) * args.detNx * args.numAngles)
@@ -2049,12 +2105,6 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
         if (args.chunkCSRDir.empty()) {
             std::cerr << "Error: -normFactorFile requires the "
                          "compact-symmetric chunk layout (-chunkCSRDir).\n";
-            return false;
-        }
-        if (!args.bProjPath.empty() || !args.bProjPaths.empty()) {
-            std::cerr << "Error: -normFactorFile currently supports only "
-                         "background-free reconstruction (no -bProj/"
-                         "-bProjList).\n";
             return false;
         }
         try {
@@ -2462,7 +2512,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     }
     std::cout << "\n";
     std::cout << "stitch_method = "
-              << (a.matrixGridOutput ? "matrix_grid_cosine" : "center66_cosine10") << "\n";
+              << (a.matrixGridOutput ? "joint_global_volume" : "center66_cosine10") << "\n";
     std::cout << "bed_step_mm   = "
               << (a.bedStepMm > 0.0 || a.matrixGridOutput ? a.bedStepMm
                                     : spect::core::sixmodule::kMultiBedStepMm)
@@ -2482,6 +2532,7 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
     std::cout << "x_out_flip   = " << (a.xOutFlip ? 1 : 0) << "\n";
+    std::cout << "xy_out_rotation_deg = " << a.xyOutRotationDeg << "\n";
     std::cout << "seam_xy_align = " << (a.seamXyAlign ? 1 : 0)
               << "  # overlap NCC integer XY shift; 0 keeps unshifted stitch\n\n";
 
@@ -2514,7 +2565,10 @@ void ArgumentParser::printUsage() {
     std::cout << "=== Data I/O ===\n";
     std::cout << "  -df, -i <path>          Projection MAT or BIN file\n";
     std::cout << "  -dfList <p1,p2,...>      Multi-bed projection MAT/BIN list, sorted by BedN when present (max "
-              << spect::core::kMaxBeds << " beds)\n";
+              << spect::core::kMaxBeds << " beds with matrix_grid_output, otherwise "
+              << spect::core::kSixModuleMaxBeds << ")\n";
+    std::cout << "  -beds <N|A:B>            Search Bed1..BedN or BedA..BedB (BedK.bin) in the -df directory\n"
+              << "                           (-df may also name one BedK.bin in it); every selected bed must exist\n";
     std::cout << "  merge_time_segments      [InputOutput] true + -df <timestamp/SPECT>: sum matching sibling BedN.bin inputs\n";
     std::cout << "  output_filters_overwrite_primary  [InputOutput] write output Smooth->Butter chain to the unsuffixed volume\n";
     std::cout << "  -chunkCSRDir <dir>       Directory with metadata.bin + chunk_*.csrb (or chunk_*.csrq)\n";
@@ -2596,16 +2650,18 @@ void ArgumentParser::printUsage() {
     std::cout << "  -singleBedStepAligned <0|1>  Single-bed crop = step+10 (default 1); 0 keeps legacy 72 layers\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
-    std::cout << "  -normFactorFile <f>       Full projection correction factors c; applies reciprocal 1/c to sensitivity\n";
+    std::cout << "  -normFactorFile <f>       Correction c: efficiency e=1/c; measured-count model e*H*x+b\n";
     std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (default 1; inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";
     std::cout << "  -xoutflip <0|1>           Flip whole output volume on X (default 0)\n";
+    std::cout << "  -xyoutrot <degrees>      Output XY rotation after flips/crop/mask; positive +X toward +Y (default 0)\n";
     std::cout << "  -seamXyAlign <0|1>        Integer XY align from overlap NCC before cosine blend (default 0)\n";
     std::cout << "  -ctac                     Enable iterative attenuation correction (uses -attMap; mu in mm^-1)\n";
     std::cout << "  -ctacModel <m>            line-integral (default; angle-dependent parallel-ray Int mu ds)\n";
     std::cout << "  -ctacRotSign <1|-1>       Rotation sign matching sysmat generator --voxel-rotation-sign (default 1)\n";
     std::cout << "  -ctacAutoMu <vol>         Build water mu-map from an early-iteration recon volume\n";
+    std::cout << "                            (untransformed full-grid MHD, SPECTAutoMuCompatible=1)\n";
     std::cout << "                            (threshold + closing + hole fill; for activity-filled phantoms;\n";
     std::cout << "                            mutually exclusive with -attMap; generated map saved as *_automu)\n";
     std::cout << "  -ctacAutoMuThresh <f>     Relative threshold vs P99.9 activity (default 0.05)\n";

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "recon/BedOffsets.h"
 #include "recon/BsremUpdate.h"
 #include "sparse/CompactSymmetricProjector.h"
 #include "sparse/SparseOpsCUDA.h"
@@ -201,52 +202,150 @@ TEST_F(MultiBedCompactNumeratorTest, TwoBedsMatchDenseReference) {
   castorPsf.kx = {0.25, 0.5, 0.25};
   castorPsf.ky = castorPsf.kx;
   castorPsf.kz = castorPsf.kx;
-  std::vector<std::vector<double>> blurredImages = {imageBed0, imageBed1};
-  for (auto &blurred : blurredImages) {
-    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
-        blurred, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
-        castorPsf.kz));
-  }
-  const double *blurredPtrs[bedCount] = {blurredImages[0].data(),
-                                         blurredImages[1].data()};
-  std::vector<std::vector<double>> hostPsfNumers(
-      bedCount, std::vector<double>(nvox, 0.0));
-  double *hostPsfNumerPtrs[bedCount] = {hostPsfNumers[0].data(),
-                                        hostPsfNumers[1].data()};
-  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
-      chunks, meta, projPtrs, nullptr, blurredPtrs, bedCount, 1,
-      hostPsfNumerPtrs));
-  ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
-      meta, globalImage.data(), globalImage.size(), 2 * meta.Nz, bedZStarts,
-      bedCount, false, &castorPsf));
-  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
-      chunks, meta, projPtrs, nullptr, nullptr, bedCount, 1,
-      residentNumerPtrs, false, nullptr, nullptr, true, true));
-  expectNear(residentNumers[0], hostPsfNumers[0], 1e-4);
-  expectNear(residentNumers[1], hostPsfNumers[1], 1e-4);
-
-  std::vector<double> expectedUpdated = globalImage;
-  for (int bed = 0; bed < bedCount; ++bed) {
-    auto backwardPsf = hostPsfNumers[static_cast<size_t>(bed)];
-    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
-        backwardPsf, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
-        castorPsf.kz));
-    const size_t offset = static_cast<size_t>(bed) * nvox;
+  for (bool masked : {false, true, false}) {
+    std::vector<uint8_t> localMask(nvox, 1);
+    // Asymmetric support with nonzero matrix columns outside it. Masking at
+    // the wrong side of PSF or after rotation cannot match this host oracle.
     for (size_t i = 0; i < nvox; ++i)
-      expectedUpdated[offset + i] *= backwardPsf[i];
+      if (masked && i % meta.Nx == 0) localMask[i] = 0;
+    std::vector<std::vector<double>> blurredImages = {imageBed0, imageBed1};
+    for (auto &blurred : blurredImages) {
+      ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
+          blurred, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
+          castorPsf.kz));
+      for (size_t i = 0; i < nvox; ++i)
+        if (!localMask[i]) blurred[i] = 0;
+    }
+    const double *blurredPtrs[bedCount] = {blurredImages[0].data(),
+                                           blurredImages[1].data()};
+    std::vector<std::vector<double>> hostPsfNumers(
+        bedCount, std::vector<double>(nvox, 0.0));
+    double *hostPsfNumerPtrs[bedCount] = {hostPsfNumers[0].data(),
+                                          hostPsfNumers[1].data()};
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, blurredPtrs, bedCount, 1,
+        hostPsfNumerPtrs));
+    ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+        meta, globalImage.data(), globalImage.size(), 2 * meta.Nz, bedZStarts,
+        bedCount, false, &castorPsf, true, masked ? localMask.data() : nullptr));
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, nullptr, bedCount, 1,
+        residentNumerPtrs, false, nullptr, nullptr, true, true));
+    expectNear(residentNumers[0], hostPsfNumers[0], 1e-4);
+    expectNear(residentNumers[1], hostPsfNumers[1], 1e-4);
+
+    std::vector<double> expectedUpdated = globalImage;
+    for (int bed = 0; bed < bedCount; ++bed) {
+      auto backwardPsf = hostPsfNumers[static_cast<size_t>(bed)];
+      for (size_t i = 0; i < nvox; ++i)
+        if (!localMask[i]) backwardPsf[i] = 0;
+      ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(
+          backwardPsf, meta.Nx, meta.Ny, meta.Nz, castorPsf.kx, castorPsf.ky,
+          castorPsf.kz));
+      const size_t offset = static_cast<size_t>(bed) * nvox;
+      for (size_t i = 0; i < nvox; ++i)
+        expectedUpdated[offset + i] *= backwardPsf[i];
+    }
+    std::vector<double> globalDenom(globalImage.size(), 1.0);
+    bool imageAllZero = true;
+    ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
+        meta, globalImage.size(), 2 * meta.Nz, bedZStarts, bedCount, false,
+        globalDenom.data(), nullptr, &castorPsf, true, true, &imageAllZero));
+    EXPECT_FALSE(imageAllZero);
+    std::vector<double> residentUpdated(globalImage.size(), 0.0);
+    ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(
+        residentUpdated.data(), residentUpdated.size()));
+    expectNear(residentUpdated, expectedUpdated, 1e-4);
   }
-  std::vector<double> globalDenom(globalImage.size(), 1.0);
-  bool imageAllZero = true;
-  ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
-      meta, globalImage.size(), 2 * meta.Nz, bedZStarts, bedCount, false,
-      globalDenom.data(), nullptr, &castorPsf, true, true, &imageAllZero));
-  EXPECT_FALSE(imageAllZero);
-  std::vector<double> residentUpdated(globalImage.size(), 0.0);
-  ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(
-      residentUpdated.data(), residentUpdated.size()));
-  expectNear(residentUpdated, expectedUpdated, 1e-4);
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
 
+  std::filesystem::remove_all(dir);
+}
+
+// Joint matrix-grid layout: two beds overlap by one layer of a 3-layer global
+// volume. The resident gather, numerator and update must equal the host
+// oracle that extracts each bed window, backprojects it, and sums the bed
+// numerators into the shared voxels before one global MLEM update.
+TEST_F(MultiBedCompactNumeratorTest, OverlappingBedsMatchHostJointUpdate) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto full = expandCompactToyToFullDense(meta, compact);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_multibed_overlap_joint_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  writeChunkFile(dir / "chunk_000.csrb", meta.totalRows, 0,
+                 meta.compactNumAngles, compact.rowPtr, compact.colIdx,
+                 compact.values);
+  spect::io::CompactSymmetryMetadata dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), dirMeta, 1024 * 1024);
+
+  constexpr int bedCount = 2;
+  const int globalNz = meta.Nz + 1;
+  const int bedZStarts[bedCount] = {0, 1};
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t globalNvox =
+      static_cast<size_t>(meta.Nx) * meta.Ny * static_cast<size_t>(globalNz);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  std::vector<double> projBed0(fullRows), projBed1(fullRows);
+  for (size_t i = 0; i < fullRows; ++i) {
+    projBed0[i] = 1.0 + 0.01 * static_cast<double>(i);
+    projBed1[i] = 2.0 + 0.02 * static_cast<double>(i);
+  }
+  const double *projPtrs[bedCount] = {projBed0.data(), projBed1.data()};
+  std::vector<double> globalImage(globalNvox);
+  std::vector<double> globalDenom(globalNvox);
+  for (size_t i = 0; i < globalNvox; ++i) {
+    globalImage[i] = 0.6 + 0.1 * static_cast<double>(i);
+    globalDenom[i] = 1.5 + 0.25 * static_cast<double>(i % 5);
+  }
+
+  for (bool flip : {false, true}) {
+    std::vector<double> numerGlobal(globalNvox, 0.0);
+    std::vector<std::vector<double>> refNumers(bedCount);
+    for (int bed = 0; bed < bedCount; ++bed) {
+      const auto local = spect::app::extractBedVolumeFromGlobal(
+          globalImage, meta.Nx, meta.Ny, meta.Nz, bedZStarts[bed], flip);
+      refNumers[bed] = denseNumerator(full, bed == 0 ? projBed0 : projBed1,
+                                      local, static_cast<int>(fullRows),
+                                      meta.totalVoxels);
+      spect::app::accumulateBedVolumeToGlobal(numerGlobal, refNumers[bed],
+                                              meta.Nx, meta.Ny, meta.Nz,
+                                              bedZStarts[bed], flip);
+    }
+    std::vector<double> expected(globalNvox);
+    for (size_t i = 0; i < globalNvox; ++i)
+      expected[i] = globalImage[i] * numerGlobal[i] / globalDenom[i];
+
+    ASSERT_TRUE(spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
+        meta, globalImage.data(), globalImage.size(), globalNz, bedZStarts,
+        bedCount, flip));
+    std::vector<std::vector<double>> numers(bedCount,
+                                            std::vector<double>(nvox, 0.0));
+    double *numerPtrs[bedCount] = {numers[0].data(), numers[1].data()};
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerMultiBedCUDA(
+        chunks, meta, projPtrs, nullptr, nullptr, bedCount, 1, numerPtrs,
+        false, nullptr, nullptr, true, true));
+    for (int bed = 0; bed < bedCount; ++bed)
+      for (size_t i = 0; i < nvox; ++i)
+        EXPECT_NEAR(numers[bed][i], refNumers[bed][i], 1e-4)
+            << "flip " << flip << " bed " << bed << " voxel " << i;
+
+    bool imageAllZero = true;
+    ASSERT_TRUE(spect::cuda::finishCompactResidentMlemIterationCUDA(
+        meta, globalNvox, globalNz, bedZStarts, bedCount, flip,
+        globalDenom.data(), nullptr, nullptr, true, true, &imageAllZero));
+    EXPECT_FALSE(imageAllZero);
+    std::vector<double> updated(globalNvox, 0.0);
+    ASSERT_TRUE(spect::cuda::downloadCompactResidentImageCUDA(updated.data(),
+                                                              updated.size()));
+    for (size_t i = 0; i < globalNvox; ++i)
+      EXPECT_NEAR(updated[i], expected[i], 1e-4 * std::max(1.0, expected[i]))
+          << "flip " << flip << " voxel " << i;
+  }
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   std::filesystem::remove_all(dir);
 }
 
@@ -322,6 +421,75 @@ TEST_F(MultiBedCompactNumeratorTest, FullHostCachePinsFollowAllocationOwnership)
     }
     allocation.reset();
     EXPECT_TRUE(weak.expired());
+  }
+  std::filesystem::remove_all(dir);
+}
+
+TEST_F(MultiBedCompactNumeratorTest, RefusedHostPinKeepsRemainingChunksPageable) {
+  const auto meta = makeToySym90ZMeta();
+  const auto compact = makeToyCompactCSR();
+  const auto full = expandCompactToyToFullDense(meta, compact);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_compact_host_pin_refusal_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  // Angle 0 (rows 0-1) and angles 1-2 (rows 2-5) of the toy matrix.
+  writeChunkFile(dir / "chunk_000.csrb", 2, 0, 1, {0, 2, 3}, {0, 3, 5},
+                 {1.0f, 0.5f, 0.75f});
+  writeChunkFile(dir / "chunk_001.csrb", 4, 1, 2, {0, 2, 3, 5, 7},
+                 {1, 6, 2, 4, 7, 0, 6},
+                 {0.2f, 1.1f, 0.9f, 0.4f, 1.2f, 0.3f, 0.8f});
+  auto dirMeta = meta;
+  dirMeta.totalRows = meta.compactRows();
+
+  const size_t nvox = static_cast<size_t>(meta.totalVoxels);
+  const size_t fullRows = static_cast<size_t>(meta.fullRows());
+  const std::vector<double> image = {1.0, 1.3, 1.7, 2.1, 0.8, 1.2, 1.6, 2.0};
+  std::vector<double> projection(fullRows);
+  for (size_t i = 0; i < fullRows; ++i)
+    projection[i] = 1.0 + 0.01 * static_cast<double>(i);
+  const auto reference = denseNumerator(full, projection, image,
+                                        static_cast<int>(fullRows),
+                                        meta.totalVoxels);
+
+  // 3 allowed registrations: chunk 0 is locked, chunk 1's col_idx lock is
+  // rolled back when its values lock is refused. 0: nothing is locked.
+  for (const int allowed : {3, 0}) {
+    auto chunks = spect::io::openCompactChunkCSRDirectory(
+        dir.string(), dirMeta, 1024 * 1024);
+    ASSERT_EQ(chunks.chunks().size(), 2u);
+    spect::cuda::setCompactHostPinRefusalForTestsCUDA(allowed);
+    testing::internal::CaptureStderr();
+    const bool prepared = spect::cuda::prepareCompactChunkExecutionCUDA(chunks);
+    const std::string log = testing::internal::GetCapturedStderr();
+    spect::cuda::setCompactHostPinRefusalForTestsCUDA(-1);
+    ASSERT_TRUE(prepared) << log;
+    const std::string expected =
+        "page-locked " + std::to_string(allowed / 2) + " / 2 chunks";
+    EXPECT_NE(log.find("[WARNING] compact host cache page-lock refused"),
+              std::string::npos) << log;
+    EXPECT_NE(log.find(expected), std::string::npos) << log;
+
+    for (size_t index = 0; index < 2; ++index) {
+      const auto chunk = chunks.loadChunk(index);
+      const bool locked = static_cast<int>(index) < allowed / 2;
+      for (const void *ptr : {static_cast<const void *>(chunk->colIdxData()),
+                              static_cast<const void *>(chunk->valuesData())}) {
+        cudaPointerAttributes attributes{};
+        ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
+        EXPECT_EQ(attributes.type, locked ? cudaMemoryTypeHost
+                                          : cudaMemoryTypeUnregistered)
+            << "chunk " << index;
+      }
+    }
+
+    std::vector<double> numer(nvox, 0.0);
+    ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+        chunks, meta, projection.data(), nullptr, image.data(), 1,
+        numer.data()));
+    for (size_t i = 0; i < nvox; ++i)
+      EXPECT_NEAR(numer[i], reference[i], 1e-4) << "voxel " << i;
+    ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
   }
   std::filesystem::remove_all(dir);
 }

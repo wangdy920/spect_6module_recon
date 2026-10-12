@@ -24,10 +24,14 @@ std::string resolveCompactMetadataPath(const ReconArgs &args);
 void applyCompactMetadataGeometry(
     ReconArgs &args, const spect::io::CompactSymmetryMetadata &meta);
 
-void prepareTimeSegmentProjectionInputs(ReconArgs &args);
+// Expands directory inputs to BedK.bin lists: -beds N|A:B searches the -df
+// (or single -df2) directory, and merge_time_segments expands a
+// timestamp/SPECT directory to all of its beds.
+void prepareProjectionInputs(ReconArgs &args);
 
+// Reconstruction consumes complete projections matching the matrix geometry.
 LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
-                                      int requestedAngles,
+                                      const io::CompactSymmetryMetadata &meta,
                                       const std::string &label,
                                       const std::string &defaultVar,
                                       bool mergeTimeSegments = false);
@@ -35,6 +39,11 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
 std::vector<double> loadVolumeChecked(const std::string &path,
                                       const std::string &label,
                                       int expectedNx, int expectedNy,
-                                      int expectedNz);
+                                      int expectedNz,
+                                      const filters::Spacing3 &expectedSpacing,
+                                      bool nonnegative);
+
+std::vector<double> loadAutoMuActivity(const std::string &path, int nx, int ny,
+                                       int nz, const filters::Spacing3 &spacing);
 
 } // namespace spect::main

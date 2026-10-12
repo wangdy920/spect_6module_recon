@@ -40,14 +40,14 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 ```
 
 说明：
-- `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。同格式双窗CSRB及实验CSRQ支持N10；N>1与CTAC组合未开放，旧POSEM像素划分已退出当前接口。
+- `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。同格式双窗CSRB及实验CSRQ均有N10和子集CTAC路径；CSRQ N>1 CTAC为2026-10-09工作树候选，尚待GPU数值回归、未发布。旧POSEM像素划分已退出当前接口。
 - `-config` 不需要显式传。
 - 多矩阵用所选方案的精确 `matrix_id/matrix_id2`；CLI覆盖受优先级开关控制。
 - 投影路径仍需要按实际数据传入。
 
 ## 多床位
 
-下述固定裁剪/ROI 是 PSC 默认。2026-09-21 源码候选另支持 `[InputOutput] matrix_grid_output=true`：完整每床网格、有效掩膜 cosine 融合、不做床间 gain-fit；多床必须显式给出正且整数体素层对齐的床步进。SC60 recipe 的 `bed_step_mm=0` 为未知，不能当作 PSC 16.8 mm；当前只有合成多床验证，部署须确认包内 EXE 是否包含该候选。完整边界见 `Format_Reader_Matrix_CN.md`，不变更已有发布默认。
+下述固定裁剪/ROI 是 PSC 默认。源码另支持 `[InputOutput] matrix_grid_output=true`：完整每床网格，最多 16 床，2026-10-11 起多床为联合全局体重建（重叠体素共同更新，不做 cosine 融合、不做床间 gain-fit，暂不支持 CTAC/AutoMu/`-maskFromAtt`）；多床必须显式给出正且整数体素层对齐的床步进。床多时可用 `-df <目录> -beds N`（或 `A:B`）代替逐个列出 `-dfList`。SC60 recipe 的 `bed_step_mm=0` 为未知，不能当作 PSC 16.8 mm；当前只有合成多床验证，部署须确认包内 EXE 是否包含该候选。完整边界见 `Format_Reader_Matrix_CN.md`，不变更已有发布默认。
 
 ```powershell
 .\bin\SPECT_recon.exe `
@@ -57,7 +57,7 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 ```
 
 固定合同：
-- 最多 5 个床位；路径含 `BedN` 时按床号排序，且必须是连续子集。`Bed1` 是最小 physical-Z 床，床号每增加 1 向较大 physical Z 移动 `16.8 mm`。少床不补虚拟床。
+- PSC 最多 5 个床位（`matrix_grid_output=true` 最多 16）；路径含 `BedN` 时按床号排序，且必须是连续子集。`Bed1` 是最小 physical-Z 床，床号每增加 1 向较大 physical Z 移动 `16.8 mm`。少床不补虚拟床。
 - `-bedOverlap` 表达重建空间的重叠层数；`-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，默认 `16.8`）声明扫描仪机械步进。输出步进由 `step = round(bed_step_mm / voxel_z)` 自动确定，**overlap 是派生值**：`overlap = baseNz - step`。不传 `-bedOverlap` 时自动推算；传错时自动纠正并打印 `[NOTE]`（`bed_step_mm` 是权威输入）。220 层 0.3 mm 床位为 `overlap = 220 - 56 = 164`（16.8 mm 步进）；其他步进/几何按同一关系换算。
 - `[MultiBed] z_bed_flip=1` 是发布默认，只定义每床 local system-matrix Z 与 reconstruction-storage Z 的关系；`-attMap` 使用前者，`-regCT` 使用后者。不要通过逆序床号或整幅 Z 翻转二次补偿。
 - 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合（沿输出 Z，入口保持上一床；`z_bed_flip` 只反转存储与增益窗）。
@@ -75,19 +75,25 @@ crop_end    = 0,0
 z_bed_flip  = 1
 z_out_flip  = 0
 x_out_flip  = 0
+xy_out_rotation_deg = 0
 seam_xy_align = 0
 ```
 
-命令行只在确有坐标合同要求时覆盖：
+命令行只在确有坐标合同要求时覆盖。沿用现有优先级：若 `recon_sections_override_cli=true`，配置中已写出的同名设置优先，应修改选中配置；需 CLI 优先时设为 `false`：
 
 ```powershell
 -zbedflip 1
 -zoutflip 0
 -xoutflip 0
+-xyoutrot 90
 -cropEnd top,end
 ```
 
-处理顺序为：`-attMap` local-Z / `-regCT` storage-Z 输入 -> compact 每床映射 -> canonical gain/stitch -> 整体输出 Z 翻转 -> 整体输出 X 翻转 -> `cropEnd top,end`。`z_out_flip` 只影响保存输出，不影响两类 CT 输入地图。
+保存阶段顺序为：每床 Z 翻转（适用时）-> 整体 Z/X 翻转 -> 拼床 -> 中心裁剪 -> `cropEnd` 端层置零及掩膜 -> XY 旋转 -> 输出滤波。新增 XY 旋转及整体 Z/X 翻转只影响保存输出，不改变迭代状态、系统矩阵或两类 CT 输入地图；`z_bed_flip` 仍遵循前述 local-Z/storage-Z 合同。
+
+`xy_out_rotation_deg` / `-xyoutrot` 支持任意有限角度（度），默认 `0` 不旋转；正值将 `+X` 转向 `+Y`，在 `+X` 向右、`+Y` 向上、从 `+Z` 看向原点的视图中为逆时针（CCW），负值为顺时针（CW）。若查看器把递增 Y 行向下显示，视觉方向相反，不能仅凭屏幕判断。示例：`90` 为 CCW 90°，`-90` 为 CW 90°。
+
+旋转围绕最终输出 XY 网格中心，按毫米坐标逐层双线性重采样，尺寸和体素间距不变，越界源采样补零，旋出视野的内容会丢失；任意角度可能改变峰值及总和。旧 `x_out_flip=0/1` 和 `-xoutflip` 完全保留，含义仍是 X 镜像，不是旋转；二者同时启用时先镜像后旋转。primary 和输出滤波副本使用同一旋转结果，run manifest 记录角度。此功能实际旋转像素，不自动修改 MHD/DICOM 患者方向元数据；CT 融合前需保持双方坐标一致。
 
 
 ## 常用覆盖参数
@@ -98,12 +104,12 @@ seam_xy_align = 0
 - `-compactDenomCache <mhd>`：显式指定 denom cache，受配置优先级控制。
 - `-psf [fwhm_mm[,N]]`：启用 image-domain PSF；发布默认 `1.3,3`、模式 `sieve`、`psfKernel=castor`。`-psfKernel adjoint` 使用采样 Gaussian + 镜像边界 + 真伴随；`-psfKernel castor` 使用 erf 体素积分核 + 零边界 + Z-only 归一化，反向复用正向。
 - 发布 `[Filtering]` 默认 `smooth_apply_stage=none`、`butter_apply_stage=output`：保留primary，并从同一primary独立写出 `_butter`（5 cycles/cm、order 8）。显式启用输出Gaussian时才另写`_smooth`（CASToR 0.30 mm/3σ）。`output_nonnegative_clamp=true` 在每个副本滤波后钳为非负；设为 `false` 仅用于原型线性旁瓣对齐。
-- `-detZRowWeightsFile <file>`：可选 norm W2 探测器效率权重，仅作用于 compact sensitivity denominator。发布默认为空/关闭；Mouse 默认保持 default 配置。只有明确验证 W2 候选时才传入。
+- `-detZRowWeightsFile <file>`：可选探测器效率 e，直接进入 compact sensitivity，有背景时内部使用 b/e。不是校正因子 c；不与 `-normFactorFile` 共用。发布默认为空，只有独立验证对应效率后才传入。
 - `-opti mlem|bsrem`：切换优化器，已有方案时不另换方案；`-it A`仅改次数，保留继承的子集。
 - 正则化由所选方案决定，不能以为`-opti bsrem`会自动开启RDP。TV方案为02、Lu合并RDP为03、Lu joint RDP为05；用实际调用参数加`-dumpConf`确认。每个子更新使用当前图像重新计算正则梯度，数据梯度乘当前子集数，β不乘子集数。输出Butterworth仅作用于保存副本。
 - `-bProj <path>` / `-bProjList <list>`：加性背景/散射投影项。
 
-性能相关环境变量不属于重建数值合同：`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 默认按矩阵总量和启动时可用内存自动选择，也可显式覆盖；`SPECT_COMPACT_BRANCH_BATCH` 默认开启（packed-K 正向 + CSR_ALG2 转置），设为 `0` 会关闭常驻 MLEM，不是产品 A/B；mmap 默认关闭。16 GB 显存的低时延实测使用 64 GB 主存与 SSD/NVMe 矩阵，32 GB 主存通常只能缓存部分矩阵，性能需重新以交错重复运行的中位数签收。
+性能相关环境变量不属于重建数值合同：`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 默认按矩阵总量和启动时可用内存自动选择，也可显式覆盖；branch/bed 合批（packed-K 正向 + CSR_ALG2 转置）为正式路径。`SPECT_COMPACT_BRANCH_BATCH` 和 `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 已退役，设置会报错；旧实验由冻结 EXE 复现。16 GB 显存的低时延实测使用 64 GB 主存与 SSD/NVMe 矩阵，32 GB 主存通常只能缓存部分矩阵，性能需重新以交错重复运行的中位数签收。
 
 ## 查看合并配置
 
@@ -126,7 +132,7 @@ seam_xy_align = 0
 
 Lu-177 joint 固定本批验证的通道顺序 **208、113 keV**，`energy_window_weights=0.1036,0.0617`。权重进入预测计数一次，并非人为给某张图加权平均，也不能凭权重大小认定某窗的信息量占比。
 
-`[Normalization] factor_file` / `factor_file2` 分别绑定这两个通道的投影校正因子 c；程序使用 1/c 构造灵敏度。Tc-99m 单窗只用第一个文件。joint 要么两份都指定，要么两份均关闭，不继承另一个核素或合并窗的 norm。相对路径以 EXE 为基准。当前方案 norm 留空，因为还没有验证并交付本批分窗标定文件；不代表两核素 norm 相同。当前校正路径只支持无背景项输入。
+`[Normalization] factor_file` / `factor_file2` 分别绑定这两个通道的投影校正因子 c；程序使用 1/c 构造灵敏度。Tc-99m 单窗只用第一个文件。joint 要么两份都指定，要么两份均关闭，不继承另一个核素或合并窗的 norm。相对路径以 EXE 为基准。当前方案 norm 留空，因为还没有验证并交付本批分窗标定文件；不代表两核素 norm 相同。CSRB/CSRQ 均允许同时提供 `-bProj/-bProjList`（第二窗用对应的 `2` 参数）：b 必须是同床/能窗/采集时间下的预计探测计数，不提前乘 c 或减出投影。程序内部一次性计算 b/e，残差仍使用原始 b，模型与数值下限见 [矩阵合同](Format_Reader_Matrix_CN.md)。
 
 已有 denom 缓存同时绑定两矩阵、能窗权重、norm 数值、Mask/PSF 和子集；改迭代数、β 或仅输出滤波，不另造缓存层。
 

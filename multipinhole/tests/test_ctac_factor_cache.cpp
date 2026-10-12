@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
 #include "ctac/CTACFactorCache.h"
+#include "cli/ReconArgs.h"
+#include "io/MHDWriter.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -119,6 +122,73 @@ TEST_F(CTACFactorCacheTest, EmptyManifestNeverCaches) {
   EXPECT_EQ(std::distance(std::filesystem::directory_iterator(testDir_),
                           std::filesystem::directory_iterator{}),
             0);
+}
+
+TEST_F(CTACFactorCacheTest, SourcePayloadAndAutoMuParametersInvalidateFactors) {
+  const auto stem = testDir_ / "mu";
+  io::writeMHD(stem.string(), std::vector<double>(8, 0.0152),
+               2, 2, 2, 0.4f, 0.4f, 0.4f);
+  cli::ReconArgs args;
+  args.attMapPath = stem.string() + ".mhd";
+  const auto manifest = [&] {
+    return buildCTACFactorManifest(args, 2, 2, 2, {0.4, 0.4, 0.4}, 0);
+  };
+  const auto headerTime = std::filesystem::last_write_time(args.attMapPath);
+  const auto before = manifest();
+  CTACFactorCache cache(testDir_ / "cache");
+  cache.save(before, {1, 2}, 2);
+  ASSERT_TRUE(cache.tryLoad(before));
+  const auto raw = stem.string() + ".raw";
+  const auto rawTime = std::filesystem::last_write_time(raw);
+  {
+    std::fstream out(raw, std::ios::in | std::ios::out | std::ios::binary);
+    const double changed = 0.03;
+    out.write(reinterpret_cast<const char *>(&changed), sizeof(changed));
+  }
+  std::filesystem::last_write_time(raw, rawTime + std::chrono::seconds(2));
+  EXPECT_EQ(std::filesystem::last_write_time(args.attMapPath), headerTime);
+  EXPECT_NE(before, manifest());
+  EXPECT_FALSE(cache.tryLoad(manifest()));
+
+  const auto changedTime = manifest();
+  {
+    std::ofstream out(raw, std::ios::binary | std::ios::app);
+    out.put(0);
+  }
+  std::filesystem::last_write_time(raw, rawTime + std::chrono::seconds(2));
+  EXPECT_NE(changedTime, manifest());
+
+  args.ctacAutoMuFrom = args.attMapPath;
+  args.attMapPath.clear();
+  args.useCylindricalMask = false;
+  const auto unmasked = manifest();
+  args.useCylindricalMask = true;
+  const auto masked = manifest();
+  EXPECT_NE(unmasked, masked);
+  args.cylinderDiameterMM += 1.0;
+  EXPECT_NE(masked, manifest());
+  const auto beforeThreshold = manifest();
+  args.ctacAutoMuThresh *= 0.5;
+  EXPECT_NE(beforeThreshold, manifest());
+  std::filesystem::remove(raw);
+  EXPECT_THROW(manifest(), std::filesystem::filesystem_error);
+
+  const auto hdr = testDir_ / "mu.hdr";
+  const auto img = testDir_ / "mu.img";
+  {
+    std::ofstream header(hdr);
+    header << "!INTERFILE :=\nmatrix size [1] := 2\nmatrix size [2] := 2\n"
+           << "matrix size [3] := 2\nname of data file := mu.img\n";
+    std::ofstream payload(img, std::ios::binary);
+    const float values[8] = {};
+    payload.write(reinterpret_cast<const char *>(values), sizeof(values));
+  }
+  args.ctacAutoMuFrom.clear();
+  args.attMapPath = hdr.string();
+  const auto hdrManifest = manifest();
+  std::filesystem::last_write_time(img,
+      std::filesystem::last_write_time(img) + std::chrono::seconds(2));
+  EXPECT_NE(hdrManifest, manifest());
 }
 
 } // namespace

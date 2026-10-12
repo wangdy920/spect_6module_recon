@@ -23,7 +23,9 @@
 
 当前 6module 矩阵对称码为 **SYM_90Z**（90° 旋转 + Z 对称）。程序按文件实际大小解析，进入 compact 路径后用 metadata 几何覆盖 CLI/INI 的 `dim` / `vox` / `detN` / `ang`（见 `ReconDataLoader.cpp::applyCompactMetadataGeometry`）。
 
-SC60 使用 `ROT90`，即 4 个 XY 分支、无 Z 镜像，要求 `detNz == compactDetZ`；PSC `ROT90_Z` 要求 `detNz == 2*compactDetZ`。两者要求方形 XY 网格和四分之一 compact angles。其他 profile 与 SMMD v4/TLV 尚不支持；不能仅根据 branchCount 决定变换。CSRQ 暂时只允许 `ROT90_Z`。
+SC60 使用 `ROT90`，即 4 个 XY 分支、无 Z 镜像，要求 `detNz == compactDetZ`；PSC `ROT90_Z` 要求 `detNz == 2*compactDetZ`。两者要求方形 XY 网格和四分之一 compact angles。其他 profile 与 SMMD v4/TLV 尚不支持；不能仅根据 branchCount 决定变换。CSRQ 共用 4/8 分支实现；2026-10-09 已通过两种 profile 的 CUDA 算子、驻留/流式、多子集 CTAC 回归，仍不是生产采用。
+
+离线 `tools/convert_csrb_to_csrq.py` 支持 88/92/124B metadata，转换后原样保留 metadata。2026-09-28 的已验证转换版本仍在运行时拒绝 CSRQ ROT90；2026-10-08 候选补齐分支步长、缓冲和算子参数，不能将这次编译通过等同于真实重建通过。不能靠开启 Z 对称或改写 metadata 改变矩阵物理语义。
 
 SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计算使用的 float32 voxelSize，与 SC60 生成端的 float32 计算约定一致。文件不足、未知版本、非有限或非正 voxel、索引维度溢出直接报错。
 
@@ -39,9 +41,11 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 `[InputOutput] matrix_grid_output=true` 保留完整矩阵网格，不执行 PSC 固定中心裁剪或固定 ROI 覆盖。默认 false，保持既有 PSC 行为。对称 profile 与输出裁剪分别配置，不把对称性当作系统型号。
 
-2026-09-21 候选支持 1..5 个连续床号。多床须显式配置有限正 `bed_step_mm`，与整数体素层对齐（绝对误差 <= 1e-4 mm），范围为 1..baseNz 层；暂不支持非整数、非等距或带间隙的步进。每床重建仍独立存储，输出尺寸 `Nx × Ny × [baseNz + (bedCount-1)*step]`，保留原 ROI 配置。复用 cosine 累加：完整网格模式在体素中心采样渐变权重，按覆盖该体素的有效掩膜归一化；掩膜外值不参与平均。重叠可超过两床，不做 prototype gain-fit，不允许 seam XY alignment。PSC 默认输出及其端点权重不变。
+支持 1..16 个连续床号（PSC 非网格模式仍为 1..5）。多床须显式配置有限正 `bed_step_mm`，与整数体素层对齐（绝对误差 <= 1e-4 mm），范围为 1..baseNz 层；暂不支持非整数、非等距或带间隙的步进。2026-10-11 起多床为**联合重建**：各床矩阵网格按 `bed*step` 放入同一全局体 `Nx × Ny × [baseNz + (bedCount-1)*step]`，重叠体素的灵敏度与反投影相加后统一更新；保存的就是该全局体，不再做每床独立重建后的 cosine 融合，不做 gain-fit，不允许 seam XY alignment。输出尺寸与旧版相同，但体素内容语义改变（旧版为各床独立重建的加权平均）。圆柱支持区为各床局部圆柱的并集。联合模式暂不支持 CTAC、`-ctacAutoMu`、`-maskFromAtt`（这些 mu 图按每床局部 Z 堆叠）。旧的独立+融合行为保留在 2026-10-11 之前的 EXE 中，可作对照基线。PSC 默认输出及其端点权重不变。
 
-用户确认 SC60 仍在组装、没有实采多床数据，机械步进待采集后确定。因此 SC60 recipe 的 `bed_step_mm=0` 表示未知，单床 manifest 保留 0，多床必须显式覆盖；测试夹具步进不是硬件推荐。多床物理偏移以第一张选中床为零点，床号递增对应 +Z；轴翻转仍由配置声明，软件测试不能确定未来采集端的实际朝向。
+`-beds <N|A:B>` 可替代冗长的 `-dfList`：给 `-df`（或单项 `-dfList`）一个目录或目录内任一 `BedK.bin`，程序在该目录搜索 `Bed1..BedN` 或 `BedA..BedB`（文件名须为 `BedK.bin`，大小写不敏感）；范围内任一床缺失即报错，范围外的床被忽略。第二能窗 `-df2` 同规则。与 `merge_time_segments` 同用时只能选中目录中的全部床。
+
+早期 SC60 recipe 的 `bed_step_mm=0` 表示未指定，单床 manifest 保留 0，多床必须显式覆盖；测试夹具步进不是硬件推荐。现有实采记录需逐设备核对，不能自动改写通用配方或套用 PSC 步进。多床物理偏移以第一张选中床为零点，床号递增对应 +Z；轴翻转仍由配置声明，软件测试不能确定采集端的实际朝向。
 
 ## 子集读取与计量
 
@@ -51,13 +55,15 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 分段读取校验完整 row_ptr 及实际读取的列索引，沿用原有 strict/sample/off 设置；未读取的 payload 不在当次校验范围。正常打开目录仍检查全部 chunk 的头、文件长度及角度覆盖。`MATRIX_IO` 日志区分应用层 payload 读取字节（包含 row_ptr）、payload 加载次数、仍存活的 host 数据复用字节、跳过的空切片和 CSRB H2D 字节。分段读取的 bytes 仅计实际读入的区间；应用层读取字节不是物理磁盘流量，host 复用字节也不代表同量 memcpy。计量 scope=iterations 不含 sensitivity 准备。N1/full-cache 路径不因本改动自动获得提速。
 
+2026-10-09 配对计时后，删除此前部分 host cache 的逐块 async 前读候选，所有 CSRB 分子计算复用已有双槽预取；SC60 2 GiB/3×N10 的 core 两次由 65.573/83.013 s 降至 58.129/59.942 s，读取量不变，数值 relL2<=1e-5。`loader_work_s` 为累计读取和校验工作时间，不应加到迭代墙钟上。未增加第三个 GPU 矩阵槽、整矩阵锁页策略或新 CLI 开关；收益仅限已测条件。CSRQ 的 X/Y 按实际 K 分配，比值工作区按最大 chunk 行数分配，普通/CTAC 打包复用同一内核，前投影/Poisson 比值继续融合。
+
 ## 读取端
 
 | 读取端 | 入口 | 说明 |
 |---|---|---|
 | `SPECT_recon` | `-chunkCSRDir <dir>`；或 `[SystemMatrix] default_chunk_csr_dir`；或 exe-local `bin/matrix/*` 唯一候选自动发现 | **唯一消费路径** |
 
-解析与校验见 `src/io/CompactChunkCSR.cpp`（chunk 校验可用 `SPECT_CHUNK_VALIDATE=off` 关闭，会打印 WARN）。
+解析与校验见 `src/io/CompactChunkCSR.cpp`。CSRB 列索引默认 sample，`SPECT_CHUNK_VALIDATE=strict` 检查全部已读取索引，`off` 仅关闭列索引范围检查并打印 NOTE；文件结构、几何、行指针和已读取权值的有限非负检查仍执行。CSRQ header 的 `cols` 必须与 metadata 的 `totalVoxels` 一致，在分配载荷前拒绝不匹配输入。
 
 ## 现行合同与职责（2026-09-20 审查）
 
@@ -84,18 +90,34 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 当前 BIN 是分箱投影：头部两个 int32 为角度数、每角度射线数，后接 float64 计数。它不是逐事件 list-mode；窗内能量等丢失属性无法靠矩阵格式转换恢复。两窗投影必须按同一床位和 full-row 顺序一一对应，不允许事件重复计入两个独立 Poisson 通道；重叠能窗须由上游明确去重或另行建模。
 
-令 `H_k = w_k A_k`，忽略此处未展开的 PSF/CTAC 组合，当前代码计算：
+令 `H_k = w_k A_k`，忽略此处未展开的 PSF/CTAC 组合；有效行的效率为 `e_k`（无校正时为 1）。测量与加性背景均使用原始探测计数空间：
 
 ```text
-q_m = sum_k H_(k,m)^T [y_(k,m) / (H_(k,m) x + b_(k,m))]
-S_m = sum_k H_(k,m)^T W_(k,m) 1
+mean_k = e_k * H_k x + b_k
+q_m = sum_k H_(k,m)^T [y_(k,m) / (H_(k,m) x + b_(k,m)/e_(k,m))]
+S_m = sum_k H_(k,m)^T e_(k,m)
 ```
 
-`w_k` 必须有限且 >0，在前向均值与相应灵敏度/反投语义中配套应用，不是对计数额外乘一次。`W_k` 是既有 sensitivity-only 行权重，包含 mask、detZ 权重及 norm 倒数；无权重时为单位阵。测量计数不直接乘 W；censor 的行在上游清零。各窗 norm 独立，不得复用合窗 norm 冒充逐窗校正。
+`w_k` 必须有限且 >0，不是对计数额外乘一次。正校正因子 `c_k` 的倒数为效率 `e_k=1/c_k`；detZ 行权重入口则直接提供效率，不取倒数。两入口互斥，均不代表效率已经物理标定。mask 行同时剔除测量、灵敏度和最终残差统计；背景不需要在调用前自行屏蔽。各窗 norm 独立，不得复用合窗 norm 冒充逐窗校正。
 
-**归一化边界：**生产 CLI 已禁止 norm 与背景投影同时使用（单窗的 `-bProj/-bProjList`、双窗任一窗的对应参数均拒绝），并要求双窗 norm 成对提供。因此它不是当前开放但未标定的组合。设正校正因子 `c_k` 的倒数为效率 `e_k=1/c_k`，无背景、有效行预测为正且不触发数值截断时，原始计数模型 `mean_k=e_k H_k x` 的 EM 分子中效率抵消：`(e_k H_k)^T[y_k/(e_k H_k x)] = H_k^T[y_k/(H_k x)]`，分母仍为 `H_k^T e_k`。这解释了现有 sensitivity-only norm 的实现，不表示可以预先把计数乘 c 后再次应用该 norm。mask 行须同步剔除测量和灵敏度。
+**归一化与背景：**2026-10-09 起单窗/双窗 CSRB、CSRQ 支持 norm 与背景共用，调用参数不变，双窗 norm 仍须成对提供。准备阶段只对有校正的背景计算一次 `b/e`，原背景留给最终残差；投影计数不预乘 c。既有 CUDA 比值内核继续计算 `H^T[y/max(Hx+b/e,1e-10)]`，不新增内核。上式与完整效率模型在不触发数值下限时代数等价；保留现有 Hx 单位下的数值下限，不承诺极小预测值时与另一种截断定义相同。`b/e` 非有限时报错。无背景路径及默认配方不变。
 
-普通 `detZRowWeights` 是另一入口，不应自动当成已标定 norm；它与背景可以进入现有通用 q/S 接口，但其物理解释仍需来源合同。将来若开放 norm+background，必须先明确 b 的计数空间并推导一致公式，不能仅删除 CLI 拒绝。上述代数与测试均不证明 c 的标定正确或绝对活度单位成立。
+背景文件必须与 y 的床位、行序、采集时间和能窗相同，且为有限非负的预计探测计数；不是预减散射后的投影，也不是已除效率的背景。效率行权重与背景的组合现在同样使用 `b/e`，修正旧 sensitivity-only 组合的不一致。不把负的散射减后计数夹零作为输入修复。上游负责估计背景，重建只验证并消费它。
+
+### 上游交接的最小物理约定
+
+在现有 SN 配置说明或生成记录中给出下表内容，不新增二进制版本或历史身份注册库。未知项明确写未知，不由重建猜测。
+
+| 项目 | 调用方/生成端应明确 |
+|---|---|
+| 坐标 | 角度零点与正方向、模块/像素顺序、原点、床号增加方向；输出旋转不是输入配准 |
+| 两窗选择 | high/low 的实际能窗；完整分窗优先，全部缺失才走既定 merged/high 兼容模式，部分缺失失败 |
+| 矩阵与权重 | A 是每光子/每衰变/何种归一量；是否已含发射谱、探测效率、准直器响应；避免 w 或 e 重复计算 |
+| 计数与时间 | BIN 是计数，不是未经声明的计数率；曝光/有效时间差异由上游统一到矩阵/标定约定 |
+| 背景与校正 | b 为同次采集、同能窗的探测计数，c 为对应窗的正校正因子；不先校正 y 再重复应用 c |
+| 定量边界 | 未完成独立标定时输出相对强度；不自动宣称 Bq/ml，不以每图百分比色标比较摄取量 |
+
+合窗模型只有在响应与权重相应组合时才与其计数空间匹配；合并 BIN 配单个 high 矩阵是保留的兼容配方，不与分窗联合声称物理等价。核素和矩阵选择仍在 wrapper/SN 层，核心不认证来源身份或计算全矩阵 SHA。
 
 ### Lu-177 实际矩阵来源（2026-09-20 续查）
 
@@ -126,15 +148,27 @@ S_m = sum_k H_(k,m)^T W_(k,m) 1
 |---|---|
 | 单窗 CSRB + ROT90_Z | 既有支持 |
 | 单窗 CSRB + ROT90 | SC60 候选已做 ROI 1000 轮、N10/PSF1.5 验证；原始未裁剪矩阵仅短验证，非生产替换 |
-| 单窗 / 双窗 CSRQ + ROT90_Z | 已有执行及 toy 数值测试；CSRQ 为派生实验格式 |
+| 单窗 / 双窗 CSRQ + ROT90_Z | 2026-10-09 共用内核 CUDA 回归通过，含驻留/流式、多床、多子集 CTAC；仍为实验格式 |
 | 双窗 CSRB + ROT90 / ROT90_Z | 2026-09-21 原生候选；CUDA q/S oracle、合成双窗两床入口、实际 SC60 ROI 矩阵拆窗等价检查通过，不需转换 CSRQ；非物理校准或生产采用 |
 | 混合 CSRB/CSRQ | 显式拒绝 |
-| CSRQ + ROT90 | 显式拒绝；不能只复制 metadata 后运行 |
+| CSRQ + ROT90 | 2026-10-09 的 4 分支算子/子集/CTAC/BSREM CUDA 回归通过；真实数据/量化质量与部署仍分别验收 |
 | 任意新角度/Z profile、SMMD v4/TLV、list-mode | 未实现；不得按相似维度降级套用现有 profile |
 
-原生 CSRB 双窗复用同一 q/S 数据项：逐窗累加 `w_k A_k^T[y_k/(w_k A_k x+b_k)]` 和 `w_k A_k^T W_k 1` 后更新；窗口权重不乘背景，逐窗 W 与 CTAC 指数保持独立。最多两窗，metadata 共享坐标检查和 norm/background 拒绝规则不变。projector 的 subset+CTAC 数值测试不代表 CLI 开放该组合，CLI 现有 N>1/CTAC 限制仍在。
+原生 CSRB 双窗复用同一 q/S 数据项：逐窗累加 `H_k^T[y_k/(H_k x+b_k/e_k)]` 和 `H_k^T e_k` 后更新，其中 H 含窗权重、PSF/ROI 与 CTAC；零效率行屏蔽，窗口权重不乘背景，逐窗效率与 CTAC 指数保持独立。最多两窗，共享坐标检查、成对 norm 规则保持，norm/background 可共用。CSRB 与 CSRQ 的 subset+CTAC 路径均已实现。2026-10-09 CSRQ 候选按矩阵/子集复用角度映射，只暂存选中角度的因子切片，复用原有 K4/K8 内核和双槽传输；N1 全量诊断仍独立于当前子集。无格式/CLI 变更；GPU 数值回归已通过，不可据此直接生产采用。
 
-主机缓存先按两矩阵合计字节数计算一次预算，再按矩阵大小分配；`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 在双 CSRB 运行中是总上限，不是每窗上限。每窗沿用完整缓存/分段读取；GPU 沿用既有最多两块缓存。CSRB 切窗时刷新 per-bed 投影/背景槽，矩阵计算量与读取量约为两窗之和，不承诺与单窗等速。CSRQ 调度与编码不变；CSRQ ROT90、ROI+PSF resident 优化仍是独立工作项。
+主机缓存先按两矩阵合计字节数计算一次预算，再按矩阵大小分配；`SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 在双 CSRB 运行中是总上限，不是每窗上限。每窗沿用完整缓存/分段读取；GPU 沿用既有最多两块缓存。CSRB 投影/背景按 channel×bed 缓存，新任务或显式输入变化时刷新，静态切窗不再重复上传。矩阵计算量与读取量仍约为两窗之和，不承诺与单窗等速。CSRQ 编码不变；ROT90 候选状态见上表。
+
+所有读入的 CSRB 权值必须有限且非负，subset 错误定位原文件 nnz；列索引检查仍由 `SPECT_CHUNK_VALIDATE` 控制，首次接入外部矩阵应设 `strict`。CASToR PSF 的 resident 路径支持局部 ROI mask，前向 PSF 后/反向 PSF 前执行，满视野圆柱也不假设矩阵角落为零。
+
+### 运行期职责与缓存（2026-10-08）
+
+重建核心只检查本次传入的 BIN、metadata、CSRB/CSRQ 是否可读、格式受支持、几何/行列/通道匹配，以及实际读取的索引与数值是否合法；不认证它们属于历史中的哪个矩阵或标定版本。设备与矩阵的选择由 wrapper/调用方负责，不要求建立历史矩阵库。上述校验不等于物理标定正确或定量准确。
+
+运行期已移除全矩阵 SHA256、摘要字段和加密库依赖，不做独立载荷扫描，也不在正常读取时附带计算 SHA。分母缓存保留为计算加速，v6 键由规范化完整输入路径、大小、修改时间、已解析的 chunk 布局/metadata 和实际分母计算参数构成；小型 manifest 的文件名摘要不是矩阵载荷摘要。`[MATRIX_CACHE] key=path_stat payload_scan=none` 明确记录该策略。
+
+这不是内容身份校验：同路径、同大小、保留修改时间的原地替换不会被缓存键发现，调用方此时须清除对应旧缓存或使用新缓存目录。运行期间输入必须保持不变。没有新增矩阵版本号、注册表、可信导入机制或 CLI 开关；数值合法性检查不依赖缓存键。
+
+旧 v3/v4/v5 自动缓存不复用，首次生成 v6 缓存；若显式指定旧缓存文件，仍按既有规则报告 manifest 不匹配，需由调用方换缓存路径或有意删除旧缓存后重算。移动矩阵路径也会生成新缓存，不再承诺跨路径复用。原始矩阵和发布包不改动；当前验证见 `../../reports/2026-09-27-cuda-matrix-design-review.md` 第 9/10 节。
 
 ## 参考
 

@@ -89,6 +89,32 @@ TEST(IOTest, MultiBedParserRejectsMoreThanFiveDfListBeds) {
 
     EXPECT_FALSE(parseReconArgsForTest(argv, args));
 }
+TEST(IOTest, MatrixGridParserAllowsSixteenDfListBeds) {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     "spect_matrix_grid_beds_cli_tests";
+    std::filesystem::create_directories(dir);
+    const auto config = dir / "spect_config.ini";
+    {
+        std::ofstream out(config);
+        ASSERT_TRUE(out);
+        out << "[InputOutput]\nmatrix_grid_output = true\n";
+    }
+    auto parseWithBeds = [&](int beds) {
+        std::string list;
+        for (int bed = 1; bed <= beds; ++bed)
+            list += (bed > 1 ? ";" : "") + std::string("Bed") + std::to_string(bed) + ".bin";
+        spect::cli::ReconArgs args;
+        const std::vector<std::string> argv = {
+            "SPECT_recon", "-config", config.string(), "-dfList", list,
+            "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
+            "-dim", "90,90,240", "-vox", "0.4", "-ang", "360"};
+        const bool ok = parseReconArgsForTest(argv, args);
+        return std::make_pair(ok, args.bedCount);
+    };
+    EXPECT_EQ(parseWithBeds(16), std::make_pair(true, 16));
+    EXPECT_FALSE(parseWithBeds(17).first);
+    std::filesystem::remove_all(dir);
+}
 TEST(IOTest, MultiBedParserRejectsMoreThanFiveBedOverlapSlots) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
@@ -116,6 +142,23 @@ TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);
+    EXPECT_DOUBLE_EQ(args.xyOutRotationDeg, 0.0);
+}
+
+TEST(IOTest, OutputXYRotationParsesSignedDegreesAndRejectsInvalidValues) {
+    for (const auto& value : {"90", "-32.5", "0", "450"}) {
+        spect::cli::ReconArgs args;
+        auto argv = compactBaseArgs();
+        argv.insert(argv.end(), {"-xyoutrot", value});
+        ASSERT_TRUE(parseReconArgsForTest(argv, args));
+        EXPECT_DOUBLE_EQ(args.xyOutRotationDeg, std::stod(value));
+    }
+    for (const auto& value : {"nan", "inf", "90deg", "abc"}) {
+        spect::cli::ReconArgs args;
+        auto argv = compactBaseArgs();
+        argv.insert(argv.end(), {"-xyoutrot", value});
+        EXPECT_FALSE(parseReconArgsForTest(argv, args));
+    }
 }
 
 TEST(IOTest, SingleBedStepAlignedDefaultsOnAndCanBeDisabled) {
@@ -166,6 +209,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         out << "z_bed_flip = 0\n";
         out << "z_out_flip = 1\n";
         out << "x_out_flip = 1\n";
+        out << "xy_out_rotation_deg = -22.5\n";
     }
 
     spect::cli::ReconArgs args;
@@ -182,6 +226,8 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
     EXPECT_FALSE(args.zBedFlip);
     EXPECT_TRUE(args.zOutFlip);
     EXPECT_TRUE(args.xOutFlip);
+
+    EXPECT_DOUBLE_EQ(args.xyOutRotationDeg, -22.5);
 
     std::filesystem::remove(path);
 }
@@ -399,7 +445,7 @@ TEST(IOTest, NormalizationFactorLoadsProjectionBinAndAlias) {
 
     std::filesystem::remove(weightsPath);
 }
-TEST(IOTest, NormalizationRequiresPairedWindowsAndNoBackground) {
+TEST(IOTest, NormalizationRequiresPairedWindowsAndAcceptsBackground) {
     const auto factors = writeTempProjectionWeights("norm_contract.bin", 2, 6, 0.91);
     const auto config = factors.parent_path() / "norm_contract.ini";
     for (bool joint : {false, true}) {
@@ -423,8 +469,8 @@ TEST(IOTest, NormalizationRequiresPairedWindowsAndNoBackground) {
             if (!joint && std::string(flag).back() == '2') continue;
             auto withBackground = argv;
             withBackground.insert(withBackground.end(), {flag, "Bed1_bg.bin"});
-            spect::cli::ReconArgs rejected;
-            EXPECT_FALSE(parseReconArgsForTest(withBackground, rejected)) << joint << ':' << flag;
+            spect::cli::ReconArgs withBackgroundArgs;
+            EXPECT_TRUE(parseReconArgsForTest(withBackground, withBackgroundArgs)) << joint << ':' << flag;
         }
         if (joint) {
             spect::cli::ReconArgs secondWithoutJoint;

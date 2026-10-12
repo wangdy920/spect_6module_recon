@@ -66,20 +66,10 @@ VARIANTS: dict[str, dict[str, Any]] = {
         "cli": [],
         "purpose": "explicit 32g host cache if device RAM allows",
     },
-    "mmap_0": {
-        "env": {"SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES": "0"},
-        "cli": [],
-        "purpose": "mmap chunk payloads; previously rejected on 64 GB+NVMe",
-    },
     "threads_8": {
         "env": {},
         "cli": ["-th", "8"],
         "purpose": "OpenMP threads vs config default 16",
-    },
-    "branch_batch_0": {
-        "env": {"SPECT_COMPACT_BRANCH_BATCH": "0"},
-        "cli": [],
-        "purpose": "protected scalar-branch baseline; expect slower",
     },
 }
 
@@ -88,9 +78,7 @@ DEFAULT_SUITE = [
     "host_cache_8g",
     "host_cache_16g",
     "host_cache_32g",
-    "mmap_0",
     "threads_8",
-    "branch_batch_0",
 ]
 
 
@@ -334,7 +322,7 @@ def write_decision(path: Path, rows: list[dict[str, Any]], gate: float) -> None:
 
 
 def self_check() -> int:
-    assert parse_variant_list("host_cache_8g,mmap_0")[0] == "baseline"
+    assert parse_variant_list("host_cache_8g,threads_8")[0] == "baseline"
     ident = [1.0, 2.0, 3.0]
     assert rel_l2(ident, ident) == 0.0
     shifted = [1.0, 2.0, 4.0]

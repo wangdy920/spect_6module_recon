@@ -1,4 +1,5 @@
 #include "pipeline/MainProgram.h"
+#include <cstdlib>
 
 #include "recon/CompactSymmetricReconLoop.h"
 
@@ -230,57 +231,6 @@ private:
 #endif
 };
 
-void appendCTACCacheFileIdentity(std::ostringstream &oss,
-                                 const std::string &label,
-                                 const std::filesystem::path &path) {
-  oss << label << "=" << path.string() << '\n';
-  std::error_code ec;
-  const auto size = std::filesystem::file_size(path, ec);
-  if (ec) {
-    oss << label << "_size=UNAVAILABLE\n";
-  } else {
-    oss << label << "_size=" << size << '\n';
-  }
-  ec.clear();
-  const auto writeTime = std::filesystem::last_write_time(path, ec);
-  if (ec) {
-    oss << label << "_mtime=UNAVAILABLE\n";
-  } else {
-    oss << label << "_mtime=" << writeTime.time_since_epoch().count() << '\n';
-  }
-}
-
-std::string buildCTACFactorManifest(const ReconArgs &args, int baseNx,
-                                    int baseNy, int baseNz,
-                                    const filters::Spacing3 &spacing,
-                                    int bedZStart) {
-  std::ostringstream oss;
-  oss << std::setprecision(17);
-  oss << "cache_schema=ctac_atten_factors_v1\n";
-  oss << "ctac_model=" << args.ctacModel << '\n';
-  oss << "nx=" << baseNx << '\n';
-  oss << "ny=" << baseNy << '\n';
-  oss << "nz=" << baseNz << '\n';
-  oss << "dx=" << spacing.dx << '\n';
-  oss << "dy=" << spacing.dy << '\n';
-  oss << "dz=" << spacing.dz << '\n';
-  oss << "num_angles=" << args.numAngles << '\n';
-  oss << "rotation_sign=" << args.ctacRotSign << '\n';
-  oss << "map_z_layout=local_matrix_z\n";
-  oss << "z_bed_flip=" << (args.zBedFlip ? 1 : 0) << '\n';
-  oss << "bed_z_start=" << bedZStart << '\n';
-  oss << "ctac_auto_mu_value=" << args.ctacAutoMuValue << '\n';
-  oss << "ctac_auto_mu_source=" << args.ctacAutoMuValueSource << '\n';
-  if (!args.attMapPath.empty()) {
-    appendCTACCacheFileIdentity(oss, "att_map", args.attMapPath);
-  }
-  if (!args.ctacAutoMuFrom.empty()) {
-    appendCTACCacheFileIdentity(oss, "auto_mu_from", args.ctacAutoMuFrom);
-    oss << "ctac_auto_mu_thresh=" << args.ctacAutoMuThresh << '\n';
-  }
-  return oss.str();
-}
-
 void validateInputMapContract(const std::string &path,
                               const std::string &label,
                               const std::string &role,
@@ -365,9 +315,6 @@ int runProgram(int argc, char **argv) {
     // and -vb>=1 reaches console+file through the tee.  Avoid a second raw
     // cerr line that would duplicate the path in the log.
     logInfo("Logging console output to: " + tee.logPath().string());
-    if (getVerbosity() < 1)
-      std::cerr << "Logging console output to: " << tee.logPath().string()
-                << '\n';
     if (!logDirError.empty()) {
       logWarn("Failed to create output directory '" + args.outputDir +
               "' for logging (" + logDirError + "); using current directory.");
@@ -392,8 +339,6 @@ int runProgram(int argc, char **argv) {
         "Output directory: " + outDir + " (name prefix: " +
         (args.outputName.empty() ? "recon" : args.outputName) + ")";
     logInfo(outMsg);
-    if (getVerbosity() < 1)
-      std::cerr << outMsg << '\n';
   }
 
   const std::string commandLine = makeCommandLineString(argc, argv);
@@ -405,6 +350,12 @@ int runProgram(int argc, char **argv) {
   int cudaDeviceId = 0;
   std::unique_ptr<GpuExecutionLease> gpuLease;
   try {
+    for (const char *name : {"SPECT_COMPACT_BRANCH_BATCH", "SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES"}) {
+      const char *value = std::getenv(name);
+      if (value != nullptr && value[0] != '\0')
+        throw std::runtime_error(std::string(name) +
+            " is retired; unset it. Reproduce legacy experiments with their frozen executable.");
+    }
     cudaDeviceId = selectCudaDeviceIfRequested(args);
     gpuLease = std::make_unique<GpuExecutionLease>(cudaDeviceId);
 #ifdef _WIN32
@@ -472,7 +423,7 @@ int runProgram(int argc, char **argv) {
     if (ensureReconDims(args, &dimsWarning) && !dimsWarning.empty())
       logWarn(dimsWarning);
 
-    prepareTimeSegmentProjectionInputs(args);
+    prepareProjectionInputs(args);
     const BedSetupResult bedSetup = prepareBedSetup(args);
     for (const std::string &warning : bedSetup.warnings)
       logWarn(warning);
@@ -497,7 +448,7 @@ int runProgram(int argc, char **argv) {
 
     auto stageStart = ProfileClock::now();
     LoadedProjectionSet projectionSet =
-        loadProjectionSet(projPaths, args.numAngles, "Projection Data", "matrix",
+        loadProjectionSet(projPaths, compactMeta, "Projection Data", "matrix",
                           args.mergeTimeSegments);
     args.projectionSourceGroups = projectionSet.sourceGroups;
     compactTiming.projectionLoadSeconds =
@@ -562,9 +513,7 @@ int runProgram(int argc, char **argv) {
         throw std::runtime_error("Multiple background projections were provided for single-bed mode.");
 
       const LoadedProjectionSet backgroundSet =
-          loadProjectionSet(backgroundPaths, args.numAngles, label, "b_proj");
-      if (backgroundSet.raysPerBed != projectionSet.raysPerBed)
-        throw std::runtime_error("Background projection geometry does not match emission projections.");
+          loadProjectionSet(backgroundPaths, compactMeta, label, "b_proj");
       background = backgroundSet.data;
       logInfo(std::string("Loaded ") + label + " term with " +
               std::to_string(background.size()) + " rays.");
@@ -582,14 +531,13 @@ int runProgram(int argc, char **argv) {
           args.projPaths2.empty() ? std::vector<std::string>{args.projPath2}
                                   : args.projPaths2;
       LoadedProjectionSet projectionSet2 =
-          loadProjectionSet(projPaths2, args.numAngles,
+          loadProjectionSet(projPaths2, compactMeta,
                             "Projection Data (window 2)", "matrix",
                             args.mergeTimeSegments);
-      if (projectionSet2.raysPerBed != projectionSet.raysPerBed ||
-          projectionSet2.data.size() != projectionSet.data.size()) {
+      if (projectionSet2.data.size() != projectionSet.data.size()) {
         throw std::runtime_error(
             "Second-window projections do not match the first window's "
-            "geometry (rays per bed / bed count).");
+            "bed count.");
       }
       projections2 = std::move(projectionSet2.data);
       backgroundProj2 = loadBackgroundFor(args.bProjPaths2, args.bProjPath2,
@@ -608,7 +556,7 @@ int runProgram(int argc, char **argv) {
     if (args.useReg && !args.regCtPath.empty()) {
       logInfo("Loading registered CT for TV/RDP weights from " + args.regCtPath);
       sharedAnatomical = loadVolumeChecked(args.regCtPath, "Registered CT",
-                                          args.Nx, args.Ny, args.Nz);
+                                          args.Nx, args.Ny, args.Nz, spacing, false);
     }
 
     std::vector<uint8_t> mask;
@@ -620,16 +568,15 @@ int runProgram(int argc, char **argv) {
       if (!args.attMapPath.empty()) {
         logInfo("Loading attenuation map from " + args.attMapPath);
         ctacMuMap = loadVolumeChecked(args.attMapPath, "Attenuation map",
-                                      args.Nx, args.Ny, args.Nz);
+                                      args.Nx, args.Ny, args.Nz, spacing, true);
       } else if (args.doCTAC && !args.ctacAutoMuFrom.empty()) {
         logInfo("Auto mu-map: segmenting early-iteration reconstruction " +
                 args.ctacAutoMuFrom);
         logWarn("Auto mu-map assumes activity roughly fills the attenuating "
                 "volume (water-equivalent phantom). For hot-rods-in-cold-body "
                 "objects supply a measured -attMap instead.");
-        const std::vector<double> earlyRecon = loadVolumeChecked(
-            args.ctacAutoMuFrom, "Auto-mu source reconstruction", args.Nx,
-            args.Ny, args.Nz);
+        const std::vector<double> earlyRecon = loadAutoMuActivity(
+            args.ctacAutoMuFrom, args.Nx, args.Ny, args.Nz, spacing);
         const spect::main::AutoMuMapResult autoMu =
             spect::main::buildAutoMuMapFromActivity(
                 earlyRecon, args.Nx, args.Ny, args.Nz, args.ctacAutoMuThresh,
@@ -750,9 +697,11 @@ int runProgram(int argc, char **argv) {
             static_cast<uint64_t>(static_cast<long double>(budget) * bytes[0] / total);
         // Divide one host budget, before either directory allocates payloads.
         compactChunks = std::make_unique<spect::io::CompactChunkCSRDirectory>(
-            compactChunks->directory(), compactChunks->chunks(), compactChunks->cols(), firstBudget);
+            compactChunks->directory(), compactChunks->chunks(), compactChunks->cols(),
+            firstBudget, compactChunks->branchCount());
         compactChunks2 = std::make_unique<spect::io::CompactChunkCSRDirectory>(
-            compactChunks2->directory(), compactChunks2->chunks(), compactChunks2->cols(), budget - firstBudget);
+            compactChunks2->directory(), compactChunks2->chunks(), compactChunks2->cols(),
+            budget - firstBudget, compactChunks2->branchCount());
         logInfo("Joint CSRB host cache budgets: " + std::to_string(firstBudget) +
                 " + " + std::to_string(budget - firstBudget) + " bytes (one shared cap).");
       }
@@ -798,9 +747,9 @@ int runProgram(int argc, char **argv) {
       throw std::runtime_error("Background projection size does not match projection size.");
     }
 
+    std::vector<spect::io::BadDetectorId> badDetectors;
     if (!args.badDetectorFile.empty()) {
-      const auto badDetectors =
-          spect::io::loadBadDetectorList(args.badDetectorFile);
+      badDetectors = spect::io::loadBadDetectorList(args.badDetectorFile);
       if (!badDetectors.empty()) {
         const std::vector<uint8_t> badDetectorMask =
             spect::io::buildBadDetectorProjectionMask(
@@ -1070,6 +1019,7 @@ int runProgram(int argc, char **argv) {
     outputTransform.flipZPerBed = enableBedZFlip;
     outputTransform.flipZWholeOutput = args.zOutFlip;
     outputTransform.flipXWholeOutput = args.xOutFlip;
+    outputTransform.xyRotationDeg = args.xyOutRotationDeg;
     outputTransform.seamXyAlign = args.seamXyAlign;
     outputTransform.reverseLocalZInReconStorage =
         reverseLocalZInReconStorage;
@@ -1093,13 +1043,19 @@ int runProgram(int argc, char **argv) {
       logDebug("Output transform: whole-output Z flip enabled.");
     if (args.xOutFlip)
       logDebug("Output transform: whole-output X flip enabled.");
+    if (args.xyOutRotationDeg != 0.0)
+      logInfo("Output transform: XY rotation " + std::to_string(args.xyOutRotationDeg) +
+              " deg (+X toward +Y), after flips/crop/mask; fixed grid, bilinear, zero outside.");
     if (args.seamXyAlign)
       logDebug("Output transform: seam XY overlap alignment enabled.");
     logInfo(args.matrixGridOutput
-                ? "Output transform: full matrix grids; multi-bed overlap uses cosine weights without gain fitting."
+                ? (bedCount > 1
+                       ? "Output transform: joint multi-bed volume of full matrix grids; no output blending or gain fitting."
+                       : "Output transform: full matrix grid.")
                 : "Output transform: canonical center66_cosine10 stitch; "
                   "reconstruction beds are non-overlapping.");
     CompactSymmetricReconLoopContext compactContext;
+    compactContext.badDetectors = &badDetectors;
     compactContext.args = &args;
     compactContext.opts = &opts;
     compactContext.prepared = &prepared;

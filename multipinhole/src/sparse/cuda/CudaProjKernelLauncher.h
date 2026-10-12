@@ -38,7 +38,7 @@ void launchCompactGatherBedDoubleToFloatKernel(
 
 void launchCompactConvertDoubleToFloatKernel(
     const double *input, float *output, size_t count,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr, const uint8_t *mask = nullptr);
 
 void launchCompactAccumulateBedFloatToGlobalDoubleKernel(
     const float *bedImage, double *globalImage, size_t globalCount, int nx,
@@ -70,7 +70,7 @@ void launchCompactBsremUpdateKernel(
 void launchCompactTransformForwardBatchKernel(
     const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,
     int zBranchCount, const cuda::CompactDeviceTransformParams &commonParams,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr, const uint8_t *mask = nullptr);
 
 void launchCompactTransformBackwardAddKernel(
     const float *rotated, double *accum, size_t nvox,
@@ -126,9 +126,7 @@ void launchCompactCsrSpmvXQuadKernel(const float *values, const int32_t *rowPtr,
                                      int rows, cudaStream_t stream = nullptr);
 
 // CSRQ resident-matrix kernels (projdomain_chunk_ops.cu, "CSRQ kernels").
-// K = 8 right-hand sides packed [voxel][8]; block size is fixed by the
-// kernel's shared-memory tile layout.
-constexpr int kCsrqK = cuda::kCsrqBranchCount;
+// K = 4 or 8 right-hand sides packed [voxel][K], one shared implementation.
 constexpr unsigned int kCsrqBlockSize = 256;
 
 struct CsrqDeviceChunkPtrs {
@@ -138,6 +136,7 @@ struct CsrqDeviceChunkPtrs {
   const uint32_t *runs = nullptr;
   const uint16_t *valuesQ = nullptr;
   int rows = 0;
+  int branchCount = 0;
   // Logical launch rows select interleaved angle groups in the unchanged
   // chunk. Ratios retain physical row offsets; no matrix/ratio gathering.
   int rowOffset = 0;
@@ -150,40 +149,40 @@ struct CsrqDeviceChunkPtrs {
   }
 };
 
-// yPacked[row][8] = A x for the eight branches (prediction output).
-void launchCsrqForwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+// yPacked[row][K] = A x for the active branches (prediction output).
+void launchCsrqForwardKernel(const CsrqDeviceChunkPtrs &chunk,
                                const float *xPacked, float *yPacked,
                                cudaStream_t stream = nullptr);
 
-// Same kernel, ratio mode: ratioPacked[row][8] =
+// Same kernel, ratio mode: ratioPacked[row][K] =
 //   scale * p / max(scale * A x + background, eps), 0 where the (row, branch)
 // has no full projection row. fullBackground may be null.
-void launchCsrqForwardRatioK8Kernel(
+void launchCsrqForwardRatioKernel(
     const CsrqDeviceChunkPtrs &chunk, const float *xPacked, float *ratioPacked,
     const double *fullProjection, const double *fullBackground,
     size_t fullProjectionCount, double scale,
     const cuda::CompactDeviceRatioParams &params, const int *dSymIds,
     const int *dZMirrors, double eps, cudaStream_t stream = nullptr);
 
-// ratioPacked is [row][8]; yBranch is branch-major [8][nvox] (the layout
+// ratioPacked is [row][K]; yBranch is branch-major [K][nvox] (the layout
 // launchCompactTransformBackwardAddBatchKernel consumes). Only branches
 // [kFirst, kFirst + kCount) are scattered.
-void launchCsrqBackwardK8Kernel(const CsrqDeviceChunkPtrs &chunk,
+void launchCsrqBackwardKernel(const CsrqDeviceChunkPtrs &chunk,
                                 const float *ratioPacked, float *yBranch,
                                 size_t nvox, int kFirst, int kCount,
                                 cudaStream_t stream = nullptr);
 
-// Packed-output backward (opt-in, sm_120 vector-atomic trial): all eight
-// branches in one pass into yPacked[nvox][8] (float4 atomics on sm_90+,
+// Packed-output backward (opt-in, sm_120 vector-atomic trial): all active
+// branches in one pass into yPacked[nvox][K] (float4 atomics on sm_90+,
 // scalar fallback below).
-void launchCsrqBackwardK8PackedKernel(const CsrqDeviceChunkPtrs &chunk,
+void launchCsrqBackwardPackedKernel(const CsrqDeviceChunkPtrs &chunk,
                                       const float *ratioPacked, float *yPacked,
                                       cudaStream_t stream = nullptr);
 
 // accum[M_k(v)] += yPacked[v][k] (times attSlices[sliceIndex[k]][M_k(v)]^power
 // when attSlices is non-null); consumer of the packed backward.
-void launchCompactTransformBackwardAddPacked8Kernel(
-    const float *yPacked, double *accum, size_t nvox,
+void launchCompactTransformBackwardAddPackedKernel(
+    const float *yPacked, double *accum, size_t nvox, int branchCount,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
     const int *dZMirrors, const uint16_t *attSlices = nullptr,
     const int *dSliceIndex = nullptr, float power = 1.0f,
@@ -198,23 +197,23 @@ void launchCompactTransformBackwardAddPacked8Kernel(
 // i.e. the atomic count itself, not their locality.
 constexpr int kCsrqBackwardBranchesPerPass = 2;
 
-void launchCsrqPackBranch8Kernel(const float *branchMajor, float *packed,
-                                 size_t nvox, cudaStream_t stream = nullptr);
+void launchCsrqPackBranchKernel(const float *branchMajor, float *packed,
+                                 size_t nvox, int branchCount, cudaStream_t stream = nullptr);
 
 // CTAC variant for one compact angle: packed[v][k] = branchMajor[k][v] *
 // (attSlices[sliceIndex[k]][M_k(v)] / 65535)^power (factor 1 where
 // sliceIndex[k] < 0). attSlices holds the staged full-angle factor slices
-// ([slice][nvox] uint16); sliceIndex points at the eight per-branch slice ids
+// ([slice][nvox] uint16); sliceIndex points at the K per-branch slice ids
 // of this compact angle; power rescales the table to the window's photon
 // energy (1 = as stored).
-void launchCsrqPackBranch8AttenKernel(
+void launchCsrqPackBranchAttenKernel(
     const float *branchMajor, const uint16_t *attSlices, const int *dSliceIndex,
-    float *packed, size_t nvox,
+    float *packed, size_t nvox, int branchCount,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
     const int *dZMirrors, float power = 1.0f, cudaStream_t stream = nullptr);
 
 // launchCompactTransformBackwardAddBatchKernel with the CTAC factor applied at
-// the unrotated voxel (adjoint of launchCsrqPackBranch8AttenKernel).
+// the unrotated voxel (adjoint of launchCsrqPackBranchAttenKernel).
 void launchCompactTransformBackwardAddBatchAttenKernel(
     const float *rotatedBatch, double *accum, size_t nvox, int batchSize,
     const cuda::CompactDeviceTransformParams &commonParams, const int *dSymIds,
@@ -223,12 +222,12 @@ void launchCompactTransformBackwardAddBatchAttenKernel(
 
 // ratio = value * rowWeights[fullIndex] (value alone when rowWeights is null)
 // where the (row, branch) has a full projection row, else 0.
-void launchCsrqUnitRatioK8Kernel(float *ratioPacked, float value,
+void launchCsrqUnitRatioKernel(float *ratioPacked, float value,
                                  const double *rowWeights,
                                  size_t fullProjectionCount,
                                  const cuda::CompactDeviceRatioParams &params,
                                  const int *dSymIds, const int *dZMirrors,
-                                 int rows, cudaStream_t stream = nullptr);
+                                 int rows, int branchCount, cudaStream_t stream = nullptr);
 
 // CSRB branch-batch sensitivity input: ratioBatch[branch*rows + row] =
 // rowWeights[fullIndex] (1 when null) for valid (row, branch), else 0.

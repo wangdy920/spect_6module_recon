@@ -4,6 +4,7 @@
 #include "ctac/AutoMuMap.h"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -159,6 +160,9 @@ TEST(AutoMuMapTest, InvalidArgumentsThrow) {
   EXPECT_THROW(buildAutoMuMapFromActivity(act, 2, 2, 2, 1.5, kWaterMu),
                std::runtime_error);
   EXPECT_THROW(buildAutoMuMapFromActivity(act, 2, 2, 2, 0.05, -1.0),
+               std::runtime_error);
+  EXPECT_THROW(buildAutoMuMapFromActivity(act, 2, 2, 2, 0.05,
+                                         std::numeric_limits<double>::infinity()),
                std::runtime_error);
 }
 

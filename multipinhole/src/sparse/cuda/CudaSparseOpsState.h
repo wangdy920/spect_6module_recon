@@ -292,6 +292,7 @@ private:
   // signatures below can name them).
   struct CsrqDeviceChunk {
     int rows = 0;
+    int branchCount = 0;
     int compactRowBase = 0;
     uint64_t nnz = 0;
     uint64_t runCount = 0;
@@ -309,6 +310,7 @@ private:
       p.runs = dRuns.get();
       p.valuesQ = dValuesQ.get();
       p.rows = rows;
+      p.branchCount = branchCount;
       return p;
     }
   };
@@ -320,13 +322,8 @@ private:
     PinnedHostArray<uint32_t> runs;
     PinnedHostArray<uint16_t> valuesQ;
   };
-  struct CsrqChunkDims {
-    size_t rows = 0;
-    size_t nnz = 0;
-    size_t runCount = 0;
-  };
-  // CTAC plan of one matrix (see csrqEnsureAttenPlanLocked): per chunk the
-  // compact angle count, the offset of its [angle][8] slice-id table inside
+  // CTAC plan of one matrix/subset (see csrqEnsureAttenPlanLocked): per chunk
+  // the absolute compact angles, the offset of its [angle][K] slice-id table inside
   // dSliceIndex and the distinct full angles it reaches, in slice order.
   struct CsrqAttenPlan {
     bool valid = false;
@@ -335,16 +332,22 @@ private:
     int compactNumAngles = 0;
     int fullNumAngles = 0;
     std::vector<int> symIds;
-    std::vector<int> chunkAngles;
+    std::vector<std::vector<int>> chunkAngles;
     std::vector<size_t> chunkSliceIndexOffset;
     std::vector<std::vector<int>> chunkFullAngles;
     size_t maxSlices = 0;
+    size_t maxAngles = 1;
     DeviceArray<int> dSliceIndex;
   };
   // One energy window's matrix. Resident: chunks[i] holds chunk i. Streamed:
   // chunks holds kCsrqStreamSlots device slots sized to the largest chunk and
   // host[i] the pinned copy of chunk i.
   struct CsrqResidentMatrix {
+    CsrqResidentMatrix() = default;
+    CsrqResidentMatrix(const CsrqResidentMatrix &) = delete;
+    CsrqResidentMatrix &operator=(const CsrqResidentMatrix &) = delete;
+    CsrqResidentMatrix(CsrqResidentMatrix &&) = default;
+    CsrqResidentMatrix &operator=(CsrqResidentMatrix &&) = default;
     std::vector<std::unique_ptr<CsrqDeviceChunk>> chunks;
     std::vector<CsrqHostChunk> host;
     std::vector<cuda::CsrqChunkShape> shapes;
@@ -354,7 +357,7 @@ private:
     int cols = 0;
     size_t totalRows = 0;
     uint64_t bytes = 0;
-    CsrqAttenPlan attenPlan;
+    std::map<std::pair<int, int>, CsrqAttenPlan> attenPlans;
   };
   // A caller-owned CTAC table page-locked for asynchronous slice copies.
   struct CsrqPinnedHostTable {
@@ -444,7 +447,7 @@ public:
     }
     if (accumulatorBaseIndex < 0 || cacheSlotBase < 0 ||
         accumulatorBaseIndex + bedCount > spect::core::kMaxBeds ||
-        cacheSlotBase + bedCount > spect::core::kMaxBeds) {
+        cacheSlotBase + bedCount > kCompactProjectionSlots) {
       throw std::runtime_error("compact bed-branch batch slots out of range.");
     }
     if (commonRatioParams.symmetryMode != 45 &&
@@ -935,7 +938,7 @@ public:
     }
     if (accumulatorBaseIndex < 0 || cacheSlotBase < 0 ||
         accumulatorBaseIndex + bedCount > spect::core::kMaxBeds ||
-        cacheSlotBase + bedCount > spect::core::kMaxBeds) {
+        cacheSlotBase + bedCount > kCompactProjectionSlots) {
       throw std::runtime_error("compact bed-branch batch slots out of range.");
     }
     if (commonRatioParamsIn.symmetryMode != 45 &&
@@ -1700,6 +1703,7 @@ private:
   void uploadIoCsrView(const io::CSRView &matrix, const MatrixCacheKey &key,
                        CachedMatrix *cache) {
     cache->prepareForUpload();
+    cache->sourceOwner = matrix.sourceOwner;
     cache->key = key;
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
@@ -2013,7 +2017,7 @@ public:
       int branchCount, int zBranchCount,
       const std::vector<double> *castorKx,
       const std::vector<double> *castorKy,
-      const std::vector<double> *castorKz) {
+      const std::vector<double> *castorKz, const uint8_t *localSupportMask) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     if (globalImage == nullptr || globalImageCount == 0 || globalNz <= 0 ||
@@ -2049,6 +2053,10 @@ public:
     }
 
     if (uploadGlobalImage) {
+      if (localSupportMask != nullptr)
+        dCompactLocalSupportMask_.copyFromHost(localSupportMask, nvox);
+      else
+        dCompactLocalSupportMask_.reset();
       const auto inputStart = std::chrono::steady_clock::now();
       dCompactGlobalImage_.copyFromHost(globalImage, globalImageCount);
       compactResidentImageCount_ = globalImageCount;
@@ -2092,7 +2100,7 @@ public:
                                    static_cast<size_t>(branchCount) * nvox;
       launchCompactTransformForwardBatchKernel(
           bedInput, bedBatch, nvox, branchCount, zBranchCount,
-          commonTransformParams);
+          commonTransformParams, nullptr, dCompactLocalSupportMask_.get());
     }
   }
 
@@ -2165,7 +2173,7 @@ public:
       const size_t slot = compactBackwardAccumulatorSlot(bed);
       launchCompactConvertDoubleToFloatKernel(
           dCompactBackwardAccum_[slot].get(), dCompactBedPrimary_.get(),
-          nvox);
+          nvox, nullptr, dCompactLocalSupportMask_.get());
       const float *bedNumer = dCompactBedPrimary_.get();
       if (useCastor) {
         if (!cuda::enqueueCastorConv3DFloatDeviceCUDA(
@@ -2416,6 +2424,7 @@ public:
     compactSubsetDenomCount_ = 0;
     compactSubsetDenomStride_ = 0;
     dCompactMask_.reset();
+    dCompactLocalSupportMask_.reset();
     dCompactIterationFlags_.reset();
     for (auto &projection : dCompactProjectionInput_)
       projection.reset();
@@ -2497,17 +2506,11 @@ public:
     return csrqPackedBackward_;
   }
 
-  static uint64_t csrqChunkDeviceBytes(uint64_t rows, uint64_t nnz,
-                                       uint64_t runCount) {
-    return 2ull * sizeof(uint32_t) * (rows + 1ull) + sizeof(float) * rows +
-           sizeof(uint32_t) * runCount + sizeof(uint16_t) * nnz;
-  }
-
   // Starts loading matrix matrixIndex (dropping whatever that slot held).
   // Decides resident vs streamed from the free device memory: resident when
   // the whole matrix plus scratch plus reserve fits, streamed when at least
   // two chunk slots do, error otherwise. Returns true when streamed.
-  bool beginCsrqWarmup(int matrixIndex, int cols,
+  bool beginCsrqWarmup(int matrixIndex, int cols, int branchCount,
                        const std::vector<cuda::CsrqChunkShape> &shapes,
                        uint64_t reserveBytes, bool forceStreamed) {
     ensureCudaRuntimeAvailable();
@@ -2518,6 +2521,11 @@ public:
     if (matrixIndex < 0 || matrixIndex >= kCsrqMaxMatrices) {
       throw std::runtime_error("CSRQ matrix index out of range.");
     }
+    if (branchCount != 4 && branchCount != 8)
+      throw std::runtime_error("CSRQ requires 4 or 8 symmetry branches.");
+    if (!csrqMatrices_.empty() && csrqBranchCount_ != branchCount)
+      throw std::runtime_error("CSRQ matrices must share symmetry branches.");
+    csrqBranchCount_ = branchCount;
     for (const auto &resident : csrqMatrices_) {
       if (resident.ready && resident.cols != cols) {
         throw std::runtime_error(
@@ -2532,34 +2540,27 @@ public:
 
     uint64_t matrixBytes = 0;
     uint64_t totalRows = 0;
-    uint64_t maxChunkBytes = 0;
-    CsrqChunkDims maxDims;
+    cuda::CsrqChunkShape maxDims;
     for (const auto &shape : shapes) {
       if (shape.rows <= 0 || shape.compactRowBase < 0 ||
           static_cast<uint64_t>(shape.compactRowBase) != totalRows) {
         throw std::runtime_error(
             "CSRQ warmup: chunks are not contiguous in compact row order.");
       }
-      const uint64_t bytes = csrqChunkDeviceBytes(
-          static_cast<uint64_t>(shape.rows), shape.nnz, shape.runCount);
-      matrixBytes += bytes;
-      maxChunkBytes = std::max(maxChunkBytes, bytes);
+      matrixBytes += shape.deviceBytes();
       totalRows += static_cast<uint64_t>(shape.rows);
-      maxDims.rows = std::max(maxDims.rows, static_cast<size_t>(shape.rows));
-      maxDims.nnz = std::max(maxDims.nnz, static_cast<size_t>(shape.nnz));
-      maxDims.runCount =
-          std::max(maxDims.runCount, static_cast<size_t>(shape.runCount));
+      maxDims.includeDimensions(shape);
     }
     if (totalRows > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
       throw std::runtime_error("CSRQ warmup: too many compact rows.");
     }
     const size_t nvox = static_cast<size_t>(cols);
     const size_t ratioRows =
-        std::max(csrqMaxRowsLocked(), static_cast<size_t>(totalRows));
+        std::max(csrqMaxRowsLocked(), static_cast<size_t>(maxDims.rows));
     const uint64_t scratchBytes =
-        (dCsrqX_.get() == nullptr ? 2ull * nvox * kCsrqK * sizeof(float) : 0ull) +
-        (ratioRows > dCsrqRatio_.size() / kCsrqK
-             ? (ratioRows - dCsrqRatio_.size() / kCsrqK) * kCsrqK * sizeof(float)
+        (dCsrqX_.get() == nullptr ? 2ull * nvox * csrqBranchCount_ * sizeof(float) : 0ull) +
+        (ratioRows > dCsrqRatio_.size() / csrqBranchCount_
+             ? (ratioRows - dCsrqRatio_.size() / csrqBranchCount_) * csrqBranchCount_ * sizeof(float)
              : 0ull);
     uint64_t freeBytes = 0;
     try {
@@ -2570,6 +2571,8 @@ public:
     }
     constexpr uint64_t kMiB = 1024ull * 1024ull;
     const uint64_t needResident = matrixBytes + scratchBytes + reserveBytes;
+    // Each slot reserves per-array maxima, which may come from different chunks.
+    const uint64_t maxChunkBytes = maxDims.deviceBytes();
     const uint64_t needStreamed =
         static_cast<uint64_t>(kCsrqStreamSlots) * maxChunkBytes + scratchBytes +
         reserveBytes;
@@ -2603,6 +2606,7 @@ public:
       target.host.resize(shapes.size());
       for (int slot = 0; slot < kCsrqStreamSlots; ++slot) {
         auto dev = std::make_unique<CsrqDeviceChunk>();
+        dev->branchCount = branchCount;
         dev->dRowNnzPtr.allocate(maxDims.rows + 1u);
         dev->dRowRunPtr.allocate(maxDims.rows + 1u);
         dev->dRowMax.allocate(maxDims.rows);
@@ -2613,9 +2617,9 @@ public:
     } else {
       target.chunks.resize(shapes.size());
     }
-    dCsrqX_.allocate(nvox * kCsrqK);
-    dCsrqY_.allocate(nvox * kCsrqK);
-    dCsrqRatio_.allocate(ratioRows * kCsrqK);
+    dCsrqX_.allocate(nvox * csrqBranchCount_);
+    dCsrqY_.allocate(nvox * csrqBranchCount_);
+    dCsrqRatio_.allocate(ratioRows * csrqBranchCount_);
     target.loaded.assign(shapes.size(), false);
     csrqWarmupStart_ = std::chrono::steady_clock::now();
     return target.streamed;
@@ -2647,6 +2651,7 @@ public:
       host.valuesQ.copyFromHost(view.valuesQ, static_cast<size_t>(view.nnz));
     } else {
       auto dev = std::make_unique<CsrqDeviceChunk>();
+      dev->branchCount = csrqBranchCount_;
       dev->rows = view.rows;
       dev->compactRowBase = shape.compactRowBase;
       dev->nnz = view.nnz;
@@ -2682,8 +2687,11 @@ public:
               << target.shapes.size() << " chunks, " << (target.bytes / kMiB)
               << " MiB " << (target.streamed ? "streamed (pinned host)" : "resident")
               << ", " << target.totalRows << " compact rows"
+              << ", K=" << csrqBranchCount_
+              << ", scratch_bytes=" << (dCsrqX_.size() + dCsrqY_.size() +
+                                          dCsrqRatio_.size()) * sizeof(float)
               << (csrqPackedBackward_
-                      ? ", packed [voxel][8] backward (float4 atomics on "
+                      ? ", packed [voxel][K] backward (float4 atomics on "
                         "sm_90+, scalar fallback below)"
                       : "")
               << ".\n";
@@ -2742,7 +2750,7 @@ public:
       throw std::runtime_error("CSRQ numerator received null projections.");
     }
     const size_t batchNeeded =
-        static_cast<size_t>(bedCount) * static_cast<size_t>(kCsrqK) * nvox;
+        static_cast<size_t>(bedCount) * static_cast<size_t>(csrqBranchCount_) * nvox;
     if (dBatchInput_.get() == nullptr || compactBatchInputCount_ < batchNeeded) {
       throw std::runtime_error(
           "CSRQ branch-batch input was not refreshed for these beds.");
@@ -2770,13 +2778,10 @@ public:
 
     // Timer slots: one per (chunk, bed) pass, or per (chunk, bed, compact
     // angle) launch group on the attenuated path.
-    if (hasAtten && subsetCount > 1) {
-      throw std::runtime_error("CSRQ ordered subsets with CTAC are not supported.");
-    }
     const CsrqAttenPlan *plan =
-        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
-    const size_t maxAngles =
-        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
+        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams,
+                                             subsetCount, subsetIndex) : nullptr;
+    const size_t maxAngles = plan ? plan->maxAngles : 1u;
     const size_t passes = matrix.shapes.size() * static_cast<size_t>(bedCount);
     const size_t timerSlots = passes * maxAngles;
     csrqEnsureTimersLocked(timerSlots);
@@ -2788,22 +2793,21 @@ public:
       if (selected.selectedRows() == 0) return;
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
-      float *ratio = dCsrqRatio_.get() +
-                     static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      float *ratio = dCsrqRatio_.get();
       for (int bed = 0; bed < bedCount; ++bed, ++pass) {
         const float *bedInput =
             dBatchInput_.get() +
-            static_cast<size_t>(bed) * static_cast<size_t>(kCsrqK) * nvox;
+            static_cast<size_t>(bed) * static_cast<size_t>(csrqBranchCount_) * nvox;
         const uint16_t *bedAtt =
             hasAtten ? bedAttFactors[bed] : nullptr;
         if (bedAtt == nullptr) {
-          launchCsrqPackBranch8Kernel(bedInput, dCsrqX_.get(), nvox);
+          launchCsrqPackBranchKernel(bedInput, dCsrqX_.get(), nvox, csrqBranchCount_);
 
-          // Forward and Poisson ratio in one kernel: the row's eight branch
+          // Forward and Poisson ratio in one kernel: the row's active branch
           // sums never leave the block.
           const size_t t = usedTimers++;
           csrqForwardTimers_[t].recordStart(nullptr);
-          launchCsrqForwardRatioK8Kernel(
+          launchCsrqForwardRatioKernel(
               selected, dCsrqX_.get(), ratio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
               dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
@@ -2815,7 +2819,7 @@ public:
           csrqBackwardTimers_[t].recordStop(nullptr);
           continue;
         }
-        // CTAC: stage this bed's factor slices for the chunk (overlapping the
+        // CTAC: stage this subset's factor slices for the chunk (overlapping the
         // previous pair's kernels), then one compact angle at a time so each
         // row group sees its own factors.
         const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, bedAtt,
@@ -2823,22 +2827,22 @@ public:
         const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
         const int *dSliceIndex =
             plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
-        const int angles = plan->chunkAngles[chunkIndex];
+        const auto &angles = plan->chunkAngles[chunkIndex];
         const int rpa = commonRatioParams.compactRaysPerAngle;
-        for (int i = 0; i < angles; ++i) {
-          const int rowBase = i * rpa;
+        for (size_t i = 0; i < angles.size(); ++i) {
+          const int rowBase = angles[i] * rpa - chunk.compactRowBase;
           const CsrqDeviceChunkPtrs rows = csrqRowRange(chunk, rowBase, rpa);
-          const int *dSlice = dSliceIndex + i * kCsrqK;
+          const int *dSlice = dSliceIndex + i * csrqBranchCount_;
           cuda::CompactDeviceRatioParams angleParams = ratioParams;
           angleParams.compactRowBase = chunk.compactRowBase + rowBase;
-          float *angleRatio = ratio + static_cast<size_t>(rowBase) * kCsrqK;
+          float *angleRatio = ratio + static_cast<size_t>(rowBase) * csrqBranchCount_;
           const size_t t = usedTimers++;
           csrqForwardTimers_[t].recordStart(nullptr);
-          launchCsrqPackBranch8AttenKernel(
-              bedInput, dSlices, dSlice, dCsrqX_.get(), nvox,
+          launchCsrqPackBranchAttenKernel(
+              bedInput, dSlices, dSlice, dCsrqX_.get(), nvox, csrqBranchCount_,
               commonTransformParams, dBatchSymIds_.get(),
               dBatchZMirrors_.get(), power);
-          launchCsrqForwardRatioK8Kernel(
+          launchCsrqForwardRatioKernel(
               rows, dCsrqX_.get(), angleRatio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, angleParams,
               dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
@@ -2915,13 +2919,10 @@ public:
     ensureProjDomainKernelsLoaded();
 
     const bool hasAtten = attFactors != nullptr;
-    if (hasAtten && subsetCount > 1) {
-      throw std::runtime_error("CSRQ ordered subsets with CTAC are not supported.");
-    }
     const CsrqAttenPlan *plan =
-        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams) : nullptr;
-    const size_t maxAngles =
-        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, commonRatioParams) : 1u;
+        hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams,
+                                             subsetCount, subsetIndex) : nullptr;
+    const size_t maxAngles = plan ? plan->maxAngles : 1u;
     const size_t passes = matrix.shapes.size();
     csrqEnsureTimersLocked(passes * maxAngles);
     size_t usedTimers = 0;
@@ -2931,13 +2932,12 @@ public:
       if (selected.selectedRows() == 0) return;
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
-      float *ratio = dCsrqRatio_.get() +
-                     static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      float *ratio = dCsrqRatio_.get();
       // The unit ratio covers the whole chunk in either mode.
-      launchCsrqUnitRatioK8Kernel(ratio, static_cast<float>(weight),
+      launchCsrqUnitRatioKernel(ratio, static_cast<float>(weight),
                                   dRowWeights, fullProjectionCount, ratioParams,
                                   dBatchSymIds_.get(), dBatchZMirrors_.get(),
-                                  chunk.rows);
+                                  chunk.rows, csrqBranchCount_);
       if (!hasAtten) {
         const size_t t = usedTimers++;
         csrqBackwardTimers_[t].recordStart(nullptr);
@@ -2951,16 +2951,16 @@ public:
       const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
       const int *dSliceIndex =
           plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
-      const int angles = plan->chunkAngles[chunkIndex];
+      const auto &angles = plan->chunkAngles[chunkIndex];
       const int rpa = commonRatioParams.compactRaysPerAngle;
-      for (int i = 0; i < angles; ++i) {
-        const int rowBase = i * rpa;
+      for (size_t i = 0; i < angles.size(); ++i) {
+        const int rowBase = angles[i] * rpa - chunk.compactRowBase;
         const size_t t = usedTimers++;
         csrqBackwardTimers_[t].recordStart(nullptr);
         csrqAttenBackwardAngleLocked(
             csrqRowRange(chunk, rowBase, rpa),
-            ratio + static_cast<size_t>(rowBase) * kCsrqK, nvox,
-            commonTransformParams, dSlices, dSliceIndex + i * kCsrqK, power,
+            ratio + static_cast<size_t>(rowBase) * csrqBranchCount_, nvox,
+            commonTransformParams, dSlices, dSliceIndex + i * csrqBranchCount_, power,
             accum.get());
         csrqBackwardTimers_[t].recordStop(nullptr);
       }
@@ -2994,12 +2994,12 @@ public:
     const size_t nvox = static_cast<size_t>(matrix.cols);
     const float power = csrqCheckedAttPower(attPower);
     if (hostYhatPacked == nullptr ||
-        count != matrix.totalRows * static_cast<size_t>(kCsrqK)) {
+        count != matrix.totalRows * static_cast<size_t>(csrqBranchCount_)) {
       throw std::runtime_error(
-          "CSRQ forward output must hold compactRows * 8 floats.");
+          "CSRQ forward output must hold compactRows * branchCount floats.");
     }
     if (dBatchInput_.get() == nullptr ||
-        compactBatchInputCount_ != static_cast<size_t>(kCsrqK) * nvox) {
+        compactBatchInputCount_ != static_cast<size_t>(csrqBranchCount_) * nvox) {
       throw std::runtime_error(
           "CSRQ forward requires a refreshed single-bed branch batch input.");
     }
@@ -3014,24 +3014,34 @@ public:
     if (hasAtten) {
       csrqEnsureBranchMetadataLocked(symIds, zMirrors);
     } else {
-      launchCsrqPackBranch8Kernel(dBatchInput_.get(), dCsrqX_.get(), nvox);
+      launchCsrqPackBranchKernel(dBatchInput_.get(), dCsrqX_.get(), nvox, csrqBranchCount_);
     }
 
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, *attenRatioParams) : nullptr;
-    const size_t maxAngles =
-        hasAtten ? csrqMaxAnglesPerChunkLocked(matrix, *attenRatioParams) : 1u;
+    const size_t maxAngles = plan ? plan->maxAngles : 1u;
     const size_t passes = matrix.shapes.size();
     csrqEnsureTimersLocked(passes * maxAngles);
     size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
-      float *out =
-          dCsrqRatio_.get() + static_cast<size_t>(chunk.compactRowBase) * kCsrqK;
+      float *out = dCsrqRatio_.get();
+      // Diagnostics return a full host projection, but device scratch stays
+      // chunk-sized, as in the numerator and sensitivity passes.
+      const auto download = [&]() {
+        const auto start = std::chrono::steady_clock::now();
+        const size_t elements = static_cast<size_t>(chunk.rows) * csrqBranchCount_;
+        dCsrqRatio_.copyToHost(hostYhatPacked +
+            static_cast<size_t>(chunk.compactRowBase) * csrqBranchCount_, elements);
+        noteCudaCompactOutputD2H(std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count(),
+            elements * sizeof(float), false);
+      };
       if (!hasAtten) {
         const size_t t = usedTimers++;
         csrqForwardTimers_[t].recordStart(nullptr);
-        launchCsrqForwardK8Kernel(chunk.ptrs(), dCsrqX_.get(), out);
+        launchCsrqForwardKernel(chunk.ptrs(), dCsrqX_.get(), out);
         csrqForwardTimers_[t].recordStop(nullptr);
+        download();
         return;
       }
       const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, attFactors,
@@ -3039,34 +3049,28 @@ public:
       const uint16_t *dSlices = dCsrqAttSlices_[slot].get();
       const int *dSliceIndex =
           plan->dSliceIndex.get() + plan->chunkSliceIndexOffset[chunkIndex];
-      const int angles = plan->chunkAngles[chunkIndex];
+      const auto &angles = plan->chunkAngles[chunkIndex];
       const int rpa = attenRatioParams->compactRaysPerAngle;
-      for (int i = 0; i < angles; ++i) {
-        const int rowBase = i * rpa;
+      for (size_t i = 0; i < angles.size(); ++i) {
+        const int rowBase = angles[i] * rpa - chunk.compactRowBase;
         const size_t t = usedTimers++;
         csrqForwardTimers_[t].recordStart(nullptr);
-        launchCsrqPackBranch8AttenKernel(
-            dBatchInput_.get(), dSlices, dSliceIndex + i * kCsrqK,
-            dCsrqX_.get(), nvox, *attenTransformParams, dBatchSymIds_.get(),
+        launchCsrqPackBranchAttenKernel(
+            dBatchInput_.get(), dSlices, dSliceIndex + i * csrqBranchCount_,
+            dCsrqX_.get(), nvox, csrqBranchCount_, *attenTransformParams, dBatchSymIds_.get(),
             dBatchZMirrors_.get(), power);
-        launchCsrqForwardK8Kernel(csrqRowRange(chunk, rowBase, rpa),
+        launchCsrqForwardKernel(csrqRowRange(chunk, rowBase, rpa),
                                   dCsrqX_.get(),
-                                  out + static_cast<size_t>(rowBase) * kCsrqK);
+                                  out + static_cast<size_t>(rowBase) * csrqBranchCount_);
         csrqForwardTimers_[t].recordStop(nullptr);
       }
       csrqReleaseAttenSlotLocked(slot);
+      download();
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     noteCudaCsrqForward(
         accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers), passes);
 
-    const auto outputStart = std::chrono::steady_clock::now();
-    dCsrqRatio_.copyToHost(hostYhatPacked, count);
-    noteCudaCompactOutputD2H(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      outputStart)
-            .count(),
-        count * sizeof(float), false);
   }
 
   void prefetchCompactFloatMatrix(const io::CSRSubsetView &next,
@@ -3224,7 +3228,7 @@ private:
   // h_ij = a_ij * att[fullAngle(i, branch), M_branch(j)]: the factor depends on
   // the row's full angle and the unrotated voxel only, so the passes below
   // walk a chunk one compact angle at a time and apply it in the image domain
-  // (csrq_pack_branch8_atten before the forward, the attenuated transform-add
+  // (csrq_pack_branch_atten before the forward, the attenuated transform-add
   // after the backward). The SpMV kernels themselves are untouched.
 
   // Host mirror of compact_atten_full_angle for the first row of a compact
@@ -3246,20 +3250,6 @@ private:
     }
     if (fullAngle < 0 || fullAngle >= p.fullNumAngles) return -1;
     return fullAngle;
-  }
-
-  static size_t csrqMaxAnglesPerChunkLocked(
-      const CsrqResidentMatrix &matrix,
-      const cuda::CompactDeviceRatioParams &p) {
-    if (p.compactRaysPerAngle <= 0) {
-      throw std::runtime_error("CSRQ CTAC requires compactRaysPerAngle > 0.");
-    }
-    size_t maxAngles = 1;
-    for (const auto &shape : matrix.shapes) {
-      maxAngles = std::max(
-          maxAngles, static_cast<size_t>(shape.rows / p.compactRaysPerAngle));
-    }
-    return maxAngles;
   }
 
   // (compact angle, branch) -> slice table of the given compact angles (the
@@ -3307,24 +3297,15 @@ private:
     return angles;
   }
 
-  int buildAttenChunkSliceTableLocked(const cuda::CompactDeviceRatioParams &p,
-                                      int rowBase, int rows,
-                                      std::vector<int> &sliceIndex,
-                                      std::vector<int> &fullAngles) const {
-    const std::vector<int> angles =
-        consecutiveCompactAngles(rowBase, rows, p.compactRaysPerAngle);
-    buildAttenSliceTableLocked(p, angles, sliceIndex, fullAngles);
-    return static_cast<int>(angles.size());
-  }
-
-  // Per-matrix CTAC plan: for every chunk the (compact angle, branch) -> slice
+  // Per-matrix/subset CTAC plan: for every chunk the (compact angle, branch) -> slice
   // table and the distinct full angles it reaches (slice order). Built from
   // the announced chunk shapes and the current branch ids, uploaded once, so
   // no synchronous copy sits between the launches of a pass. Rebuilt when the
   // geometry parameters or the branch ids change.
   const CsrqAttenPlan &csrqEnsureAttenPlanLocked(
-      CsrqResidentMatrix &matrix, const cuda::CompactDeviceRatioParams &p) {
-    CsrqAttenPlan &plan = matrix.attenPlan;
+      CsrqResidentMatrix &matrix, const cuda::CompactDeviceRatioParams &p,
+      int subsetCount = 1, int subsetIndex = 0) {
+    CsrqAttenPlan &plan = matrix.attenPlans[{subsetCount, subsetIndex}];
     if (plan.valid && plan.symmetryMode == p.symmetryMode &&
         plan.compactRaysPerAngle == p.compactRaysPerAngle &&
         plan.compactNumAngles == p.compactNumAngles &&
@@ -3340,10 +3321,19 @@ private:
     plan.symIds = batchSymIdsHost_;
     std::vector<int> sliceIndex;
     for (const auto &shape : matrix.shapes) {
+      const int rpa = p.compactRaysPerAngle;
+      if (rpa <= 0 || shape.rows % rpa != 0 || shape.compactRowBase % rpa != 0) {
+        throw std::runtime_error(
+            "CSRQ CTAC requires chunks made of whole compact angles.");
+      }
+      const int firstAngle = shape.compactRowBase / rpa;
+      auto angles = compactSubsetAngles(p.compactNumAngles,
+          {subsetCount, subsetIndex}, firstAngle, firstAngle + shape.rows / rpa);
       std::vector<int> fullAngles;
       plan.chunkSliceIndexOffset.push_back(sliceIndex.size());
-      plan.chunkAngles.push_back(buildAttenChunkSliceTableLocked(
-          p, shape.compactRowBase, shape.rows, sliceIndex, fullAngles));
+      buildAttenSliceTableLocked(p, angles, sliceIndex, fullAngles);
+      plan.maxAngles = std::max(plan.maxAngles, angles.size());
+      plan.chunkAngles.push_back(std::move(angles));
       plan.maxSlices = std::max(plan.maxSlices, fullAngles.size());
       plan.chunkFullAngles.push_back(std::move(fullAngles));
     }
@@ -3750,7 +3740,7 @@ private:
   }
 
   // Attenuated backward of one compact angle's rows into accum:
-  // scatter -> [8][nvox], then transform-add with the branch's factor slice
+  // scatter -> [K][nvox], then transform-add with the branch's factor slice
   // raised to the window's energy exponent.
   void csrqAttenBackwardAngleLocked(const CsrqDeviceChunkPtrs &rows,
                                     const float *ratio, size_t nvox,
@@ -3760,13 +3750,13 @@ private:
                                     double *accum) {
     csrqScatterBackwardLocked(rows, ratio, nvox);
     if (csrqPackedBackward_) {
-      launchCompactTransformBackwardAddPacked8Kernel(
-          dCsrqY_.get(), accum, nvox, tp, dBatchSymIds_.get(),
+      launchCompactTransformBackwardAddPackedKernel(
+          dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
           dBatchZMirrors_.get(), dSlices, dSliceIndex, attPower);
       return;
     }
     launchCompactTransformBackwardAddBatchAttenKernel(
-        dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
+        dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
         dBatchZMirrors_.get(), dSlices, dSliceIndex, attPower);
   }
 
@@ -3781,7 +3771,8 @@ private:
   size_t csrqMaxRowsLocked() const {
     size_t rows = 0;
     for (const auto &matrix : csrqMatrices_) {
-      rows = std::max(rows, matrix.totalRows);
+      for (const auto &shape : matrix.shapes)
+        rows = std::max(rows, static_cast<size_t>(shape.rows));
     }
     return rows;
   }
@@ -3796,8 +3787,7 @@ private:
     return csrqMatrices_[static_cast<size_t>(matrixIndex)];
   }
 
-  // The CSRQ kernels are compiled for exactly kCsrqK = 8 right-hand sides
-  // (4 xy symmetries x 2 z branches).
+  // The warmup fixes K for the task; all buffers and kernels use that stride.
   CsrqResidentMatrix &csrqRequireReadyLocked(int matrixIndex, int branchCount) {
     if (matrixIndex < 0 ||
         static_cast<size_t>(matrixIndex) >= csrqMatrices_.size() ||
@@ -3807,9 +3797,9 @@ private:
           "CSRQ matrix " + std::to_string(matrixIndex) +
           " is not loaded on the device (warmup missing).");
     }
-    if (branchCount != kCsrqK) {
+    if (branchCount != csrqBranchCount_) {
       throw std::runtime_error(
-          "CSRQ kernels require exactly " + std::to_string(kCsrqK) +
+          "CSRQ kernels require exactly " + std::to_string(csrqBranchCount_) +
           " symmetry branches, got " + std::to_string(branchCount) + ".");
     }
     return csrqMatrices_[static_cast<size_t>(matrixIndex)];
@@ -3826,12 +3816,12 @@ private:
   }
 
   // A^T of one chunk added into accum (unrotated frame): scatter into the
-  // branch-major dCsrqY_ ([8][nvox]) a few branches per pass so the atomic
+  // branch-major dCsrqY_ ([K][nvox]) a few branches per pass so the atomic
   // target stays L2-resident, then the symmetry transform-add kernel. (A
   // shared-memory slice-tile variant was measured 2x slower on sm_89 — no
   // native fp32 shared atomics; see reports/attachments/2026-09-04-*.)
-  // Packed mode (csrqPackedBackward_) scatters all eight branches in one pass
-  // into [nvox][8] with float4 atomics (sm_90+; scalar fallback elsewhere)
+  // Packed mode (csrqPackedBackward_) scatters all active branches in one pass
+  // into [nvox][K] with float4 atomics (sm_90+; scalar fallback elsewhere)
   // and consumes it with the packed transform-add.
   void csrqBackwardChunkLocked(const CsrqDeviceChunkPtrs &chunk, const float *ratio,
                                size_t nvox,
@@ -3839,30 +3829,30 @@ private:
                                double *accum) {
     csrqScatterBackwardLocked(chunk, ratio, nvox);
     if (csrqPackedBackward_) {
-      launchCompactTransformBackwardAddPacked8Kernel(
-          dCsrqY_.get(), accum, nvox, tp, dBatchSymIds_.get(),
+      launchCompactTransformBackwardAddPackedKernel(
+          dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
           dBatchZMirrors_.get());
       return;
     }
     launchCompactTransformBackwardAddBatchKernel(
-        dCsrqY_.get(), accum, nvox, kCsrqK, tp, dBatchSymIds_.get(),
+        dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
         dBatchZMirrors_.get());
   }
 
   // Scatter of rows into dCsrqY_ (zeroed first): branch-major two branches
-  // per pass, or packed [nvox][8] in one pass.
+  // per pass, or packed [nvox][K] in one pass.
   void csrqScatterBackwardLocked(const CsrqDeviceChunkPtrs &rows,
                                  const float *ratio, size_t nvox) {
-    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * kCsrqK * sizeof(float),
+    CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * csrqBranchCount_ * sizeof(float),
                                nullptr));
     if (csrqPackedBackward_) {
-      launchCsrqBackwardK8PackedKernel(rows, ratio, dCsrqY_.get());
+      launchCsrqBackwardPackedKernel(rows, ratio, dCsrqY_.get());
       return;
     }
-    for (int kFirst = 0; kFirst < kCsrqK;
+    for (int kFirst = 0; kFirst < csrqBranchCount_;
          kFirst += kCsrqBackwardBranchesPerPass) {
-      const int kCount = std::min(kCsrqBackwardBranchesPerPass, kCsrqK - kFirst);
-      launchCsrqBackwardK8Kernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
+      const int kCount = std::min(kCsrqBackwardBranchesPerPass, csrqBranchCount_ - kFirst);
+      launchCsrqBackwardKernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
                                  kCount);
     }
   }
@@ -3870,7 +3860,7 @@ private:
   size_t csrqBackwardPassCount() const {
     return csrqPackedBackward_
                ? 1u
-               : static_cast<size_t>((kCsrqK + kCsrqBackwardBranchesPerPass - 1) /
+               : static_cast<size_t>((csrqBranchCount_ + kCsrqBackwardBranchesPerPass - 1) /
                                      kCsrqBackwardBranchesPerPass);
   }
 
@@ -3966,21 +3956,7 @@ private:
   }
 
   void csrqEnsureBranchMetadataLocked(const int *symIds, const int *zMirrors) {
-    if (symIds == nullptr || zMirrors == nullptr) {
-      throw std::runtime_error("CSRQ branch symmetry tables are null.");
-    }
-    const size_t count = static_cast<size_t>(kCsrqK);
-    const bool changed =
-        batchSymIdsHost_.size() != count || batchZMirrorsHost_.size() != count ||
-        !std::equal(batchSymIdsHost_.begin(), batchSymIdsHost_.end(), symIds) ||
-        !std::equal(batchZMirrorsHost_.begin(), batchZMirrorsHost_.end(),
-                    zMirrors);
-    if (changed) {
-      dBatchSymIds_.copyFromHost(symIds, count);
-      dBatchZMirrors_.copyFromHost(zMirrors, count);
-      batchSymIdsHost_.assign(symIds, symIds + count);
-      batchZMirrorsHost_.assign(zMirrors, zMirrors + count);
-    }
+    ensureBranchMetadataLocked(symIds, zMirrors, csrqBranchCount_);
   }
 
   CuSparseHandleGuard handle_;
@@ -4012,6 +3988,7 @@ private:
   int compactSubsetDenomCount_ = 0;
   size_t compactSubsetDenomStride_ = 0;
   DeviceArray<uint8_t> dCompactMask_;
+  DeviceArray<uint8_t> dCompactLocalSupportMask_;
   DeviceArray<uint32_t> dCompactIterationFlags_;
   size_t compactResidentStaticCount_ = 0;
   bool compactResidentHasMask_ = false;
@@ -4050,12 +4027,11 @@ private:
   size_t compactKappaCount_ = 0;
   std::array<size_t, kCompactDeviceBackwardMaxAccumulators>
       compactBackwardAccumSize_{};
-  // CSRQ scratch shared by all resident matrices: dCsrqX_ is the [voxel][8]
-  // packed forward input, dCsrqY_ the branch-major [8][voxel] backward
-  // output, and dCsrqRatio_ the [compactRow][8] forward/ratio buffer sized
-  // for the largest matrix (3.3 MB at 103680 rows), so forward/ratio/backward
-  // run as three whole-matrix stages instead of interleaving per chunk.
+  // Shared CSRQ scratch, K=4/8: packed X [voxel][K], backward Y
+  // [K][voxel] (or [voxel][K] in packed mode), ratio [largestChunkRows][K].
+  // Each chunk's fused forward/ratio is immediately consumed by backward.
   std::vector<CsrqResidentMatrix> csrqMatrices_;
+  int csrqBranchCount_ = 0;
   DeviceArray<float> dCsrqX_;
   DeviceArray<float> dCsrqY_;
   DeviceArray<float> dCsrqRatio_;
@@ -4080,7 +4056,7 @@ private:
   std::array<bool, kCsrqAttSlots> csrqAttSlotUsed_{};
   int csrqAttNextSlot_ = 0;
   std::vector<CsrqPinnedHostTable> csrqPinnedTables_;
-  // Packed [nvox][8] backward with float4 atomics (sm_120 trial; default from
+  // Packed [nvox][K] backward with float4 atomics (sm_120 trial; default from
   // SPECT_CSRQ_BACKWARD_PACKED=1, tests toggle it directly).
   bool csrqPackedBackward_ = csrqPackedBackwardDefault();
   // CSRB CTAC: per-(chunk, subset tag) slice tables and sub-CSR row pointers

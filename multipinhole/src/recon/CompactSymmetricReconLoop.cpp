@@ -278,22 +278,11 @@ std::string psfInterpKey(filters::PSFInterp interp) {
 void appendFileStatIdentity(std::ostringstream &oss, const std::string &label,
                             const std::filesystem::path &path) {
   const auto normalized = normalizePathForCache(path);
-  // Package roots are deployment details, not denominator inputs.
-  oss << label << "_name=" << normalized.filename().string() << '\n';
-  std::error_code ec;
-  const auto size = std::filesystem::file_size(normalized, ec);
-  if (ec) {
-    oss << label << "_size=UNAVAILABLE\n";
-  } else {
-    oss << label << "_size=" << size << '\n';
-  }
-  ec.clear();
-  const auto writeTime = std::filesystem::last_write_time(normalized, ec);
-  if (ec) {
-    oss << label << "_mtime=UNAVAILABLE\n";
-  } else {
-    oss << label << "_mtime=" << writeTime.time_since_epoch().count() << '\n';
-  }
+  oss << label << "_path=" << normalized.generic_string() << '\n';
+  oss << label << "_size=" << std::filesystem::file_size(normalized) << '\n';
+  oss << label << "_mtime="
+      << std::filesystem::last_write_time(normalized).time_since_epoch().count()
+      << '\n';
 }
 
 template <typename T>
@@ -401,24 +390,6 @@ bool isCompactDenomManifestMismatch(const std::string &status) {
   return status.rfind("cache manifest mismatch", 0) == 0;
 }
 
-void appendChunkDirectoryIdentity(
-    std::ostringstream &oss, const std::string &prefix,
-    const spect::io::CompactChunkCSRDirectory &chunks) {
-  oss << prefix << "chunk_count=" << chunks.chunks().size() << '\n';
-  oss << prefix << "chunk_total_rows=" << chunks.totalRows() << '\n';
-  oss << prefix << "chunk_total_nnz=" << chunks.totalNnz() << '\n';
-  for (size_t i = 0; i < chunks.chunks().size(); ++i) {
-    const auto &chunk = chunks.chunks()[i];
-    const std::string chunkPrefix = prefix + "chunk_" + std::to_string(i);
-    appendFileStatIdentity(oss, chunkPrefix, chunk.path);
-    oss << chunkPrefix << "_rows=" << chunk.rows << '\n';
-    oss << chunkPrefix << "_angle_offset=" << chunk.angleOffset << '\n';
-    oss << chunkPrefix << "_angle_count=" << chunk.angleCount << '\n';
-    oss << chunkPrefix << "_nnz=" << chunk.nnz << '\n';
-    oss << chunkPrefix << "_file_size_bytes=" << chunk.fileSizeBytes << '\n';
-  }
-}
-
 std::string buildCompactDenomCacheManifest(
     const ReconArgs &args, const OutputGeometry &geometry,
     const spect::io::CompactSymmetryMetadata &compactMeta,
@@ -426,18 +397,17 @@ std::string buildCompactDenomCacheManifest(
     const spect::io::CompactChunkCSRDirectory &compactChunks,
     const std::vector<int> &bedZStarts,
     const spect::filters::PSFKernels *psfKernels,
+    size_t rowWeightCount, size_t normFactor2Count, uint64_t normFactor2Hash,
+    const std::vector<spect::io::BadDetectorId> &badDetectors,
     const spect::io::CompactChunkCSRDirectory *compactChunks2 = nullptr,
     const std::vector<double> *sensRowWeights = nullptr,
     const std::vector<std::vector<uint16_t>> *bedAttenFactors = nullptr,
     const std::vector<double> *ctacAttenPowers = nullptr) {
   std::ostringstream oss;
   oss << std::setprecision(17);
-  oss << "cache_schema=compact_global_denom_v4_portable_stat_identity\n";
+  oss << "cache_schema=compact_global_denom_v6_path_stat_local_support\n";
   oss << "matrix_layout=compact-symmetric\n";
   oss << "matrix_source_kind=chunkCSRDir\n";
-  oss << "matrix_profile="
-      << normalizePathForCache(compactChunks.directory()).filename().string()
-      << '\n';
   appendFileStatIdentity(oss, "compact_meta", compactMetaPath);
   oss << "compact_mode="
       << spect::io::compactSymmetryModeName(compactMeta) << '\n';
@@ -450,16 +420,13 @@ std::string buildCompactDenomCacheManifest(
   oss << "compact_rows=" << compactMeta.compactRows() << '\n';
   oss << "full_rows=" << compactMeta.fullRows() << '\n';
   oss << "matrix_cols=" << compactMeta.totalVoxels << '\n';
-  appendChunkDirectoryIdentity(oss, "", compactChunks);
+  compactChunks.appendCacheInputs(oss, "");
   // Joint dual-window: the sensitivity is sum_k w_k A_k^T 1, so the second
   // matrix and both weights are part of the identity. Emitted only when
   // active so single-window caches keep matching their stored manifests.
   if (compactChunks2 != nullptr) {
     oss << "dual_window=1\n";
-    oss << "matrix2_profile="
-        << normalizePathForCache(compactChunks2->directory()).filename().string()
-        << '\n';
-    appendChunkDirectoryIdentity(oss, "matrix2_", *compactChunks2);
+    compactChunks2->appendCacheInputs(oss, "matrix2_");
     oss << "energy_window_weights=";
     for (size_t k = 0; k < args.energyWindowWeights.size(); ++k)
       oss << (k ? "," : "") << args.energyWindowWeights[k];
@@ -529,35 +496,21 @@ std::string buildCompactDenomCacheManifest(
   if (!args.detZRowWeightsFile.empty()) {
     appendFileStatIdentity(oss, "detz_row_weights",
                            args.detZRowWeightsFile);
-    oss << "detz_row_weights_count="
-        << spect::io::loadDetZRowWeights(args.detZRowWeightsFile,
-                                         compactMeta.detNz, compactMeta.detNx,
-                                         compactMeta.fullNumAngles)
-               .size()
-        << '\n';
+    oss << "detz_row_weights_count=" << rowWeightCount << '\n';
   }
   if (!args.normFactorFile.empty()) {
     appendFileStatIdentity(oss, "normalization_factor",
                            args.normFactorFile);
-    oss << "normalization_factor_count="
-        << spect::io::loadDetZRowWeights(
-               args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
-               compactMeta.fullNumAngles)
-               .size()
-        << '\n';
+    oss << "normalization_factor_count=" << rowWeightCount << '\n';
     oss << "normalization_factor_semantics="
            "projection_correction_c_to_efficiency_1_over_c\n";
   }
   if (!args.normFactorFile2.empty()) {
-    const auto values = spect::io::loadDetZRowWeights(args.normFactorFile2,
-        compactMeta.detNz, compactMeta.detNx, compactMeta.fullNumAngles);
     appendFileStatIdentity(oss, "normalization_factor2", args.normFactorFile2);
-    oss << "normalization_factor2_values=" << values.size() << ':' << std::hex
-        << fnv1a64Words(values.data(), values.size() * sizeof(double)) << std::dec << '\n';
+    oss << "normalization_factor2_values=" << normFactor2Count << ':' << std::hex
+        << normFactor2Hash << std::dec << '\n';
   }
   if (!args.badDetectorFile.empty()) {
-    const auto badDetectors =
-        spect::io::loadBadDetectorList(args.badDetectorFile);
     if (!badDetectors.empty()) {
       oss << "bad_detector_count=" << badDetectors.size() << '\n';
       for (size_t index = 0; index < badDetectors.size(); ++index)
@@ -568,7 +521,12 @@ std::string buildCompactDenomCacheManifest(
   }
   oss << "bed_count=" << bedZStarts.size() << '\n';
   appendVectorLine(oss, "bed_z_starts", bedZStarts);
-  oss << "reconstruction_beds_nonoverlapping=1\n";
+  oss << "reconstruction_beds_nonoverlapping="
+      << (spect::app::computeTotalOverlap(static_cast<int>(bedZStarts.size()),
+                                          args.bedOverlaps) == 0
+              ? 1
+              : 0)
+      << '\n';
   appendVectorLine(oss, "output_bed_overlaps", args.outputBedOverlaps);
   if (args.zBedFlip && !args.projPaths.empty() && bedZStarts.size() > 1) {
     oss << "joint_virtual_z_flip=1\n";
@@ -867,20 +825,6 @@ std::vector<double> runCompactSymmetricReconstruction(
                       args.cylinderDiameterMM, args.cylinderHeightMM,
                       args.cylCenterX, args.cylCenterY, args.cylCenterZ)
                 : std::vector<uint8_t>();
-        const bool compactRoiPrunesMatrix =
-            !compactLocalSupportMask.empty() &&
-            // ponytail: full-FOV cylinders rely on the matrix's cylindrical
-            // support; add a column-support bitmap if future matrices differ.
-            // ROI dimensions are float: compare extents at the same precision.
-            // Widened float voxel sizes otherwise make 36/66 mm look pruned.
-            (args.cylinderDiameterMM + 1e-6 <
-                 static_cast<float>(
-                     std::min(baseNx * spacing.dx, baseNy * spacing.dy)) ||
-             (args.cylinderHeightMM > 0.0 &&
-              args.cylinderHeightMM + 1e-6 <
-                  static_cast<float>(baseNz * spacing.dz)) ||
-             !std::isnan(args.cylCenterX) || !std::isnan(args.cylCenterY) ||
-             !std::isnan(args.cylCenterZ));
         // Sieve: iteration path is identical to Operator; save points write a
         // PSF-convolved copy of the state instead of the raw state.
         const bool sieveSaveCopyActive =
@@ -909,8 +853,9 @@ std::vector<double> runCompactSymmetricReconstruction(
         // angle/block row sets; all zero masks win.
         // The weights enter S = A^T W 1 directly through the unit-ratio
         // kernels. Measured bins are never scaled here: censoring zeroes
-        // them in MainProgram, and the efficiency weights are
-        // denominator-only. When the final w is all ones the unweighted
+        // them in MainProgram. Efficiency stays in the denominator; an
+        // additive measured-count background is divided by efficiency below.
+        // When the final w is all ones the unweighted
         // path is kept, so the default stays bit-identical. Computed before
         // the denom cache manifest so its hash is part of the identity.
         const int detZEdgeCensor = args.detZEdgeCensor;
@@ -930,8 +875,8 @@ std::vector<double> runCompactSymmetricReconstruction(
           logInfo("normalization correction factors: loaded " +
                   std::to_string(detZRowWeights.size()) + " values from " +
                   args.normFactorFile +
-                  "; applying reciprocal efficiency 1/c to the "
-                  "sensitivity (denominator) only.");
+                  "; applying reciprocal efficiency 1/c to sensitivity "
+                  "and converting any measured-count background to b/e.");
         } else if (!args.detZRowWeightsFile.empty()) {
           detZRowWeights = spect::io::loadDetZRowWeights(
               args.detZRowWeightsFile, compactMeta.detNz, compactMeta.detNx,
@@ -939,13 +884,14 @@ std::vector<double> runCompactSymmetricReconstruction(
           logInfo("detZ efficiency weights: loaded " +
                   std::to_string(detZRowWeights.size()) + " values from " +
                   args.detZRowWeightsFile +
-                  "; applying to the sensitivity (denominator) only.");
+                  "; applying to sensitivity and converting any "
+                  "measured-count background to b/e.");
         }
-        std::vector<spect::io::BadDetectorId> badDetectors;
+        if (ctx.badDetectors == nullptr)
+          throw std::runtime_error("Prepared bad detector list is missing.");
+        const auto &badDetectors = *ctx.badDetectors;
         std::vector<uint8_t> badDetectorMask;
         if (!args.badDetectorFile.empty()) {
-          badDetectors =
-              spect::io::loadBadDetectorList(args.badDetectorFile);
           badDetectorMask = spect::io::buildBadDetectorProjectionMask(
               badDetectors, compactMeta.fullNumAngles, compactMeta.detNz,
               compactMeta.detNx);
@@ -1010,20 +956,41 @@ std::vector<double> runCompactSymmetricReconstruction(
         // window. The numerator cancels the efficiency for background-free EM;
         // the sensitivity retains w_k A_k^T (1/c_k), with shared masks.
         std::vector<double> detZSensWeights2;
+        uint64_t normFactor2Hash = 0;
         if (!args.normFactorFile2.empty()) {
-          const auto correction1 = spect::io::loadDetZRowWeights(
-              args.normFactorFile, compactMeta.detNz, compactMeta.detNx,
-              compactMeta.fullNumAngles);
           const auto correction2 = spect::io::loadDetZRowWeights(
               args.normFactorFile2, compactMeta.detNz, compactMeta.detNx,
               compactMeta.fullNumAngles);
-          if (correction1.size() != static_cast<size_t>(compactMeta.fullRows()) ||
-              correction2.size() != correction1.size() || channels.size() != 2)
+          if (detZRowWeights.size() != static_cast<size_t>(compactMeta.fullRows()) ||
+              correction2.size() != detZRowWeights.size() || channels.size() != 2)
             throw std::runtime_error("Joint normalization requires two full projection correction arrays.");
+          normFactor2Hash = fnv1a64Words(correction2.data(),
+                                      correction2.size() * sizeof(double));
           detZSensWeights2.resize(correction2.size());
           for (size_t i = 0; i < correction2.size(); ++i)
             detZSensWeights2[i] = detZSensWeights[i] == 0.0 ? 0.0 : 1.0 / correction2[i];
           channels[1].sensitivityRowWeights = detZSensWeights2.data();
+        }
+        // For e>0, (eH)^T[y/(eHx+b)] = H^T[y/(Hx+b/e)]. Prepare b/e
+        // once, retaining raw b for diagnostics. No new format-specific kernels.
+        std::vector<std::vector<double>> normalizedBackgrounds(channelCount);
+        for (size_t channel = 0; channel < channelCount; ++channel) {
+          const auto *background = channelBackgrounds[channel];
+          const double *efficiencies = channels[channel].sensitivityRowWeights;
+          if (efficiencies == nullptr && useWeightedSensitivity)
+            efficiencies = detZSensWeights.data();
+          if (background == nullptr || background->empty() || efficiencies == nullptr)
+            continue;
+          auto &normalized = normalizedBackgrounds[channel];
+          normalized.resize(background->size());
+          const size_t fullRows = static_cast<size_t>(compactMeta.fullRows());
+          for (size_t i = 0; i < normalized.size(); ++i) {
+            const double e = efficiencies[i % fullRows];
+            normalized[i] = e == 0.0 ? 0.0 : (*background)[i] / e;
+            if (!std::isfinite(normalized[i]))
+              throw std::runtime_error("Background/efficiency overflow in channel " +
+                                       std::to_string(channel) + ", bin " + std::to_string(i));
+          }
         }
         const auto sensStart = ProfileClock::now();
         std::filesystem::path compactDenomCachePath =
@@ -1034,10 +1001,12 @@ std::vector<double> runCompactSymmetricReconstruction(
           ctacAttenPowers.push_back(channel.attenPower);
         compactDenomManifest = buildCompactDenomCacheManifest(
             args, geometry, compactMeta, compactMetaPath, compactChunks,
-            bedZStarts, psfPtr, ctx.compactChunks2,
+            bedZStarts, psfPtr, detZRowWeights.size(), detZSensWeights2.size(),
+            normFactor2Hash, badDetectors, ctx.compactChunks2,
             useWeightedSensitivity ? &detZSensWeights : nullptr,
             compactHasAttenuation ? &opts.bedAttenFactors : nullptr,
             compactHasAttenuation ? &ctacAttenPowers : nullptr);
+        logInfo("[MATRIX_CACHE] key=path_stat payload_scan=none");
         if (useWeightedSensitivity && detZEdgeCensor > 0) {
           logInfo("detZ edge censoring: using masked sensitivity (k=" +
                   std::to_string(detZEdgeCensor) + ", " +
@@ -1277,7 +1246,9 @@ std::vector<double> runCompactSymmetricReconstruction(
               const size_t offset =
                   static_cast<size_t>(bed) * fullProjectionCount;
               const size_t slot = channel * bedCount + bed;
-              const auto *background = channelBackgrounds[channel];
+              const auto *background = normalizedBackgrounds[channel].empty()
+                                           ? channelBackgrounds[channel]
+                                           : &normalizedBackgrounds[channel];
               projectionPtrs[slot] = channelProjections[channel]->data() + offset;
               backgroundPtrs[slot] =
                   (background == nullptr || background->empty())
@@ -1367,6 +1338,7 @@ std::vector<double> runCompactSymmetricReconstruction(
             reads.payloadReadBytes += second.payloadReadBytes;
             reads.hostReuseBytes += second.hostReuseBytes;
             reads.emptySlicesSkipped += second.emptySlicesSkipped;
+            reads.loaderWorkSeconds += second.loaderWorkSeconds;
           }
           return reads;
         };
@@ -1483,16 +1455,17 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           // The resident branch-batch input (image rotated on the device)
           // serves any bed count and both formats, backgrounds and CTAC
-          // included (the factor is applied on the device per compact angle);
-          // ROI-pruned matrices still take the host input path.
+          // included (the factor is applied on the device per compact angle).
+          // The local support mask is applied after forward / before backward PSF.
           const bool residentBatchInput =
-              !debugStats && !compactRoiPrunesMatrix &&
+              !debugStats &&
               (!compactPsfActive ||
                opts.psf.kernel == filters::PSFKernel::Castor) &&
               spect::cuda::prepareCompactBranchBatchInputFromGlobalCUDA(
                   compactMeta, image.data(), image.size(),
                   args.Nz, bedZStarts.data(), bedCount, bedVirtualZFlip,
-                  compactPsfActive ? psfPtr : nullptr, !imageResident);
+                  compactPsfActive ? psfPtr : nullptr, !imageResident,
+                  compactLocalSupportMask.empty() ? nullptr : compactLocalSupportMask.data());
           if (imageResident && !residentBatchInput) {
             if (!spect::cuda::downloadCompactResidentImageCUDA(
                     image.data(), image.size())) {
@@ -1507,7 +1480,7 @@ std::vector<double> runCompactSymmetricReconstruction(
             logInfo(std::string("compact iteration path: input=") +
                     (residentBatchInput ? "device" : "host") + ", update=" +
                     (residentIteration ? "device" : "host") +
-                    ", roi_prunes_matrix=" + (compactRoiPrunesMatrix ? "yes" : "no"));
+                    ", local_support_mask=" + (compactLocalSupportMask.empty() ? "no" : "yes"));
           }
           if (!residentIteration)
             numer.assign(globalNvox, 0.0);
@@ -1915,10 +1888,12 @@ std::vector<double> runCompactSymmetricReconstruction(
             if (compactPsfActive) {
               apply_psf_forward(localImage, localUsed, baseNx, baseNy, baseNz,
                                 opts, psfPtr, opts.threads);
+              if (!compactLocalSupportMask.empty())
+                spect::core::applyMaskInplace(localUsed, compactLocalSupportMask);
               localImageForProjection = localUsed.data();
             }
            for (size_t channel = 0; channel < channelCount; ++channel) {
-            // Window mean = w_k * A_k x + b_k.
+            // Measured-count mean = e_k * w_k * A_k x + b_k, on valid rows.
             std::vector<double> expected(fullRows, 0.0);
             const uint16_t *bedAttenuation =
                 compactAttFactorPtrs.empty()
@@ -1937,6 +1912,9 @@ std::vector<double> runCompactSymmetricReconstruction(
             const double windowWeight = channels[channel].weight;
             for (double &value : expected)
               value *= windowWeight;
+            const double *efficiencies = channels[channel].sensitivityRowWeights;
+            if (efficiencies == nullptr && useWeightedSensitivity)
+              efficiencies = detZSensWeights.data();
 
             const size_t projectionOffset =
                 static_cast<size_t>(bed) * fullRows;
@@ -1958,8 +1936,12 @@ std::vector<double> runCompactSymmetricReconstruction(
                         static_cast<size_t>(compactMeta.detNx);
                 for (int detX = 0; detX < compactMeta.detNx; ++detX) {
                   const size_t index = rowBase + static_cast<size_t>(detX);
+                  const double efficiency = efficiencies == nullptr
+                                                ? 1.0 : efficiencies[index];
+                  if (efficiency == 0.0)
+                    continue;
                   const double totalExpected =
-                      expected[index] +
+                      efficiency * expected[index] +
                       (background == nullptr ? 0.0 : background[index]);
                   addProjectionResidualSample(rowStats, measured[index],
                                               totalExpected);
@@ -2052,7 +2034,8 @@ std::vector<double> runCompactSymmetricReconstruction(
                 std::to_string(reads.payloadReadBytes - readsBeforeIterations.payloadReadBytes) +
                 " payload_loads=" + std::to_string(reads.payloadLoads - readsBeforeIterations.payloadLoads) +
                 " host_reuse_bytes=" + std::to_string(reads.hostReuseBytes - readsBeforeIterations.hostReuseBytes) +
-                " empty_slices_skipped=" + std::to_string(reads.emptySlicesSkipped - readsBeforeIterations.emptySlicesSkipped));
+                " empty_slices_skipped=" + std::to_string(reads.emptySlicesSkipped - readsBeforeIterations.emptySlicesSkipped) +
+                " loader_work_s=" + std::to_string(reads.loaderWorkSeconds - readsBeforeIterations.loaderWorkSeconds));
         logInfo("[MATRIX_IO] scope=run application_payload_read_bytes=" +
                 std::to_string(reads.payloadReadBytes) +
                 " payload_loads=" + std::to_string(reads.payloadLoads));

@@ -2,6 +2,7 @@
 #include "core/AttenuationConstants.h"
 #include "cuda/CudaDriverHelpers.h"
 #include "sparse/ProjDomainChunked.h"
+#include "sparse/CompactSubsets.h"
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS) && defined(SPECT_CUDA_SPARSEOPS_EXTERNAL_IMPL)
 
@@ -110,14 +111,14 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     int branchCount, int zBranchCount,
     const std::vector<double> *castorKx,
     const std::vector<double> *castorKy,
-    const std::vector<double> *castorKz) {
+    const std::vector<double> *castorKz, const uint8_t *localSupportMask) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().prepareCompactBranchBatchInputFromGlobal(
       globalImage, globalImageCount, globalNz, bedZStarts, bedCount,
       flipLocalZ, uploadGlobalImage, commonTransformParams, branchCount,
-      zBranchCount, castorKx, castorKy, castorKz);
+      zBranchCount, castorKx, castorKy, castorKz, localSupportMask);
   return true;
 }
 
@@ -282,14 +283,14 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     const int *symIds, const int *zMirrors, int branchCount, int bedCount,
     const uint16_t *const *bedAttFactors, size_t attCount, double attPower,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat(
       matrix, fullProjections, fullProjectionCount, commonRatioParams,
       commonTransformParams, symIds, zMirrors, branchCount, bedCount,
-      bedAttFactors, attCount, attPower, ratioTiming, backwardTiming, 0, 0);
+      bedAttFactors, attCount, attPower, ratioTiming, backwardTiming, 0, cacheSlotBase);
   return true;
 }
 
@@ -334,14 +335,14 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     const cuda::CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int branchCount, int bedCount,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
       matrix, fullProjections, fullProjectionCount, commonRatioParams,
       commonTransformParams, symIds, zMirrors, branchCount, bedCount,
-      ratioTiming, backwardTiming);
+      ratioTiming, backwardTiming, 0, cacheSlotBase);
   return true;
 }
 
@@ -362,7 +363,7 @@ bool compactSensitivityBranchBatchSpmvTAccumulateFloatCUDA(
   return true;
 }
 
-bool csrqWarmupBeginCUDA(int matrixIndex, int cols,
+bool csrqWarmupBeginCUDA(int matrixIndex, int cols, int branchCount,
                          const std::vector<CsrqChunkShape> &shapes,
                          uint64_t reserveBytes, bool forceStreamed,
                          bool *streamed) {
@@ -370,7 +371,7 @@ bool csrqWarmupBeginCUDA(int matrixIndex, int cols,
     return false;
   }
   const bool isStreamed = cudaState().beginCsrqWarmup(
-      matrixIndex, cols, shapes, reserveBytes, forceStreamed);
+      matrixIndex, cols, branchCount, shapes, reserveBytes, forceStreamed);
   if (streamed != nullptr) {
     *streamed = isStreamed;
   }
@@ -595,7 +596,7 @@ bool prepareCompactBranchBatchInputFromGlobalCUDA(
     const double *, size_t, int, const int *, int, bool, bool,
     const cuda::CompactDeviceTransformParams &, int, int,
     const std::vector<double> *, const std::vector<double> *,
-    const std::vector<double> *) {
+    const std::vector<double> *, const uint8_t *) {
   return false;
 }
 
@@ -645,7 +646,7 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     const io::CSRSubsetView &, const double *const *, size_t,
     const CompactDeviceRatioParams &, const CompactDeviceTransformParams &,
     const int *, const int *, int, int, const uint16_t *const *, size_t, double,
-    CompactDeviceRatioTiming *, CompactDeviceBackwardTiming *) {
+    CompactDeviceRatioTiming *, CompactDeviceBackwardTiming *, int) {
   return false;
 }
 
@@ -666,7 +667,7 @@ bool compactBranchBatchAttenForwardCUDA(const io::CSRView &,
   return false;
 }
 
-bool csrqWarmupBeginCUDA(int, int, const std::vector<CsrqChunkShape> &,
+bool csrqWarmupBeginCUDA(int, int, int, const std::vector<CsrqChunkShape> &,
                          uint64_t, bool, bool *) {
   return false;
 }

@@ -6,7 +6,15 @@
 #include <string>
 #include <vector>
 
+namespace spect::cli { struct ReconArgs; }
+namespace spect::filters { struct Spacing3; }
+
 namespace spect::main {
+
+std::string buildCTACFactorManifest(const cli::ReconArgs &args, int baseNx,
+                                    int baseNy, int baseNz,
+                                    const filters::Spacing3 &spacing,
+                                    int bedZStart);
 
 /**
  * @brief Disk cache for CTAC attenuation factors.

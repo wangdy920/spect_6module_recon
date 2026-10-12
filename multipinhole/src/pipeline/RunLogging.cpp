@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 
 
@@ -13,16 +14,32 @@ namespace {
 
 class TeeBuf : public std::streambuf {
 public:
-  TeeBuf(std::streambuf *primary, std::streambuf *secondary)
-      : primary_(primary), secondary_(secondary) {}
+  // quietConsole (-vb 0): the console only receives lines accepted by
+  // spect::main::isMinimalConsoleLine; the file still receives every byte.
+  TeeBuf(std::streambuf *primary, std::streambuf *secondary, bool quietConsole)
+      : primary_(primary), secondary_(secondary), quietConsole_(quietConsole) {}
+
+  // Emits a trailing line without '\n' (quiet mode holds it until then).
+  void flushPendingLine() {
+    std::lock_guard<std::mutex> lock(pendingMutex_);
+    emitPendingLocked();
+  }
 
 protected:
   int overflow(int ch) override {
     if (ch == EOF)
       return 0;
     const char c = static_cast<char>(ch);
-    const int r1 = primary_ ? primary_->sputc(c) : ch;
     const int r2 = secondary_ ? secondary_->sputc(c) : ch;
+    int r1 = ch;
+    if (!quietConsole_) {
+      r1 = primary_ ? primary_->sputc(c) : ch;
+    } else {
+      std::lock_guard<std::mutex> lock(pendingMutex_);
+      pending_.push_back(c);
+      if (c == '\n')
+        r1 = emitPendingLocked();
+    }
     // Flush both the log file and the console/pipe at line ends so a
     // kill/crash keeps a usable tail and a progress-bar host reading
     // redirected stdout sees `[ITER]` immediately.
@@ -42,8 +59,21 @@ protected:
   }
 
 private:
+  int emitPendingLocked() {
+    int result = 0;
+    if (primary_ && spect::main::isMinimalConsoleLine(pending_)) {
+      const auto size = static_cast<std::streamsize>(pending_.size());
+      result = primary_->sputn(pending_.data(), size) == size ? 0 : EOF;
+    }
+    pending_.clear();
+    return result;
+  }
+
   std::streambuf *primary_ = nullptr;
   std::streambuf *secondary_ = nullptr;
+  const bool quietConsole_ = false;
+  std::mutex pendingMutex_;
+  std::string pending_;
 };
 
 std::string sanitizeFilename(std::string value) {
@@ -88,6 +118,26 @@ std::string timestampForFilename() {
 namespace spect {
 namespace main {
 
+bool isMinimalConsoleLine(const std::string &line) {
+  size_t start = 0;
+  const auto digitsAt = [&line](size_t pos, size_t count) {
+    for (size_t i = pos; i < pos + count; ++i)
+      if (line[i] < '0' || line[i] > '9')
+        return false;
+    return true;
+  };
+  // Optional "YYYY-MM-DD HH:MM:SS " prefix written by RunLogger.
+  if (line.size() >= 20 && digitsAt(0, 4) && line[4] == '-' && digitsAt(5, 2) &&
+      line[7] == '-' && digitsAt(8, 2) && line[10] == ' ' && digitsAt(11, 2) &&
+      line[13] == ':' && digitsAt(14, 2) && line[16] == ':' && digitsAt(17, 2) &&
+      line[19] == ' ')
+    start = 20;
+  for (const char *tag : {"[ITER] ", "Error", "[ERROR]", "[FATAL]"})
+    if (line.compare(start, std::char_traits<char>::length(tag), tag) == 0)
+      return true;
+  return false;
+}
+
 struct ConsoleTeeGuard::Impl {
   std::filesystem::path path;
   std::ofstream file;
@@ -129,10 +179,11 @@ ConsoleTeeGuard::ConsoleTeeGuard(const std::filesystem::path &logPath)
 
   impl_->oldCout = std::cout.rdbuf();
   impl_->oldCerr = std::cerr.rdbuf();
-  impl_->teeCout =
-      std::make_unique<TeeBuf>(impl_->oldCout, impl_->file.rdbuf());
-  impl_->teeCerr =
-      std::make_unique<TeeBuf>(impl_->oldCerr, impl_->file.rdbuf());
+  const bool quietConsole = getVerbosity() < 1;
+  impl_->teeCout = std::make_unique<TeeBuf>(impl_->oldCout, impl_->file.rdbuf(),
+                                            quietConsole);
+  impl_->teeCerr = std::make_unique<TeeBuf>(impl_->oldCerr, impl_->file.rdbuf(),
+                                            quietConsole);
   std::cout.rdbuf(impl_->teeCout.get());
   std::cerr.rdbuf(impl_->teeCerr.get());
   // Quiet runs (-vb 0) suppress logInfo on cout; keep the durable log filled.
@@ -147,6 +198,8 @@ ConsoleTeeGuard::~ConsoleTeeGuard() {
     setFileLogStream(nullptr);
   std::cout.flush();
   std::cerr.flush();
+  impl_->teeCout->flushPendingLine();
+  impl_->teeCerr->flushPendingLine();
   std::cout.rdbuf(impl_->oldCout);
   std::cerr.rdbuf(impl_->oldCerr);
   impl_->file.flush();

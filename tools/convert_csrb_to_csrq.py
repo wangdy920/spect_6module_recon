@@ -31,6 +31,7 @@ Usage:
 import argparse
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -86,8 +87,8 @@ def encode_block(row_ptr_block: np.ndarray, col: np.ndarray, val: np.ndarray):
         return (np.zeros(0, np.uint16), np.zeros(0, np.uint32),
                 np.zeros(nrows, np.int64), np.zeros(nrows, np.float32),
                 {"split_runs": 0, "zeroed": 0, "sorted_values": np.zeros(0, np.float32)})
-    if np.any(val < 0):
-        raise RuntimeError("negative matrix value encountered; CSRQ requires v >= 0")
+    if not np.isfinite(val).all() or np.any(val < 0):
+        raise RuntimeError("invalid matrix value encountered; CSRQ requires finite v >= 0")
     row_id = np.repeat(np.arange(nrows, dtype=np.int64), counts)
     key = (row_id << 32) | col.astype(np.int64)
     order = np.argsort(key, kind="stable")
@@ -145,6 +146,8 @@ def write_csrq_header(f, rows, ang_off, ang_cnt, cols, nnz, run_count):
 def convert_chunk(src: Path, dst: Path, cols: int, block_rows: int):
     rows, ang_off, ang_cnt, nnz = read_csrb_header(src)
     row_ptr = np.fromfile(src, dtype=np.int64, count=rows + 1, offset=CSRB_HEADER)
+    if row_ptr[0] != 0 or row_ptr[-1] != nnz or np.any(np.diff(row_ptr) < 0):
+        raise RuntimeError(f"{src}: invalid row pointers")
     col_off = CSRB_HEADER + 8 * (rows + 1)
     val_off = col_off + 4 * nnz
     src_col = np.memmap(src, dtype=np.uint32, mode="r", offset=col_off, shape=(nnz,))
@@ -174,6 +177,8 @@ def convert_chunk(src: Path, dst: Path, cols: int, block_rows: int):
         local_ptr = (row_ptr[r0:r1 + 1] - s).astype(np.int64)
         c = np.asarray(src_col[s:e])
         v = np.asarray(src_val[s:e])
+        if np.any(c >= cols):
+            raise RuntimeError(f"{src}: column outside metadata grid")
         q, runs, run_counts, row_max, st = encode_block(local_ptr, c, v)
         if e > s:
             dst_q[s:e] = q
@@ -213,12 +218,28 @@ def convert_chunk(src: Path, dst: Path, cols: int, block_rows: int):
 
 
 def read_total_voxels(metadata_bin: Path) -> int:
-    """metadata.bin: 22 fields, voxelSize float32 (88 B) or float64 (92 B);
-    totalVoxels is the second int32 in both layouts."""
+    """Read the voxel count from legacy 88/92 B or SMMD v3 124 B metadata.
+
+    Metadata is preserved, not converted; CSRQ runtime profile support is separate.
+    """
     data = metadata_bin.read_bytes()
-    if len(data) not in (88, 92):
+    if len(data) == 124:
+        if struct.unpack_from("<II", data) != (0x444D4D53, 3):
+            raise RuntimeError(f"{metadata_bin}: invalid SMMD v3 magic/version")
+        offset = 12
+        dims_offset = 40
+    elif len(data) in (88, 92):
+        offset = 4
+        dims_offset = 32
+    else:
         raise RuntimeError(f"{metadata_bin}: unsupported metadata size {len(data)}")
-    return int(np.frombuffer(data[4:8], dtype=np.int32)[0])
+    cols = struct.unpack_from("<i", data, offset)[0]
+    dims = struct.unpack_from("<iii", data, dims_offset)
+    if cols <= 0 or min(dims) <= 0 or cols != dims[0] * dims[1] * dims[2]:
+        raise RuntimeError(f"{metadata_bin}: invalid voxel count/dimensions")
+    if cols > MAX_START_COL:
+        raise RuntimeError(f"{metadata_bin}: grid exceeds CSRQ column range")
+    return cols
 
 
 def decode_csrq_chunk(path: Path):
@@ -271,6 +292,14 @@ def write_csrb(path: Path, rows: int, ang_off: int, ang_cnt: int,
 
 
 def self_check() -> int:
+    for invalid in (-1.0, float("nan"), float("inf")):
+        try:
+            encode_block(np.array([0, 1]), np.array([0], np.uint32),
+                         np.array([invalid], np.float32))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("invalid matrix value accepted")
     rng = np.random.default_rng(7)
     cols = 5000
     rows = 12
@@ -296,6 +325,23 @@ def self_check() -> int:
     col = np.concatenate(all_c); val = np.concatenate(all_v)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
+        for size in (88, 92, 124):
+            meta = bytearray(size)
+            if size == 124:
+                struct.pack_into("<II", meta, 0, 0x444D4D53, 3)
+            struct.pack_into("<i", meta, 12 if size == 124 else 4, cols)
+            struct.pack_into("<iii", meta, 40 if size == 124 else 32, 10, 10, 50)
+            path = tmp / "metadata.bin"
+            path.write_bytes(meta)
+            assert read_total_voxels(path) == cols
+        meta[0] = 0
+        path.write_bytes(meta)
+        try:
+            read_total_voxels(path)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("invalid SMMD magic accepted")
         src = tmp / "chunk_000.csrb"
         dst = tmp / "chunk_000.csrq"
         write_csrb(src, rows, 0, 1, np.array(row_ptr), col, val)
@@ -336,6 +382,8 @@ def main() -> int:
         return self_check()
     if not a.src or not a.dst:
         ap.error("src and dst are required")
+    if a.block_rows <= 0:
+        ap.error("--block-rows must be positive")
     src = Path(a.src)
     dst = Path(a.dst)
     chunks = sorted(p for p in src.iterdir()

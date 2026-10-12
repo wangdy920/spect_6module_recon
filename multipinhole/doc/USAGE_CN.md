@@ -45,6 +45,10 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 
 矩阵以合并配置的 `root + matrix_id/matrix_id2` 精确查找 `root/id` 或 `root/isotope/id`，缺失或歧义失败；`root`相对EXE。显式矩阵/缓存CLI也服从优先级。旧配置无ID时才走 `default_chunk_csr_dir` 和唯一目录发现。完整方案表、norm和wrapper说明见 [参数说明](PARAMETERS_CN.template.md)。
 
+固定设备安装可在 `[SystemMatrix]` 设置 `scanner_config=scanners/PSC30-MPH6.ini`，路径相对全局配置目录。非空配置绑定始终优先于 CLI `-scannerConf`，不受 `recon_sections_override_cli` 开关影响；冲突输出 WARNING，配置文件缺失或无效直接失败，不回退到 CLI。未配置时仍接受 `-scannerConf`。这是重建 EXE 的设备配置选择，不会修改或覆盖预处理 wrapper 的设备一致性校验。
+
+PSC30 合并窗 Lu-177 可在对应 scanner INI 的 `[Lu177]` 设置 `input_mode=merged`、`sysmat_high=<208 keV矩阵目录>`、`sysmat_low=`，只传 `BedN.bin`；不要传第二组投影。固定安装的 `[MultiBed] xy_out_rotation_deg=180` 表示 XY 平面旋转半周，不等同于单独 X 镜像；通常配合 `x_out_flip=0`，原有 `z_bed_flip` 和 `z_out_flip` 仍独立生效。此安装配置不自动更改其他设备的默认方向。
+
 ---
 
 ## 数据与矩阵
@@ -54,7 +58,8 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 | `-df <path>` / `-i <path>` / `-input <path>` | 单床位投影 MAT/BIN |
 | `[InputOutput] merge_time_segments=true` | `-df` 指向一个 `案例/时间段/SPECT` 目录时，按时间顺序扫描同案例下的 `YYYYMMDD_HHMMSS/SPECT`，在内存中合并各时间段的同名 `BedN.bin`；默认关闭 |
 | `[InputOutput] output_filters_overwrite_primary=true` | 将启用的输出阶段后处理按 Smooth→Butterworth 顺序写入无后缀主输出；默认关闭 |
-| `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，必须是 Bed1..Bed5 的连续子集 |
+| `-dfList <list>` | 多床位投影列表，逗号/分号分隔；路径含 `BedN` 时按床位号排序，必须是连续床号；PSC 最多 5 床（Bed1..Bed5），`matrix_grid_output=true` 最多 16 床 |
+| `-beds <N\|A:B>` | 在 `-df`（或单项 `-dfList`）给出的目录、或该目录内任一 `BedK.bin` 所在目录中搜索 `Bed1..BedN` / `BedA..BedB`；范围内缺床即报错，范围外的床忽略；`-df2` 同规则 |
 | `-bProj <path>` | 背景/散射投影 MAT/BIN |
 | `-bProjList <list>` | 多床位背景投影列表，排序后必须与床位数量一致 |
 | `-chunkCSRDir <dir>` | compact chunk 目录，包含 `metadata.bin + chunk_*.csrb`；也可用CSRQ及配置matrix_id |
@@ -66,9 +71,15 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 
 `-dfList` 中任一路径含 `BedN` 时，程序会按床号稳定排序；仅把命令文本写成 `Bed5;...;Bed1` **不会**反转实际输入顺序。床号随 patient/physical +Z 增加，Bed1 为最小 Z。少于五床时直接传真实连续子集（如 Bed2,3,4），不补空床；地图 MHD 的 `SPECTBeds` 必须精确相同。
 
-多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每床位逐元素求和后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非有限值或求和溢出都会失败退出。
+每个能窗、床位和时间段的投影/背景都必须完整匹配矩阵 metadata 的角度数与每角度射线数；MAT 提供探测器形状时还必须匹配 detZ/detX。不会自动截去多余角度，也不以总元素数相同代替布局匹配。所有计数必须有限且 >= 0，零计数合法；负值、NaN、Inf 会报错并标明源文件与从 0 开始的元素/记录索引。MAT 事件表也检查原始计数字段，不允许重复记录聚合掩盖非法值。
 
-有无 CTAC 均可复用分母缓存。按上述CLI/配置优先级解析后，可使用显式 `-compactDenomCache` 或 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不再受终端启动目录影响。v4 manifest 包含矩阵 profile/文件统计、metadata、全局维度、床位 Z 起点、PSF、解析后的坏探头列表、normfactor、实际行权重、CTAC 因子表哈希及能窗指数，但不写 source/package 的绝对根路径，因此同一 profile 随包移动仍可复用；不匹配时不会复用，不同床位数必须分开。旧 v3 cache 会在升级后一次性 miss 并生成新的 v4 文件；显式 v3 文件需改用新路径或有意删除后重建。以下是旧单矩阵预热工具入口，只用于经dump确认的单矩阵配置；不替代joint两窗缓存准备。可手动预热匹配单矩阵配置的1–5床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
+多时间段合并示例：配置 `merge_time_segments=true`，并传入 `-df "D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT"`。程序只纳入同级、名称满足 `YYYYMMDD_HHMMSS` 且含 `SPECT` 的目录；所有时间段必须具有完全相同的 `BedN.bin` 集合与 BIN 大小/头/几何。每份源投影先检查完整几何与计数合法性，再按原顺序逐元素求和，不允许用正负相抵掩盖非法计数。合并后直接进入重建，不写中间投影；manifest 保留每床位的全部来源。任一缺床、几何不一致、非法计数或求和溢出都会失败退出。
+
+有无 CTAC 均可复用分母缓存。按上述 CLI/配置优先级解析后，可使用显式 `-compactDenomCache` 或 `[SystemMatrix] compact_denom_cache_path`，否则在 `compact_denom_cache_dir` 下自动选择 `auto_<manifest-hash>.mhd`。INI 相对路径按 exe 目录解析，发布默认落在 `bin/cache/compact_denom/`，不受终端启动目录影响。
+
+当前 v6 manifest 使用本次矩阵的规范化完整路径、文件大小/修改时间、布局/metadata，以及全局维度、床位 Z 起点、PSF、坏探头、norm、实际行权重、CTAC 因子与能窗指数。**不计算矩阵 SHA，不认证历史矩阵版本。**设备/矩阵选择由调用方负责；同路径原地替换且保留大小和修改时间时，调用方须清除旧分母缓存。正常文件属性或参数变化会产生新自动缓存；矩阵移动路径后也重算。旧 v3/v4/v5 自动缓存升级后一次性 miss，显式旧缓存需改用新路径或有意删除后重建。运行期间不要改写输入。
+
+以下是旧单矩阵预热工具入口，只用于经 dump 确认的单矩阵配置；不替代 joint 两窗缓存准备。可手动预热匹配单矩阵配置的 1–5 床（占位 BIN，投影计数不进入 denom；有 CTAC 时不要用）：
 
 ```powershell
 python tools\prep_compact_denom_cache.py --chunkCSRDir <matrix-dir>
@@ -115,15 +126,14 @@ python tools\prep_compact_denom_cache.py --help
 | `-th <N>` / `-threads <N>` / `-t <N>` | OpenMP 线程数 |
 | `-cudaDevice <id>` | 选择 CUDA device，覆盖环境变量 `SPECT_CUDA_DEVICE` |
 
-MLEM加角度子集即OSEM，BSREM共用划分；单/双窗同格式CSRB和实验joint CSRQ均支持N10。N>1不与CTAC组合。子集数整除compact角度数，递减阶段满足整除关系且迭代数之和为A。当前不提供POSEM像素分支。后端固定CUDA；旧后端选择参数已退役。
+MLEM加角度子集即OSEM，BSREM共用划分；单/双窗同格式CSRB和实验joint CSRQ均支持N10。CSRB与CSRQ均已实现CTAC子集路径；CSRQ N>1复用原有逐角度因子分解内核，2026-10-09的K4/K8、驻留/流式、双床双窗GPU数值回归通过，仍实验、未发布。子集数整除compact角度数，递减阶段满足整除关系且迭代数之和为A。当前不提供POSEM像素分支。后端固定CUDA；旧后端选择参数已退役。不能由入口允许或数值回归通过推定生产签收。
 
 ### compact CUDA 性能环境变量
 
 | 环境变量 | 发布默认 | 说明 |
 |---|---|---|
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 覆盖资源感知的主机端矩阵缓存；仅在当前可用内存保留安全余量时完整缓存系统矩阵 |
-| `SPECT_COMPACT_BRANCH_BATCH` | 开启 | 常驻 branch×bed 合批（packed-K 正向 + CSR_ALG2 转置）；设为 `0` 会关闭常驻 MLEM，不是产品 A/B |
-| `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` | 关闭 | 设为 `0` 才对矩阵 payload 使用 mmap；当前低时延路线不依赖 mmap |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 主机端矩阵缓存预算；接受 auto、非负字节数及 K/M/G/T 后缀（1024 倍数），0 关闭永久 host cache；非法/非有限值报错。CSRB auto 按可用内存保留余量，CSRQ auto 不启用 host cache。仅完整覆盖矩阵的 CSRB host cache 会逐块锁页；驱动拒绝锁页时，已锁页分块保留，其余分块留在 host cache 中走普通内存上传（结果不变、传输变慢），`.log` 记录 `[WARNING] compact host cache page-lock refused ... page-locked k / n chunks`，不再因此报 `out of memory` 退出 |
+| 已退役实验开关 | 不设置 | `SPECT_COMPACT_BRANCH_BATCH` / `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 不再接受；历史实验使用对应冻结 EXE |
 
 实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。host cache 默认按已发现矩阵总量与启动时可用内存自动选择，至少为系统保留 8 GiB 且总内存保留不低于 25%；32 GB 主存通常只缓存部分矩阵，不承诺同等吞吐。共享 GPU 或磁盘上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。
 
@@ -221,7 +231,7 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 | `-ctac` | 启用迭代 CTAC |
 | `-ctacModel <line-integral>` | CTAC 模型；默认且唯一公开入口为 `line-integral` |
 | `-ctacRotSign <1\|-1\|cw\|ccw>` | 角度旋转符号，默认 1 |
-| `-ctacAutoMu <vol>` | 从早期重建体自动生成水 mu-map；与 `-attMap` 二选一 |
+| `-ctacAutoMu <vol>` | 从未变换的全网格早期重建 MHD 生成水 mu-map；要求 `SPECTAutoMuCompatible=1`；与 `-attMap` 二选一 |
 | `-ctacAutoMuThresh <f>` | auto-mu 阈值，相对 P99.9，范围 `(0,1)`，默认 0.05 |
 | `-ctacAutoMuValue <mu>` | 调试覆盖 body fill mu，单位 `mm^-1`；默认由 `[CTAC] auto_mu_nuclide` 查表 |
 | `-ctacMapEnergy <keV>` | μ 图（或 auto-mu 填充值）对应的光子能量；默认取 `auto_mu_nuclide` 预设能量（INI `[CTAC] mu_map_energy_kev`） |
@@ -234,11 +244,36 @@ CASToR PSF 与输出 Smooth 固定走 CUDA CASToR float32 staging；Butterworth 
 
 CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-voxel 实现。108×108×80、360 角度时按 16-angle batch 生成，临时 device factor 输出约 29 MiB；compact 系统矩阵 resident cache 仍可能主动使用其余显存，两者不应混作 factor 峰值。
 
+CSRQ 多子集 CTAC 不新增调用参数：在已有正确矩阵/投影配置上使用 `-it 50:10 -ctac -attMap D:/data/case/maps/att_local.mhd`。双窗仍需对应的 `-ctacWindowEnergies`，子集数必须整除 compact 角度数；不会自动改为 N=1。CT 或有效 AutoMu 生成的衰减表走同一路径，仅上传当前子集需要的角度切片。此项为待 GPU 回归的工作树候选，不表示已部署的 SPECT_Core 具备该能力。
+
+### 输入检查与缓存
+
+`-attMap`、`-maskFromAtt` 使用的 μ 图必须与内部重建体尺寸和间距一致（间距容差 `1e-6*max(1,预期间距)` mm，仅容纳头部精度舍入），值须有限且非负，单位 `mm^-1`。`-regCT` 同样检查网格和有限值，但允许合法负 HU；它是正则边权输入，不会自行开启 CTAC。多床 μ 图仍按 local-matrix-Z 堆叠，HU 图按 reconstruction-storage-Z 堆叠；不是拼接后的显示体。
+
+AutoMu 保存输出现在带 `SPECTAutoMuCompatible=0/1`。旋转、X/Z 翻转、裁剪/端层置零、拼床或大端保存结果标记为 0；无标记旧文件也拒绝，不能仅靠同尺寸推定坐标一致。使用单床早期 run 的全网格、无输出变换 MHD（`matrix_grid_output=true`、输出翻转/旋转/裁剪均关闭）；多床需调用方提供经过坐标核实的未拼接 storage 体。不要给旧显示图手工补 1 来绕过检查。缺 CT 时不传 `-ctac` 就是不作衰减校正；只有满足活动分布近似水体假设的仿体才考虑 AutoMu，不能把它当作测量 CT。
+
+CTAC 因子缓存 v2 同时记录 MHD/HDR 头和实际 RAW/IMG 的规范化路径、大小、修改时间，并记录 AutoMu 阈值、填充值与圆柱掩码参数。只更新数据文件也会使缓存失效；旧缓存首次 miss。**没有计算矩阵或体数据 SHA。**同路径原地改写且保留大小/时间时由调用方清除旧缓存；运行中输入必须不变。
+
+### SC60 的 CT 准备
+
+`scripts/prepare_ct_mu_map.py --recon-manifest` 从现有运行 manifest 读取完整网格、间距、床号、步进及 Z 映射，不套用 PSC 的 108/120、0.3 mm 或 16.8 mm。参考 SPECT DICOM 必须来自对应无旋转、翻转、裁剪和额外导出变换的全网格 run；不满足时明确报错。单床未知步进可为 0，多床必须已有明确的整数层步进。CT/SPECT 的 FoR/方向/IPP 仍需正确，脚本不会通过网格匹配证明真实配准。
+
+```powershell
+python scripts/prepare_ct_mu_map.py `
+  --ct-dir D:/data/case/CT --spect-dicom-dir D:/data/case/SPECT_reference `
+  --recon-manifest D:/data/case/reference/recon_manifest.json `
+  --output D:/data/case/maps/physical_mu.mhd `
+  --attenuation-mu-output D:/data/case/maps/att_local.mhd `
+  --regct-hu-output D:/data/case/maps/ct_storage.mhd
+```
+
+重建沿用 `-ctac -attMap D:/data/case/maps/att_local.mhd`；需要 CT 引导正则时另传 `-regCT .../ct_storage.mhd`。示例沿用脚本现有 Tc 水 μ 默认值，其他能量要显式设置 `--water-mu` 和重建能量参数。`--recon-manifest` 不与 `--profile` 混用，也不自动套用 PSC 的 `mdp_device` 配准预设；原 PSC `--profile device160/recon220` 调用保持可用。
+
 ---
 
 ## 多床位与输出变换
 
-下面的固定裁剪/gain-fit 是 **PSC 默认合同**。SC60 recipe 使用 `[InputOutput] matrix_grid_output=true`，完整保留每床矩阵网格及 ROI 设置，输出 Z 为 `baseNz+(床数-1)*step`，按有效掩膜做 cosine 融合，不拟合床间增益。多床必须给出有限正、整数体素层对齐的 `-bedStepMm`，不能有网格间隙；不支持 seam XY alignment。SC60 系统尚未组装完成，recipe 的 `bed_step_mm=0` 表示未知，不继承 PSC 16.8 mm。详见 [现行格式合同](Format_Reader_Matrix_CN.md#sc60-网格输出)。该候选未替换已发布 EXE。
+下面的固定裁剪/gain-fit 是 **PSC 默认合同**。SC60 recipe 使用 `[InputOutput] matrix_grid_output=true`，完整保留每床矩阵网格及 ROI 设置，最多 16 床。多床为联合重建：各床网格按 `床序*step` 放入一个全局体（Z 为 `baseNz+(床数-1)*step`），重叠体素合并灵敏度与反投影后统一更新，直接保存该全局体，不做 cosine 融合，不拟合床间增益；暂不支持 CTAC、`-ctacAutoMu`、`-maskFromAtt`。多床必须给出有限正、整数体素层对齐的 `-bedStepMm`，不能有网格间隙；不支持 seam XY alignment。例如 `-df D:\scan\SPECT -beds 12 -bedStepMm 8`。SC60 系统尚未组装完成，recipe 的 `bed_step_mm=0` 表示未知，不继承 PSC 16.8 mm。详见 [现行格式合同](Format_Reader_Matrix_CN.md#sc60-网格输出)。该候选未替换已发布 EXE。
 
 固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、默认输出 `100×100×66`（`step+10`）；`-singleBedStepAligned 0` 恢复旧 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
 
@@ -246,8 +281,16 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 |---|---|
 | `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` 物理 overlap 表；**派生值** `overlap = baseNz - round(bed_step_mm / voxel_z)`（当前220层、0.3mm、16.8mm步进时为164），可省略（自动推算）或传错（自动纠正 + warning） |
 | `-bedStepMm <mm>` / `[MultiBed] bed_step_mm` | 扫描仪机械床步进（默认 `16.8` mm，权威输入）；输出步进 `step = round(bed_step_mm / voxel_z)`，中心裁剪 `step+10` 层 |
-| `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | 可选 detZ/per-bin/full-projection 效率权重，仅作用于 compact sensitivity denominator；默认空 |
-| `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影校正因子 `c`；对 sensitivity 施加 `1/c`；默认空 |
+| `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | 可选 detZ/per-bin/full-projection 效率 e；对 sensitivity 施加 e，有背景时内部转换为 b/e；默认空 |
+| `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影正校正因子 c，效率 e=1/c；支持同计数空间的背景；默认空 |
+
+归一化与背景均默认关闭；只在已有对应校正/背景数据时配置。双窗仍用现有 `[Normalization] factor_file/factor_file2` 分别绑定主窗/第二窗，不新增接口。背景按原始探测计数传入，不提前乘 c；完整模型及窗口/时间约定见 [矩阵合同](Format_Reader_Matrix_CN.md)。例如在已有双窗、两床重建命令上增加：
+
+```text
+-bProjList "D:/case/Bed1_high_bg.bin;D:/case/Bed2_high_bg.bin" -bProjList2 "D:/case/Bed1_low_bg.bin;D:/case/Bed2_low_bg.bin"
+```
+
+程序不会估计散射、自动寻找背景或从另一能窗继承背景。`-projectionResidual 1` 输出有效行的 `eHx+b` 与计数比较；被屏蔽的 detector-Z 行仍保留 CSV 行，但 count=0，不参与统计。
 | `-detZEdgeCensor <k>` / `[MultiBed] detz_edge_censor` | compact 分子+分母每侧屏蔽 k 行 detector-Z；默认 0 |
 | `-cropEnd <top[,end]>` | 整体输出翻转后将 Z 首尾指定层置零，不改变层数 |
 | `-zbedflip [0\|1]` | local system-matrix Z 与 reconstruction-storage Z 的逐床映射；发布默认 1。`-attMap` 必须使用 local-matrix-Z，`-regCT` 不应用此反转 |
@@ -270,13 +313,13 @@ CTAC line-integral factor 固定由 CUDA 生成，无 CPU fallback 或旧 per-vo
 | `-fout <dir/name>` | 输出路径前缀；传入绝对路径（含盘符/UNC）时，`.log` 与 MHD/RAW 均写入该绝对目录 |
 | `-o <dir>` / `-output <dir>` | 输出目录 |
 | `-n <name>` / `-name <name>` | 输出文件名前缀 |
-| `-vb <0\|1\|2>` | 日志级别；0=安静，1=INFO 默认，2=DEBUG。进度行 `[ITER] n/N compact` 在 `-vb 0` 也会打到控制台 |
+| `-vb <0\|1\|2>` | 日志级别；0=最小控制台（部署 `spect_config.ini` 默认）：控制台只输出 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact` 进度行与错误行（`Error`/`[ERROR]`/`[FATAL]` 开头），INFO、`[NOTE]`、`[WARNING]` 只写入 `.log`；1=INFO（无配置时的程序默认），2=DEBUG。CLI `-vb` 优先于配置，现场诊断用 `-vb 1` |
 | `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件。`-v <n>` 会失败（那是 verbosity，请用 `-vb`） |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
 `[ITER] n/N compact` 只表示完整迭代开始，每轮一条，N 为完整迭代总数，不乘子集数；例如 `50:10` 共 50 条。子集明细使用 `[SUBSET]`，不参与旧进度识别；`[ITER_TIME]` / `[SUBSET_TIME]` 仍为耗时记录。最后一条 `[ITER] N/N compact` 不代表输出写入完成，完成必须以进程退出和产物状态为准。
 
-默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 也会在控制台打出路径与 `[ITER]`；其余 INFO 仍写入 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
+默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 时这两行与 `Reconstruction finished successfully.` 只写入 `.log`，控制台仅有 `[ITER]` 与错误行；按控制台文本判定完成的脚本须显式传 `-vb 1`，或改为检查进程退出码与 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
 
 ---
 

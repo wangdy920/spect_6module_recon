@@ -1,13 +1,15 @@
 #include "sparse/CompactSubsets.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <sstream>
 #include <stdexcept>
 
 namespace spect {
 
 std::vector<int> compactSubsetAngles(int compactNumAngles,
-                                     const CompactSubsetSpec &spec) {
+                                     const CompactSubsetSpec &spec,
+                                     int firstAngle, int endAngle) {
   if (compactNumAngles <= 0 || spec.count <= 0 || spec.index < 0 ||
       spec.index >= spec.count || compactNumAngles % spec.count != 0) {
     throw std::runtime_error(
@@ -15,10 +17,17 @@ std::vector<int> compactSubsetAngles(int compactNumAngles,
         "the compact angle count (" +
         std::to_string(compactNumAngles) + ").");
   }
+  if (endAngle == -1) endAngle = compactNumAngles;
+  if (firstAngle < 0 || firstAngle > endAngle || endAngle > compactNumAngles) {
+    throw std::runtime_error("compact subset angle range is outside the matrix.");
+  }
   std::vector<int> angles;
-  angles.reserve(static_cast<size_t>(compactNumAngles / spec.count));
-  for (int angle = spec.index; angle < compactNumAngles; angle += spec.count) {
-    angles.push_back(angle);
+  angles.reserve(static_cast<size_t>((endAngle - firstAngle) / spec.count) + 1u);
+  int offset = spec.index - firstAngle % spec.count;
+  if (offset < 0) offset += spec.count;
+  for (int64_t angle = static_cast<int64_t>(firstAngle) + offset;
+       angle < endAngle; angle += spec.count) {
+    angles.push_back(static_cast<int>(angle));
   }
   return angles;
 }

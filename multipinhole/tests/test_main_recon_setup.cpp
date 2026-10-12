@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "core/BedPathUtils.h"
+#include "core/ReconLimits.h"
+#include "recon/BedOffsets.h"
 
 namespace spect {
 namespace main {
@@ -347,13 +349,51 @@ TEST(ReconSetupTest, MatrixGridOutputRequiresExplicitAlignedMultiBedStep) {
   args.cylinderDiameterMM = 32.8f;
   args.cylinderHeightMM = 12.0f;
   const auto multi = prepareBedSetup(args);
-  EXPECT_EQ(args.Nz, 480);
+  // Joint global volume: 240 + 20 layers, beds overlap by 220 layers.
+  EXPECT_EQ(args.Nz, 260);
   EXPECT_EQ(multi.canonicalGeom.cropLayers, 240);
   EXPECT_EQ(multi.canonicalGeom.stepLayers, 20);
   EXPECT_EQ(multi.canonicalGeom.blendOverlap, 220);
-  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{0}));
+  EXPECT_EQ(args.bedOverlaps, (std::vector<int>{220}));
   EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{220}));
   EXPECT_FLOAT_EQ(args.cylinderHeightMM, 12.0f);
+  EXPECT_NE(multi.summary.find("joint"), std::string::npos);
+}
+
+TEST(ReconSetupTest, MatrixGridJointVolumeSupportsSixteenBeds) {
+  ReconArgs args;
+  args.Nx = args.Ny = 90;
+  args.Nz = 240;
+  args.dz = 0.4;
+  args.matrixGridOutput = true;
+  args.bedStepMm = 6.0;
+  for (int bed = 1; bed <= spect::core::kMaxBeds; ++bed)
+    args.projPaths.push_back("Bed" + std::to_string(bed) + ".bin");
+  const auto result = prepareBedSetup(args);
+  ASSERT_EQ(spect::core::kMaxBeds, 16);
+  EXPECT_EQ(result.bedNumbers.back(), 16);
+  EXPECT_EQ(args.Nz, 240 + 15 * 15);
+  EXPECT_EQ(args.bedOverlaps, std::vector<int>(15, 225));
+  EXPECT_EQ(spect::app::computeBedZOffsets(16, 240, args.bedOverlaps).back(),
+            15 * 15);
+
+  ReconArgs tooMany = args;
+  tooMany.Nz = 240;
+  tooMany.projPaths.push_back("Bed17.bin");
+  EXPECT_THROW((void)prepareBedSetup(tooMany), std::runtime_error);
+
+  ReconArgs ctac = args;
+  ctac.Nz = 240;
+  ctac.doCTAC = true;
+  EXPECT_THROW((void)prepareBedSetup(ctac), std::runtime_error);
+
+  ReconArgs sixModule;
+  sixModule.Nx = sixModule.Ny = 120;
+  sixModule.Nz = 220;
+  sixModule.dz = 0.3;
+  for (int bed = 1; bed <= 6; ++bed)
+    sixModule.projPaths.push_back("Bed" + std::to_string(bed) + ".bin");
+  EXPECT_THROW((void)prepareBedSetup(sixModule), std::runtime_error);
 }
 
 TEST(ReconSetupTest, PrepareBedSetupCorrectsLegacyOverlapForSmallMatrixNz) {

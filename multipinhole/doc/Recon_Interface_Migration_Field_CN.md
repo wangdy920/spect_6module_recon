@@ -20,7 +20,7 @@ python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" 
 | 旧行为/假设 | 当前合同 |
 |---|---|
 | `-it N:S`中S为保存频率 | `-it A:B`为迭代数:子集数；保存用 `-save-every N`，默认0仅末次 |
-| compact固定一个子集 | OSEM/BSREM共用角度子集，单CSRB和joint CSRQ均支持N10；N>1与CTAC组合未开放 |
+| compact固定一个子集 | OSEM/BSREM共用角度子集；CSRB及实验CSRQ均有N10和子集CTAC路径，调用参数不变；CSRQ N>1 CTAC的K4/K8、驻留/流式、双床双窗GPU数值回归已通过，仍实验、未发布 |
 | 每次显式拼算法、PSF和几何四件套 | 普通wrapper只传输入输出，采集核素从summary继承；其余由方案、global及metadata解析 |
 | `-opti bsrem`自动加载RDP | 已选方案不随优化器变化；明确选RDP/TV方案 |
 | true只保护PSF/Filtering等四节 | true保护配置中所有已填写重建字段，包括算法、迭代、矩阵和norm |

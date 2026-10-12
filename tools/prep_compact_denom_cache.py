@@ -20,6 +20,7 @@ import re
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -161,7 +162,7 @@ def discover_matrix(explicit: Path | None, exe: Path | None) -> Path:
 
 def parse_manifest_fields(manifest_path: Path) -> dict[str, str]:
     fields: dict[str, str] = {}
-    for line in manifest_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
@@ -170,16 +171,23 @@ def parse_manifest_fields(manifest_path: Path) -> dict[str, str]:
 
 
 def existing_auto_caches(cache_dir: Path, bed: int, matrix_dir: Path) -> list[Path]:
-    wanted = str(matrix_dir.resolve())
+    wanted = matrix_dir.resolve()
     matches: list[Path] = []
     for manifest in sorted(cache_dir.glob("auto_*.manifest.txt")):
         fields = parse_manifest_fields(manifest)
         if fields.get("bed_count") != str(bed):
             continue
-        chunk_dir = fields.get("chunk_dir", "")
-        if chunk_dir and Path(chunk_dir).resolve() != Path(wanted):
+        if fields.get("dual_window") == "1" or fields.get("ctac") == "1":
             continue
-        matches.append(manifest.with_suffix(".mhd"))
+        # Only delete caches explicitly bound to this input directory. Older
+        # path-free manifests cannot safely identify the caller's matrix.
+        chunk_dir = fields.get("chunk_dir", "")
+        chunk_path = fields.get("chunk_0_path", "")
+        if chunk_path:
+            chunk_dir = str(Path(chunk_path).parent)
+        if not chunk_dir or Path(chunk_dir).resolve() != wanted:
+            continue
+        matches.append(manifest.with_suffix("").with_suffix(".mhd"))
     return matches
 
 
@@ -285,6 +293,35 @@ def self_check(args: argparse.Namespace) -> int:
     if angles != 4 or rays != 6 or fill != 1.0:
         raise RuntimeError("dummy BIN header/payload mismatch")
     print("self-check: dummy BIN writer ok")
+    with tempfile.TemporaryDirectory(prefix="spect_cache_cleanup_", dir=args.work_dir) as temp:
+        root = Path(temp)
+        matrix = root / "matrix"
+        matrix.mkdir()
+        common = "bed_count=1\n"
+        bound = common + f"chunk_0_path={(matrix / 'chunk_000.csrb').as_posix()}\n"
+        manifests = {
+            "selected": bound,
+            "subset": bound + "subset=0/10\n",
+            "other": common + f"chunk_0_path={(root / 'other' / 'chunk_000.csrb').as_posix()}\n",
+            "unknown": common,
+            "joint": bound + "dual_window=1\n",
+            "ctac": bound + "ctac=1\n",
+            "other_beds": bound.replace("bed_count=1", "bed_count=2"),
+            "legacy": common + f"chunk_dir={matrix.as_posix()}\n",
+        }
+        for name, content in manifests.items():
+            (root / f"auto_{name}.manifest.txt").write_text(content, encoding="utf-8")
+            (root / f"auto_{name}.mhd").touch()
+            (root / f"auto_{name}.raw").touch()
+        selected = existing_auto_caches(root, 1, matrix)
+        assert {p.name for p in selected} == {"auto_selected.mhd", "auto_subset.mhd", "auto_legacy.mhd"}
+        for mhd in selected:
+            assert mhd.resolve().parent == root.resolve()
+            delete_cache_set(mhd)
+        for name in manifests:
+            for suffix in (".mhd", ".raw", ".manifest.txt"):
+                assert (root / f"auto_{name}{suffix}").exists() == (name not in {"selected", "subset", "legacy"})
+    print("self-check: cache cleanup is input-scoped and removes all three files")
     exe = None
     if args.exe is not None:
         exe = discover_exe(args.exe)

@@ -36,6 +36,37 @@ TEST(IOTest, CompactChunkHostCacheBudgetAdaptsToMatrixAndRam) {
                                40ull * GiB, 0, 0));
 }
 
+TEST(IOTest, CompactChunkHostCacheBudgetRejectsMalformedOverrides) {
+    const char *name = "SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES";
+    const char *old = std::getenv(name);
+    const bool hadOld = old != nullptr;
+    const std::string saved = old ? old : "";
+    const auto set = [name](const char *value) {
+#ifdef _WIN32
+        _putenv_s(name, value ? value : "");
+#else
+        if (value) setenv(name, value, 1);
+        else unsetenv(name);
+#endif
+    };
+    try {
+        for (const char *value : {"-1", "nan0", "NaNg", "1e309", "12garbage", "1x"}) {
+            set(value);
+            EXPECT_THROW(defaultCompactChunkHostCacheBudgetBytes(4096), std::runtime_error);
+        }
+        set("0");
+        EXPECT_EQ(defaultCompactChunkHostCacheBudgetBytes(4096), 0u);
+        set("1.5K");
+        EXPECT_EQ(defaultCompactChunkHostCacheBudgetBytes(4096), 1536u);
+        set("auto");
+        EXPECT_LE(defaultCompactChunkHostCacheBudgetBytes(4096), 4096u);
+    } catch (...) {
+        set(hadOld ? saved.c_str() : nullptr);
+        throw;
+    }
+    set(hadOld ? saved.c_str() : nullptr);
+}
+
 void writeCompactMetadata(const std::filesystem::path &path, int use90,
                           int useZ, int use45, int symCode,
                           int symmetryOrder,

@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 
@@ -122,7 +123,8 @@ bool shouldFlipXWholeOutput(const OutputTransform *transform) {
 }
 
 bool shouldStitchCanonicalOutput(const OutputTransform *transform) {
-  return transform && transform->baseNz > 0 &&
+  // Matrix-grid beds are reconstructed jointly; the volume is already global.
+  return transform && !transform->matrixGridOutput && transform->baseNz > 0 &&
          transform->bedZStarts.size() > 1;
 }
 
@@ -239,12 +241,11 @@ std::vector<int> outputBedStarts(const OutputTransform &transform) {
   return starts;
 }
 
-double center66CosineFadeIn(int overlapIndex, int blendOverlap, bool voxelCentered = false) {
+double center66CosineFadeIn(int overlapIndex, int blendOverlap) {
   if (blendOverlap == 1) return 0.5;
   constexpr double pi = 3.14159265358979323846;
-  const double phase = voxelCentered
-      ? (overlapIndex + 0.5) / blendOverlap
-      : static_cast<double>(overlapIndex) / static_cast<double>(blendOverlap - 1);
+  const double phase =
+      static_cast<double>(overlapIndex) / static_cast<double>(blendOverlap - 1);
   const double sine = std::sin(0.5 * pi * phase);
   return sine * sine;
 }
@@ -252,9 +253,6 @@ double center66CosineFadeIn(int overlapIndex, int blendOverlap, bool voxelCenter
 void validateCenter66CosineTransform(const OutputTransform &transform, int nz) {
   validateBedZFlipTransform(transform, nz);
   const auto& geom = transform.canonicalGeom;
-  if (transform.matrixGridOutput &&
-      (transform.seamXyAlign || geom.cropLayers != transform.baseNz))
-    throw std::invalid_argument("matrix-grid output requires full bed grids without XY seam alignment");
   if (transform.baseNz < geom.cropLayers)
     throw std::invalid_argument(
         "prepareOutputVolume: canonical stitch requires baseNz >= " +
@@ -527,7 +525,7 @@ SeamXyShift estimateOverlapXyShift(const std::vector<double> &source, int nx,
 std::vector<double> center66CosineBlendOutputOverlap(
     const std::vector<double> &source, int nx, int ny, int nz,
     const OutputTransform &transform, double voxelSizeXmm,
-    double voxelSizeYmm, const std::vector<uint8_t> *mask) {
+    double voxelSizeYmm) {
   validateCenter66CosineTransform(transform, nz);
   const auto& geom = transform.canonicalGeom;
   const std::vector<int> starts = outputBedStarts(transform);
@@ -568,8 +566,7 @@ std::vector<double> center66CosineBlendOutputOverlap(
   const int outputNz = starts.back() + geom.cropLayers;
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
   std::vector<double> out(static_cast<size_t>(outputNz) * plane, 0.0);
-  const bool maskedGrid = transform.matrixGridOutput && mask != nullptr;
-  std::vector<double> weights(maskedGrid ? out.size() : static_cast<size_t>(outputNz), 0.0);
+  std::vector<double> weights(static_cast<size_t>(outputNz), 0.0);
   for (size_t bed = 0; bed < starts.size(); ++bed) {
     const int dx = sampleDx[bed];
     const int dy = sampleDy[bed];
@@ -579,13 +576,12 @@ std::vector<double> center66CosineBlendOutputOverlap(
       // only selects which overlap voxels are compared for gain; inverting
       // these weights produced a paired bed-switch at each 10-layer joint.
       if (bed > 0 && localZ < geom.blendOverlap) {
-        const double fade = center66CosineFadeIn(
-            localZ, geom.blendOverlap, transform.matrixGridOutput);
+        const double fade = center66CosineFadeIn(localZ, geom.blendOverlap);
         weight *= fade;
       }
       if (bed + 1 < starts.size() && localZ >= geom.stepLayers) {
-        const double fade = center66CosineFadeIn(
-            localZ - geom.stepLayers, geom.blendOverlap, transform.matrixGridOutput);
+        const double fade =
+            center66CosineFadeIn(localZ - geom.stepLayers, geom.blendOverlap);
         weight *= 1.0 - fade;
       }
       const int srcZ = transform.bedZStarts[bed] + cropStart + localZ;
@@ -593,16 +589,7 @@ std::vector<double> center66CosineBlendOutputOverlap(
       const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
       const size_t dstOffset = static_cast<size_t>(dstZ) * plane;
       const double scaled = weight * gains[bed];
-      if (maskedGrid) {
-        // A masked-out bed is missing support, not a zero-valued observation.
-        // Matrix-grid mode disallows XY seam shifts. Centered taper samples
-        // stay positive when only one bed covers an overlap boundary voxel.
-        for (size_t xy = 0; xy < plane; ++xy) {
-          if (!(*mask)[srcOffset + xy]) continue;
-          out[dstOffset + xy] += scaled * source[srcOffset + xy];
-          weights[dstOffset + xy] += weight;
-        }
-      } else if (dx == 0 && dy == 0) {
+      if (dx == 0 && dy == 0) {
         for (size_t xy = 0; xy < plane; ++xy)
           out[dstOffset + xy] += scaled * source[srcOffset + xy];
       } else {
@@ -620,13 +607,8 @@ std::vector<double> center66CosineBlendOutputOverlap(
           }
         }
       }
-      if (!maskedGrid) weights[static_cast<size_t>(dstZ)] += weight;
+      weights[static_cast<size_t>(dstZ)] += weight;
     }
-  }
-  if (maskedGrid) {
-    for (size_t i = 0; i < out.size(); ++i)
-      if (weights[i] > 0) out[i] /= weights[i];
-    return out;
   }
   for (int z = 0; z < outputNz; ++z) {
     const double weight = weights[static_cast<size_t>(z)];
@@ -787,6 +769,53 @@ void clampNonNegativeInPlace(std::vector<double> &vol) {
     v = std::max(0.0, v);
 }
 
+std::vector<double> rotateOutputXY(const std::vector<double> &source,
+                                   int nx, int ny, int nz,
+                                   double vx, double vy, double degrees) {
+  if (!std::isfinite(degrees) || !std::isfinite(vx) || !std::isfinite(vy) ||
+      vx <= 0.0 || vy <= 0.0)
+    throw std::invalid_argument("Output XY rotation requires a finite angle and positive finite XY spacing");
+  degrees = std::remainder(degrees, 360.0);
+  if (degrees == 0.0)
+    return source;
+  const double radians = degrees * (std::acos(-1.0) / 180.0);
+  double c = std::cos(radians), s = std::sin(radians);
+  // Exact cardinal angles avoid resampling noise on aligned voxel grids.
+  if (std::remainder(degrees, 90.0) == 0.0) {
+    c = std::round(c);
+    s = std::round(s);
+  }
+  const double cx = (nx - 1) * 0.5, cy = (ny - 1) * 0.5;
+  const size_t plane = static_cast<size_t>(nx) * ny;
+  std::vector<double> out(source.size(), 0.0);
+  for (int y = 0; y < ny; ++y) {
+    for (int x = 0; x < nx; ++x) {
+      // Inverse mapping in millimetres preserves anisotropic voxel geometry.
+      const double px = (x - cx) * vx, py = (y - cy) * vy;
+      const double sx = (c * px + s * py) / vx + cx;
+      const double sy = (-s * px + c * py) / vy + cy;
+      if (sx <= -1.0 || sx >= nx || sy <= -1.0 || sy >= ny)
+        continue;
+      const int x0 = static_cast<int>(std::floor(sx));
+      const int y0 = static_cast<int>(std::floor(sy));
+      const double fx = sx - x0, fy = sy - y0;
+      for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+          if (x0 + i < 0 || x0 + i >= nx || y0 + j < 0 || y0 + j >= ny)
+            continue;
+          const double weight = (i ? fx : 1.0 - fx) * (j ? fy : 1.0 - fy);
+          if (weight == 0.0)
+            continue;
+          for (int z = 0; z < nz; ++z)
+            out[z * plane + y * nx + x] += weight *
+                source[z * plane + (y0 + j) * nx + x0 + i];
+        }
+      }
+    }
+  }
+  return out;
+}
+
 } // namespace
 
 std::vector<double> fitCenter66BedGains(
@@ -794,7 +823,7 @@ std::vector<double> fitCenter66BedGains(
     const OutputTransform &transform, int cropStart, double voxelSizeXmm,
     double voxelSizeYmm) {
   const size_t bedCount = transform.bedZStarts.size();
-  if (transform.matrixGridOutput || bedCount < 2)
+  if (bedCount < 2)
     return std::vector<double>(bedCount, 1.0);
   std::vector<double> logGains(bedCount, 0.0);
   for (size_t lowBed = bedCount - 1; lowBed > 0; --lowBed) {
@@ -879,7 +908,7 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
   if (shouldStitchCanonicalOutput(transform)) {
     transformedSource = center66CosineBlendOutputOverlap(
         *sourceForOutput, nx, ny, transformedNz, *transform,
-        voxelSizeXmm, voxelSizeYmm, maskForOutput);
+        voxelSizeXmm, voxelSizeYmm);
     sourceForOutput = &transformedSource;
     const int stitchOutputNz = static_cast<int>(transformedSource.size() /
                                      (static_cast<size_t>(nx) * ny));
@@ -949,6 +978,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
     }
   }
 
+  if (transform && transform->xyRotationDeg != 0.0)
+    out = rotateOutputXY(out, croppedNx, croppedNy, croppedNz,
+                         voxelSizeXmm, voxelSizeYmm, transform->xyRotationDeg);
+
   if (outNz)
     *outNz = croppedNz;
   return out;
@@ -971,6 +1004,22 @@ void saveVolumeOutput(const std::vector<double> &source,
   if (transform && transform->centerCropNx > 0) outNx = transform->centerCropNx;
   if (transform && transform->centerCropNy > 0) outNy = transform->centerCropNy;
 
+  const auto iterStem = std::filesystem::path(outputDir) /
+      (outputPrefix + (iteration >= 0 ? "_it" + std::to_string(iteration) : ""));
+  const bool autoMuCompatible = littleEndian && crop.start == 0 && crop.end == 0 &&
+      outNx == geometry.nx && outNy == geometry.ny &&
+      outNz == geometry.nz && (!transform ||
+      (!transform->flipZPerBed && !transform->flipZWholeOutput &&
+       !transform->flipXWholeOutput && !transform->seamXyAlign &&
+       transform->bedZStarts.size() <= 1 &&
+       std::fmod(transform->xyRotationDeg, 360.0) == 0.0));
+  const auto markCoordinates = [&](const std::string &suffix) {
+    const auto header = iterStem.string() + suffix + ".mhd";
+    std::ofstream out(header, std::ios::app);
+    out << "SPECTAutoMuCompatible = " << (autoMuCompatible ? 1 : 0) << '\n';
+    out.flush();
+    if (!out) throw std::runtime_error("Failed writing volume coordinate marker: " + header);
+  };
   const bool clamp = outputFilters == nullptr || outputFilters->nonnegativeClamp;
   const bool filtersActive = outputFilters != nullptr && iteration >= 0;
   const bool overwritePrimary =
@@ -982,6 +1031,7 @@ void saveVolumeOutput(const std::vector<double> &source,
     io::saveMHDRAW(volume, outNx, outNy, outNz, geometry.vx,
                    geometry.vy, geometry.vz, outputDir, outputPrefix,
                    iteration, littleEndian);
+    markCoordinates("");
   };
   if (!overwritePrimary)
     savePrimary(primary);
@@ -1034,9 +1084,6 @@ void saveVolumeOutput(const std::vector<double> &source,
     savePrimary(primary);
   }
 
-  const std::filesystem::path iterStem =
-      std::filesystem::path(outputDir) /
-      (outputPrefix + "_it" + std::to_string(iteration));
   if (outputFilters->smoothEnabled) {
     if (clamp)
       clampNonNegativeInPlace(smoothed);
@@ -1044,6 +1091,7 @@ void saveVolumeOutput(const std::vector<double> &source,
                  outNz, static_cast<float>(geometry.vx),
                  static_cast<float>(geometry.vy),
                  static_cast<float>(geometry.vz), littleEndian);
+    markCoordinates("_smooth");
   }
   if (outputFilters->butterEnabled) {
     if (clamp)
@@ -1052,6 +1100,7 @@ void saveVolumeOutput(const std::vector<double> &source,
                  outNz, static_cast<float>(geometry.vx),
                  static_cast<float>(geometry.vy),
                  static_cast<float>(geometry.vz), littleEndian);
+    markCoordinates("_butter");
   }
 }
 

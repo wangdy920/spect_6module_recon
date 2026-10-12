@@ -190,7 +190,57 @@ void applyCompactMetadataGeometry(
   args.numAngles = meta.fullNumAngles;
 }
 
-void prepareTimeSegmentProjectionInputs(ReconArgs &args) {
+namespace {
+
+// -beds selects BedFirst..BedLast from the directory of one input (a
+// directory, or any file inside it). Every selected bed must exist.
+void selectBedRange(const ReconArgs &args, std::string &single,
+                    std::vector<std::string> &list, const char *option) {
+  if (single.empty() && list.empty())
+    return;
+  if (list.size() > 1 || (!single.empty() && !list.empty()))
+    throw std::runtime_error(
+        std::string("-beds needs one ") + option +
+        " directory (or one BedK.bin inside it), not a list.");
+  const std::filesystem::path input(list.empty() ? single : list.front());
+  const std::filesystem::path dir =
+      std::filesystem::is_directory(input) ? input : input.parent_path();
+  if (!std::filesystem::is_directory(dir))
+    throw std::runtime_error(std::string("-beds: ") + option +
+                             " directory not found: " + dir.string());
+  const BedFileMap beds = listBedFiles(dir);
+  std::vector<std::string> selected;
+  for (int bed = args.bedFirst; bed <= args.bedLast; ++bed) {
+    const auto found = beds.find(bed);
+    if (found == beds.end())
+      throw std::runtime_error("-beds " + std::to_string(args.bedFirst) +
+                               ":" + std::to_string(args.bedLast) +
+                               ": Bed" + std::to_string(bed) +
+                               ".bin not found in " + dir.string());
+    selected.push_back(found->second.generic_string());
+  }
+  single.clear();
+  list.clear();
+  if (selected.size() == 1)
+    single = selected.front();
+  else
+    list = std::move(selected);
+}
+
+} // namespace
+
+void prepareProjectionInputs(ReconArgs &args) {
+  if (args.bedFirst > 0) {
+    selectBedRange(args, args.projPath, args.projPaths, "-df/-dfList");
+    selectBedRange(args, args.projPath2, args.projPaths2, "-df2/-dfList2");
+    logInfo("Bed selection: Bed" + std::to_string(args.bedFirst) + "..Bed" +
+            std::to_string(args.bedLast) + " from " +
+            std::filesystem::path(args.projPaths.empty() ? args.projPath
+                                                         : args.projPaths.front())
+                .parent_path()
+                .string());
+    return;
+  }
   if (!args.mergeTimeSegments || !args.projPaths.empty() ||
       args.projPath.empty())
     return;
@@ -217,7 +267,7 @@ void prepareTimeSegmentProjectionInputs(ReconArgs &args) {
 }
 
 LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
-                                      int requestedAngles,
+                                      const io::CompactSymmetryMetadata &meta,
                                       const std::string &label,
                                       const std::string &defaultVar,
                                       bool mergeTimeSegments) {
@@ -245,8 +295,26 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
       const std::string varName = resolveMatVarName(path, defaultVar);
       spect::io::ProjectionReorderStats stats;
       spect::io::MatArray mat;
-      auto proj = spect::io::loadProjection(path, varName, requestedAngles,
+      auto proj = spect::io::loadProjection(path, varName, 0,
                                             &stats, &mat);
+      // Event-list reordering aggregates duplicates and skips non-finite
+      // records; validate source counts too so aggregation cannot hide them.
+      if (stats.isEventList) {
+        const bool rowTriples = mat.dims[1] == 3;
+        const size_t records = rowTriples ? mat.dims[0] : mat.dims[1];
+        for (size_t record = 0; record < records; ++record) {
+          const size_t index = rowTriples ? record + 2 * records : 3 * record + 2;
+          const double value = mat.d.empty() ? mat.f[index] : mat.d[index];
+          if (!std::isfinite(value) || value < 0.0)
+            throw std::runtime_error(label +
+                                     " contains an invalid count at record " +
+                                     std::to_string(record) +
+                                     " (expected finite and >= 0): " + path);
+        }
+      }
+      requireMatchingGeometry(proj, static_cast<size_t>(meta.fullRows()),
+                              meta.fullNumAngles, meta.detNz, meta.detNx,
+                              proj.detectorShapeKnown, label + ": " + path);
       const std::size_t projectionRecordCount = proj.size();
       const std::uintmax_t sourceFileSize =
           mergeTimeSegments ? std::filesystem::file_size(path) : 0;
@@ -271,24 +339,28 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
         bedDetNx = proj.detNx;
         bedShapeKnown = proj.detectorShapeKnown;
         bedFileSize = sourceFileSize;
-        bedData = std::move(proj.data);
-        if (!std::all_of(bedData.begin(), bedData.end(),
-                         [](double value) { return std::isfinite(value); }))
-          throw std::runtime_error(label + suffix +
-                                   " contains non-finite values.");
       } else {
         if (sourceFileSize != bedFileSize)
           throw std::runtime_error(label + suffix +
                                    " BIN header/file size mismatch.");
         requireMatchingGeometry(proj, bedRays, bedAngles, bedDetNz, bedDetNx,
                                 bedShapeKnown, label + suffix);
-        for (size_t i = 0; i < bedData.size(); ++i) {
+      }
+      for (size_t i = 0; i < proj.data.size(); ++i) {
+        if (!std::isfinite(proj.data[i]) || proj.data[i] < 0.0)
+          throw std::runtime_error(label + suffix +
+                                   " contains an invalid count at index " +
+                                   std::to_string(i) +
+                                   " (expected finite and >= 0): " + path);
+        if (segment != 0) {
           bedData[i] += proj.data[i];
           if (!std::isfinite(bedData[i]))
             throw std::runtime_error(label + suffix +
                                      " sum produced a non-finite value.");
         }
       }
+      if (segment == 0)
+        bedData = std::move(proj.data);
 
       if (proj.binaryFormat) {
         std::ostringstream oss;
@@ -335,19 +407,42 @@ LoadedProjectionSet loadProjectionSet(const std::vector<std::string> &paths,
 std::vector<double> loadVolumeChecked(const std::string &path,
                                       const std::string &label,
                                       int expectedNx, int expectedNy,
-                                      int expectedNz) {
+                                      int expectedNz,
+                                      const filters::Spacing3 &expectedSpacing,
+                                      bool nonnegative) {
+  const auto info = io::readVolumeInfo(path);
+  const double actual[] = {info.dx, info.dy, info.dz};
+  const double expected[] = {expectedSpacing.dx, expectedSpacing.dy, expectedSpacing.dz};
+  for (int axis = 0; axis < 3; ++axis) {
+    // Header and matrix spacing are float32; allow only decimal roundoff in mm.
+    if (!std::isfinite(actual[axis]) || !std::isfinite(expected[axis]) ||
+        actual[axis] <= 0.0 || expected[axis] <= 0.0 ||
+        std::abs(actual[axis] - expected[axis]) > 1e-6 * std::max(1.0, expected[axis]))
+      throw std::runtime_error(label + " voxel spacing mismatch on axis " +
+          std::to_string(axis) + ": " + path);
+  }
+  if (info.Nx != expectedNx || info.Ny != expectedNy || info.Nz != expectedNz)
+    throw std::runtime_error(label + " dimensions do not match reconstruction: " + path);
   int nx = 0;
   int ny = 0;
   int nz = 0;
   std::vector<double> volume = spect::io::loadVolume(path, nx, ny, nz);
-  if (nx != expectedNx || ny != expectedNy || nz != expectedNz) {
-    std::ostringstream oss;
-    oss << label << " dimensions (" << nx << 'x' << ny << 'x' << nz
-        << ") do not match reconstruction dimensions (" << expectedNx << 'x'
-        << expectedNy << 'x' << expectedNz << ").";
-    throw std::runtime_error(oss.str());
-  }
+  for (size_t i = 0; i < volume.size(); ++i)
+    if (!std::isfinite(volume[i]) || (nonnegative && volume[i] < 0.0))
+      throw std::runtime_error(label + " invalid value at index " +
+          std::to_string(i) + ": " + path);
   return volume;
+}
+
+std::vector<double> loadAutoMuActivity(const std::string &path, int nx, int ny,
+                                       int nz, const filters::Spacing3 &spacing) {
+  if (io::readVolumeInfo(path).spectAutoMuCompatible != 1)
+    throw std::runtime_error(
+        "Auto-mu requires an untransformed reconstruction-storage volume with "
+        "SPECTAutoMuCompatible = 1: " + path +
+        ". Regenerate a full-grid early reconstruction without crop, stitching, "
+        "axis flips or XY rotation; displayed outputs cannot be inverted safely.");
+  return loadVolumeChecked(path, "Auto-mu source reconstruction", nx, ny, nz, spacing, true);
 }
 
 } // namespace spect::main

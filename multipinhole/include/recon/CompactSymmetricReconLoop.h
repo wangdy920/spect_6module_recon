@@ -5,6 +5,7 @@
 #include "filters/PSFConfig.h"
 #include "io/CompactChunkCSR.h"
 #include "io/CompactSymmetryMetadata.h"
+#include "io/BadDetectorMask.h"
 #include "pipeline/ReconPreparation.h"
 #include "pipeline/VolumeOutput.h"
 
@@ -37,6 +38,7 @@ struct CompactSymmetricReconLoopContext {
   const ReconPreparedParams *prepared = nullptr;
   const std::vector<double> *projections = nullptr;
   const std::vector<double> *backgroundProj = nullptr;
+  const std::vector<io::BadDetectorId> *badDetectors = nullptr;
   const std::vector<uint8_t> *mask = nullptr;
   const filters::PSFKernels *psfKernels = nullptr;
   filters::Spacing3 spacing{};
