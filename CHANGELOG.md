@@ -8,6 +8,12 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-12: normal logs include the selected profile and effective settings
+  after configuration/metadata overrides; the original CLI is explicitly labeled
+  as requested input. Console and normal log progress use full iterations only.
+  Subset progress, per-subset cache detail and kernel timing require `-vb 2`.
+  Successful completion and `[WARNING]` lines reach the console even at `-vb 0`;
+  completion is still emitted only after reconstruction outputs finish.
 - 2026-10-12: synchronous CSRB uploads retain source storage until device-cache
   eviction, preventing false pointer-key hits with partial host caches. Output
   XY rotation is independent of the legacy X flip; configured scanner binding

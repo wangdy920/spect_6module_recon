@@ -808,7 +808,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           std::ostringstream orderText;
           for (const int k : compactSubsetOrder(finestSubsetCount))
             orderText << (orderText.tellp() > 0 ? "," : "") << k;
-          logInfo("compact ordered subsets: schedule " +
+          logDebug("compact ordered subsets: schedule " +
                   formatCompactSubsetSchedule(subsetSchedule) +
                   " over " + std::to_string(compactMeta.compactNumAngles) +
                   " compact angles (interleaved; visiting order of the finest "
@@ -1064,12 +1064,13 @@ std::vector<double> runCompactSymmetricReconstruction(
                 const std::string &manifest, const char *label,
                 std::vector<double> &target, const CompactSubsetSpec *subset) {
               bool loaded = false;
+              const auto logCache = subset ? logDebug : logInfo;
               if (!cachePath.empty()) {
                 std::string cacheStatus;
                 loaded = tryLoadCompactDenomCache(cachePath, manifest, geometry,
                                                   target, &cacheStatus);
                 if (loaded) {
-                  logInfo(std::string("compact ") + label + " cache hit: " +
+                  logCache(std::string("compact ") + label + " cache hit: " +
                           cachePath.string());
                 } else {
                   if (isCompactDenomManifestMismatch(cacheStatus)) {
@@ -1081,7 +1082,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                         "PSF/FWHM, and bed-geometry variants, or delete the "
                         "stale cache intentionally.");
                   }
-                  logInfo(std::string("compact ") + label + " cache miss: " +
+                  logCache(std::string("compact ") + label + " cache miss: " +
                           cacheStatus);
                 }
               }
@@ -1090,7 +1091,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 if (!cachePath.empty()) {
                   try {
                     saveCompactDenomCache(cachePath, manifest, geometry, target);
-                    logInfo(std::string("compact ") + label + " cache saved: " +
+                    logCache(std::string("compact ") + label + " cache saved: " +
                             cachePath.string());
                   } catch (const std::exception &ex) {
                     logWarn(std::string("Failed saving compact ") + label +
@@ -1104,7 +1105,7 @@ std::vector<double> runCompactSymmetricReconstruction(
         if (compactDenomCachePath.empty()) {
           compactDenomCachePath =
               autoCompactDenomCachePath(args, compactDenomManifest);
-          logInfo("compact denom auto-cache path: " +
+          logDebug("compact denom auto-cache path: " +
                   compactDenomCachePath.string());
         }
         const bool loadedCompactDenomCache = loadOrComputeSensitivity(
@@ -1151,7 +1152,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           }
           const double relDiff =
               std::sqrt(squaredError / std::max(squaredNorm, 1e-300));
-          logInfo("compact subset sensitivities: sum_m S_m vs S voxelwise relL2 " +
+          logDebug("compact subset sensitivities: sum_m S_m vs S voxelwise relL2 " +
                   std::to_string(relDiff));
           if (!(relDiff < 1e-4)) {
             throw std::runtime_error(
@@ -1406,7 +1407,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                 "compact subset sensitivities require the CUDA backend.");
           }
           if (useSubsets) {
-            logInfo("compact subset stage " + std::to_string(stage + 1) + "/" +
+            logDebug("compact subset stage " + std::to_string(stage + 1) + "/" +
                     std::to_string(subsetSchedule.size()) + ": " +
                     std::to_string(stageSubsetCount) + " subset(s) for " +
                     std::to_string(subsetSchedule[stage].iterations) +
@@ -1447,7 +1448,7 @@ std::vector<double> runCompactSymmetricReconstruction(
               *stageDenoms[static_cast<size_t>(
                   stageSubsetCount > 1 ? subsetSpec.index : 0)];
           if (stageSubsetCount > 1) {
-            logInfo("[SUBSET] " + std::to_string(it) + " subset " +
+            logDebug("[SUBSET] " + std::to_string(it) + " subset " +
                     std::to_string(subsetSpec.index) + "/" +
                     std::to_string(stageSubsetCount) + " (" +
                     std::to_string(sub + 1) + " of " +
@@ -1477,7 +1478,7 @@ std::vector<double> runCompactSymmetricReconstruction(
           const bool residentIteration =
               residentBatchInput && residentUpdateAllowed;
           if (it == 1 && sub == 0) {
-            logInfo(std::string("compact iteration path: input=") +
+            logDebug(std::string("compact iteration path: input=") +
                     (residentBatchInput ? "device" : "host") + ", update=" +
                     (residentIteration ? "device" : "host") +
                     ", local_support_mask=" + (compactLocalSupportMask.empty() ? "no" : "yes"));
@@ -1825,7 +1826,7 @@ std::vector<double> runCompactSymmetricReconstruction(
                               : std::string()));
           imageResident = false;
           }
-          logInfo("[SUBSET_TIME] iteration=" + std::to_string(it) +
+          logDebug("[SUBSET_TIME] iteration=" + std::to_string(it) +
                   " subset=" + std::to_string(subsetSpec.index) + " wall_s=" +
                   std::to_string(std::chrono::duration<double>(
                       ProfileClock::now() - subsetWallStart).count()));

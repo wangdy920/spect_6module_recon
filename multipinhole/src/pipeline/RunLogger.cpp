@@ -1,4 +1,5 @@
 #include "pipeline/RunLogger.h"
+#include "pipeline/RunLogging.h"
 
 #include <chrono>
 #include <cstdio>
@@ -45,12 +46,10 @@ void writeLine(std::ostream &os, const std::string &prefix,
 } // namespace
 
 void logInfo(const std::string &message) {
-  // [ITER] n/N compact is the field progress-bar contract: always reach
-  // cout (and the tee'd .log). Other INFO stays quiet at -vb 0 and is
+  // Progress and completion always reach cout (and the tee'd .log).
+  // Other INFO stays quiet at -vb 0 and is
   // written only to the file sink so the console is not duplicated.
-  const bool progressLine =
-      message.size() >= 6 && message.compare(0, 6, "[ITER]") == 0;
-  if (progressLine || gVerbosity >= 1)
+  if (isMinimalConsoleLine(message) || gVerbosity >= 1)
     writeLine(std::cout, " ", message);
   else if (gFileLog)
     writeLine(*gFileLog, " ", message);

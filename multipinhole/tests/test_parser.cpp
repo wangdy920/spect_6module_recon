@@ -17,6 +17,7 @@
 
 #include "cli/StringUtils.h"
 #include "cli/ConfigParser.h"
+#include "pipeline/ReconArgsPrinter.h"
 
 
 namespace spect {
@@ -354,14 +355,16 @@ TEST(IOTest, IterProgressLineReachesStdoutAtQuietVerbosity) {
     spect::main::setFileLogStream(&fileLog);
     testing::internal::CaptureStdout();
     spect::main::logInfo("[ITER] 1/50 compact");
-    spect::main::logInfo("[SUBSET] 1 subset 0/10 (1 of 10)");
+    spect::main::logDebug("[SUBSET] 1 subset 0/10 (1 of 10)");
+    spect::main::logInfo("Reconstruction finished successfully.");
     spect::main::logInfo("Loaded configuration from x");
     const std::string out = testing::internal::GetCapturedStdout();
     spect::main::setFileLogStream(previousLog);
     spect::main::setVerbosity(previous);
     EXPECT_NE(out.find("[ITER] 1/50 compact"), std::string::npos);
     EXPECT_EQ(out.find("[SUBSET]"), std::string::npos);
-    EXPECT_NE(fileLog.str().find("[SUBSET] 1 subset 0/10 (1 of 10)"), std::string::npos);
+    EXPECT_EQ(fileLog.str().find("[SUBSET]"), std::string::npos);
+    EXPECT_NE(out.find("Reconstruction finished successfully."), std::string::npos);
     EXPECT_EQ(out.find("Loaded configuration"), std::string::npos);
 }
 
@@ -1041,6 +1044,23 @@ TEST(IOTest, RecipesCoverDefaultExplicitAndCliWithBothOverridePolicies) {
             EXPECT_EQ(a.butterApplyStage, style==0 ? "output" : "none");
             EXPECT_EQ(a.outputDir,"caller-output");
             EXPECT_EQ(std::filesystem::path(a.algoConfPath), style ? selected : fallback);
+            const int previous = spect::main::getVerbosity();
+            auto* previousLog = spect::main::getFileLogStream();
+            std::ostringstream log;
+            spect::main::setVerbosity(0);
+            spect::main::setFileLogStream(&log);
+            spect::main::printReconArgs(a);
+            spect::main::setFileLogStream(previousLog);
+            spect::main::setVerbosity(previous);
+            EXPECT_NE(log.str().find("[CONFIG] Effective reconstruction settings"), std::string::npos);
+            EXPECT_NE(log.str().find("profile: " + a.algoConfPath), std::string::npos);
+            EXPECT_NE(log.str().find(protect ? "profile > global > CLI" : "CLI > profile > global"), std::string::npos);
+            const std::string effective = style==0 ? "algorithm=MLEM, iterations=50, subset_schedule=10"
+                : (style==2 && !protect ? "algorithm=MLEM, iterations=4, subset_schedule=2"
+                                       : "algorithm=BSREM, iterations=75, subset_schedule=10");
+            EXPECT_NE(log.str().find(effective), std::string::npos) << log.str();
+            if (style!=0 && (style!=2 || protect))
+                EXPECT_NE(log.str().find("regularization: TVIsotropic, beta=0.0003"), std::string::npos);
         }
     }
     spect::cli::ReconArgs directRecipe;

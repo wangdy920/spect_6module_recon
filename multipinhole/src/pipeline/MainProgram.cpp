@@ -84,7 +84,7 @@ void reportConfigStatus(const ReconArgs &args) {
       logWarn("Specified config file '" + args.configPath +
               "' was not found. Using internal defaults.");
     } else if (args.configLoaded) {
-      logInfo("Loaded configuration from " + args.configPath);
+      logDebug("Loaded configuration from " + args.configPath);
     } else {
       logWarn("Failed to load config file '" + args.configPath +
               "'. Using internal defaults.");
@@ -93,7 +93,7 @@ void reportConfigStatus(const ReconArgs &args) {
   }
 
   if (args.configFound && args.configLoaded) {
-    logInfo("Loaded configuration from " + args.configPath);
+    logDebug("Loaded configuration from " + args.configPath);
   } else if (!args.configFound) {
     logInfo("Default config not found in exe-local config/ or cwd fallbacks. Using internal defaults.");
   } else {
@@ -344,7 +344,7 @@ int runProgram(int argc, char **argv) {
   const std::string commandLine = makeCommandLineString(argc, argv);
   logInfo(std::string("=== SPECT_recon ") + spect::cli::versionString() +
           " ===");
-  logInfo("Command line: " + commandLine);
+  logInfo("[CLI] Requested command (before config/metadata overrides): " + commandLine);
   reportConfigStatus(args);
 
   int cudaDeviceId = 0;
@@ -438,7 +438,6 @@ int runProgram(int argc, char **argv) {
           args.attMapPath, "Attenuation map", "attenuation_local_matrix_z",
           "local_matrix_z", "mm^-1", bedSetup.bedNumbers);
     logInfo(bedSetup.summary);
-    printReconArgs(args, commandLine);
 
     std::filesystem::create_directories(args.outputDir);
 
@@ -494,6 +493,7 @@ int runProgram(int argc, char **argv) {
                               static_cast<size_t>(args.Nz);
     const bool reverseLocalZInReconStorage = args.zBedFlip && bedCount > 1;
 
+    printReconArgs(args);
     logInfo("Loaded projection rays: total=" +
             std::to_string(projectionSet.data.size()) + ", per bed=" +
             std::to_string(projectionSet.raysPerBed));

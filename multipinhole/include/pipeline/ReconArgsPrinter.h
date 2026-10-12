@@ -7,7 +7,7 @@
 namespace spect {
 namespace main {
 
-void printReconArgs(const ReconArgs &args, const std::string &commandLine);
+void printReconArgs(const ReconArgs &args);
 
 } // namespace main
 } // namespace spect

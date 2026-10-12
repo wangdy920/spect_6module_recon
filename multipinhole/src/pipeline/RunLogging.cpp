@@ -132,7 +132,8 @@ bool isMinimalConsoleLine(const std::string &line) {
       line[13] == ':' && digitsAt(14, 2) && line[16] == ':' && digitsAt(17, 2) &&
       line[19] == ' ')
     start = 20;
-  for (const char *tag : {"[ITER] ", "Error", "[ERROR]", "[FATAL]"})
+  for (const char *tag : {"[ITER] ", "Error", "[ERROR]", "[FATAL]",
+                          "[WARNING]", "Reconstruction finished successfully."})
     if (line.compare(start, std::char_traits<char>::length(tag), tag) == 0)
       return true;
   return false;

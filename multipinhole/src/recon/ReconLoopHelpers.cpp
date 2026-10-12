@@ -43,17 +43,17 @@ void logCudaChunkTimingSnapshot(
                              cudaChunkTiming.fusedBedCycleSeconds,
                              cudaChunkTiming.fusedBedCycleCalls));
   if (cudaChunkTiming.cusparseForwardCalls > 0) {
-    logInfo(formatProfileEntry("cuda.cusparse_fwd",
+    logDebug(formatProfileEntry("cuda.cusparse_fwd",
                               cudaChunkTiming.cusparseForwardSeconds,
                               cudaChunkTiming.cusparseForwardCalls));
   }
   if (cudaChunkTiming.csrqForwardCalls > 0) {
-    logInfo(formatProfileEntry("cuda.csrq_fwd",
+    logDebug(formatProfileEntry("cuda.csrq_fwd",
                               cudaChunkTiming.csrqForwardSeconds,
                               cudaChunkTiming.csrqForwardCalls));
   }
   if (cudaChunkTiming.csrqBackwardCalls > 0) {
-    logInfo(formatProfileEntry("cuda.csrq_bwd",
+    logDebug(formatProfileEntry("cuda.csrq_bwd",
                               cudaChunkTiming.csrqBackwardSeconds,
                               cudaChunkTiming.csrqBackwardCalls));
   }
@@ -61,14 +61,14 @@ void logCudaChunkTimingSnapshot(
                              cudaChunkTiming.cusparseForwardHostSeconds,
                              cudaChunkTiming.cusparseForwardHostCalls));
   if (cudaChunkTiming.ratioCalls > 0) {
-    logInfo(formatProfileEntry("cuda.ratio", cudaChunkTiming.ratioSeconds,
+    logDebug(formatProfileEntry("cuda.ratio", cudaChunkTiming.ratioSeconds,
                               cudaChunkTiming.ratioCalls));
   }
   logDebug(formatProfileEntry("cuda.transpose_chunk",
                              cudaChunkTiming.transposeChunkSeconds,
                              cudaChunkTiming.transposeChunkCalls));
   if (cudaChunkTiming.cusparseBackwardCalls > 0) {
-    logInfo(formatProfileEntry("cuda.cusparse_bwd",
+    logDebug(formatProfileEntry("cuda.cusparse_bwd",
                               cudaChunkTiming.cusparseBackwardSeconds,
                               cudaChunkTiming.cusparseBackwardCalls));
   }
@@ -76,17 +76,17 @@ void logCudaChunkTimingSnapshot(
                              cudaChunkTiming.cusparseBackwardHostSeconds,
                              cudaChunkTiming.cusparseBackwardHostCalls));
   if (cudaChunkTiming.transformBackwardCalls > 0) {
-    logInfo(formatProfileEntry("cuda.transform_bwd",
+    logDebug(formatProfileEntry("cuda.transform_bwd",
                               cudaChunkTiming.transformBackwardSeconds,
                               cudaChunkTiming.transformBackwardCalls));
   }
   if (cudaChunkTiming.compactMatrixUploadCalls > 0) {
-    logInfo(formatProfileEntry("cuda.compact_matrix_upload",
+    logDebug(formatProfileEntry("cuda.compact_matrix_upload",
                               cudaChunkTiming.compactMatrixUploadSeconds,
                               cudaChunkTiming.compactMatrixUploadCalls));
   }
   if (cudaChunkTiming.compactMatrixReuseCalls > 0) {
-    logInfo(formatProfileEntry("cuda.compact_matrix_reuse_hit", 0.0,
+    logDebug(formatProfileEntry("cuda.compact_matrix_reuse_hit", 0.0,
                               cudaChunkTiming.compactMatrixReuseCalls));
   }
   if (cudaChunkTiming.compactInputH2DCalls > 0) {

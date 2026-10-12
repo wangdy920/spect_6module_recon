@@ -317,9 +317,11 @@ python scripts/prepare_ct_mu_map.py `
 | `-v` | 打印当前精确构建号及内嵌的完整 `CHANGELOG.md` 后退出，不依赖当前目录或外部文件。`-v <n>` 会失败（那是 verbosity，请用 `-vb`） |
 | `--version` | 只打印单行构建号后退出，保留给脚本解析 |
 
-`[ITER] n/N compact` 只表示完整迭代开始，每轮一条，N 为完整迭代总数，不乘子集数；例如 `50:10` 共 50 条。子集明细使用 `[SUBSET]`，不参与旧进度识别；`[ITER_TIME]` / `[SUBSET_TIME]` 仍为耗时记录。最后一条 `[ITER] N/N compact` 不代表输出写入完成，完成必须以进程退出和产物状态为准。
+`[ITER] n/N compact` 只表示完整迭代开始，每轮一条，N 为完整迭代总数，不乘子集数；例如 `50:10` 共 50 条。普通日志与终端使用相同的整轮进度，日志另保留 `[ITER_TIME]` 每轮耗时与末尾 `[PERF]` 汇总。`[SUBSET]`、`[SUBSET_TIME]` 和逐子集缓存明细仅在 `-vb 2` 时写入终端和日志，不参与旧进度识别。最后一条 `[ITER] N/N compact` 不代表输出写入完成；所有输出完成后，终端和日志均打印 `Reconstruction finished successfully.`（包括 `-vb 0`）。上位机仍须以进程退出码 0 和产物状态确认成功。
 
-默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。启动时打印 `Logging console output to: ...` 与 `Output directory: ...`（`-vb 0` 时这两行与 `Reconstruction finished successfully.` 只写入 `.log`，控制台仅有 `[ITER]` 与错误行；按控制台文本判定完成的脚本须显式传 `-vb 1`，或改为检查进程退出码与 `.log`）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
+默认仅末次输出主 MHD/RAW、独立 `_butter` MHD/RAW、`recon_manifest.json` 与自动日志 `<outputDir>/<outputName>_YYYYMMDD_HHMMSS.log`。manifest 记录滤波阶段、覆盖开关、主输出派生顺序、钳制策略及实际输出文件。无论覆盖开关状态，下游若只取最终交付结果都选择无后缀 `<fout>_it<N>.mhd/.raw`。`-fout D:/data/case/run1`（或 `D:\data\case\run1`）会把 log 与体积都写到绝对目录 `D:\data\case\`，前缀 `run1`；相对 `-fout` 则相对**进程 CWD**（与INI中的矩阵/norm/cache路径按EXE解析不同）。`-fout path/run.mhd` 会剥掉 `.mhd/.raw/.img`；路径以分隔符结尾或指向已存在目录时，视为输出目录（默认前缀 `recon`）。进度条请匹配 `YYYY-MM-DD HH:MM:SS [ITER] n/N compact`（必须含 `[ITER]`，不要用裸 `n/n`，以免碰到 `device=0/1`）。
+
+日志中的 `[CLI] Requested command` 仅记录原始调用，不代表实际参数。以 `[CONFIG] Effective reconstruction settings` 为准：该摘要在配置合并、矩阵几何和床位准备后输出，列出选中的 profile、配置优先级、实际算法/完整迭代数/子集调度、投影模型、矩阵路径、PSF、正则及输出变换。`-vb 0` 控制台只显示整轮进度、成功完成、`[WARNING]` 和错误；参数摘要、日志路径和耗时仍写入 `.log`。`-vb 1` 同时在控制台显示这些普通信息；`-vb 2` 才启用子集和底层调试明细。
 
 ---
 

@@ -272,7 +272,7 @@ TEST(RunLoggingTest, DefaultLogNameUsesSecondTimestampOnly) {
                                std::regex(R"(recon_\d{8}_\d{6}\.log)")));
 }
 
-TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
+TEST(RunLoggingTest, MinimalConsoleKeepsProgressCompletionWarningsAndErrors) {
   EXPECT_TRUE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [ITER] 2/20 compact\n"));
   EXPECT_TRUE(main::isMinimalConsoleLine("[ITER] 20/20 compact"));
   EXPECT_TRUE(main::isMinimalConsoleLine("Error: -dfList is required\n"));
@@ -281,7 +281,8 @@ TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
   EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [ITER_TIME] 2 11.0 s\n"));
   EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22 [SUBSET] 1/10\n"));
   EXPECT_FALSE(main::isMinimalConsoleLine("2026-09-13 11:57:22  [NOTE] cache\n"));
-  EXPECT_FALSE(main::isMinimalConsoleLine("[WARNING] compact host cache page-lock refused\n"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("[WARNING] compact host cache page-lock refused\n"));
+  EXPECT_TRUE(main::isMinimalConsoleLine("Reconstruction finished successfully.\n"));
   EXPECT_FALSE(main::isMinimalConsoleLine("CUDA environment: device=0/1\n"));
 
   const fs::path dir = fs::temp_directory_path() / "spect_minimal_console_test";
@@ -298,10 +299,13 @@ TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
     ASSERT_TRUE(tee.enabled());
     main::logInfo("Output directory: D:/out");
     main::logInfo("[ITER] 2/20 compact");
+    main::logDebug("[SUBSET] 2 subset 0/10 (1 of 10)");
+    main::logDebug("[SUBSET_TIME] iteration=2 subset=0 wall_s=1");
     main::logWarn("compact host cache below matrix size");
     std::cerr << "[WARNING] compact host cache page-lock refused\n";
     std::cout << "[ITER_TIME] 2 11.0 s\n";
     std::cerr << "[FATAL] boom\n";
+    main::logInfo("Reconstruction finished successfully.");
     std::cout << "Error: trailing line without newline";
   }
   main::setVerbosity(previousVerbosity);
@@ -310,7 +314,9 @@ TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
 
   const std::regex expectedConsole(
       R"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[ITER\] 2/20 compact\n)"
-      R"(\[FATAL\] boom\nError: trailing line without newline)");
+      R"(\[WARNING\] compact host cache page-lock refused\n\[FATAL\] boom\n)"
+      R"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} Reconstruction finished successfully\.\n)"
+      R"(Error: trailing line without newline)");
   EXPECT_TRUE(std::regex_match(console.str(), expectedConsole)) << console.str();
   std::ifstream in(logPath, std::ios::binary);
   const std::string file((std::istreambuf_iterator<char>(in)),
@@ -319,8 +325,10 @@ TEST(RunLoggingTest, MinimalConsoleKeepsProgressAndErrorsOnly) {
                            "[NOTE] compact host cache below matrix size",
                            "[WARNING] compact host cache page-lock refused",
                            "[ITER_TIME] 2 11.0 s", "[FATAL] boom",
+                           "Reconstruction finished successfully.",
                            "Error: trailing line without newline"})
     EXPECT_NE(file.find(text), std::string::npos) << text << "\n" << file;
+  EXPECT_EQ(file.find("[SUBSET"), std::string::npos);
   in.close();
   fs::remove_all(dir);
 }
