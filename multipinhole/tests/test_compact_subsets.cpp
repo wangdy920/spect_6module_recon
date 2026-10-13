@@ -661,6 +661,58 @@ TEST_F(CompactSubsetCudaTest, NextSliceLoadPreservesCurrentNumeratorAndDrainsOnE
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
 }
 
+TEST_F(CompactSubsetCudaTest, BranchMetadataCacheSurvivesInterleavedProfiles) {
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  auto meta = makeSixAngleMeta();
+  meta.profile = spect::io::CompactSymmetryProfile::Rot90;
+  meta.detNz = meta.compactDetZ;
+  auto metaZ = meta;
+  metaZ.profile = spect::io::CompactSymmetryProfile::Rot90Z;
+  metaZ.detNz = 2 * metaZ.compactDetZ;
+  const auto compact = makeSixAngleCompactCSR(meta);
+  const int rows = static_cast<int>(meta.fullRows()), cols = meta.totalVoxels;
+  const int xy[4][4] = {{0,1,2,3}, {1,3,0,2}, {3,2,1,0}, {2,0,3,1}};
+  std::vector<double> full(static_cast<size_t>(rows) * cols, 0.0);
+  std::vector<double> expectedSensitivity(cols, 0.0);
+  // Explicit rotations and Z reflection, independent of production mappings.
+  for (int sym = 0; sym < 4; ++sym)
+    for (int r = 0; r < meta.totalRows; ++r)
+      for (uint32_t j = compact.rowPtr[r]; j < compact.rowPtr[r+1]; ++j) {
+        const int c = static_cast<int>(compact.colIdx[j]);
+        const int rotated = (c / 4) * 4 + xy[sym][c % 4];
+        full[static_cast<size_t>(sym * meta.totalRows + r) * cols + rotated] +=
+            compact.values[j];
+        expectedSensitivity[rotated] += compact.values[j];
+        expectedSensitivity[(meta.Nz - 1 - c / 4) * 4 + xy[sym][c % 4]] +=
+            compact.values[j];
+      }
+  std::vector<double> image(cols), projection(rows);
+  for (int c = 0; c < cols; ++c) image[c] = 0.25 + 0.19 * c;
+  for (int r = 0; r < rows; ++r) projection[r] = 1.0 + 0.07 * (r % 17);
+  const auto expected =
+      spect::io::test::denseNumerator(full, projection, image, rows, cols);
+  const auto dir = std::filesystem::temp_directory_path() /
+                   "spect_branch_metadata_cache";
+  writeChunkDirectory(dir, meta, compact, meta.compactNumAngles);
+  const auto chunks =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), meta, 1 << 20);
+  const auto chunksZ =
+      spect::io::openCompactChunkCSRDirectory(dir.string(), metaZ, 1 << 20);
+  std::vector<double> before(cols), sensitivity(cols), after(cols);
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projection.data(), nullptr, image.data(), 1, before.data()));
+  EXPECT_LE(relL2(before, expected), 1e-5);
+  // Keep the state alive: sensitivity replaces the device symmetry tables.
+  ASSERT_TRUE(spect::cuda::computeCompactChunkSensitivityCUDA(
+      chunksZ, metaZ, 1, sensitivity.data()));
+  EXPECT_LE(relL2(sensitivity, expectedSensitivity), 1e-5);
+  ASSERT_TRUE(spect::cuda::runCompactChunkMlemNumerCUDA(
+      chunks, meta, projection.data(), nullptr, image.data(), 1, after.data()));
+  EXPECT_LE(relL2(after, expected), 1e-5);
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  std::filesystem::remove_all(dir);
+}
+
 // Per subset, S_m and q_m equal the dense oracle restricted to the subset's
 // rows; over all subsets they add up to the full-data S and q. Two chunks of
 // three angles exercise slices with several segments, slices spanning both

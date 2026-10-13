@@ -807,7 +807,6 @@ public:
         dFullOutput_.get(), accum.get(), accumSize, params);
     transformTiming.recordStop(nullptr);
 
-    backwardTiming.synchronizeStop();
     transformTiming.synchronizeStop();
     const double backwardSeconds = backwardTiming.elapsedSeconds();
     const double transformSeconds = transformTiming.elapsedSeconds();
@@ -976,19 +975,7 @@ public:
       throw std::runtime_error(
           "compact branch-batch input was not refreshed for this pass.");
     }
-    const bool branchMetadataChanged =
-        batchSymIdsHost_.size() != static_cast<size_t>(branchCount) ||
-        batchZMirrorsHost_.size() != static_cast<size_t>(branchCount) ||
-        !std::equal(batchSymIdsHost_.begin(), batchSymIdsHost_.end(), symIds) ||
-        !std::equal(batchZMirrorsHost_.begin(), batchZMirrorsHost_.end(),
-                    zMirrors);
-    if (branchMetadataChanged) {
-      dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(branchCount));
-      dBatchZMirrors_.copyFromHost(zMirrors,
-                                  static_cast<size_t>(branchCount));
-      batchSymIdsHost_.assign(symIds, symIds + branchCount);
-      batchZMirrorsHost_.assign(zMirrors, zMirrors + branchCount);
-    }
+    ensureBranchMetadataLocked(symIds, zMirrors, branchCount);
     ensureProjDomainKernelsLoaded();
 
     dBatchOutput_.allocate(static_cast<size_t>(rows) *
@@ -1118,8 +1105,7 @@ public:
           "compact device accumulator size does not match matrix columns.");
     }
 
-    dBatchSymIds_.copyFromHost(symIds, static_cast<size_t>(batchSize));
-    dBatchZMirrors_.copyFromHost(zMirrors, static_cast<size_t>(batchSize));
+    ensureBranchMetadataLocked(symIds, zMirrors, batchSize);
     ensureProjDomainKernelsLoaded();
 
     const size_t batchedRows = static_cast<size_t>(rows) *
@@ -1169,7 +1155,6 @@ public:
     transformTiming.recordStop(nullptr);
 
     transformTiming.synchronizeStop();
-    backwardTiming.synchronizeStop();
     const double backwardSeconds = backwardTiming.elapsedSeconds();
     const double transformSeconds = transformTiming.elapsedSeconds();
     noteCudaCusparseBackward(backwardSeconds, batchSize);
@@ -1214,16 +1199,6 @@ private:
     dev.copyToHostAsync(pinnedOutputStage_.data(), count, nullptr);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     std::memcpy(y, pinnedOutputStage_.data(), count * sizeof(float));
-  }
-
-  // Double↔float host-device conversion helpers.
-  // Pageable→device cudaMemcpy(Async) is host-synchronous, so a single
-  // scratch buffer (hostFloatScratch_) is safe to reuse between calls.
-  void uploadDouble(DeviceArray<float> &dev, const double *src, size_t count) {
-    hostFloatScratch_.resize(count);
-    for (size_t i = 0; i < count; ++i)
-      hostFloatScratch_[i] = static_cast<float>(src[i]);
-    dev.copyFromHost(hostFloatScratch_.data(), count);
   }
 
   void ensureCompactFullProjectionUploaded(const double *src, size_t count,
@@ -1315,24 +1290,6 @@ private:
                : nullptr;
   }
 
-  void uploadDoubleAsync(DeviceArray<float> &dev, const double *src,
-                         size_t count, cudaStream_t stream) {
-    hostFloatScratch_.resize(count);
-    for (size_t i = 0; i < count; ++i)
-      hostFloatScratch_[i] = static_cast<float>(src[i]);
-    dev.copyFromHostAsync(hostFloatScratch_.data(), count, stream);
-  }
-
-  void downloadDouble(const DeviceArray<float> &dev, double *dst,
-                      size_t count) {
-    hostFloatScratch_.resize(count);
-    dev.copyToHost(hostFloatScratch_.data(), count);
-    for (size_t i = 0; i < count; ++i)
-      dst[i] = static_cast<double>(hostFloatScratch_[i]);
-  }
-
-  enum class CachedMatrixValueType { Float };
-
   struct CachedMatrix {
     // Declared before device arrays so storage also survives their destruction.
     std::shared_ptr<const void> sourceOwner;
@@ -1340,7 +1297,6 @@ private:
     int64_t rows = 0;
     int64_t cols = 0;
     int64_t nnz = 0;
-    CachedMatrixValueType valueType = CachedMatrixValueType::Float;
     DeviceArray<int32_t> dRowPtr;
     DeviceArray<int32_t> dColIdx;
     DeviceArray<float> dValues;
@@ -1365,7 +1321,6 @@ private:
       rows = 0;
       cols = 0;
       nnz = 0;
-      valueType = CachedMatrixValueType::Float;
       blockAngles.clear();
       rowsPerBlock = 0;
       matA.reset();
@@ -1712,7 +1667,6 @@ private:
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
     cache->nnz = static_cast<int64_t>(matrix.nnz);
-    cache->valueType = CachedMatrixValueType::Float;
     cache->dRowPtr.copyFromHost(
         reinterpret_cast<const int32_t *>(matrix.row_ptr),
         static_cast<size_t>(matrix.rows) + 1u);
@@ -1733,7 +1687,6 @@ private:
     cache->rows = matrix.rows;
     cache->cols = matrix.cols;
     cache->nnz = static_cast<int64_t>(matrix.nnz);
-    cache->valueType = CachedMatrixValueType::Float;
     const size_t rowPtrCount = static_cast<size_t>(matrix.rows) + 1u;
     if (cache->rowPtrStagePending) {
       CUDA_CHECK(cudaEventSynchronize(cache->rowPtrStageDone.get()));
@@ -1775,7 +1728,6 @@ private:
     cache->rows = slice.rows;
     cache->cols = slice.cols;
     cache->nnz = static_cast<int64_t>(slice.nnz);
-    cache->valueType = CachedMatrixValueType::Float;
     cache->blockAngles = slice.blockAngles;
     cache->rowsPerBlock = slice.rowsPerBlock;
     const size_t rowPtrCount = static_cast<size_t>(slice.rows) + 1u;
@@ -2466,7 +2418,6 @@ public:
     compactBackwardAccumSize_ = {};
     batchSymIdsHost_.clear();
     batchZMirrorsHost_.clear();
-    hostFloatScratch_.clear();
 
   }
 
@@ -4035,7 +3986,6 @@ private:
   bool compactPackedKLogged_ = false;
   std::array<DeviceArray<double>, kCompactDeviceBackwardMaxAccumulators>
       dCompactBackwardAccum_;
-  std::vector<float> hostFloatScratch_;
   std::array<const double *, kCompactProjectionSlots> compactProjectionHostKey_{};
   std::array<size_t, kCompactProjectionSlots> compactProjectionCount_{};
   // Fraction of exactly-zero bins per projection slot; drives the CSRB
