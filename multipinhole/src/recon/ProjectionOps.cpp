@@ -184,11 +184,10 @@ std::vector<double> build_sieve_save_volume(
         spect::app::extractBedVolumeFromGlobal(image, Nx, Ny, baseNz,
                                                bedZStarts[static_cast<size_t>(bed)],
                                                bedVirtualZFlip);
-    std::vector<double> localBlurred;
-    apply_psf_forward(localImage, localBlurred, Nx, Ny, baseNz, opts,
-                      psfKernels, threads);
+    applyPsfInplace(localImage, Nx, Ny, baseNz, opts, psfKernels, threads,
+                    false);
     spect::app::accumulateBedVolumeToGlobal(
-        saveVolume, localBlurred, Nx, Ny, baseNz,
+        saveVolume, localImage, Nx, Ny, baseNz,
         bedZStarts[static_cast<size_t>(bed)], bedVirtualZFlip);
   }
   return saveVolume;

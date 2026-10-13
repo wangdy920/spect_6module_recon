@@ -500,6 +500,35 @@ TEST(VolumeOutputTest, WholeAxisFlipsPrecedeEndSliceZeroing) {
             (std::vector<double>{3, 2, 1, 6, 5, 4}));
 }
 
+TEST(VolumeOutputTest, WholeZFlipAndCenterCropKeepAsymmetricMaskAligned) {
+  constexpr int nx = 4, ny = 3, nz = 6;
+  std::vector<double> source(nx * ny * nz);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x)
+        source[(z * ny + y) * nx + x] = 100 * z + 10 * y + x;
+  std::vector<uint8_t> mask(source.size(), 0);
+  mask[(4 * ny + 1) * nx + 2] = 1;
+  mask[(3 * ny + 1) * nx + 1] = 1;
+  mask[(2 * ny + 1) * nx + 2] = 1;
+  mask[(1 * ny + 1) * nx + 1] = 1;
+  mask[0] = 1;
+  OutputTransform transform;
+  transform.flipZWholeOutput = true;
+  transform.centerCropNx = 2;
+  transform.centerCropNy = 1;
+  transform.centerCropNz = 4;
+  int outNz = 0;
+
+  EXPECT_EQ(prepareOutputVolume(source, nx, ny, nz, &mask, CropSettings{},
+                                &outNz, &transform),
+            (std::vector<double>{0, 412, 311, 0, 0, 212, 111, 0}));
+  EXPECT_EQ(outNz, 4);
+  EXPECT_EQ(prepareOutputVolume(source, nx, ny, nz, &mask, CropSettings{1, 0},
+                                nullptr, &transform),
+            (std::vector<double>{0, 0, 311, 0, 0, 212, 111, 0}));
+}
+
 TEST(VolumeOutputTest, ThrowsWhenSourceSizeMismatch) {
   const std::vector<double> source = {1.0, 2.0, 3.0};
   EXPECT_THROW(

@@ -889,3 +889,58 @@ PSC每次全6块33568MiB锁页，迭代期零应用载荷读取，50轮H2D均1,1
 复现重建使用 `run.py`（只复用已经完成的记录，不覆盖已有失败/部分结果；新实验需新输出根）；真实原生CSRB命令保存在 `runs/maoxi/unfused_1/run.json`，其余质量臂当前runner明确用CSRQ。`python .../analyze.py --self-test`核对轴序、恒值斜截面、Gaussian宽度、exact-copy零差异；`python .../analyze.py`重绘，`python .../summarize_runs.py`核对10/20/30轮格式/融合数值门。PSC复现用既有 `paired.py psc5 --label <新目录> --iterations 50 --subsets 1 --threads 16 --auto-host-cache --baseline <冻结a72a991 EXE> --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/psc5`；本次记录在 `psf_fused_20261013_psc5_n1/`。
 
 本轮只创建本地干净提交并重新配置/编译，不推送、不修改SPECT_Core或设备现场默认配置。原始矩阵/投影与历史证据均保持不变。
+
+## 24. 2026-10-13 主线冗余实现收敛
+
+### 24.1 范围与验证边界
+
+用户要求子代理交叉审查，并以不损失精度和效率的小幅重构尽量删除冗余。控制为干净主线 `945b983`，EXE、测试程序、配置与依赖已冻结在 `recon_out/convergence_compact_20261013/baseline_945b983/`。三条审查线分别负责 CUDA 实现、矩阵/投影 I/O、重建编排，候选由另一条线核验调用闭包后实施。只收敛真实无消费者的内部代码及已确认的重复工作；保留 CLI/config、算法、浮点操作顺序、输入校验、格式支持、异步生命周期和默认值，不新增后端或配置开关。
+
+本轮不重复已完成的 Z blur/norm 画质消融，不重开约束中否决的算法。CSRB 仍为生产格式，CSRQ 仍实验性；不计算 SHA 或替代性全载荷摘要，不推送或部署。串行数据变换要求输出/布局/计数精确相同；CUDA 原路径沿用实际重建保存体 relL2<=1e-5 门和非有限值检查，不把原子归约噪声解释为精度策略变化。
+
+验证针对删除闭包、MAT 加载异常/nullable 参数、原生多格式与多床入口。编译四个现有目标并运行受影响测试；若候选触及实际热路径，再使用既有配对 runner，保留所有样本及进程/核心耗时，PSC 五床50:1自动缓存与 SC60 十二床子集负载分别记录。不因一次测量或删除行数声称加速；停止于这些候选的实现、交叉复核和必要回归，不继续无边界扫描。
+
+### 24.2 已实施的最小收敛
+
+| 维护问题 | 修改与保留边界 | 生产净减行数 |
+|---|---|---:|
+| 无调用者的 TV proximal 完整链 | 删除入口/stub、dual/primal 两个 kernel、launch/符号加载和六个专属 buffer；实际 TV/RDP gradient 全部保留 | 317 |
+| 已被 batch 路径替代的 scalar ratio/backward 死链 | 删除两个内部接口、State 方法、两个 kernel 和专属缓冲；保留 batch/pair/quad、begin/download、共享 staging 和全部事件/ownership | 472 |
+| 旧 prepared host-cache 预算计算无消费者 | 删除 getter/selector、九个常量和专属 Windows 内存查询；`CompactChunkCSR` 当前预算及环境变量不动 | 95 |
+| MAT 整载荷复制、nullable-stats 二次重排、死便捷入口和未用类型 | 直接读入最终 `MatArray` owner，重排一次；删除三个无消费者 wrapper 和未参与读写的 `CSRHeader` 类型 | 60 |
+| 输出图像/mask 裁剪与整卷 Z 翻转重复；sieve 保存重复复制局部床体 | 沿用现有内部模板模式，仅统一同操作；逐床图像平均/mask最大值差异保留；独占局部床体原地调用同一个 PSF helper | 55 |
+
+`src/include` 合计增加31行、删除1030行，净减999行；没有新增 kernel、运行模式、后端或配置字段。四个被删 kernel 没有执行中的消费者，因此不能把删除量宣传成 GPU 加速或运行期显存节省。多床 sieve 保存每床少一次局部 double 体复制/临时缓冲，未改全局图像、卷积或累加顺序。
+
+删除前后的消费者检查覆盖源码、测试、tools/scripts、当前文档和构建/安装规则。相关 C++ 库为内部 STATIC 目标，安装不导出 SDK 头文件/库；命令行未变。24B legacy flat CSR 仍被两份 Python 工具读取，工具和格式说明保留，只移除未使用的 C++ 自证类型/尺寸测试，不宣称删除了该历史格式。
+
+交叉审查专门保留 MAT 异常阶段的可观测行为：读取失败不覆盖原 `outMat/stats`，读取成功而重排失败仍保留完整源载荷；BIN 的提前清空顺序不变。空 event-list 在有/无 stats 下原来的 `detNz=1/0` 差异不在这次精简中顺手改变。新增/扩展现有测试覆盖这些边界、float/double MAT、Nx3/3xN、非对称 mask 与 XY/Z 裁剪、整卷翻转、双床重叠、虚拟翻转和 sieve 输入不变。
+
+未继续合并：CSRB/CSRQ 的格式校验及子集/整块读取 ownership 不同；逐床平均/mask最大值不同；float/double、resident/streamed 和 pair/quad 仍有实际消费者。本轮未找到另一处具有同样明确等价边界的低风险 kernel 融合，保留第23节的 Z 融合，不为减少表面重复而增加分派框架或改变同步。
+
+### 24.3 正确性检查
+
+四个现有目标 `SPECT_recon/spect_tests/spect_forward_project/spect_transpose_bench` 构建成功，两个受影响 fatbin 重新生成 sm_86/89/120。候选完整套件358项：354通过、4原有条件跳过、0失败；增加5个针对性用例，删除仅自证已删除类型尺寸的1个测试。新 MAT fixture 引入的隐式 double->float 编译警告已改为由精确小整数 float 无损提升成 double，并重编/复查；未顺带更改现存生产数值转换或其他历史警告。
+
+原生入口无背景/有背景各32项及各一次 operator PSF+ROI残差闭合检查通过，覆盖 CSRB/CSRQ、ROT90/ROT90Z、单双窗、单双床、N=1/N>1 与归一化/背景组合。现有完整套件同时检查 CTAC、BSREM/TV/RDP、partial-cache 与首次 fatbin 加载；不以源码不存在消费者替代实际链接/加载检查。没有修改活跃 CUDA 累加顺序或跨流事件，本轮不重复此前已通过且未受影响的 sanitizer/物理消融实验。
+
+独立互审实际补丁确认：MAT 原始计数校验仍读完整源数据，输出 image/mask 坐标一致，sieve 输入不变；每次 PSF 仍上传当前局部数据并同步下载，不依赖被删除向量的地址。候选 EXE 为3,361,280 bytes，控制为3,553,280 bytes，减少192,000 bytes；这是二进制体积变化，不是速度或显存收益。
+
+### 24.4 配对结果与采用结论
+
+同一主机 RTX4070 Ti SUPER 16GiB/64GiB RAM，ABBA顺序，每臂两次，分母缓存均命中，所有进程正常退出；不是 RTX5060 Ti 实测。PSC为既有Lu208原生CSRB五床真实合并投影、50:1、16线程、自动主机缓存；SC60为既有原生CSRB十二床合成输入、3:10、8线程、40GiB主机缓存、8mm软件测试步进，不能用作真实设备多床标定。未增加参数扫描。
+
+| 工作负载 | 控制核心秒，两次 | 候选核心秒，两次 | 最大保存体 relL2 |
+|---|---:|---:|---:|
+| PSC 五床50:1 | 74.485 / 72.680 | 73.096 / 72.679 | 1.3924e-7，含Butterworth副本 |
+| SC60 十二床3:10 | 137.312 / 311.617 | 131.129 / 134.557 | 5.8523e-8，全保存体 |
+
+PSC核心均值73.5825 -> 72.8875秒，进程均值127.548 -> 125.918秒；反向配对核心几乎相等，四次均低于120秒既有目标，不宣传可重复加速。SC60完整均值224.4645 -> 132.843秒、进程236.998 -> 145.648秒被控制4_A的长尾显著影响：该次三轮68.027/31.683/211.961秒，loader_work为282.234秒；另一控制66.874/35.650/34.834秒，两候选64.968/33.285/32.931和67.919/33.843/32.843秒。全部样本保留，不剔除长尾后重算提速比，也不把它归因为本轮已解决的磁盘/系统问题。
+
+两臂工作量相同：PSC每次6块33568MiB均锁页，迭代载荷读取为0，50轮H2D=1,180,179,411,992 bytes；SC60每次缓存40960MiB、前缀11/18，三轮读取111,973,097,304 bytes/114次、H2D=201,308,258,928 bytes。主机峰值工作集以5秒采样，PSC A/B为33.212/33.446GiB，SC60为41.031/41.031GiB；不宣称进程峰值RAM下降。GPU总占用采样受其他桌面占用与时机影响，不能用一次峰值差推断最低显存需求。其他CPU平均占用约3.8%~4.7%，不称为整机独占。
+
+**采用：保留等价精简，未观察到候选性能退化，不作整体加速承诺。** 接口、格式和实际数值门通过，活跃计算内核/精度/缓存策略不变；没有为消除时序噪声继续重复已通过的检查。SC60读取长尾仍是独立未解决的问题，新增kernel融合或I/O架构不在本次净删除中顺带实施。CSRQ生产采用、真实SC60多床标定和现场5060Ti性能不由本轮证据补齐。
+
+证据：`recon_out/convergence_compact_20261013/` 保存冻结控制、`candidate.exe`、`candidate.patch`、构建/完整套件/原生入口日志。候选构建沿用基线版本头，banner相同，必须按冻结EXE路径和补丁区分；本地提交后重配构建生成干净身份。配对原命令、有效参数、文件大小/时间、各轮耗时、内存样本和输出比较在 `recon_out/throughput_20261012/compact_cleanup_20261013_{psc5_n1,sc12_n10}/` 的 `provenance.json`、`summary.json` 和逐run目录中。
+
+复现沿用 `recon_out/throughput_20261012/paired.py`，基线参数为 `--baseline recon_out/convergence_compact_20261013/baseline_945b983/SPECT_recon.exe`，每次使用新的 `--label`。PSC：`psc5 --iterations 50 --subsets 1 --threads 16 --auto-host-cache --reuse-cache recon_out/throughput_20261012/psc5`；SC60：`sc12 --iterations 3 --reuse-cache recon_out/throughput_20261012/sc12`。脚本候选固定为build树，故复现历史候选须先还原本节补丁的构建，不能拿未来版本混作同一试验。

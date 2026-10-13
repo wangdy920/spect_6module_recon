@@ -137,10 +137,11 @@ void validateBedZFlipTransform(const OutputTransform &transform, int nz) {
   }
 }
 
-std::vector<double> centerCropVolume(const std::vector<double> &source,
-                                     int &nx, int &ny, int &nz,
-                                     int requestedNx, int requestedNy,
-                                     int requestedNz) {
+template <typename T>
+std::vector<T> centerCropVolume(const std::vector<T> &source,
+                                 int &nx, int &ny, int &nz,
+                                 int requestedNx, int requestedNy,
+                                 int requestedNz) {
   const int targetNx = requestedNx > 0 ? requestedNx : nx;
   const int targetNy = requestedNy > 0 ? requestedNy : ny;
   const int targetNz = requestedNz > 0 ? requestedNz : nz;
@@ -157,49 +158,8 @@ std::vector<double> centerCropVolume(const std::vector<double> &source,
   const int z0 = (nz - targetNz) / 2;
   const size_t sourcePlane = static_cast<size_t>(nx) * ny;
   const size_t targetPlane = static_cast<size_t>(targetNx) * targetNy;
-  std::vector<double> cropped(
-      targetPlane * static_cast<size_t>(targetNz), 0.0);
-  for (int z = 0; z < targetNz; ++z) {
-    for (int y = 0; y < targetNy; ++y) {
-      const size_t sourceOffset =
-          static_cast<size_t>(z + z0) * sourcePlane +
-          static_cast<size_t>(y + y0) * nx + x0;
-      const size_t targetOffset =
-          static_cast<size_t>(z) * targetPlane +
-          static_cast<size_t>(y) * targetNx;
-      std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(sourceOffset),
-                  targetNx,
-                  cropped.begin() + static_cast<std::ptrdiff_t>(targetOffset));
-    }
-  }
-  nx = targetNx;
-  ny = targetNy;
-  nz = targetNz;
-  return cropped;
-}
-
-std::vector<uint8_t> centerCropVolume(const std::vector<uint8_t> &source,
-                                      int &nx, int &ny, int &nz,
-                                      int requestedNx, int requestedNy,
-                                      int requestedNz) {
-  const int targetNx = requestedNx > 0 ? requestedNx : nx;
-  const int targetNy = requestedNy > 0 ? requestedNy : ny;
-  const int targetNz = requestedNz > 0 ? requestedNz : nz;
-  if (targetNx > nx || targetNy > ny || targetNz > nz || targetNx <= 0 ||
-      targetNy <= 0 || targetNz <= 0) {
-    throw std::invalid_argument(
-        "Fixed 6module output mask exceeds reconstructed geometry.");
-  }
-  if (targetNx == nx && targetNy == ny && targetNz == nz)
-    return source;
-
-  const int x0 = (nx - targetNx) / 2;
-  const int y0 = (ny - targetNy) / 2;
-  const int z0 = (nz - targetNz) / 2;
-  const size_t sourcePlane = static_cast<size_t>(nx) * ny;
-  const size_t targetPlane = static_cast<size_t>(targetNx) * targetNy;
-  std::vector<uint8_t> cropped(
-      targetPlane * static_cast<size_t>(targetNz), 0);
+  std::vector<T> cropped(
+      targetPlane * static_cast<size_t>(targetNz), T{});
   for (int z = 0; z < targetNz; ++z) {
     for (int y = 0; y < targetNy; ++y) {
       const size_t sourceOffset =
@@ -715,25 +675,11 @@ std::vector<uint8_t> flipMaskZPerBed(const std::vector<uint8_t> &source, int nx,
   return out;
 }
 
-std::vector<double> flipDoubleZWholeOutput(const std::vector<double> &source,
-                                           int nx, int ny, int nz) {
+template <typename T>
+std::vector<T> flipZWholeOutput(const std::vector<T> &source,
+                                 int nx, int ny, int nz) {
   const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<double> out(source.size(), 0.0);
-  for (int z = 0; z < nz; ++z) {
-    const int srcZ = nz - 1 - z;
-    const size_t dstOffset = static_cast<size_t>(z) * plane;
-    const size_t srcOffset = static_cast<size_t>(srcZ) * plane;
-    std::copy(source.begin() + static_cast<std::ptrdiff_t>(srcOffset),
-              source.begin() + static_cast<std::ptrdiff_t>(srcOffset + plane),
-              out.begin() + static_cast<std::ptrdiff_t>(dstOffset));
-  }
-  return out;
-}
-
-std::vector<uint8_t> flipMaskZWholeOutput(const std::vector<uint8_t> &source,
-                                          int nx, int ny, int nz) {
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  std::vector<uint8_t> out(source.size(), 0);
+  std::vector<T> out(source.size(), T{});
   for (int z = 0; z < nz; ++z) {
     const int srcZ = nz - 1 - z;
     const size_t dstOffset = static_cast<size_t>(z) * plane;
@@ -886,10 +832,10 @@ std::vector<double> prepareOutputVolume(const std::vector<double> &source, int n
   std::vector<double> wholeZFlipped;
   std::vector<uint8_t> wholeZMaskFlipped;
   if (shouldFlipZWholeOutput(transform)) {
-    wholeZFlipped = flipDoubleZWholeOutput(*sourceForOutput, nx, ny, transformedNz);
+    wholeZFlipped = flipZWholeOutput(*sourceForOutput, nx, ny, transformedNz);
     sourceForOutput = &wholeZFlipped;
     if (maskForOutput) {
-      wholeZMaskFlipped = flipMaskZWholeOutput(*maskForOutput, nx, ny, transformedNz);
+      wholeZMaskFlipped = flipZWholeOutput(*maskForOutput, nx, ny, transformedNz);
       maskForOutput = &wholeZMaskFlipped;
     }
   }

@@ -441,6 +441,48 @@ TEST(SieveSaveCopyTest, InputStateIsNotModified) {
   EXPECT_EQ(image, original);
 }
 
+TEST(SieveSaveCopyTest, OverlappingBedsHonorVirtualFlipAndPreserveInput) {
+  constexpr int nx = 6, ny = 6, baseNz = 4, globalNz = 6;
+  constexpr size_t plane = nx * ny;
+  const std::vector<int> bedZStarts = {0, 2};
+  const int globalZForLocal[2][2][baseNz] = {
+      {{0, 1, 2, 3}, {2, 3, 4, 5}},
+      {{3, 2, 1, 0}, {5, 4, 3, 2}}};
+  const std::vector<double> image = makeRampVolume(nx, ny, globalNz);
+  const std::vector<double> original = image;
+  ReconOpts opts;
+  opts.threads = 1;
+  opts.psf = makeTestPsf();
+
+  for (const auto kernel : {spect::filters::PSFKernel::Adjoint,
+                            spect::filters::PSFKernel::Castor}) {
+    opts.psf.kernel = kernel;
+    const auto kernels = make_psf_kernels(opts.psf);
+    for (const bool flip : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "kernel=" << static_cast<int>(kernel)
+                                        << ", flip=" << flip);
+      std::vector<double> expected(image.size(), 0.0);
+      for (int bed = 0; bed < 2; ++bed) {
+        std::vector<double> local(plane * baseNz);
+        for (int z = 0; z < baseNz; ++z)
+          std::copy_n(image.data() + globalZForLocal[flip][bed][z] * plane,
+                      plane, local.data() + z * plane);
+        std::vector<double> blurred;
+        apply_psf_forward(local, blurred, nx, ny, baseNz, opts, &kernels, 1);
+        for (int z = 0; z < baseNz; ++z)
+          for (size_t xy = 0; xy < plane; ++xy)
+            expected[globalZForLocal[flip][bed][z] * plane + xy] +=
+                blurred[z * plane + xy];
+      }
+
+      const auto saved = build_sieve_save_volume(
+          image, nx, ny, baseNz, 2, bedZStarts, flip, opts, &kernels, 1);
+      EXPECT_EQ(saved, expected);
+      EXPECT_EQ(image, original);
+    }
+  }
+}
+
 // ---------------------------------------------------------- castor kernel --
 
 TEST(CastorKernelTest, MatchesErfVoxelIntegral) {
