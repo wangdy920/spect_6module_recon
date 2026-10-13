@@ -419,6 +419,7 @@ extern "C" __global__ void conv_z_zero_3d_f(const float* input,
                                              int Nx, int Ny, int Nz,
                                              const float* kernel,
                                              int radius,
+                                             const float* znorm,
                                              unsigned long long total) {
   const unsigned long long index =
       static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -441,23 +442,9 @@ extern "C" __global__ void conv_z_zero_3d_f(const float* input,
             static_cast<unsigned long long>(zz);
     sum += kernel[t + radius] * input[src];
   }
-  output[index] = sum;
-}
-
-extern "C" __global__ void div_znorm_3d_f(float* data,
-                                           const float* znorm,
-                                           int Nx, int Ny, int Nz,
-                                           unsigned long long total) {
-  const unsigned long long index =
-      static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= total) {
-    return;
-  }
-  const unsigned long long yz = index / static_cast<unsigned long long>(Nx);
-  const int z = static_cast<int>(yz / static_cast<unsigned long long>(Ny));
   float d = znorm[z];
   if (!isfinite(d) || d < 1e-12f) d = 1e-12f;
-  data[index] /= d;
+  output[index] = sum / d;
 }
 
 extern "C" __global__ void conv_mirror_adjoint_3d_f(

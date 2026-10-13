@@ -513,18 +513,28 @@ TEST(CastorKernelTest, BackwardReusesForwardExactly) {
 TEST(CastorKernelTest, CudaMatchesCpuReference) {
   if (!spect::cuda::isCudaAvailable())
     GTEST_SKIP() << "CUDA unavailable";
-  const int n = 16;
-  std::vector<double> gpu = makeRampVolume(n, n, n);
-  std::vector<double> cpu = gpu;
-  const auto k = spect::filters::makeCastorErf1D(0.9, 0.6, 3.0);
-  ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDA(gpu, n, n, n, k, k, k));
-  spect::filters::conv3d_castor_forward_inplace(cpu, n, n, n, k, k, k, 1);
-  double maxAbs = 0.0, maxRef = 0.0;
-  for (size_t i = 0; i < gpu.size(); ++i) {
-    maxAbs = std::max(maxAbs, std::abs(gpu[i] - cpu[i]));
-    maxRef = std::max(maxRef, std::abs(cpu[i]));
+  const int nx = 7, ny = 11;
+  const auto kx = spect::filters::makeCastorErf1D(0.9, 0.6, 3.0);
+  const auto ky = spect::filters::makeCastorErf1D(1.3, 0.5, 3.0);
+  const auto kz = spect::filters::makeCastorErf1D(1.5, 0.4, 3.0);
+  // Thin Z extents exercise truncation on both ends; axes are asymmetric.
+  for (const int nz : {1, 4, 21}) {
+    SCOPED_TRACE(nz);
+    std::vector<double> gpu = makeRampVolume(nx, ny, nz);
+    for (size_t i = 0; i < gpu.size(); ++i)
+      gpu[i] *= static_cast<double>(i % 7);
+    std::vector<double> cpu = gpu;
+    ASSERT_TRUE(spect::cuda::applyCastorConv3DInplaceCUDAForcedFloat32Staging(
+        gpu, nx, ny, nz, kx, ky, kz));
+    spect::filters::conv3d_castor_forward_inplace(cpu, nx, ny, nz, kx, ky, kz, 1);
+    double maxAbs = 0.0, maxRef = 0.0;
+    for (size_t i = 0; i < gpu.size(); ++i) {
+      ASSERT_TRUE(std::isfinite(gpu[i]));
+      maxAbs = std::max(maxAbs, std::abs(gpu[i] - cpu[i]));
+      maxRef = std::max(maxRef, std::abs(cpu[i]));
+    }
+    EXPECT_LT(maxAbs / maxRef, 1e-6);
   }
-  EXPECT_LT(maxAbs / maxRef, 1e-4);  // 默认 float 路径精度
 }
 
 TEST(CastorKernelTest, ForcedFloat32StagingIgnoresPsfDoubleEnvironment) {

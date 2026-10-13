@@ -42,7 +42,6 @@ struct VolumeKernelCache {
   CUfunction convXZeroF = nullptr;
   CUfunction convYZeroF = nullptr;
   CUfunction convZZeroF = nullptr;
-  CUfunction divZnormF = nullptr;
   CUfunction attenLineIntegral = nullptr;
   CUfunction rdpGrad = nullptr;
   CUfunction tvGrad = nullptr;
@@ -171,9 +170,6 @@ void ensureVolumeKernelsLoaded() {
     SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.convZZeroF,
                                           g_volumeKernelCache.module,
                                           "conv_z_zero_3d_f"));
-    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.divZnormF,
-                                          g_volumeKernelCache.module,
-                                          "div_znorm_3d_f"));
     SPECT_CUDRV_CHECK(cuModuleGetFunction(
         &g_volumeKernelCache.attenLineIntegral, g_volumeKernelCache.module,
         "atten_line_integral_3d"));
@@ -681,14 +677,15 @@ void enqueueCastorConv3DFloatDeviceImpl(
   launchSeparableConvKernelFloat(g_volumeKernelCache.convYZeroF, secondary,
                                  primary, Nx, Ny, Nz, state.kyF.get(),
                                  radiusY, totalCount);
-  launchSeparableConvKernelFloat(g_volumeKernelCache.convZZeroF, primary,
-                                 secondary, Nx, Ny, Nz, state.kzF.get(),
-                                 radiusZ, totalCount);
-  CUdeviceptr dataPtr = reinterpret_cast<CUdeviceptr>(secondary);
+  CUdeviceptr inputPtr = reinterpret_cast<CUdeviceptr>(primary);
+  CUdeviceptr outputPtr = reinterpret_cast<CUdeviceptr>(secondary);
+  CUdeviceptr kernelPtr = reinterpret_cast<CUdeviceptr>(state.kzF.get());
   CUdeviceptr normPtr =
       reinterpret_cast<CUdeviceptr>(state.znormF.get());
-  void *args[] = {&dataPtr, &normPtr, &Nx, &Ny, &Nz, &totalCount};
-  launchVolumeKernel(g_volumeKernelCache.divZnormF, args, totalCount);
+  int radius = radiusZ;
+  void *args[] = {&inputPtr, &outputPtr, &Nx, &Ny, &Nz, &kernelPtr,
+                  &radius, &normPtr, &totalCount};
+  launchVolumeKernel(g_volumeKernelCache.convZZeroF, args, totalCount);
 }
 
 bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
@@ -714,8 +711,6 @@ bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
   const int radiusX = static_cast<int>(kx.size()) / 2;
   const int radiusY = static_cast<int>(ky.size()) / 2;
   const int radiusZ = static_cast<int>(kz.size()) / 2;
-  const std::vector<double> znormHost =
-      filters::makeCastorZNorm1D(kz, Nz);
 
   const bool useFloatStaging =
       forceFloat32Staging || cudaPsfUseFloat(useFloat);
@@ -736,6 +731,7 @@ bool applyCastorConv3DInplaceCUDAImpl(std::vector<double> &f, int Nx, int Ny,
     uploadKernelIfNeeded(kx, state.cachedKx, state.kx);
     uploadKernelIfNeeded(ky, state.cachedKy, state.ky);
     uploadKernelIfNeeded(kz, state.cachedKz, state.kz);
+    const auto znormHost = filters::makeCastorZNorm1D(kz, Nz);
     state.znorm.upload(znormHost.data(), znormHost.size());
 
     launchSeparableConvKernel(g_volumeKernelCache.convXZero,

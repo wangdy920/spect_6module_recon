@@ -820,3 +820,72 @@ PSC 核心均值 77.167 -> 76.900 秒（-0.35%），达到原保护门，**不�
 证据根 `recon_out/mainline_convergence_20261013/` 保存修复前失败、两次编译、完整套件、重复测试、memcheck、原生入口日志及冻结 EXE/补丁。配对数据在 `recon_out/throughput_20261012/convergence_20261013_{psc5_n1,sc12_n10,sc12_reverse}/`，汇总为同根 `metrics.json`。复现继续使用 `paired.py`，`--baseline recon_out/mainline_convergence_20261013/baseline_19711d1/SPECT_recon.exe`，PSC 加 `--iterations 50 --subsets 1 --threads 16 --auto-host-cache`，SC 加 `--iterations 3`；`--reuse-cache` 指向原 `psc5`/`sc12` 目录，补充检查加 `--order BA`，每次必须使用新的 `--label`。
 
 实验候选未重配版本头，banner 仍为 `19711d1`，不能凭 banner 把它与控制混同；用冻结 `candidate.exe/patch` 与路径/大小/时间记录区分。提交后重新配置/构建干净版本并复查套件；不 push、不修改 SPECT_Core 或现场目录。后续 PSF kernel 融合仍为未实施候选，不由本轮清理的通过记录自动放行。
+
+## 23. 2026-10-13 PSF Z 融合与 SC60 轴向消融
+
+### 23.1 冻结实验范围
+
+用户明确要求继续 float CASToR Z 卷积/归一化融合，并确认消融指的是关闭 **Z 归一化本身**，不是关闭等价融合。两者分开判定：生产候选只融合原除法，不更改数学/default；关闭归一化只存在于独立实验 EXE，不新增生产配置开关。本轮不修改输入/矩阵、不计算 SHA、不部署。
+
+控制为干净 `a72a991` EXE 和原 fatbin，冻结于 `recon_out/psf_z_ablation_20261013/baseline_a72a991/`。融合需通过非立方/薄 Z CPU oracle、完整测试、实际旧/新 fatbin FP32 对照及同输入重建 relL2 <=1e-5；性能采用配对重复，不从少一次 launch 推断整体加速。消融允许数学不同，不用该数值门评价画质。
+
+三种数学设置：A 保留 Z blur+norm；B 保留 Z blur、关闭 norm；C 关闭 Z blur（Z 核为 identity，norm=1，因此同时关闭二者没有第四种数学结果）。固定 OSEM 30:10、CASToR sieve 1.5 mm/3 sigma、0.4 mm 90x90x240 网格、单床、无 CTAC/正则/输出后滤波/翻转。保存第10/20/30轮；primary 是 sieve 的 PSF 保存副本，不称为未滤波迭代状态。停止于这两个已存在输入的配对检查，不扫描参数或标定实际设备 PSF。
+
+- 已知真值：`recon_out/sc60_multibed_review_20261011/synth/proj_nf/Bed1.bin`；真值为同根 `phantom_12bed_step20.mhd` 前240层。full-grid CSRQ，cylinder=36x96 mm；原 forward 无 PSF，属于同模型机制实验，不代表实测物理正确性。固定背景环 12.6<=r<=13.6 mm 的现存真值逐体素为1。全轴向曲线保留，同时用原 sensitivity 的固定中心支持区读出均值/CV/真值误差；不按候选结果选ROI，不用强度重新缩放隐藏偏差。
+- 实测：`E:/Xiang_Project/SPECT/6Module/experiments/sc60/pre_tc2/Bed2.bin`，来源为 `F:/DATA/SC60_luzhou/sc60_maoxi/SPECT`；原生 full CSRB，cylinder=36x36 mm。沿用历史 z=75:165、r<16 mm 分析区域和三个管位置，比较相同截面积分曲线、 apparent width、总信号及共同色标图。内径/实际轴向活度未知，因此这是同数据相对表现，不能称为绝对均匀性或真实 PSF 标定。
+
+Z norm 按数组边界计算，不按 cylinder/灵敏度支持计算。当前11 taps只直接补偿 z=0..4/235..239；中心36 mm支持区与它不相交。全网格尾部低灵敏度导致的不稳定需单独标示，不能因中心不变就宣称 norm 无作用，也不能因尾部数值变小就宣称临床/物理改善。图像指标为描述性证据，不预设未经验证的CV硬阈值；默认保持A，任何数学默认值变更另行决策。
+
+执行中的预算调整：实测 full CSRB/40 GiB 缓存每轮约28~31秒，首轮还有读取长尾，六组30轮约需1.5小时。保留已经启动的原生 CSRB `maoxi/unfused_1` 跑完30轮；将其余毛细管三臂及融合 ABBA 改为同一现存 full CSRQ 派生矩阵，不改输入或ROI。重建子进程未中断，只更换批次调度器并等待原退出码；过程记录在 run.json。先核对原生/CSRQ相同参数体积，再解释消融结果；CSRQ仅实验用途，不因此升级生产矩阵默认值。独立原生PSC性能保护另用既有固定工作负载。每个进程最长1200秒，超时/失败不进入完成结果。
+
+### 23.2 等价融合与性能
+
+float `conv_z_zero_3d_f` 在原 FP32 tap 累加后执行原 norm 有限值/1e-12 下限检查和除法，删除独立 `div_znorm_3d_f`、加载项及 launch；X/Y、double、默认流、两缓冲区所有权不变。host-staged float 不再重复构造一次 Z norm。生产两文件净减17行；没有新增开关/后端/专用设备 kernel。
+
+旧/新实际 fatbin 探针：SC60 90x90x240、90x90x460、PSC 120x120x220，分别以1.5mm/0.4mm和1.3mm/0.3mm参数对照，全部 max ULP=0、relL2=0、逐位一致。8轮ABBA、每次50次 Z 运算；SC60 单床 Z 阶段 device 中位0.05656 -> 0.04626 ms，PSC参数/网格0.08733 -> 0.07355 ms。只计 Z 阶段，包含事件区间内可能的 host launch starvation；Python提交时间不等于生产C++开销，不将这些数值当作整程加速。
+
+实际重建保护：
+
+| 工作负载 | 未融合核心秒 | 融合核心秒 | 最大同输入保存体 relL2 |
+|---|---:|---:|---:|
+| PSC Lu208 原生CSRB，五床50:1，自动缓存，ABBA | 75.941 / 76.585 | 76.390 / 76.258 | 2.553e-7 |
+| SC60实测毛细管CSRQ，单床30:10，ABBA | 32.506 / 32.512 | 32.473 / 32.456 | 7.313e-8 |
+
+PSC均值76.263 -> 76.324秒（+0.08%），进程均值124.255 -> 124.533秒；四次均达到原120秒核心目标。SC60均值32.509 -> 32.465秒（-0.14%），融合的两次自身重复差7.242e-8。**无可确认的整程加速**；按减少维护点、逐位kernel一致及实际回归保持的净简化保留，不以>=5%速度候选宣传。
+
+PSC每次全6块33568MiB锁页，迭代期零应用载荷读取，50轮H2D均1,180,179,411,992 bytes。SC60原生CSRB控制30轮核心1061.701秒，40GiB缓存、迭代应用读取817,747,675,488 bytes、H2D2,013,082,589,280 bytes；与同数学CSRQ对照在10/20/30轮全体积最大relL2=3.954e-7，才采用派生矩阵做三臂质量实验。这一单次格式对照不是新的重复性能宣传。所有结果来自本机4070 Ti SUPER/64GiB，不是5060 Ti实测；桌面后台及短时CPU图像分析仍存在，不称为整机独占。
+
+完整候选套件354项：350通过、4原有条件跳过、0失败。扩展既有CPU-reference检查覆盖7x11x{1,4,21}、不同轴核、非有限值检查与1e-6 max-relative门；Castor及双床PSF共11项memcheck为0 errors。独立子代理复核ABI/调用闭包和分析坐标。没有新增生产norm-off接口；实验EXE有 `EXPERIMENT_ONLY.txt`，源文件的norm构造已恢复，临时消融补丁不进入提交。
+
+### 23.3 轴向均匀性结果
+
+第30轮，同一投影、矩阵、支持区、相同截面与共同强度色标。CV为总体标准差/均值；合成组为恒值背景环的逐层均值，实测组为固定管轴垂直截面的积分，**不是整幅图像的体素误差，也不是物理PSF标定**。
+
+| 冻结读出 | Z blur+norm 默认 | 仅关闭 norm | 关闭 Z blur |
+|---|---:|---:|---:|
+| 合成中心背景环轴向CV | 0.55835% | 0.55835% | 0.80588% |
+| 实测近纵向管1截面积分CV | 13.1649% | 约13.1649% | 32.5872% |
+| 实测近纵向管2截面积分CV | 9.9807% | 约9.9807% | 31.8337% |
+| 实测近横向管3截面积分CV | 4.8165% | 约4.8165% | 4.5691% |
+
+合成区固定为原单床 sensitivity 在r<=14mm内逐层总和>=0.5峰值，得到z=99..140（中心坐标-8.2..8.2mm）；环为12.6<=r<=13.6mm。合成10/20轮的CV同样由0.9890%/0.6609%增至1.4304%/0.8926%，30轮方向不是单一checkpoint偶然反转。中心环均值1.001986 -> 1.002774；体素对真值relL2约0.20915 -> 0.20954，不能将0.56%的轴向CV冒充0.56%的绝对重建误差。原投影生成无PSF，证据属于此同模型输入和当前有限迭代端点。
+
+**关闭Z blur：本次轴向均匀性恶化。** 两条近纵向实测管（轴向分量0.959/0.976）条纹和截面积分波动明显增大；近横向第三管不能用于证明长Z均匀性改善。第三管关闭Z blur后横截面出现多个半高连通峰，不能把其中最高峰的窄宽度当成整个管的分辨率改善；多峰截面单一FWHM标为不适用，并保留各峰/外包络描述。当前比较的是sieve保存图，包含迭代内与保存时的PSF效果，未将二者分别归因。
+
+**关闭Z norm：中心基本不变，但合成数组边界的假高值有所减小。** 实测全体积norm-off/default relL2=2.708e-7；合成中心环2.176e-7，合成全图差分平方能量99.999563%位于首尾各5层。该边界对真值RMSE由1.45760降至1.23765，最大假高值由41.319降至23.827；整网格对真值relL2由0.84930降至0.83892，仍很大。因此可以确认这一低支持边界的局部效应，不能据此说96mm全FOV已可靠或设备均匀性已改善。Z-off在该边界几乎全零，却使整网格真值relL2增至1.24065，也说明仅看边界峰值降低会误导。
+
+结论：等价kernel融合保留；数学默认值保持 Z blur+Z norm。关闭Z blur不作为本数据轴向均匀性的优化；norm-off仅保留实验结果，未做生产采用。未知真实毛细管内径/沿管活度、不同采集、实际多床步进和CT空间均未由本实验补齐。
+
+![实测毛细管，同色标三臂MIP](../recon_out/psf_z_ablation_20261013/analysis/maoxi_it30_central_mip.png)
+
+![实测毛细管固定截面积分曲线](../recon_out/psf_z_ablation_20261013/analysis/maoxi_it30_tubes.png)
+
+![合成背景环全轴向与固定中心区曲线](../recon_out/psf_z_ablation_20261013/analysis/synthetic_it30_profiles.png)
+
+### 23.4 证据与复现
+
+本节证据根 `recon_out/psf_z_ablation_20261013/`：`fused.patch`、`norm_off.patch`、冻结EXE/fatbin、`kernel_probe*.json`、`run_summary.json`、各run的原命令/有效配置/输入文件属性和退出码；`analysis/metrics.json`、CSV及10/20/30轮共同色标图。原生/融合/消融的实验banner均保留base a72a991，不能只凭banner区分，必须使用各run记录的EXE路径和补丁。没有计算内容摘要。
+
+复现重建使用 `run.py`（只复用已经完成的记录，不覆盖已有失败/部分结果；新实验需新输出根）；真实原生CSRB命令保存在 `runs/maoxi/unfused_1/run.json`，其余质量臂当前runner明确用CSRQ。`python .../analyze.py --self-test`核对轴序、恒值斜截面、Gaussian宽度、exact-copy零差异；`python .../analyze.py`重绘，`python .../summarize_runs.py`核对10/20/30轮格式/融合数值门。PSC复现用既有 `paired.py psc5 --label <新目录> --iterations 50 --subsets 1 --threads 16 --auto-host-cache --baseline <冻结a72a991 EXE> --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/psc5`；本次记录在 `psf_fused_20261013_psc5_n1/`。
+
+本轮只创建本地干净提交并重新配置/编译，不推送、不修改SPECT_Core或设备现场默认配置。原始矩阵/投影与历史证据均保持不变。
