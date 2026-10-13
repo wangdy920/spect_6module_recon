@@ -7,39 +7,7 @@
 
 #include <algorithm>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <memoryapi.h>
-#endif
-
-
 namespace spect {
-
-namespace {
-
-struct SystemMemoryInfo {
-  uint64_t totalBytes = 0;
-  uint64_t availableBytes = 0;
-};
-
-#if defined(_WIN32)
-SystemMemoryInfo querySystemMemoryInfo() {
-  MEMORYSTATUSEX memStatus{};
-  memStatus.dwLength = sizeof(memStatus);
-  if (!GlobalMemoryStatusEx(&memStatus)) {
-    return {};
-  }
-  return {static_cast<uint64_t>(memStatus.ullTotalPhys),
-          static_cast<uint64_t>(memStatus.ullAvailPhys)};
-}
-#else
-SystemMemoryInfo querySystemMemoryInfo() { return {}; }
-#endif
-
-} // namespace
 
 CudaChunkStageTimingState g_cudaChunkStageTiming;
 
@@ -153,41 +121,6 @@ void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward) {
         static_cast<uint64_t>(bytes);
   }
 }
-
-uint64_t selectPreparedChunkHostCacheBudgetCapBytes() {
-  const SystemMemoryInfo memory = querySystemMemoryInfo();
-  uint64_t cap = cuda::kPreparedChunkHostCacheMinBytes;
-  // P3-A: Use 60 GiB threshold instead of 64 GiB — Windows reserves ~0.5 GiB
-  // for hardware (BIOS, GPU BAR, etc.), so a 64 GB system reports ~63.8 GiB.
-  if (memory.totalBytes >= cuda::kPreparedChunkHostCacheHighRamThresholdBytes) {
-    cap = cuda::kPreparedChunkHostCacheMaxBytes;
-  } else if (memory.totalBytes >=
-             cuda::kPreparedChunkHostCacheMidRamThresholdBytes) {
-    cap = cuda::kPreparedChunkHostCacheMidBytes;
-  }
-  // Code.CUDA.41: On high-RAM systems, Windows MEMORYSTATUSEX.ullAvailPhys
-  // counts memory-mapped file pages (e.g. the 21 GB CSR file) as "in use",
-  // even though file-backed pages are trivially evictable by the OS.
-  // Use totalBytes*2/3 as a floor for effectiveAvailable to prevent the
-  // cache budget from being suppressed below the matrix size.
-  const uint64_t effectiveAvailable =
-      (memory.totalBytes >= cuda::kPreparedChunkHostCacheHighRamThresholdBytes)
-            ? std::max(
-              memory.availableBytes,
-              memory.totalBytes *
-                cuda::kPreparedChunkHostCacheEffectiveAvailableNumerator /
-                cuda::kPreparedChunkHostCacheEffectiveAvailableDenominator)
-          : memory.availableBytes;
-  if (effectiveAvailable > cuda::kPreparedChunkHostCacheSafetyReserveBytes) {
-    cap = std::min<uint64_t>(
-        cap, effectiveAvailable - cuda::kPreparedChunkHostCacheSafetyReserveBytes);
-  } else {
-    cap = std::min<uint64_t>(cap, cuda::kPreparedChunkHostCacheEmergencyBytes);
-  }
-  return cap;
-}
-
-
 
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix) {
   MatrixCacheKey key;

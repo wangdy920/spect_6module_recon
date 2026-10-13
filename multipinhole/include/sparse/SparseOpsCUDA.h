@@ -164,25 +164,8 @@ bool spmvFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool spmvTFloatCUDA(const io::CSRView& matrix, const float* x, float* y);
 bool compactDeviceBackwardBeginCUDA(size_t voxelCount,
                                     int accumulatorIndex = 0);
-bool compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
-    const float* x,
-    const CompactDeviceTransformParams& params,
-    CompactDeviceBackwardTiming* timing = nullptr,
-    int accumulatorIndex = 0);
 bool compactDeviceBackwardDownloadCUDA(double* y, size_t voxelCount,
                                        int accumulatorIndex = 0);
-bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
-    const io::CSRView& matrix,
-    const float* x,
-    const double* fullProjection,
-    size_t fullProjectionCount,
-    const CompactDeviceRatioParams& ratioParams,
-    const CompactDeviceTransformParams& transformParams,
-    CompactDeviceRatioTiming* ratioTiming = nullptr,
-    CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int accumulatorIndex = 0,
-    int cacheSlot = 0);
 // --- CSRB batch passes over a chunk slice ------------------------------------
 // The matrix operand of the four passes below is an io::CSRSubsetView: the
 // rows of the compact angles of one ordered subset that fall in one chunk, or

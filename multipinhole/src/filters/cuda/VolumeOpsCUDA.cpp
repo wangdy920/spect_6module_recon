@@ -45,8 +45,6 @@ struct VolumeKernelCache {
   CUfunction attenLineIntegral = nullptr;
   CUfunction rdpGrad = nullptr;
   CUfunction tvGrad = nullptr;
-  CUfunction tvProxDual = nullptr;
-  CUfunction tvProxPrimal = nullptr;
   int device = -1;
   int computeMajor = -1;
   int computeMinor = -1;
@@ -179,12 +177,6 @@ void ensureVolumeKernelsLoaded() {
     SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvGrad,
                                           g_volumeKernelCache.module,
                                           "tv_grad_3d"));
-    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxDual,
-                                          g_volumeKernelCache.module,
-                                          "tv_prox_dual_update_3d"));
-    SPECT_CUDRV_CHECK(cuModuleGetFunction(&g_volumeKernelCache.tvProxPrimal,
-                                          g_volumeKernelCache.module,
-                                          "tv_prox_primal_update_3d"));
     if (!runVolumeKernelGoldenSelfTest(g_volumeKernelCache.convX,
                                        g_volumeKernelCache.convXF)) {
       throw std::runtime_error("volume convolution golden self-test failed");
@@ -333,14 +325,6 @@ struct VolumeOpsState {
   DeviceBuffer<double> znorm;
   DeviceBuffer<float> znormF;
 
-  // TV proximal (Chambolle-Pock) buffers
-  DeviceBuffer<double> tvPx;
-  DeviceBuffer<double> tvPy;
-  DeviceBuffer<double> tvPz;
-  DeviceBuffer<double> tvU;
-  DeviceBuffer<double> tvUbar;
-  DeviceBuffer<double> tvV;
-
   std::vector<double> cachedKx;
   std::vector<double> cachedKy;
   std::vector<double> cachedKz;
@@ -460,46 +444,6 @@ void launchRdpGradientKernel(const double *input, const uint8_t *mask,
                   &skipOutsideMask, &Nx, &Ny, &Nz, &eps, &gamma, &ctSigma,
                   &ctWeightFloor, &outputPtr, &total};
   launchVolumeKernel(g_volumeKernelCache.rdpGrad, args, total);
-}
-
-void launchTvProxDualKernel(const double *u_bar, const double *ct,
-                           double *px, double *py,
-                           double *pz, double sigma, double lambda_val,
-                           bool hasCt, double ctSigma, double ctWeightFloor,
-                           int Nx, int Ny, int Nz,
-                           unsigned long long total) {
-  ensureVolumeKernelsLoaded();
-  CUdeviceptr ubarPtr = reinterpret_cast<CUdeviceptr>(u_bar);
-  CUdeviceptr ctPtr = reinterpret_cast<CUdeviceptr>(const_cast<double *>(ct));
-  CUdeviceptr pxPtr = reinterpret_cast<CUdeviceptr>(px);
-  CUdeviceptr pyPtr = reinterpret_cast<CUdeviceptr>(py);
-  CUdeviceptr pzPtr = reinterpret_cast<CUdeviceptr>(pz);
-  void *args[] = {&ubarPtr, &ctPtr, &pxPtr, &pyPtr, &pzPtr, &sigma,
-                  &lambda_val, &hasCt, &ctSigma, &ctWeightFloor,
-                  &Nx, &Ny, &Nz, &total};
-  launchVolumeKernel(g_volumeKernelCache.tvProxDual, args, total);
-}
-
-void launchTvProxPrimalKernel(double *u, double *u_bar, const double *v,
-                              const double *ct,
-                              const double *px, const double *py,
-                              const double *pz, double tau, double theta,
-                              bool hasCt, double ctSigma,
-                              double ctWeightFloor,
-                              int Nx, int Ny, int Nz,
-                              unsigned long long total) {
-  ensureVolumeKernelsLoaded();
-  CUdeviceptr uPtr = reinterpret_cast<CUdeviceptr>(u);
-  CUdeviceptr ubarPtr = reinterpret_cast<CUdeviceptr>(u_bar);
-  CUdeviceptr vPtr = reinterpret_cast<CUdeviceptr>(v);
-  CUdeviceptr ctPtr = reinterpret_cast<CUdeviceptr>(const_cast<double *>(ct));
-  CUdeviceptr pxPtr = reinterpret_cast<CUdeviceptr>(px);
-  CUdeviceptr pyPtr = reinterpret_cast<CUdeviceptr>(py);
-  CUdeviceptr pzPtr = reinterpret_cast<CUdeviceptr>(pz);
-  void *args[] = {&uPtr, &ubarPtr, &vPtr, &ctPtr, &pxPtr, &pyPtr, &pzPtr,
-                  &tau, &theta, &hasCt, &ctSigma, &ctWeightFloor,
-                  &Nx, &Ny, &Nz, &total};
-  launchVolumeKernel(g_volumeKernelCache.tvProxPrimal, args, total);
 }
 
 bool shouldUseCudaVolumeOps() {
@@ -1037,78 +981,6 @@ bool computeRegGradientDeviceCUDA(const double *dImage, int Nx, int Ny, int Nz,
                            reg.ct_sigma, reg.ct_weight_floor, dGrad,
                            static_cast<unsigned long long>(total));
   }
-  return true;
-}
-
-bool computeTVProxCUDA(const std::vector<double> &v, int Nx, int Ny, int Nz,
-                       double lambda, int innerIters,
-                       std::vector<double> &u_out,
-                       const std::vector<double> *ctImage,
-                       double ctSigma, double ctWeightFloor) {
-  if (!shouldUseCudaVolumeOps())
-    return false;
-
-  const size_t total = static_cast<size_t>(Nx) * static_cast<size_t>(Ny) *
-                       static_cast<size_t>(Nz);
-  if (v.size() != total)
-    throw std::runtime_error("CUDA TV prox input size mismatch");
-  if (ctImage && ctImage->size() != total)
-    throw std::runtime_error("CUDA TV prox registered CT size mismatch");
-  if (ctImage && !(ctSigma > 0.0))
-    throw std::runtime_error("CUDA TV prox CT sigma must be positive");
-  if (ctWeightFloor < 0.0 || ctWeightFloor > 1.0)
-    throw std::runtime_error("CUDA TV prox CT weight floor must be in [0,1]");
-  if (innerIters <= 0)
-    innerIters = 1;
-
-  ensureVolumeKernelsLoaded();
-
-  // Chambolle-Pock step sizes: sigma*tau*||grad||^2 < 1, ||grad||^2 <= 12
-  const double sigma = 1.0 / std::sqrt(12.0);
-  const double tau = 1.0 / std::sqrt(12.0);
-  const double theta = 1.0;
-  const unsigned long long totalCount =
-      static_cast<unsigned long long>(total);
-
-  auto &state = g_volumeOpsState;
-  const bool hasCt = ctImage != nullptr;
-  if (hasCt)
-    state.ct.upload(ctImage->data(), total);
-
-  // Upload v (fixed target)
-  state.tvV.upload(v.data(), total);
-
-  // Initialize u = v, u_bar = v
-  state.tvU.upload(v.data(), total);
-  state.tvUbar.upload(v.data(), total);
-
-  // Initialize dual variables p = 0
-  std::vector<double> zeros(total, 0.0);
-  state.tvPx.upload(zeros.data(), total);
-  state.tvPy.upload(zeros.data(), total);
-  state.tvPz.upload(zeros.data(), total);
-
-  // Chambolle-Pock inner iterations (all on GPU)
-  for (int k = 0; k < innerIters; ++k) {
-    // Dual update: p = proj(p + sigma * grad(u_bar))
-    launchTvProxDualKernel(state.tvUbar.get(),
-                           hasCt ? state.ct.get() : nullptr, state.tvPx.get(),
-                           state.tvPy.get(), state.tvPz.get(), sigma,
-                           lambda, hasCt, ctSigma, ctWeightFloor,
-                           Nx, Ny, Nz, totalCount);
-
-    // Primal update: u_new, u_bar extrapolation
-    launchTvProxPrimalKernel(state.tvU.get(), state.tvUbar.get(),
-                             state.tvV.get(),
-                             hasCt ? state.ct.get() : nullptr, state.tvPx.get(),
-                             state.tvPy.get(), state.tvPz.get(), tau,
-                             theta, hasCt, ctSigma, ctWeightFloor,
-                             Nx, Ny, Nz, totalCount);
-  }
-
-  SPECT_CUDRV_CHECK(cuCtxSynchronize());
-  u_out.resize(total);
-  state.tvU.download(u_out.data(), total);
   return true;
 }
 

@@ -756,171 +756,6 @@ public:
     compactBackwardAccumSize_[slot] = voxelCount;
   }
 
-  void executeCompactDeviceBackwardSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const float *x,
-      const cuda::CompactDeviceTransformParams &params,
-      cuda::CompactDeviceBackwardTiming *timing, int accumulatorIndex) {
-    ensureCudaRuntimeAvailable();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device-backward accumulator was not initialized.");
-    }
-    if (params.symmetryMode != 45 && params.symmetryMode != 90) {
-      throw std::runtime_error(
-          "compact device-backward CUDA helper requires symmetryMode 45 or 90.");
-    }
-    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-    const int64_t rows = cached.rows;
-    const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device-backward accumulator size does not match matrix columns.");
-    }
-
-    const auto inputStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(rows));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      inputStart)
-            .count());
-    dFullOutput_.allocate(static_cast<size_t>(cols));
-    ensureProjDomainKernelsLoaded();
-
-    CuSparseVecGuard vecXBackward;
-    CuSparseVecGuard vecYBackward;
-    vecXBackward.create(rows, dInput_.get());
-    vecYBackward.create(cols, dFullOutput_.get());
-    TimedCudaStagePair backwardTiming;
-    backwardTiming.recordStart(nullptr);
-    executeSpMVLocked(cached, CUSPARSE_OPERATION_TRANSPOSE,
-                      vecXBackward.get(), vecYBackward.get(), 0.0f);
-    backwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair transformTiming;
-    transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddKernel(
-        dFullOutput_.get(), accum.get(), accumSize, params);
-    transformTiming.recordStop(nullptr);
-
-    transformTiming.synchronizeStop();
-    const double backwardSeconds = backwardTiming.elapsedSeconds();
-    const double transformSeconds = transformTiming.elapsedSeconds();
-    noteCudaCusparseBackward(backwardSeconds, 1);
-    if (timing != nullptr) {
-      timing->backwardSeconds += backwardSeconds;
-      timing->transformBackwardSeconds += transformSeconds;
-    }
-  }
-
-  void executeCompactDeviceRatioSpmvTAccumulateFloat(
-      const io::CSRView &matrix, const float *x, const double *fullProjection,
-      size_t fullProjectionCount,
-      const cuda::CompactDeviceRatioParams &ratioParams,
-      const cuda::CompactDeviceTransformParams &transformParams,
-      cuda::CompactDeviceRatioTiming *ratioTimingOut,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorIndex, int cacheSlot) {
-    ensureCudaRuntimeAvailable();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (cacheSlot < 0 || cacheSlot >= spect::core::kMaxBeds) {
-      throw std::runtime_error(
-          "compact device-ratio accumulator cache slot out of range.");
-    }
-    const size_t projectionSlot = static_cast<size_t>(cacheSlot);
-    const size_t slot = compactBackwardAccumulatorSlot(accumulatorIndex);
-    DeviceArray<double> &accum = dCompactBackwardAccum_[slot];
-    const size_t accumSize = compactBackwardAccumSize_[slot];
-    if (accumSize == 0 || accum.get() == nullptr) {
-      throw std::runtime_error(
-          "compact device accumulator was not initialized.");
-    }
-    if (ratioParams.symmetryMode != 45 && ratioParams.symmetryMode != 90) {
-      throw std::runtime_error(
-          "compact device-ratio accumulator helper requires symmetryMode 45 or 90.");
-    }
-    const CachedMatrix &cached = ensureCompactFloatMatrixUploaded(matrix);
-    const int64_t rows = cached.rows;
-    const int64_t cols = cached.cols;
-    if (static_cast<size_t>(cols) != accumSize) {
-      throw std::runtime_error(
-          "compact device accumulator size does not match matrix columns.");
-    }
-
-    const auto inputStart = std::chrono::steady_clock::now();
-    dInput_.copyFromHost(x, static_cast<size_t>(cols));
-    noteCudaCompactInputH2D(
-        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                      inputStart)
-            .count());
-    ensureCompactFullProjectionUploaded(fullProjection, fullProjectionCount,
-                                        cacheSlot);
-    ensureProjDomainKernelsLoaded();
-
-    dOutput_.allocate(static_cast<size_t>(rows));
-    dChunkInput_.allocate(static_cast<size_t>(rows));
-    dFullOutput_.allocate(static_cast<size_t>(cols));
-
-    CuSparseVecGuard vecXForward;
-    CuSparseVecGuard vecYForward;
-    vecXForward.create(cols, dInput_.get());
-    vecYForward.create(rows, dOutput_.get());
-    TimedCudaStagePair forwardTiming;
-    forwardTiming.recordStart(nullptr);
-    executeSpMVLocked(cached, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                      vecXForward.get(), vecYForward.get(), 0.0f);
-    forwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair ratioTiming;
-    ratioTiming.recordStart(nullptr);
-    launchCompactRatioKernel(dOutput_.get(),
-                             dCompactProjectionInput_[projectionSlot].get(),
-                             compactBackgroundDeviceLocked(cacheSlot),
-                             fullProjectionCount, ratioParams,
-                             dChunkInput_.get(), static_cast<size_t>(rows),
-                             1e-10);
-    ratioTiming.recordStop(nullptr);
-
-    CuSparseVecGuard vecXBackward;
-    CuSparseVecGuard vecYBackward;
-    vecXBackward.create(rows, dChunkInput_.get());
-    vecYBackward.create(cols, dFullOutput_.get());
-    TimedCudaStagePair backwardTiming;
-    backwardTiming.recordStart(nullptr);
-    executeSpMVLocked(cached, CUSPARSE_OPERATION_TRANSPOSE,
-                      vecXBackward.get(), vecYBackward.get(), 0.0f);
-    backwardTiming.recordStop(nullptr);
-
-    TimedCudaStagePair transformTiming;
-    transformTiming.recordStart(nullptr);
-    launchCompactTransformBackwardAddKernel(
-        dFullOutput_.get(), accum.get(), accumSize, transformParams);
-    transformTiming.recordStop(nullptr);
-
-    transformTiming.synchronizeStop();
-    const double forwardSeconds = forwardTiming.elapsedSeconds();
-    const double ratioSeconds = ratioTiming.elapsedSeconds();
-    const double backwardSeconds = backwardTiming.elapsedSeconds();
-    const double transformSeconds = transformTiming.elapsedSeconds();
-    noteCudaCusparseForward(forwardSeconds, 1);
-    noteCudaRatio(ratioSeconds, 1);
-    noteCudaCusparseBackward(backwardSeconds, 1);
-    if (ratioTimingOut != nullptr) {
-      ratioTimingOut->forwardSeconds += forwardSeconds;
-      ratioTimingOut->ratioSeconds += ratioSeconds;
-      ratioTimingOut->backwardSeconds += backwardSeconds;
-    }
-    if (backwardTimingOut != nullptr) {
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-      backwardTimingOut->transformBackwardSeconds += transformSeconds;
-    }
-  }
-
   void executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
       const io::CSRSubsetView &matrix, const double *const *fullProjections,
       size_t fullProjectionCount,
@@ -2366,8 +2201,6 @@ public:
     cache_.release();
     dInput_.reset();
     dOutput_.reset();
-    dChunkInput_.reset();
-    dFullOutput_.reset();
     dBatchInput_.reset();
     dBatchOutput_.reset();
     dFullBatchOutput_.reset();
@@ -3953,10 +3786,8 @@ private:
   DeviceArray<float> dOutput_;
   std::array<DeviceArray<double>, kCompactProjectionSlots>
       dCompactProjectionInput_;
-  DeviceArray<float> dChunkInput_;
   PinnedHostArray<float> pinnedInputStage_;
   PinnedHostArray<float> pinnedOutputStage_;
-  DeviceArray<float> dFullOutput_;
   // Branch-batch compact-symmetric buffers (cols x batchSize / rows x batchSize).
   DeviceArray<float> dBatchInput_;
   DeviceArray<float> dBatchOutput_;

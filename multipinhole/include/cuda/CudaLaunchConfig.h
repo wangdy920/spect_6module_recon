@@ -24,16 +24,6 @@ constexpr uint64_t kProjDomainChunkLowMemTargetBytesCap = 3ull * kCudaGiB;
 constexpr uint64_t kProjDomainChunkHighMemDivisor = 2ull;
 constexpr uint64_t kProjDomainChunkLowMemDivisor = 3ull;
 
-constexpr uint64_t kPreparedChunkHostCacheMaxBytes = 24ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheMidBytes = 8ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheMinBytes = 2ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheEmergencyBytes = 512ull * kCudaMiB;
-constexpr uint64_t kPreparedChunkHostCacheSafetyReserveBytes = 4ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheHighRamThresholdBytes = 60ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheMidRamThresholdBytes = 28ull * kCudaGiB;
-constexpr uint64_t kPreparedChunkHostCacheEffectiveAvailableNumerator = 2ull;
-constexpr uint64_t kPreparedChunkHostCacheEffectiveAvailableDenominator = 3ull;
-
 constexpr uint64_t kCompactChunkHostCacheFallbackBytes = 26ull * kCudaGiB;
 constexpr uint64_t kCompactChunkHostCacheMinReserveBytes = 8ull * kCudaGiB;
 constexpr uint64_t kCompactChunkResidentDeviceReserveBytes = 6ull * kCudaGiB;

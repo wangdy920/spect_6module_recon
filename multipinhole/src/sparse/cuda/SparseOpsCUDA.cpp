@@ -40,14 +40,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <memoryapi.h>
-#endif
-
 #if defined(_OPENMP)
 #include <omp.h>
 #endif
@@ -64,10 +56,6 @@ namespace cuda {
 
 uint64_t getProjDomainChunkNnzBudgetCUDA() {
   return selectCudaChunkNnzBudget();
-}
-
-uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() {
-  return selectPreparedChunkHostCacheBudgetCapBytes();
 }
 
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &matrices,
@@ -236,42 +224,12 @@ bool compactDeviceBackwardBeginCUDA(size_t voxelCount, int accumulatorIndex) {
   return true;
 }
 
-bool compactDeviceBackwardSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const float *x,
-    const cuda::CompactDeviceTransformParams &params,
-    cuda::CompactDeviceBackwardTiming *timing, int accumulatorIndex) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().executeCompactDeviceBackwardSpmvTAccumulateFloat(matrix, x,
-                                                               params, timing,
-                                                               accumulatorIndex);
-  return true;
-}
-
 bool compactDeviceBackwardDownloadCUDA(double *y, size_t voxelCount,
                                        int accumulatorIndex) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().downloadCompactDeviceBackward(y, voxelCount, accumulatorIndex);
-  return true;
-}
-
-bool compactDeviceRatioSpmvTAccumulateFloatCUDA(
-    const io::CSRView &matrix, const float *x, const double *fullProjection,
-    size_t fullProjectionCount,
-    const cuda::CompactDeviceRatioParams &ratioParams,
-    const cuda::CompactDeviceTransformParams &transformParams,
-    cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int accumulatorIndex,
-    int cacheSlot) {
-  if (!isCudaAvailable()) {
-    return false;
-  }
-  cudaState().executeCompactDeviceRatioSpmvTAccumulateFloat(
-      matrix, x, fullProjection, fullProjectionCount, ratioParams,
-      transformParams, ratioTiming, backwardTiming, accumulatorIndex, cacheSlot);
   return true;
 }
 
@@ -578,8 +536,6 @@ namespace cuda {
 uint64_t getProjDomainChunkNnzBudgetCUDA() {
   return kProjDomainChunkMinNnz;
 }
-
-uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() { return 0; }
 
 bool warmupResidentMatrixSetCUDA(const std::vector<io::CSRView> &,
                                  uint64_t) {

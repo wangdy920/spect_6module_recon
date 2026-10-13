@@ -90,16 +90,6 @@ bool computeRegGradientDeviceCUDA(const double *dImage, int Nx, int Ny, int Nz,
                                   const std::vector<uint8_t> *mask,
                                   double *dGrad);
 
-/// TV proximal via Chambolle-Pock primal-dual on GPU.
-/// Solves: u = argmin_u (1/2)||u-v||^2 + lambda*TV(u)
-/// Returns true only when the CUDA kernel ran successfully.
-bool computeTVProxCUDA(const std::vector<double> &v, int Nx, int Ny, int Nz,
-                       double lambda, int innerIters,
-                       std::vector<double> &u_out,
-                       const std::vector<double> *ctImage = nullptr,
-                       double ctSigma = 0.01,
-                       double ctWeightFloor = 0.05);
-
 #else
 
 inline bool isCudaVolumeOpsAvailable() { return false; }
@@ -172,13 +162,6 @@ inline bool computeRegGradientDeviceCUDA(const double *, int, int, int,
                                          const spect::RegConf &,
                                          const std::vector<uint8_t> *,
                                          double *) {
-  return false;
-}
-
-inline bool computeTVProxCUDA(const std::vector<double> &, int, int, int,
-                              double, int, std::vector<double> &,
-                              const std::vector<double> * = nullptr,
-                              double = 0.01, double = 0.05) {
   return false;
 }
 

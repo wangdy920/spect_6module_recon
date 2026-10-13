@@ -15,14 +15,6 @@ namespace spect {
 
 void ensureProjDomainKernelsLoaded();
 
-// fullBackground: device additive background (same layout as fullProjection)
-// or nullptr for none.
-void launchCompactRatioKernel(
-    const float *yhat, const double *fullProjection,
-    const double *fullBackground, size_t fullProjectionCount,
-    const cuda::CompactDeviceRatioParams &params, float *ratio, size_t count,
-    double eps, cudaStream_t stream = nullptr);
-
 // Null yhatBatch prepares a binary p!=0 activity mask in ratioBatch.
 void launchCompactRatioBatchKernel(
     const float *yhatBatch, const double *fullProjection,
@@ -71,11 +63,6 @@ void launchCompactTransformForwardBatchKernel(
     const float *bedImage, float *rotatedBatch, size_t nvox, int branchCount,
     int zBranchCount, const cuda::CompactDeviceTransformParams &commonParams,
     cudaStream_t stream = nullptr, const uint8_t *mask = nullptr);
-
-void launchCompactTransformBackwardAddKernel(
-    const float *rotated, double *accum, size_t nvox,
-    const cuda::CompactDeviceTransformParams &params,
-    cudaStream_t stream = nullptr);
 
 void launchCompactTransformBackwardAddBatchKernel(
     const float *rotatedBatch, double *accum, size_t nvox, int batchSize,

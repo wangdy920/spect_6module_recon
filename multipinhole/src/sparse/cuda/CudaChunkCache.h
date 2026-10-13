@@ -165,8 +165,6 @@ void noteCudaCompactInputH2D(double seconds);
 void noteCudaCompactProjectionH2D(double seconds, size_t bytes);
 void noteCudaCompactOutputD2H(double seconds, size_t bytes, bool backward);
 
-uint64_t selectPreparedChunkHostCacheBudgetCapBytes();
-
 MatrixCacheKey makeCacheKey(const io::CSRView &matrix);
 MatrixCacheKey makeCacheKey(const io::CSRSubsetView &slice);
 uint64_t estimateDeviceCsrBytes(int64_t rows, int64_t nnz);

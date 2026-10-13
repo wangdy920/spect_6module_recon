@@ -68,7 +68,6 @@ void resetCudaChunkStageTimingCUDA();
 CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA();
 
 uint64_t getProjDomainChunkNnzBudgetCUDA();
-uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA();
 
 #else
 
@@ -78,7 +77,6 @@ inline CudaChunkStageTimingSnapshot getCudaChunkStageTimingSnapshotCUDA() {
 }
 
 inline uint64_t getProjDomainChunkNnzBudgetCUDA() { return kProjDomainChunkMinNnz; }
-inline uint64_t getCudaPreparedChunkHostCacheBudgetCapCUDA() { return 0; }
 
 #endif
 
