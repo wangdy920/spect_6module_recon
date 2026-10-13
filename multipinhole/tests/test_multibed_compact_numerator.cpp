@@ -405,16 +405,16 @@ TEST_F(MultiBedCompactNumeratorTest, FullHostCachePinsFollowAllocationOwnership)
     allocation.reset();
     ASSERT_FALSE(weak.expired());
     allocation = weak.lock();
-    for (const void *ptr : {static_cast<const void *>(allocation->colIdxData()),
-                            static_cast<const void *>(allocation->valuesData())}) {
+    for (const void *ptr : {static_cast<const void *>(allocation->colIdx.data()),
+                            static_cast<const void *>(allocation->values.data())}) {
       cudaPointerAttributes attributes{};
       ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
       EXPECT_EQ(attributes.type, cudaMemoryTypeHost);
     }
     ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
     lease.reset();
-    for (const void *ptr : {static_cast<const void *>(allocation->colIdxData()),
-                            static_cast<const void *>(allocation->valuesData())}) {
+    for (const void *ptr : {static_cast<const void *>(allocation->colIdx.data()),
+                            static_cast<const void *>(allocation->values.data())}) {
       cudaPointerAttributes attributes{};
       ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
       EXPECT_EQ(attributes.type, cudaMemoryTypeUnregistered);
@@ -473,8 +473,8 @@ TEST_F(MultiBedCompactNumeratorTest, RefusedHostPinKeepsRemainingChunksPageable)
     for (size_t index = 0; index < 2; ++index) {
       const auto chunk = chunks.loadChunk(index);
       const bool locked = static_cast<int>(index) < allowed / 2;
-      for (const void *ptr : {static_cast<const void *>(chunk->colIdxData()),
-                              static_cast<const void *>(chunk->valuesData())}) {
+      for (const void *ptr : {static_cast<const void *>(chunk->colIdx.data()),
+                              static_cast<const void *>(chunk->values.data())}) {
         cudaPointerAttributes attributes{};
         ASSERT_EQ(cudaPointerGetAttributes(&attributes, ptr), cudaSuccess);
         EXPECT_EQ(attributes.type, locked ? cudaMemoryTypeHost

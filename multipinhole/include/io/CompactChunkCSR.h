@@ -24,7 +24,6 @@ enum class CompactChunkFormat { CsrbFloat32, CsrqRunU16 };
 // CSRQ run word: (startCol << kCompactRunLenBits) | (len - 1), len in 1..64.
 constexpr int kCompactRunLenBits = 6;
 constexpr int kCompactRunMaxLen = 1 << kCompactRunLenBits;
-constexpr uint32_t kCompactRunMaxStartCol = 1u << (32 - kCompactRunLenBits);
 
 struct CompactChunkCSRInfo {
   std::filesystem::path path;
@@ -80,10 +79,6 @@ struct CompactChunkCSRData : std::enable_shared_from_this<CompactChunkCSRData> {
   // identifies the subset for device caching (0 = whole chunk).
   CSRSubsetView subsetView(const std::vector<int> &compactAngles,
                            int raysPerAngle, uint64_t tag) const;
-  const uint32_t *colIdxData() const;
-  const float *valuesData() const;
-  size_t colIdxCount() const;
-  size_t valuesCount() const;
   uint64_t residentBytes() const;
 };
 

@@ -23,21 +23,15 @@ using io::CSR;
 struct ReconOpts {
   int threads = 16;
   bool nonneg = true;
-  const std::vector<uint8_t>* mask = nullptr;
-  const std::vector<double>* w_img = nullptr;
   const std::vector<double>* w_proj = nullptr;
   const std::vector<double>* b_proj = nullptr;
   PSFConf psf;
-  bool do_post_smooth_every_iter = false;
 
-  // Optional projection-domain PSF geometry (used only if enabled and valid)
-  int det_nz = 0;
-  int det_nx = 0;
+  // Angle count for per-angle attenuation in projection metrics.
   int num_angles = 0;
 
   // Multi-bed configuration
   int bedCount = 1;
-  std::vector<int> bedOverlaps; // Overlap pixels between beds (Stride = BaseNz - Overlap)
   std::vector<long long> bedOffsetVoxels; // Pre-calculated start index in image vector for each bed
 
   // Per-Bed Attenuation Factors for On-the-fly CTAC
@@ -46,31 +40,6 @@ struct ReconOpts {
   std::vector<std::vector<uint16_t>> bedAttenFactors;
 
 };
-
-/// Check if thread-local accumulation should be used based on memory constraints
-inline int effective_threads(int threads) {
-  if (threads <= 0)
-    threads = 1;
-#ifdef SPECT_DETERMINISTIC
-  (void)threads;
-  return 1;
-#else
-  return threads;
-#endif
-}
-
-inline bool should_use_threadlocal_accum(size_t nvox, int threads) {
-  threads = effective_threads(threads);
-  if (threads <= 1 || nvox == 0)
-    return false;
-
-  // Cap temporary memory to avoid regressions on large volumes / many-core CPUs.
-  // Fallback path uses atomics (slower but memory-safe).
-  constexpr size_t kMaxThreadLocalBytes = 512ull * 1024ull * 1024ull; // 512 MiB
-  constexpr size_t kMaxElems = kMaxThreadLocalBytes / sizeof(double);
-  const size_t t = static_cast<size_t>(threads);
-  return nvox <= (kMaxElems / t);
-}
 
 /// Check if PSF blurring is needed
 inline bool needs_psf_blur(const ReconOpts& opts, const PSFKernels* psfKernels) {

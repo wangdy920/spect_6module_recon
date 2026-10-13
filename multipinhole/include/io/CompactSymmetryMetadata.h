@@ -1,7 +1,5 @@
 #pragma once
 
-#include "io/CSRTypes.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -30,7 +28,6 @@ struct CompactSymmetryMetadata {
   int Ny = 0;
   int Nz = 0;
   float voxelSize = 0.0f;
-  int detNxDuplicate = 0;
   int detNz = 0;
   float pixelSize = 0.0f;
   float detectorY = 0.0f;
@@ -129,12 +126,6 @@ bool fullProjectionIndexFromCompactRow(const CompactSymmetryMetadata &meta,
                                        int compactRow, int symId,
                                        bool zMirror,
                                        uint64_t &fullProjectionIndex);
-
-void validateCompactSymmetricInputs(const CompactSymmetryMetadata &meta,
-                                    const CSRView &matrix,
-                                    size_t projectionRowsPerBed, int detNz,
-                                    int detNx, int numAngles, int Nx, int Ny,
-                                    int Nz);
 
 void validateCompactChunkSymmetricInputs(const CompactSymmetryMetadata &meta,
                                          uint64_t chunkRows, int matrixCols,

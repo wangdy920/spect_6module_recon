@@ -79,8 +79,8 @@ struct CompactChunkResidentCacheLease {
     }
     const size_t bytes = static_cast<size_t>(chunk->info.nnz) * sizeof(uint32_t);
     const size_t firstArray = pinnedArrays.size();
-    for (void *ptr : {static_cast<void *>(const_cast<uint32_t *>(chunk->colIdxData())),
-                      static_cast<void *>(const_cast<float *>(chunk->valuesData()))}) {
+    for (void *ptr : {static_cast<void *>(const_cast<uint32_t *>(chunk->colIdx.data())),
+                      static_cast<void *>(const_cast<float *>(chunk->values.data()))}) {
       const cudaError_t status = registerHostArray(ptr, bytes);
       if (status != cudaSuccess) {
         (void)cudaGetLastError();
@@ -962,33 +962,6 @@ void fillBranchSymmetryTables(const std::vector<CompactBranchDescriptor> &branch
 
 
 
-void transformForwardInto(const double *input, double *output,
-                          const spect::io::CompactSymmetryMetadata &meta,
-                          int symId, bool zMirror, int threads) {
-  const int nx = meta.Nx;
-  const int ny = meta.Ny;
-  const int nz = meta.Nz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  const size_t nvox = plane * static_cast<size_t>(nz);
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(nvox); ++idx) {
-    const size_t uidx = static_cast<size_t>(idx);
-    const int iz = static_cast<int>(uidx / plane);
-    const int rem = static_cast<int>(uidx - static_cast<size_t>(iz) * plane);
-    const int iy = rem / nx;
-    const int ix = rem - iy * nx;
-    const spect::io::CompactVoxelCoord mapped =
-        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
-    output[uidx] =
-        input[static_cast<size_t>(mapped.z) * plane +
-              static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
-              static_cast<size_t>(mapped.x)];
-  }
-}
-
 void transformForwardIntoFloat(const double *input, float *output,
                                const spect::io::CompactSymmetryMetadata &meta,
                                int symId, bool zMirror, int threads) {
@@ -1013,48 +986,6 @@ void transformForwardIntoFloat(const double *input, float *output,
         input[static_cast<size_t>(mapped.z) * plane +
               static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
               static_cast<size_t>(mapped.x)]);
-  }
-}
-
-void transformForward(const double *input, std::vector<double> &output,
-                      const spect::io::CompactSymmetryMetadata &meta,
-                      int symId, bool zMirror, int threads) {
-  const int nx = meta.Nx;
-  const int ny = meta.Ny;
-  const int nz = meta.Nz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  const size_t nvox = plane * static_cast<size_t>(nz);
-  output.resize(nvox);
-  transformForwardInto(input, output.data(), meta, symId, zMirror, threads);
-}
-
-void transformBackwardAdd(const float *rotated, std::vector<double> &accum,
-                          const spect::io::CompactSymmetryMetadata &meta,
-                          int symId, bool zMirror, int threads) {
-  const int nx = meta.Nx;
-  const int ny = meta.Ny;
-  const int nz = meta.Nz;
-  const size_t plane = static_cast<size_t>(nx) * static_cast<size_t>(ny);
-  const size_t nvox = plane * static_cast<size_t>(nz);
-  if (accum.size() != nvox) {
-    accum.assign(nvox, 0.0);
-  }
-
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) num_threads(effectiveThreads(threads))
-#endif
-  for (ptrdiff_t idx = 0; idx < static_cast<ptrdiff_t>(nvox); ++idx) {
-    const size_t uidx = static_cast<size_t>(idx);
-    const int iz = static_cast<int>(uidx / plane);
-    const int rem = static_cast<int>(uidx - static_cast<size_t>(iz) * plane);
-    const int iy = rem / nx;
-    const int ix = rem - iy * nx;
-    const spect::io::CompactVoxelCoord mapped =
-        spect::io::mapCompactVoxelCoord(ix, iy, iz, nx, nz, symId, zMirror);
-    accum[static_cast<size_t>(mapped.z) * plane +
-          static_cast<size_t>(mapped.y) * static_cast<size_t>(nx) +
-          static_cast<size_t>(mapped.x)] +=
-        static_cast<double>(rotated[uidx]);
   }
 }
 

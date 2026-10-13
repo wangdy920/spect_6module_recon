@@ -57,12 +57,6 @@ const std::vector<uint8_t> *maybeMakeCylindricalMask(
   return &mask;
 }
 
-filters::PSFKernels preparePSFKernels(const filters::PSFConf &psfConf) {
-  if (psfConf.mode == filters::PSFMode::None)
-    return {};
-  return filters::make_psf_kernels(psfConf);
-}
-
 filters::ButterworthConf prepareButterworthConf(const ReconArgs &args) {
   filters::ButterworthConf conf;
   // Only the in_recon stage feeds the per-iteration filter.
@@ -105,39 +99,29 @@ SmoothConf prepareSmoothingConf(const ReconArgs &args) {
   return conf;
 }
 
-ReconPreparedParams prepareReconPreparedParams(const ReconArgs &args,
-                                               const filters::PSFConf &psfConf) {
+ReconPreparedParams prepareReconPreparedParams(const ReconArgs &args) {
   ReconPreparedParams prepared;
-  prepared.psfKernels = preparePSFKernels(psfConf);
   prepared.butterConf = prepareButterworthConf(args);
   prepared.smoothConf = prepareSmoothingConf(args);
   return prepared;
 }
 
-PSFPreparationResult preparePSFForRuntime(ReconOpts &opts, const ReconArgs &args,
-                                          const filters::Spacing3 &spacing,
-                                          int, size_t,
-                                          int) {
-  PSFPreparationResult result;
+filters::PSFKernels preparePSFForRuntime(ReconOpts &opts, const ReconArgs &args,
+                                         const filters::Spacing3 &spacing) {
   opts.psf = args.psf;
   opts.psf.vox_x = spacing.dx;
   opts.psf.vox_y = spacing.dy;
   opts.psf.vox_z = spacing.dz;
 
-  if (!args.usePSF) {
+  if (!args.usePSF)
     opts.psf.mode = filters::PSFMode::None;
-    return result;
-  }
-
-  if (opts.psf.mode != filters::PSFMode::None) {
-    if (!cuda::isCudaVolumeOpsAvailable())
-      throw std::runtime_error(
-          "PSF-enabled reconstruction requires CUDA volume operations; "
-          "SPECT_CUDA_VOLUME_OPS=0 and CPU fallback are not supported.");
-    result.psfKernels = preparePSFKernels(opts.psf);
-  }
-
-  return result;
+  if (opts.psf.mode == filters::PSFMode::None)
+    return {};
+  if (!cuda::isCudaVolumeOpsAvailable())
+    throw std::runtime_error(
+        "PSF-enabled reconstruction requires CUDA volume operations; "
+        "SPECT_CUDA_VOLUME_OPS=0 and CPU fallback are not supported.");
+  return filters::make_psf_kernels(opts.psf);
 }
 
 } // namespace spect::main

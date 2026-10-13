@@ -157,8 +157,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   const uint32_t *hRowPtr = chunk->rowPtr.data();
-  const uint32_t *hColIdx = chunk->colIdxData();
-  const float *hValues = chunk->valuesData();
+  const uint32_t *hColIdx = chunk->colIdx.data();
+  const float *hValues = chunk->values.data();
 
   // ---- Host transpose: CSR(A) -> CSR(A^T) (counting sort by column) ----
   // Only the full mode needs CSR(A^T); scatter mode keeps host memory small.

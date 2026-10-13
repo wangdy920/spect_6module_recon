@@ -1,7 +1,5 @@
 #include "ctac/CTACFactorCache.h"
 
-#include "core/AttenuationConstants.h"
-#include "ctac/CTACOps.h"
 #include "cli/ReconArgs.h"
 #include "io/VolumeLoader.h"
 #include "pipeline/RunLogger.h"
@@ -211,35 +209,6 @@ void CTACFactorCache::save(const std::string &manifest,
   }
 
   logInfo("CTAC factor cache saved: " + rawFile.string());
-}
-
-std::vector<uint16_t> computeAttenFactorsCached(
-    const std::vector<double> &muMap, int nx, int ny, int nz, double dx,
-    double dy, double dz, int numAngles, int rotationSign, int threads,
-    const CTACFactorCache *cache, const std::string &manifest) {
-  const size_t expectedCount =
-      static_cast<size_t>(numAngles) * static_cast<size_t>(nx) * ny * nz;
-
-  if (cache != nullptr && !manifest.empty()) {
-    auto cached = cache->tryLoad(manifest);
-    if (cached.has_value()) {
-      if (cached->size() == expectedCount) {
-        return std::move(*cached);
-      }
-      logWarn("CTAC factor cache hit size mismatch: " +
-              std::to_string(cached->size()) + " vs " +
-              std::to_string(expectedCount) + ", regenerating.");
-    }
-  }
-
-  std::vector<uint16_t> factors = computeAttenFactors(
-      muMap, nx, ny, nz, dx, dy, dz, numAngles, rotationSign, threads);
-
-  if (cache != nullptr && !manifest.empty()) {
-    cache->save(manifest, factors, expectedCount);
-  }
-
-  return factors;
 }
 
 } // namespace spect::main

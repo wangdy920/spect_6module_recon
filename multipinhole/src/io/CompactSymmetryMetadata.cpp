@@ -297,25 +297,6 @@ void validateCompactSymmetricGeometry(const CompactSymmetryMetadata &meta,
   }
 }
 
-void validateCompactSymmetricInputs(const CompactSymmetryMetadata &meta,
-                                    const CSRView &matrix,
-                                    size_t projectionRowsPerBed, int detNz,
-                                    int detNx, int numAngles, int Nx, int Ny,
-                                    int Nz) {
-  validateCompactSymmetricGeometry(meta, projectionRowsPerBed, detNz, detNx,
-                                   numAngles, Nx, Ny, Nz);
-  auto fail = [](const std::string &message) {
-    throw std::runtime_error("Invalid compact-symmetric inputs: " + message);
-  };
-  if (matrix.rows != static_cast<int>(meta.compactRows())) {
-    fail("matrix rows do not match metadata compact rows.");
-  }
-  if (matrix.cols != meta.totalVoxels ||
-      matrix.cols != static_cast<int>(meta.voxelCount())) {
-    fail("matrix columns do not match metadata voxel count.");
-  }
-}
-
 void validateCompactChunkSymmetricInputs(const CompactSymmetryMetadata &meta,
                                          uint64_t chunkRows, int matrixCols,
                                          size_t projectionRowsPerBed,

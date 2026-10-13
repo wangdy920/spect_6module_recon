@@ -923,13 +923,13 @@ int runProgram(int argc, char **argv) {
         std::vector<std::vector<double>> muToGenerate;
         std::vector<int> bedsToGenerate;
         for (int bed = 0; bed < bedCount; ++bed) {
-          const auto cached = ctacFactorCache->tryLoad(
+          auto cached = ctacFactorCache->tryLoad(
               bedManifests[static_cast<size_t>(bed)]);
           if (cached.has_value() && cached->size() == expectedCount) {
             dynamicAttenFactors[static_cast<size_t>(bed)] =
                 std::move(*cached);
           } else {
-            muToGenerate.push_back(localMuMaps[static_cast<size_t>(bed)]);
+            muToGenerate.push_back(std::move(localMuMaps[static_cast<size_t>(bed)]));
             bedsToGenerate.push_back(bed);
           }
         }
@@ -967,40 +967,26 @@ int runProgram(int argc, char **argv) {
     ReconOpts opts;
     opts.threads = std::max(1, args.numThreads);
     opts.nonneg = true;
-    opts.mask = maskPtr;
     opts.w_proj = nullptr;
-    opts.w_img = nullptr;
     opts.b_proj = backgroundProj.empty() ? nullptr : &backgroundProj;
     opts.bedCount = bedCount;
-    opts.bedOverlaps = args.bedOverlaps;
-    opts.bedAttenFactors = dynamicAttenFactors;
+    opts.bedAttenFactors = std::move(dynamicAttenFactors);
     opts.bedOffsetVoxels.resize(static_cast<size_t>(bedCount));
     for (int bed = 0; bed < bedCount; ++bed) {
       opts.bedOffsetVoxels[static_cast<size_t>(bed)] =
           static_cast<long long>(bedZStarts[static_cast<size_t>(bed)]) *
           static_cast<long long>(baseNx) * static_cast<long long>(baseNy);
     }
-    opts.det_nz = args.detNz;
-    opts.det_nx = args.detNx;
     opts.num_angles = args.numAngles;
 
     stageStart = ProfileClock::now();
-    auto prepared = prepareReconPreparedParams(args, args.psf);
-    auto runtimePsf = preparePSFForRuntime(opts, args, spacing, bedCount,
-                                           projections.size(), baseNx);
+    auto prepared = prepareReconPreparedParams(args);
+    const auto psfKernels = preparePSFForRuntime(opts, args, spacing);
     compactTiming.psfPrepareSeconds =
         std::chrono::duration<double>(ProfileClock::now() - stageStart).count();
-    for (const std::string &message : runtimePsf.logs.infoMessages)
-      logInfo(message);
-    for (const std::string &message : runtimePsf.logs.warningMessages)
-      logWarn(message);
 
-    const filters::PSFKernels *psfPtr = nullptr;
-    if (!runtimePsf.psfKernels.kx.empty()) {
-      psfPtr = &runtimePsf.psfKernels;
-    } else if (!prepared.psfKernels.kx.empty()) {
-      psfPtr = &prepared.psfKernels;
-    }
+    const filters::PSFKernels *psfPtr =
+        psfKernels.kx.empty() ? nullptr : &psfKernels;
     const CropSettings crop = sanitizeCropSettings(args.cropEndStart, args.cropEndEnd);
     int outputNzBeforeCrop = args.Nz;
     if (bedCount > 1) {

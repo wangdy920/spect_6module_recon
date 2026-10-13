@@ -633,9 +633,9 @@ CSRView CompactChunkCSRData::view() const {
   out.rows = info.rows;
   out.cols = cols;
   out.row_ptr = rowPtr.data();
-  out.col_idx = colIdxData();
-  out.val = valuesData();
-  out.nnz = static_cast<uint64_t>(valuesCount());
+  out.col_idx = colIdx.data();
+  out.val = values.data();
+  out.nnz = static_cast<uint64_t>(values.size());
   return out;
 }
 
@@ -725,24 +725,6 @@ uint64_t CompactChunkCSRData::residentBytes() const {
          static_cast<uint64_t>(runs.size()) * sizeof(uint32_t) +
          static_cast<uint64_t>(valuesQ.size()) * sizeof(uint16_t);
 }
-
-const uint32_t *CompactChunkCSRData::colIdxData() const {
-  return colIdx.data();
-}
-
-const float *CompactChunkCSRData::valuesData() const {
-  return values.data();
-}
-
-
-size_t CompactChunkCSRData::colIdxCount() const {
-  return colIdx.size();
-}
-
-size_t CompactChunkCSRData::valuesCount() const {
-  return values.size();
-}
-
 
 CompactChunkCSRDirectory::CompactChunkCSRDirectory(
     std::filesystem::path directory, std::vector<CompactChunkCSRInfo> chunks,
@@ -907,34 +889,12 @@ uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes) {
           matrixBytes, memory.totalBytes, memory.availableBytes));
 }
 
-CompactChunkCSRDirectory openCompactChunkCSRDirectory(
-    const std::string &directory, const CompactSymmetryMetadata &meta) {
-  const std::filesystem::path dir(directory);
-  const auto infos = discoverChunkInfos(dir, meta.totalVoxels);
-  uint64_t matrixBytes = 0;
-  for (const auto &info : infos) {
-    matrixBytes = info.fileSizeBytes >
-                          std::numeric_limits<uint64_t>::max() - matrixBytes
-                      ? std::numeric_limits<uint64_t>::max()
-                      : matrixBytes + info.fileSizeBytes;
-  }
-  // CSRQ chunks are uploaded once to a GPU-resident copy and never re-read,
-  // so the host cache would only pin the matrix in RAM for the whole run.
-  const bool csrq = !infos.empty() &&
-                    infos.front().format == CompactChunkFormat::CsrqRunU16;
-  const uint64_t cacheBudget =
-      csrq ? parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"), 0)
-           : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
-  // ponytail: rescan only the small headers to keep one validation path.
-  return openCompactChunkCSRDirectory(directory, meta, cacheBudget);
-}
+namespace {
 
-CompactChunkCSRDirectory openCompactChunkCSRDirectory(
-    const std::string &directory, const CompactSymmetryMetadata &meta,
+CompactChunkCSRDirectory makeCompactChunkCSRDirectory(
+    const std::filesystem::path &dir, const CompactSymmetryMetadata &meta,
+    std::vector<CompactChunkCSRInfo> infos,
     uint64_t cacheBudgetBytes) {
-  const std::filesystem::path dir(directory);
-  std::vector<CompactChunkCSRInfo> infos = discoverChunkInfos(dir, meta.totalVoxels);
-
   if (meta.profile != CompactSymmetryProfile::Rot90 &&
       meta.profile != CompactSymmetryProfile::Rot90Z)
     throw std::runtime_error("Unsupported compact matrix symmetry profile.");
@@ -978,6 +938,36 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
 
   return CompactChunkCSRDirectory(dir, std::move(infos), meta.totalVoxels,
                                   cacheBudgetBytes, meta.xySymmetryCount() * meta.zBranchCount());
+}
+
+} // namespace
+
+CompactChunkCSRDirectory openCompactChunkCSRDirectory(
+    const std::string &directory, const CompactSymmetryMetadata &meta) {
+  const std::filesystem::path dir(directory);
+  auto infos = discoverChunkInfos(dir, meta.totalVoxels);
+  uint64_t matrixBytes = 0;
+  for (const auto &info : infos) {
+    matrixBytes = info.fileSizeBytes >
+                          std::numeric_limits<uint64_t>::max() - matrixBytes
+                      ? std::numeric_limits<uint64_t>::max()
+                      : matrixBytes + info.fileSizeBytes;
+  }
+  // Keep the CSRQ host cache opt-in; residency and streaming own its uploads.
+  const bool csrq = !infos.empty() &&
+                    infos.front().format == CompactChunkFormat::CsrqRunU16;
+  const uint64_t cacheBudget =
+      csrq ? parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"), 0)
+           : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
+  return makeCompactChunkCSRDirectory(dir, meta, std::move(infos), cacheBudget);
+}
+
+CompactChunkCSRDirectory openCompactChunkCSRDirectory(
+    const std::string &directory, const CompactSymmetryMetadata &meta,
+    uint64_t cacheBudgetBytes) {
+  const std::filesystem::path dir(directory);
+  return makeCompactChunkCSRDirectory(dir, meta,
+      discoverChunkInfos(dir, meta.totalVoxels), cacheBudgetBytes);
 }
 
 } // namespace spect::io

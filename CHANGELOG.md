@@ -8,6 +8,10 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-13: numerator and sensitivity share one branch-metadata cache update,
+  fixing stale GPU symmetry tables when ROT90 and ROT90Z calls are interleaved.
+  Removed unused internal paths, redundant preparation/copies and covered event
+  waits; public CLI/config, matrix formats, kernels and defaults are unchanged.
 - 2026-10-12: CSRB numerator queues current-chunk GPU work before loading and
   prefetching the next slice, allowing reads and uploads to overlap computation.
   Plain and CTAC passes share the scheduling change and retain existing slot,

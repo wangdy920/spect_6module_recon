@@ -89,7 +89,7 @@ TEST(ReconPreparationTest, SmoothingBuildsOddKernel) {
   EXPECT_EQ(conf.kx, conf.kz);
 }
 
-TEST(ReconPreparationTest, CombinedPreparationBuildsAllParts) {
+TEST(ReconPreparationTest, CombinedPreparationBuildsConfiguredFilters) {
   ReconArgs args;
   args.useSmooth = true;
   args.smoothApplyStage = "in_recon";
@@ -100,20 +100,10 @@ TEST(ReconPreparationTest, CombinedPreparationBuildsAllParts) {
   args.butterOrder = 2;
   args.butterCutoff = 0.35f;
 
-  spect::filters::PSFConf psf;
-  psf.mode = spect::filters::PSFMode::Operator;
-  psf.fwhm_x = 2.0;
-  psf.fwhm_y = 2.0;
-  psf.fwhm_z = 2.0;
-  psf.vox_x = 1.0;
-  psf.vox_y = 1.0;
-  psf.vox_z = 1.0;
-
-  const auto prepared = prepareReconPreparedParams(args, psf);
+  const auto prepared = prepareReconPreparedParams(args);
 
   EXPECT_TRUE(prepared.butterConf.enabled);
   EXPECT_TRUE(prepared.smoothConf.enabled);
-  EXPECT_FALSE(prepared.psfKernels.kx.empty());
 }
 
 TEST(ReconPreparationTest, CylindricalMaskHelperReturnsNullWhenDisabled) {

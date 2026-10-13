@@ -519,6 +519,32 @@ TEST(IOTest, CompactChunkCSRDirectoryReadsToyChunks) {
     EXPECT_EQ(chunks.totalRows(), 4u);
     EXPECT_EQ(chunks.totalNnz(), 5u);
     EXPECT_EQ(chunks.cols(), 5);
+    EXPECT_EQ(chunks.cacheBudgetBytes(), 1024u * 1024u);
+
+    const auto automatic =
+        spect::io::openCompactChunkCSRDirectory(dir.string(), meta);
+    ASSERT_EQ(automatic.chunks().size(), chunks.chunks().size());
+    EXPECT_EQ(automatic.format(), chunks.format());
+    EXPECT_EQ(automatic.totalRows(), chunks.totalRows());
+    EXPECT_EQ(automatic.totalNnz(), chunks.totalNnz());
+    EXPECT_EQ(automatic.cols(), chunks.cols());
+    EXPECT_EQ(automatic.branchCount(), chunks.branchCount());
+    for (size_t i = 0; i < chunks.chunks().size(); ++i) {
+        const auto &expected = chunks.chunks()[i];
+        const auto &actual = automatic.chunks()[i];
+        EXPECT_EQ(actual.path, expected.path);
+        EXPECT_EQ(actual.version, expected.version);
+        EXPECT_EQ(actual.rows, expected.rows);
+        EXPECT_EQ(actual.angleOffset, expected.angleOffset);
+        EXPECT_EQ(actual.angleCount, expected.angleCount);
+        EXPECT_EQ(actual.nnz, expected.nnz);
+        EXPECT_EQ(actual.fileSizeBytes, expected.fileSizeBytes);
+        const auto explicitData = chunks.loadChunk(i);
+        const auto automaticData = automatic.loadChunk(i);
+        EXPECT_EQ(automaticData->rowPtr, explicitData->rowPtr);
+        EXPECT_EQ(automaticData->colIdx, explicitData->colIdx);
+        EXPECT_EQ(automaticData->values, explicitData->values);
+    }
 
     const auto first = chunks.loadChunk(0);
     ASSERT_TRUE(first);

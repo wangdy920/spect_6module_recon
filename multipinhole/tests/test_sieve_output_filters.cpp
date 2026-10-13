@@ -328,8 +328,47 @@ TEST(SieveRuntimeTest, DisabledCudaVolumeOpsFailsPreparation) {
   const spect::filters::Spacing3 spacing{0.6, 0.6, 0.6};
 
   EXPECT_THROW(spect::main::preparePSFForRuntime(
-                   opts, args, spacing, 1, 8 * 8 * 6, 1),
+                   opts, args, spacing),
                std::runtime_error);
+}
+
+TEST(SieveRuntimeTest, PsfPreparationUsesRuntimeVoxelSpacing) {
+  ScopedEnvironmentOverride volumeOps("SPECT_CUDA_VOLUME_OPS", "1");
+  if (!spect::cuda::isCudaVolumeOpsAvailable())
+    GTEST_SKIP() << "CUDA volume operations are not available";
+  spect::cli::ReconArgs args;
+  args.usePSF = true;
+  args.psf = makeTestPsf();
+  ReconOpts opts;
+  const spect::filters::Spacing3 spacing{0.3, 0.6, 1.2};
+
+  const auto kernels = spect::main::preparePSFForRuntime(opts, args, spacing);
+
+  EXPECT_EQ(opts.psf.mode, PSFMode::Sieve);
+  EXPECT_DOUBLE_EQ(opts.psf.vox_x, spacing.dx);
+  EXPECT_DOUBLE_EQ(opts.psf.vox_y, spacing.dy);
+  EXPECT_DOUBLE_EQ(opts.psf.vox_z, spacing.dz);
+  // FWHM 1.2 mm at three sigma gives radii 6, 3 and 2 on this grid.
+  EXPECT_EQ(kernels.kx.size(), 13u);
+  EXPECT_EQ(kernels.ky.size(), 7u);
+  EXPECT_EQ(kernels.kz.size(), 5u);
+}
+
+TEST(SieveRuntimeTest, DisabledPsfPreparationNeedsNoCudaVolumeOps) {
+  ScopedEnvironmentOverride volumeOps("SPECT_CUDA_VOLUME_OPS", "0");
+  spect::cli::ReconArgs args;
+  args.usePSF = false;
+  args.psf.mode = PSFMode::None;
+  ReconOpts opts;
+  opts.psf = makeTestPsf();
+  const spect::filters::Spacing3 spacing{0.3, 0.6, 1.2};
+
+  const auto kernels = spect::main::preparePSFForRuntime(opts, args, spacing);
+
+  EXPECT_EQ(opts.psf.mode, PSFMode::None);
+  EXPECT_TRUE(kernels.kx.empty());
+  EXPECT_TRUE(kernels.ky.empty());
+  EXPECT_TRUE(kernels.kz.empty());
 }
 
 

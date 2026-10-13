@@ -57,19 +57,4 @@ private:
   std::filesystem::path cacheDir_;
 };
 
-/**
- * @brief Compute attenuation factors with optional disk caching.
- *
- * If @p cache is non-null and @p manifest is non-empty, the function first
- * attempts to load previously cached factors. On miss it generates them via
- * computeAttenFactors() and writes them to the cache.
- *
- * This is a convenience wrapper; callers that need fine-grained control over
- * the cache key can use CTACFactorCache directly.
- */
-std::vector<uint16_t> computeAttenFactorsCached(
-    const std::vector<double> &muMap, int nx, int ny, int nz, double dx,
-    double dy, double dz, int numAngles, int rotationSign, int threads,
-    const CTACFactorCache *cache, const std::string &manifest);
-
 } // namespace spect::main

@@ -763,3 +763,60 @@ PSC5 N1x50 自动缓存保护门 ABBA：A 核心 75.186/76.029 秒，B 76.272/76
 复现：同根 `paired.py` 使用 `--baseline recon_out/throughput_20261012/baseline_a635d10/SPECT_recon.exe --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/<psc5|sc12|sc16>`；PSC5 3 轮 ABBA、SC12 6 轮 ABBA、SC16 2 轮 AB，PSC5 保护门加 `--iterations 50 --subsets 1 --threads 16 --auto-host-cache`。每次用新的 `--label`，不能覆盖已有样本。Nsight 用 `profile_io.py <新目录> --exe <EXE>`，随后 `nsys export --type sqlite` 和 `timeline_stats.py <SQLite>`。原始证据为 `psc5_overlap/`、`sc12_overlap/`、`sc12_overlap_long/`、`sc16_overlap/`、`psc5_overlap_n1/`、`sc12_timeline_*/`、`overlap_suite.xml/log`、`overlap_memcheck.log` 及 `metrics.json`。
 
 实验 EXE `overlap_candidate.exe` 及 `overlap_candidate.patch` 冻结候选；实验时未重新配置版本头，banner 仍为 `a635d10`，以实际路径/大小/时间和补丁区分，不将其当正式干净构建。最终提交后须重新配置并构建发布 EXE，复查完整套件和 `--version`；本轮不推送，也不修改 SPECT_Core ZIP 或现场部署。
+
+## 22. 2026-10-13 主线代码收敛与交叉审查
+
+范围：主线 `19711d1`，三个子代理分别负责矩阵 I/O、CUDA 执行、重建准备，再互相复核调用闭包与实际补丁。遵循 code-optimization-convergence v2.0；本轮不改公开 CLI/config、矩阵字节协议、精度、子集、PSF/滤波顺序或设备默认值，不计算 SHA。只实施已经证明无调用的删除、现有 helper 复用、独占 vector 所有权转移及同流末尾事件已覆盖的等待清理。原始数据和现有部署包不变。
+
+### 22.1 发现并修复的问题
+
+**P2：交错使用对称模式会使分支表缓存失配。** 普通 sensitivity 原先直接写 `dBatchSymIds_`/`dBatchZMirrors_`，不更新 host mirror；numerator 用 host mirror 判断是否需要上传。因此同一进程 `ROT90 numerator -> ROT90Z sensitivity -> ROT90 numerator` 可让第三步使用旧 GPU 表。独立 2x2 旋转/Z 镜像 oracle 在修复前只有第三步失败，relL2=`0.51219602890582372`；前两步通过。不能把这个 API 状态切换缺陷描述成每次独立 EXE 重建都出错。
+
+两处均复用现有 `ensureBranchMetadataLocked`，形成唯一写入入口，继续持有原 mutex 并使用原 stream。新回归 `CompactSubsetCudaTest.BranchMetadataCacheSurvivesInterleavedProfiles` 保留原 `1e-5` 门限；修复前后证据为 `recon_out/mainline_convergence_20261013/prefix_cache.xml/log` 和 `postfix_suite.xml/log`。
+
+其他已采用的收敛：
+
+| 范围 | 实际修改 | 保留边界 |
+|---|---|---|
+| 矩阵 reader | 两个 open 重载共用首次发现的 chunk infos，不再重复枚举和读取头部 | 原 profile、角度覆盖、row/column、格式和预算检查全部保留；无载荷缓存新策略 |
+| 内部 I/O API | 删除无调用的完整 CSR 校验入口、未使用成员/常量、四个 vector 透传访问器 | 保留生产 chunk 校验、磁盘重复 detNx 字段检查和 sourceOwner；更新 pin/test/transpose 工具调用 |
+| CTAC 准备 | 去掉 cached optional 的 const，三处大数组复制改为 move；删除无调用的单床缓存 wrapper | 缓存读写与因子计算顺序不变；只删除源对象已无后续读者的复制 |
+| PSF 准备 | 只按 runtime spacing 构建一次，直接返回 PSFKernels；删除空日志包装及三个无用形参 | 同一核生成器、CUDA 可用性检查、启用/关闭及 sieve/output 顺序保留 |
+| CUDA 与配置内部 | 删除无人调用的 double 变换/转换、专属 scratch、只写不读的单值 enum、死 ReconOpts 字段和 CPU 策略 helper | 不删除仍有测试/工具用途的数学参考、generic SpMM 或 transpose benchmark kernel |
+| CUDA 等待 | 删除两个 backward stop 的重复等待 | 同一 stream 后续 transform stop 仍等待全部消费者；上传事件、异常排空、I/O-compute 重叠不变 |
+
+PSF 旧 combined helper 测试曾独立传入 Operator 配置而保留 `usePSF=false`，不是 parser 产生的生产输入；测试已明确迁移为滤波准备检查，并补 runtime spacing 和关闭 PSF 的检查，不声称新内部 helper 与旧 helper 对任意手工矛盾参数等价。所有公开 parser 产生的 PSF 状态保持原行为。
+
+### 22.2 核心融合候选与停止边界
+
+下一项最小候选是 `VolumeOpsCUDA.cpp` 中 float CASToR PSF 的 **Z 卷积 + Z 归一化**：当前两个 kernel 只有同一调用入口，host-staged 和 resident 路径共用；可以把原除法及有限值/下限检查移至现有 Z kernel 写回前，删除一个 kernel/加载项/launch，不增加运行期开关或第二套算法。X/Y、double 路径和 FP32 tap 归约顺序无需改变。
+
+本轮**未实施该融合**。它改变实际 GPU executable 与写回边界，仍需旧版输出配对验证舍入行为，以及 PSC/SC 多床、masked/unmasked、边界 Z 的同输入检查和重复性能测量；现有宽松单测不能替代 `relL2 <=1e-5` 门。净简化可以没有加速，但不能以未测的收益宣称已采用；新增复杂度仍沿用 >=5% 核心收益门。
+
+没有发现可以无条件合并 MLEM/BSREM resident/host、CSRB/CSRQ 数据路径的依据：它们仍有不同驻留、编码、CTAC 和诊断职责。保留已经共用的调度/校正/更新 helper，不新增通用后端框架，也不重新打开 mmap、FP16、第三 GPU 块、宽 SpMM 自动选择、reader worker 等已拒绝方向。
+
+### 22.3 验证与性能保护
+
+四个实际目标 `SPECT_recon`、`spect_tests`、`spect_forward_project`、`spect_transpose_bench` 均编译成功，只有既有 LNK4098 警告。完整套件 354 项，350 通过、4 个原有条件跳过、0 失败；跳过项仍是未启用的冻结输出集和缺少特定 260601 历史 fixture。A/B/A、部分缓存独立 oracle 和 next-slice 异常生命周期三项各重复 10 次通过，Compute Sanitizer memcheck 对三项报告 0 errors。
+
+性能保护使用冻结的 `baseline_19711d1/SPECT_recon.exe` 和候选实际文件/补丁，沿用同一 `paired.py`：PSC Lu208 五床 `50:1`、16 线程、自动主机缓存；SC60 合成十二床 `3:10`、40 GiB 主机缓存；均 ABBA、分母缓存命中，单臂 900 秒上限。预定数值门为所有保存体 relL2 <=1e-5，PSC 核心目标 <=120 秒；本轮不是改变数学的速度候选，不预设加速结论。SC60 出现首轮长尾后另做一次 BA 复测，不改变输入或门限，不删除原样本。
+
+| 工作负载 | A 核心秒数 | B 核心秒数 | 稳态均值 A -> B（秒/轮） | 最大保存体 relL2 |
+|---|---|---|---|---:|
+| PSC 五床 N1x50，ABBA | 77.606 / 76.728 | 76.915 / 76.884 | 1.5226 -> 1.5162 | 1.494e-7 |
+| SC60 十二床 N10x3，ABBA | 125.354 / 125.137 | 235.171 / 130.068 | 32.3881 -> 32.6296 | 6.396e-8 |
+| SC60 同条件补充 BA | 126.737 | 127.033 | 31.6665 -> 31.2527 | 5.611e-8 |
+
+PSC 核心均值 77.167 -> 76.900 秒（-0.35%），达到原保护门，**不宣称稳定加速**。第一次候选准备阶段 167.876 秒，另一次 44.180 秒，控制为 46.289/45.136 秒；进程均值因此为 127.544 -> 187.441 秒。SC60 原 ABBA 核心均值 125.246 -> 182.620 秒，进程 137.545 -> 195.670 秒；第一次候选首轮 171.293 秒、loader_work=204.657 秒，控制首轮约 60 秒、loader_work 约 96 秒，相同读取量。后一次候选首轮 63.544 秒、核心 130.068 秒；BA 复测为 126.737 -> 127.033 秒（+0.23%），进程 138.751 -> 138.933 秒，未重现大长尾。
+
+全部慢样本保留。证据支持正确性修复、数值一致和所测稳态成本基本保持，不支持“端到端保证不退化”或“启动长尾已修复”；也没有证明长尾由本轮补丁引入或由某个系统组件造成。第 20/21 节旧控制也曾有读取长尾，不能仅凭这一背景抹掉本轮候选的慢样本。此类低风险减法式收敛按正确性/维护性保留，不据此部署新包或承诺速度提升。
+
+各臂读取量和 H2D 量相等：PSC N1 全矩阵 6 块均锁页，迭代期零文件载荷读取，50 轮 H2D=`1,180,179,411,992` bytes；SC12 三轮应用读取=`111,973,097,304` bytes、114 次，H2D=`201,308,258,928` bytes。PSC 主机峰值工作集 A/B 33.45/33.21 GiB，SC12 41.03/41.03 GiB；稳态 GPU 总占用约 14.2/14.2 GiB、8.19/8.20 GiB，没有无 CTAC 内存下降结论。CTAC 三处 move 消除了源码明确的重复载荷，但本轮未测真实 CTAC 峰值 RAM，不能用普通重建的采样冒充该收益。硬件为本机 RTX 4070 Ti SUPER 16 GiB/64 GiB RAM；SC8mm 步进仍是合成软件测试参数，不是设备标定或 RTX 5060 Ti 实测。
+
+运行前未发现其他重建进程；仍有桌面/后台任务，其他 CPU 平均负载约 7.6%~9.8%，不称为整机独占。内存和 GPU 总占用以 5 秒间隔采样，不作为最低硬件需求。
+
+生产 `src/include` 实际增加 64 行、删除 351 行，净减 287 行；另外更新直接消费者和测试，不以行数替代安全证明。`scripts/test_compact_observation_model.py` 的无背景/有背景各 32 个原生入口用例及两次 operator PSF+ROI 残差闭合检查通过，覆盖 CSRB/CSRQ、ROT90/ROT90Z、单双窗、单双床和子集；CSRQ 仍实验性。所有实测主图及 PSC 输出 Butterworth 副本都通过数值门。
+
+证据根 `recon_out/mainline_convergence_20261013/` 保存修复前失败、两次编译、完整套件、重复测试、memcheck、原生入口日志及冻结 EXE/补丁。配对数据在 `recon_out/throughput_20261012/convergence_20261013_{psc5_n1,sc12_n10,sc12_reverse}/`，汇总为同根 `metrics.json`。复现继续使用 `paired.py`，`--baseline recon_out/mainline_convergence_20261013/baseline_19711d1/SPECT_recon.exe`，PSC 加 `--iterations 50 --subsets 1 --threads 16 --auto-host-cache`，SC 加 `--iterations 3`；`--reuse-cache` 指向原 `psc5`/`sc12` 目录，补充检查加 `--order BA`，每次必须使用新的 `--label`。
+
+实验候选未重配版本头，banner 仍为 `19711d1`，不能凭 banner 把它与控制混同；用冻结 `candidate.exe/patch` 与路径/大小/时间记录区分。提交后重新配置/构建干净版本并复查套件；不 push、不修改 SPECT_Core 或现场目录。后续 PSF kernel 融合仍为未实施候选，不由本轮清理的通过记录自动放行。
