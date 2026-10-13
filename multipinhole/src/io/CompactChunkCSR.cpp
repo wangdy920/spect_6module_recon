@@ -431,6 +431,13 @@ void validateChunkColIdxRange(const CompactChunkCSRInfo &info,
 
 void validateChunkValues(const CompactChunkCSRInfo &info, const float *values,
                          uint64_t count, uint64_t sourceOffset = 0) {
+  // Keep the valid-data pass vectorizable; scan again only to locate an error.
+  int valid = 1;
+  for (uint64_t i = 0; i < count; ++i)
+    valid &= (values[i] >= 0.0f) &
+             (values[i] <= std::numeric_limits<float>::max());
+  if (valid)
+    return;
   for (uint64_t i = 0; i < count; ++i) {
     if (!std::isfinite(values[i]) || values[i] < 0.0f) {
       throw std::runtime_error("Invalid nonnegative finite chunk value in " +

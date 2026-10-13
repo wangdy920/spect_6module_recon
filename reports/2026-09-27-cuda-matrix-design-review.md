@@ -690,3 +690,36 @@ SC12 D 的两次进程分别为 **271.663/126.761 秒**；前一次首轮 217.55
 SC12/16 每轮 CSRB H2D 均为 **67,102,752,976 bytes（62.49 GiB）**，两轮应用读取均为 85,833,298,112 bytes；增加床位没有增加矩阵传输次数，但图像/投影存储和计算仍随床数增加。普通迭代每轮未常驻的约 24.3 GiB 仍需由文件路径获取，不等同于全部落到物理磁盘。本次验证的是完整矩阵、合成 12/16 床的软件/容量边界，上限仍为 16 床；真实 SC60 多床采集、步进/朝向标定、长轮次收敛、CTAC 多床及 RTX 5060 Ti 现场性能均未由此关闭。
 
 复现使用本节证据目录的 `paired.py`：`psc5 --label <new-name> --iterations 2 --reuse-cache <psc5-dir>`、`sc12` 同样参数；`sc16 --iterations 2 --order AB --reuse-cache <sc16-dir>`。省略 `--order` 是 ABBA；每个输出目录必须全新。脚本和原始 JSON/日志属于任务证据，不新增生产维护入口。完整套件入口仍为 `build/csrb-native-20260921/bin/Release/spect_tests.exe`。本轮仅本地提交、干净重建，不推送，不替换已有 SPECT_Core ZIP。
+
+## 20. 2026-10-12 矩阵读入热点的后续配对验证
+
+控制为干净提交 `5808455`，冻结 EXE/DLL 在 `recon_out/throughput_20261012/baseline_5808455/`。沿用第 19 节矩阵、投影、PSF、床位顺序及合成 SC60 8 mm 步进；N10 主机预算仍为 PSC 30 GiB、SC60 40 GiB。每臂 3 轮，ABBA 两对，分母缓存命中、verbosity=1；每臂上限 900 秒。数值门限仍为 primary relL2 <=1e-5，新增性能路径要求受影响工作负载核心耗时改善至少 5%，其余既有路径不得以降质换速度。无 SHA、无矩阵精度/格式/内核/配置默认值修改。
+
+先用 SC60 十二床 `-vb 2` 分阶段定位：3 轮 loader_work=71.954 秒，forward=7.798 秒，图像更新=0.054 秒。该次分母 miss 且 debug 会改变 host/device 更新路径，只用于热点诊断，**不进入正式配对计时**；loader_work 含读入、分配和校验，不是纯物理磁盘耗时，各 profiler 项不能不加区分地相加。该次错误复用 `sc12_retained` 而不是实际 `sc12/cache_A` 的缓存位置，驱动正确拒绝将其登记为正式命中样本。
+
+### 20.1 顺序读取提示：拒绝
+
+尝试用共享的 stdio payload 入口和 Windows `rbS` 顺序缓存提示读取 CSRB/CSRQ，所有原检查保留。微软将 `S` 定义为顺序访问缓存提示，并非硬件吞吐承诺，见 [CRT 文档](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/fopen-s-wfopen-s?view=msvc-170)。SC12 实际两对结果：三轮核心均值 149.726 -> 159.013 秒（慢 6.20%），稳态 39.241 -> 39.501 秒/轮，进程 160.685 -> 168.162 秒；最大输出 relL2=5.58e-8。首次迭代也都变慢。完整套件 346 通过、4 原有条件跳过，但正确不等于更快。**代码已撤回，不添加运行期开关，不扩大到 PSC 或作为正式文件读取实现。** 证据：`sc12_sequential/`、`sequential_candidate.patch/exe`、`sequential_suite.xml/log`。
+
+### 20.2 有限非负值校验：保留局部优化
+
+唯一生产代码差异为 `validateChunkValues` 的 7 行快速检查：对每个值累积 `value >= 0 && value <= FLT_MAX` 的真假值，不在正常数据循环内分支或抛异常；失败后仍用原循环定位第一个非法值、保留源 nnz 下标和错误文本。NaN、正负无穷和负数仍拒绝，负零、非负次正规数和最大有限 float 仍接受。没有省略校验、接受历史身份、缓存“已验证”结论或增加线程/内存；CSRB 整块和磁盘子集共用这一入口，CSRQ 的 row_max/run 校验未改。
+
+任务内 MSVC Release 微测读取真实 SC60 `chunk_000.csrb` 的前 256 MiB values，ABC CBA 顺序重复 3 次。原循环约 0.043 秒，单线程累积检查约 0.014 秒，8 线程探针约 0.004~0.008 秒；多线程分支不进入生产代码。微测仅定位机制，采用判断使用下面实际重建配对结果。`validation_probe/` 是可复现证据，不新增维护入口。
+
+| 场景，N10，各 ABBA 三轮 | 三轮核心均值秒 A -> B | 核心降幅 | 首轮后稳态秒/轮 A -> B | 进程均值秒 A -> B | 最大 primary relL2 |
+|---|---:|---:|---:|---:|---:|
+| PSC Lu208 五床，30 GiB 部分缓存 | 59.399 -> 56.902 | 4.20% | 7.787 -> 7.539 | 72.917 -> 69.907 | 1.42e-7 |
+| SC60 十二床，40 GiB 部分缓存 | 148.972 -> 140.061 | 5.98% | 38.759 -> 36.998 | 162.294 -> 151.921 | 6.03e-8 |
+
+SC12 两次候选核心 140.020/140.101 秒，配对基线 149.489/148.455 秒，两对均超过 5%；PSC 是较小的附带收益，不单独宣称达到 5%。稳态降幅为 PSC 3.17%、SC12 4.54%，不能把首轮加载也在内的三轮核心降幅说成长序列稳态收益。两组新增工作集基本为零：PSC 约 30.04 GiB、SC12 约 41.03 GiB，GPU 稳态采样峰值分别约 5.4/8.1 GiB；不作显存优化结论。每臂矩阵读取和 H2D 字节数相同；SC12 三轮 loader_work 均值 98.564 -> 90.064 秒，与值检查的干预方向一致。
+
+本机 RTX 4070 Ti SUPER 16 GiB、64 GiB RAM；其他 CPU 负载采样均值 PSC 约 4.8~4.9%、SC12 约 5.6~5.8%。这是同主机短轮配对，不是 RTX 5060 Ti 现场结果，也不是 SC60 实际机械步进、真实多床图像质量或 1000 轮收敛结论。所有实际保存的输出（PSC primary/Butterworth、SC60 primary）均通过门限；不能由短轮声称所有长序列 bitwise 相同。
+
+N1 受保护的 Lu208 五床 MLEM50 已补测：同输入、PSF sieve/castor 1.3 mm、16 线程、自动主机缓存、分母命中，ABBA 每臂完整 50 轮，均自动容纳并锁页全部 6 块（33568 MiB），迭代期零载荷重读。A 两次核心 71.912/72.843 秒，B 为 72.385/72.236 秒，均达到原目标 <=120 秒；核心均值 72.378 -> 72.311 秒，变化约 0.09%，**不宣称 N1 稳态加速**。进程均值 121.856 -> 121.359 秒，prepare 均值 46.005 -> 44.574 秒。最大 primary relL2=1.403e-7，Butterworth=1.819e-7，均小于 1e-5；这是数值等价门，不是 bitwise 承诺。证据 `psc5_validation_n1/`，没有用 N10 短跑代替该门。
+
+当前候选完整套件 **350 项，346 通过、4 原有条件跳过、0 失败**，扩充原权重合法性用例以覆盖负零、次正规数、FLT_MAX 和负无穷；原 CSRB/CSRQ、CTAC、多床、部分缓存独立 oracle 保留。结论：保留这 7 行局部校验优化，拒绝顺序读取候选；性能证据仅支持上述工作负载，不把较小的 PSC 收益外推为所有系统 6% 加速。仅本地提交及干净重编译，不推送，不更新现有 SPECT_Core ZIP。
+
+证据：同根目录 `psc5_validation/`、`sc12_validation/`、`validation_candidate.patch/exe`、`validation_suite.xml/log`、`metrics.json`。中间候选未经重新配置版本头，其 EXE banner 仍为基线 `5808455`，不能仅凭该 banner 区分；必须使用保存的候选补丁和对应 EXE 路径/大小/时间。交付构建须在最终提交后重新配置，不能将实验 EXE 当干净发布版。
+
+复现：`python recon_out/throughput_20261012/paired.py <psc5|sc12> --label <新目录> --iterations 3 --baseline recon_out/throughput_20261012/baseline_5808455/SPECT_recon.exe --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/<psc5|sc12>`。受保护 N1 使用 `psc5 --iterations 50 --subsets 1 --threads 16 --auto-host-cache`，其余参数相同。默认 ABBA，所有实际命令、输入轻量属性、逐轮与进程时间及数值差异均在对应目录。

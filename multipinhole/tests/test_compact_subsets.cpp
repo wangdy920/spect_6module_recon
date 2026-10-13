@@ -347,8 +347,11 @@ TEST(CompactSubsets, RejectsInvalidWeightsInWholeAndDiskSlices) {
   const auto meta = makeSixAngleMeta();
   auto compact = makeSixAngleCompactCSR(meta);
   const auto dir = std::filesystem::temp_directory_path() / "spect_invalid_csrb_weights";
-  for (float value : {0.0f, 1.0f, -1.0f,
+  for (float value : {0.0f, -0.0f, 1.0f, -1.0f,
+                      std::numeric_limits<float>::denorm_min(),
+                      std::numeric_limits<float>::max(),
                       std::numeric_limits<float>::quiet_NaN(),
+                      -std::numeric_limits<float>::infinity(),
                       std::numeric_limits<float>::infinity()}) {
     compact.values[0] = value;
     writeChunkDirectory(dir, meta, compact, 6);

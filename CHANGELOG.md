@@ -8,6 +8,9 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-12: CSRB payload validation uses a vectorizable valid-data pass;
+  invalid weights still fail with the original source index and diagnostic.
+  Matrix values, cache policy, reconstruction kernels and defaults are unchanged.
 - 2026-10-12: normal logs include the selected profile and effective settings
   after configuration/metadata overrides; the original CLI is explicitly labeled
   as requested input. Console and normal log progress use full iterations only.
