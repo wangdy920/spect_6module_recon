@@ -2,7 +2,7 @@
  * @file CSRTypes.h
  * @brief CSR sparse matrix types (IO-facing, lightweight)
  *
- * This header defines CSR/CSRView/CSRHeader without pulling heavy IO deps.
+ * This header defines CSR storage and views without pulling heavy IO deps.
  */
 
 #pragma once
@@ -95,19 +95,6 @@ struct CSRSubsetView {
                    blockAngles.size() * static_cast<size_t>(rowsPerBlock);
     }
 };
-
-/**
- * @brief CSR binary file header (IO format)
- */
-struct CSRHeader {
-    uint32_t magic = 0x43535242;   // 'CSRB'
-    uint32_t version = 1;
-    uint32_t rows = 0;
-    uint32_t cols = 0;
-    uint64_t nnz = 0;
-};
-
-static_assert(sizeof(CSRHeader) == 24, "io::CSRHeader must be 24 bytes (CSRB v1 on disk)");
 
 } // namespace io
 } // namespace spect

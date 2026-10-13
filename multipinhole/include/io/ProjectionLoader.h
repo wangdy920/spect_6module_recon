@@ -73,24 +73,18 @@ std::vector<double> reorderProjection(const MatArray& mat, int requestedAngles,
 bool isProjectionBinPath(const std::string& path);
 
 /**
- * @brief Load projection data from the CUDA projection BIN format.
+ * @brief Load projection data from MAT file or projection BIN file.
  *
  * The BIN layout matches 6module_bak_src/mat_convert_bin.m:
  * int32 num_angles, int32 rays_per_angle, then float64 angle-major data.
  * The header does not carry detZ/detX, so detectorShapeKnown is false and
  * callers should keep an external -detN/config shape when the product matches.
- */
-ProjectionData loadProjectionBin(const std::string& path,
-                                 int requestedAngles);
-
-/**
- * @brief Load projection data from MAT file or projection BIN file.
- * 
+ *
  * @param path Path to MAT or BIN file.
  * @param varName Variable name for MAT input (empty = first variable).
  * @param requestedAngles Max angles to load (0 = all).
  * @param stats Optional reorder stats (event-list diagnostics).
- * @param outMat Optional MatArray output for info/logging.
+ * @param outMat Optional full MatArray output for source validation and logging.
  * @return ProjectionData with loaded and reordered data.
  */
 ProjectionData loadProjection(const std::string& path, 
@@ -98,24 +92,6 @@ ProjectionData loadProjection(const std::string& path,
                                int requestedAngles,
                                ProjectionReorderStats* stats,
                                MatArray* outMat);
-
-/**
- * @brief Load projection data from MAT or projection BIN file (no stats or MatArray).
- */
-ProjectionData loadProjection(const std::string& path, 
-                               const std::string& varName,
-                               int requestedAngles);
-
-/**
- * @brief Load multiple bed projections.
- * 
- * @param paths List of MAT or BIN file paths.
- * @param requestedAngles Max angles per bed.
- * @return Vector of ProjectionData for each bed.
- */
-std::vector<ProjectionData> loadMultiBedProjections(
-    const std::vector<std::string>& paths,
-    int requestedAngles);
 
 } // namespace io
 } // namespace spect

@@ -258,12 +258,14 @@ ProjectionData loadProjection(const std::string &path, const std::string &varNam
   if (isProjectionBinPath(path))
     return loadProjectionBinInternal(path, requestedAngles, stats, outMat);
 
-  MatArray mat = readMat(path, varName);
-  if (outMat)
-    *outMat = mat;
+  MatArray localMat;
+  MatArray &mat = outMat ? *outMat : localMat;
+  mat = readMat(path, varName);
+  ProjectionReorderStats localStats;
+  ProjectionReorderStats *effectiveStats = stats ? stats : &localStats;
 
   ProjectionData out;
-  out.data = reorderProjection(mat, requestedAngles, stats);
+  out.data = reorderProjection(mat, requestedAngles, effectiveStats);
 
   if (mat.dims.size() == 3) {
     out.detNz = static_cast<int>(mat.dims[0]);
@@ -271,38 +273,13 @@ ProjectionData loadProjection(const std::string &path, const std::string &varNam
     const int totalAngles = static_cast<int>(mat.dims[2]);
     out.numAngles = (requestedAngles > 0) ? std::min(requestedAngles, totalAngles) : totalAngles;
     out.raysPerAngle = static_cast<size_t>(out.detNz) * static_cast<size_t>(out.detNx);
-  } else if (stats) {
-    out.numAngles = stats->selectedAngles;
+  } else if (stats != nullptr || !out.data.empty()) {
+    out.numAngles = effectiveStats->selectedAngles;
     out.detNz = 1;
-    out.detNx = static_cast<int>(stats->detectorsPerAngle);
-    out.raysPerAngle = stats->detectorsPerAngle;
-  } else if (!out.data.empty()) {
-    ProjectionReorderStats localStats;
-    reorderProjection(mat, requestedAngles, &localStats);
-    out.numAngles = localStats.selectedAngles;
-    out.detNz = 1;
-    out.detNx = static_cast<int>(localStats.detectorsPerAngle);
-    out.raysPerAngle = localStats.detectorsPerAngle;
+    out.detNx = static_cast<int>(effectiveStats->detectorsPerAngle);
+    out.raysPerAngle = effectiveStats->detectorsPerAngle;
   }
 
-  return out;
-}
-
-ProjectionData loadProjectionBin(const std::string &path, int requestedAngles) {
-  return loadProjectionBinInternal(path, requestedAngles, nullptr, nullptr);
-}
-
-ProjectionData loadProjection(const std::string &path, const std::string &varName,
-                              int requestedAngles) {
-  return loadProjection(path, varName, requestedAngles, nullptr, nullptr);
-}
-
-std::vector<ProjectionData> loadMultiBedProjections(const std::vector<std::string> &paths,
-                                                    int requestedAngles) {
-  std::vector<ProjectionData> out;
-  out.reserve(paths.size());
-  for (const auto &path : paths)
-    out.push_back(loadProjection(path, std::string(), requestedAngles));
   return out;
 }
 

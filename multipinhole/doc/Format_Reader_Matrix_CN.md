@@ -33,7 +33,7 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 实际 chunk 头为 28B：`u32 magic=0x42525343, u32 version=1, i32 rows, i32 angle_offset, i32 angle_count, u64 nnz`，随后是 `i64 row_ptr[rows+1]`、`i32 col_idx[nnz]`、`f32 values[nnz]`，均为小端。列维数来自 metadata；这里没有 n_cols。文件长度为 `28 + 8*(rows+1) + 8*nnz`。
 
-不要将此布局与 `CSRTypes.h` 中历史 24B `CSRHeader` 混用：后者包含 cols，magic 也不同，并非 `chunk_*.csrb` 的头。当前 host row_ptr 转为 u32，CUDA 每个上传 chunk/slice 的 nnz 还必须能表示为 i32。
+不要将此布局与历史 24B flat CSRB 头混用：后者包含 cols，magic 为 `0x43535242`，并非 `chunk_*.csrb` 的头；`scripts/eval_csrb_crc_var.py` 和 `scripts/validate_6module_compact_inputs.py` 仍独立读取该历史格式。当前 compact host row_ptr 转为 u32，CUDA 每个上传 chunk/slice 的 nnz 还必须能表示为 i32。
 
 ## SC60 网格输出
 

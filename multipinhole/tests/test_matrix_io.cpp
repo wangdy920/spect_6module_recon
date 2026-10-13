@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -18,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "io/CSRTypes.h"
 #include "io/ProjectionLoader.h"
 #include "io/MatFileReader.h"
 #include "io/MHDWriter.h"
@@ -28,6 +28,24 @@
 namespace spect {
 namespace io {
 namespace test {
+namespace {
+
+void writeProjectionMat(const std::filesystem::path &path,
+                        std::vector<size_t> dims, void *values,
+                        matio_classes cls = MAT_C_DOUBLE,
+                        matio_types dtype = MAT_T_DOUBLE) {
+    mat_t *file = Mat_CreateVer(path.string().c_str(), nullptr, MAT_FT_MAT5);
+    ASSERT_NE(file, nullptr);
+    matvar_t *var = Mat_VarCreate("matrix", cls, dtype,
+                                 static_cast<int>(dims.size()), dims.data(),
+                                 values, 0);
+    ASSERT_NE(var, nullptr);
+    ASSERT_EQ(Mat_VarWrite(file, var, MAT_COMPRESSION_NONE), 0);
+    Mat_VarFree(var);
+    Mat_Close(file);
+}
+
+} // namespace
 
 TEST(IOTest, ProjectionDataEmpty) {
     ProjectionData pd;
@@ -76,6 +94,153 @@ TEST(IOTest, ReorderProjectionLimitAngles) {
     
     auto result = reorderProjection(mat, 3);  // Only 3 angles
     EXPECT_EQ(result.size(), 2 * 2 * 3);
+}
+TEST(IOTest, LoadProjectionMatPreservesSourceAndOptionalStats) {
+    const auto path = std::filesystem::temp_directory_path() /
+        ("spect_projection_mat_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".mat");
+    std::vector<float> floats = {0, 1, 10, 11, 100, 101, 110, 111};
+    std::vector<double> values(floats.begin(), floats.end());
+    for (bool single : {false, true}) {
+        const auto cls = single ? MAT_C_SINGLE : MAT_C_DOUBLE;
+        const auto dtype = single ? MAT_T_SINGLE : MAT_T_DOUBLE;
+        ASSERT_NO_FATAL_FAILURE(writeProjectionMat(
+            path, {2, 2, 2}, single ? static_cast<void *>(floats.data())
+                                    : static_cast<void *>(values.data()), cls, dtype));
+        for (bool withStats : {false, true}) {
+            for (bool withSource : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << single << ',' << withStats
+                                                 << ',' << withSource);
+                ProjectionReorderStats stats{true, 9, 8, 7};
+                MatArray source;
+                const auto projection = loadProjection(
+                    path.string(), "matrix", 1, withStats ? &stats : nullptr,
+                    withSource ? &source : nullptr);
+                EXPECT_EQ(projection.data, (std::vector<double>{0, 10, 1, 11}));
+                EXPECT_EQ(projection.numAngles, 1);
+                EXPECT_EQ(projection.detNz, 2);
+                EXPECT_EQ(projection.detNx, 2);
+                EXPECT_EQ(projection.raysPerAngle, 4u);
+                EXPECT_TRUE(projection.detectorShapeKnown);
+                EXPECT_FALSE(projection.binaryFormat);
+                if (withStats) {
+                    EXPECT_FALSE(stats.isEventList);
+                    EXPECT_EQ(stats.selectedAngles, 1);
+                    EXPECT_EQ(stats.detectorsPerAngle, 4u);
+                    EXPECT_EQ(stats.recordCount, 4u);
+                }
+                if (withSource) {
+                    EXPECT_EQ(source.dims, (std::vector<size_t>{2, 2, 2}));
+                    EXPECT_EQ(source.cls, cls);
+                    EXPECT_EQ(source.dtype, dtype);
+                    EXPECT_EQ(source.d, single ? std::vector<double>{} : values);
+                    EXPECT_EQ(source.f, single ? floats : std::vector<float>{});
+                    EXPECT_TRUE(source.i32.empty());
+                }
+            }
+        }
+    }
+    std::filesystem::remove(path);
+}
+TEST(IOTest, LoadProjectionMatFailuresPreserveStageOutputs) {
+    const auto path = std::filesystem::temp_directory_path() /
+        ("spect_projection_failure_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".mat");
+    std::vector<int32_t> integers = {0, 0, 7};
+    ASSERT_NO_FATAL_FAILURE(writeProjectionMat(
+        path, {1, 3}, integers.data(), MAT_C_INT32, MAT_T_INT32));
+    ProjectionReorderStats stats{true, 9, 8, 7};
+    MatArray source;
+    source.dims = {1, 1};
+    source.d = {42};
+    EXPECT_THROW(loadProjection(path.string(), "missing", 0, &stats, &source),
+                 std::runtime_error);
+    EXPECT_EQ(source.dims, (std::vector<size_t>{1, 1}));
+    EXPECT_EQ(source.d, (std::vector<double>{42}));
+    EXPECT_TRUE(stats.isEventList);
+    EXPECT_EQ(stats.selectedAngles, 9);
+    EXPECT_EQ(stats.detectorsPerAngle, 8u);
+    EXPECT_EQ(stats.recordCount, 7u);
+
+    // The source is available even when its class cannot be reordered.
+    EXPECT_THROW(loadProjection(path.string(), "matrix", 0, &stats, &source),
+                 std::runtime_error);
+    EXPECT_EQ(source.dims, (std::vector<size_t>{1, 3}));
+    EXPECT_EQ(source.cls, MAT_C_INT32);
+    EXPECT_EQ(source.dtype, MAT_T_INT32);
+    EXPECT_EQ(source.i32, integers);
+    EXPECT_TRUE(source.d.empty());
+    EXPECT_TRUE(source.f.empty());
+    EXPECT_TRUE(stats.isEventList);
+    EXPECT_EQ(stats.selectedAngles, 9);
+    EXPECT_EQ(stats.detectorsPerAngle, 8u);
+    EXPECT_EQ(stats.recordCount, 7u);
+
+    std::vector<double> invalidShape = {1, 2, 3, 4};
+    ASSERT_NO_FATAL_FAILURE(writeProjectionMat(path, {2, 2}, invalidShape.data()));
+    EXPECT_THROW(loadProjection(path.string(), "matrix", 0, &stats, &source),
+                 std::runtime_error);
+    EXPECT_EQ(source.dims, (std::vector<size_t>{2, 2}));
+    EXPECT_EQ(source.d, invalidShape);
+    EXPECT_TRUE(source.i32.empty());
+    EXPECT_FALSE(stats.isEventList);
+    EXPECT_EQ(stats.selectedAngles, 0);
+    EXPECT_EQ(stats.detectorsPerAngle, 0u);
+    EXPECT_EQ(stats.recordCount, 0u);
+
+    stats = {true, 9, 8, 7};
+    EXPECT_THROW(loadProjection(path.string() + ".bin", "matrix", 0, &stats, &source),
+                 std::runtime_error);
+    EXPECT_TRUE(source.dims.empty());
+    EXPECT_TRUE(source.d.empty());
+    EXPECT_TRUE(source.f.empty());
+    EXPECT_TRUE(source.i32.empty());
+    EXPECT_FALSE(stats.isEventList);
+    EXPECT_EQ(stats.selectedAngles, 0);
+    EXPECT_EQ(stats.detectorsPerAngle, 0u);
+    EXPECT_EQ(stats.recordCount, 0u);
+    std::filesystem::remove(path);
+}
+TEST(IOTest, LoadProjectionEmptyEventsPreserveOptionalStatsMetadata) {
+    const auto path = std::filesystem::temp_directory_path() /
+        ("spect_empty_events_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".mat");
+    for (bool rowTriples : {true, false}) {
+        const std::vector<size_t> dims = rowTriples ? std::vector<size_t>{2, 3}
+                                                   : std::vector<size_t>{3, 2};
+        std::vector<double> values(6);
+        for (size_t r = 0; r < 2; ++r) {
+            const double fields[] = {std::numeric_limits<double>::quiet_NaN(),
+                                     static_cast<double>(r), 1.0};
+            for (size_t c = 0; c < 3; ++c)
+                values[rowTriples ? r + 2 * c : c + 3 * r] = fields[c];
+        }
+        ASSERT_NO_FATAL_FAILURE(writeProjectionMat(path, dims, values.data()));
+        for (bool withStats : {false, true}) {
+            ProjectionReorderStats stats{true, 9, 8, 7};
+            MatArray source;
+            const auto projection = loadProjection(
+                path.string(), "matrix", 0, withStats ? &stats : nullptr, &source);
+            EXPECT_TRUE(projection.empty());
+            EXPECT_EQ(projection.numAngles, 0);
+            EXPECT_EQ(projection.detNz, withStats ? 1 : 0);
+            EXPECT_EQ(projection.detNx, 0);
+            EXPECT_EQ(projection.raysPerAngle, 0u);
+            EXPECT_TRUE(projection.detectorShapeKnown);
+            EXPECT_FALSE(projection.binaryFormat);
+            EXPECT_EQ(source.dims, dims);
+            ASSERT_EQ(source.d.size(), values.size());
+            EXPECT_EQ(std::memcmp(source.d.data(), values.data(),
+                                  values.size() * sizeof(double)), 0);
+            if (withStats) {
+                EXPECT_FALSE(stats.isEventList);
+                EXPECT_EQ(stats.selectedAngles, 0);
+                EXPECT_EQ(stats.detectorsPerAngle, 0u);
+                EXPECT_EQ(stats.recordCount, 0u);
+            }
+        }
+    }
+    std::filesystem::remove(path);
 }
 TEST(IOTest, LoadProjectionBinAutoDetects) {
     const auto dir = std::filesystem::temp_directory_path() / "spect_projection_loader_tests";
@@ -313,15 +478,8 @@ TEST(IOTest, ReconstructionProjectionInputsRequireExactLayoutAndValidCounts) {
     for (const auto shape : {std::pair<size_t, size_t>{2, 2}, {1, 4}}) {
         std::vector<double> values(32);
         for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<double>(i);
-        size_t dims[] = {shape.first, shape.second, 8};
-        mat_t *file = Mat_CreateVer(matPath.string().c_str(), nullptr, MAT_FT_MAT5);
-        ASSERT_NE(file, nullptr);
-        matvar_t *var = Mat_VarCreate("matrix", MAT_C_DOUBLE, MAT_T_DOUBLE, 3,
-                                     dims, values.data(), 0);
-        ASSERT_NE(var, nullptr);
-        ASSERT_EQ(Mat_VarWrite(file, var, MAT_COMPRESSION_NONE), 0);
-        Mat_VarFree(var);
-        Mat_Close(file);
+        ASSERT_NO_FATAL_FAILURE(writeProjectionMat(
+            matPath, {shape.first, shape.second, 8}, values.data()));
         if (shape.first == 2) {
             const auto loaded = spect::main::loadProjectionSet(
                 {matPath.string()}, meta, "Projection Data", "matrix");
@@ -350,7 +508,8 @@ TEST(IOTest, ReconstructionEventListRejectsInvalidSourceCounts) {
     for (bool rowTriples : {true, false}) {
         for (double last : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
                              std::numeric_limits<double>::infinity()}) {
-            size_t dims[] = {rowTriples ? 17u : 3u, rowTriples ? 3u : 17u};
+            const std::vector<size_t> dims = {rowTriples ? 17u : 3u,
+                                             rowTriples ? 3u : 17u};
             std::vector<double> values(51);
             for (size_t r = 0; r < 17; ++r) {
                 const double fields[] = {r < 16 ? double(r / 2) : 0.0,
@@ -359,15 +518,27 @@ TEST(IOTest, ReconstructionEventListRejectsInvalidSourceCounts) {
                 for (size_t c = 0; c < 3; ++c)
                     values[rowTriples ? r + 17 * c : c + 3 * r] = fields[c];
             }
-            mat_t *file = Mat_CreateVer(path.string().c_str(), nullptr, MAT_FT_MAT5);
-            ASSERT_NE(file, nullptr);
-            matvar_t *var = Mat_VarCreate("matrix", MAT_C_DOUBLE, MAT_T_DOUBLE, 2,
-                                         dims, values.data(), 0);
-            ASSERT_NE(var, nullptr);
-            ASSERT_EQ(Mat_VarWrite(file, var, MAT_COMPRESSION_NONE), 0);
-            Mat_VarFree(var);
-            Mat_Close(file);
+            ASSERT_NO_FATAL_FAILURE(writeProjectionMat(path, dims, values.data()));
             if (last == 0.0) {
+                for (bool withStats : {false, true}) {
+                    ProjectionReorderStats stats;
+                    MatArray source;
+                    const auto projection = loadProjection(
+                        path.string(), "matrix", 2, withStats ? &stats : nullptr, &source);
+                    EXPECT_EQ(projection.data, std::vector<double>(4, 1.0));
+                    EXPECT_EQ(projection.numAngles, 2);
+                    EXPECT_EQ(projection.detNz, 1);
+                    EXPECT_EQ(projection.detNx, 2);
+                    EXPECT_EQ(projection.raysPerAngle, 2u);
+                    EXPECT_EQ(source.dims, dims);
+                    EXPECT_EQ(source.d, values);
+                    if (withStats) {
+                        EXPECT_TRUE(stats.isEventList);
+                        EXPECT_EQ(stats.selectedAngles, 2);
+                        EXPECT_EQ(stats.detectorsPerAngle, 2u);
+                        EXPECT_EQ(stats.recordCount, 17u);
+                    }
+                }
                 const auto loaded = spect::main::loadProjectionSet(
                     {path.string()}, meta, "Projection Data", "matrix");
                 EXPECT_EQ(loaded.data, std::vector<double>(16, 1.0));
@@ -379,17 +550,6 @@ TEST(IOTest, ReconstructionEventListRejectsInvalidSourceCounts) {
         }
     }
     std::filesystem::remove(path);
-}
-TEST(IOTest, IoCSRBv1HeaderIs24Bytes) {
-    EXPECT_EQ(sizeof(spect::io::CSRHeader), 24u);
-    spect::io::CSRHeader header;
-    header.magic = 0x43535242u;
-    header.version = 1;
-    header.rows = 10;
-    header.cols = 20;
-    header.nnz = 100;
-    EXPECT_EQ(header.magic, 0x43535242u);
-    EXPECT_EQ(header.version, 1u);
 }
 TEST(IOTest, ReorderProjectionEmptyThrows) {
     MatArray mat;
