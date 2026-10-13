@@ -601,6 +601,66 @@ TEST_F(CompactSubsetCudaTest, FirstSubsetReleasesWholeChunkDeviceCapacity) {
   ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
 }
 
+TEST_F(CompactSubsetCudaTest, NextSliceLoadPreservesCurrentNumeratorAndDrainsOnError) {
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+  auto chunk = std::make_shared<spect::io::CompactChunkCSRData>();
+  chunk->info.rows = 2;
+  chunk->info.angleCount = 1;
+  chunk->info.nnz = 4;
+  chunk->cols = 4;
+  chunk->rowPtr = {0, 2, 4};
+  chunk->colIdx = {0, 1, 0, 2};
+  chunk->values = {2.0f, 1.0f, 3.0f, 2.0f};
+  auto other = std::make_shared<spect::io::CompactChunkCSRData>(*chunk);
+  other->colIdx = {2, 3, 1, 3};
+  const auto current = chunk->subsetView({0}, 2, 0);
+  const auto next = other->subsetView({0}, 2, 0);
+  ASSERT_TRUE(spect::cuda::warmupResidentMatrixSetCUDA({chunk->view()}));
+  const float image[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  const double projection[] = {8.0, 27.0, 0, 0, 0, 0, 0, 0};
+  const double *projections[] = {projection};
+  const int sym[] = {0}, mirror[] = {0};
+  spect::cuda::CompactDeviceRatioParams ratio;
+  ratio.symmetryMode = 90;
+  ratio.compactRaysPerAngle = ratio.fullRaysPerAngle = 2;
+  ratio.compactNumAngles = 1;
+  ratio.fullNumAngles = 4;
+  ratio.detNx = 2;
+  ratio.detNz = ratio.compactDetZ = 1;
+  spect::cuda::CompactDeviceTransformParams transform;
+  transform.symmetryMode = 90;
+  transform.nx = transform.ny = 2;
+  transform.nz = 1;
+  ASSERT_TRUE(spect::cuda::refreshCompactBranchBatchInputCUDA(image, 4));
+  for (const bool fail : {false, true}) {
+    ASSERT_TRUE(spect::cuda::compactDeviceBackwardBeginCUDA(4));
+    int loads = 0;
+    const auto loadNext = [&]() -> spect::io::CSRSubsetView {
+      ++loads;
+      if (fail) throw std::runtime_error("next slice read failed");
+      return next;
+    };
+    const auto run = [&] {
+      return spect::cuda::compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
+          current, projections, 8, ratio, transform, sym, mirror, 1, 1,
+          nullptr, nullptr, 0, loadNext);
+    };
+    if (fail) {
+      EXPECT_THROW(run(), std::runtime_error);
+      EXPECT_EQ(cudaStreamQuery(nullptr), cudaSuccess);
+    } else {
+      ASSERT_TRUE(run());
+    }
+    EXPECT_EQ(loads, 1);
+    double result[4] = {};
+    ASSERT_TRUE(spect::cuda::compactDeviceBackwardDownloadCUDA(result, 4));
+    // Independent A^T[p/(Ax)]: Ax=(4,9), p/(Ax)=(2,3).
+    const double expected[] = {13.0, 2.0, 6.0, 0.0};
+    for (int i = 0; i < 4; ++i) EXPECT_NEAR(result[i], expected[i], 1e-5);
+  }
+  ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
+}
+
 // Per subset, S_m and q_m equal the dense oracle restricted to the subset's
 // rows; over all subsets they add up to the full-data S and q. Two chunks of
 // three angles exercise slices with several segments, slices spanning both

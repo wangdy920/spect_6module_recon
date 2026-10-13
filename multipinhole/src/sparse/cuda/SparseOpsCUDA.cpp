@@ -283,14 +283,16 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     const int *symIds, const int *zMirrors, int branchCount, int bedCount,
     const uint16_t *const *bedAttFactors, size_t attCount, double attPower,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase,
+    const std::function<io::CSRSubsetView()> &loadNext) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactBedBranchBatchAttenDeviceRatioSpmvTAccumulateFloat(
       matrix, fullProjections, fullProjectionCount, commonRatioParams,
       commonTransformParams, symIds, zMirrors, branchCount, bedCount,
-      bedAttFactors, attCount, attPower, ratioTiming, backwardTiming, 0, cacheSlotBase);
+      bedAttFactors, attCount, attPower, ratioTiming, backwardTiming, 0,
+      cacheSlotBase, loadNext);
   return true;
 }
 
@@ -335,14 +337,15 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     const cuda::CompactDeviceTransformParams &commonTransformParams,
     const int *symIds, const int *zMirrors, int branchCount, int bedCount,
     cuda::CompactDeviceRatioTiming *ratioTiming,
-    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase) {
+    cuda::CompactDeviceBackwardTiming *backwardTiming, int cacheSlotBase,
+    const std::function<io::CSRSubsetView()> &loadNext) {
   if (!isCudaAvailable()) {
     return false;
   }
   cudaState().executeCompactBedBranchBatchDeviceRatioSpmvTAccumulateFloat(
       matrix, fullProjections, fullProjectionCount, commonRatioParams,
       commonTransformParams, symIds, zMirrors, branchCount, bedCount,
-      ratioTiming, backwardTiming, 0, cacheSlotBase);
+      ratioTiming, backwardTiming, 0, cacheSlotBase, loadNext);
   return true;
 }
 

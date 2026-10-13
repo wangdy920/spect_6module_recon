@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -210,7 +211,8 @@ bool compactDeviceRatioBedBranchBatchAttenSpmvTAccumulateFloatCUDA(
     double attPower = 1.0,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int cacheSlotBase = 0);
+    int cacheSlotBase = 0,
+    const std::function<io::CSRSubsetView()>& loadNext = {});
 /// CSRB CTAC sensitivity of one chunk: H^T W 1 for one bed's table added to
 /// accumulatorIndex. fullProjectionCount is the full projection row count
 /// (row -> projection validity); rowWeights (that many doubles) may be
@@ -246,7 +248,8 @@ bool compactBranchBatchAttenForwardCUDA(
 /// Batched compact device-ratio + device-backward accumulator path. The input
 /// refreshed by refreshCompactBranchBatchInputCUDA is ordered bed-major, with
 /// branchCount columns per bed; each bed keeps its own projection and backward
-/// accumulator.
+/// accumulator. loadNext runs after GPU submission and before the final wait; it
+/// must only load host data, never re-enter the CUDA sparse state.
 bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     const io::CSRSubsetView& matrix,
     const double* const* fullProjections,
@@ -259,7 +262,8 @@ bool compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
     int bedCount,
     CompactDeviceRatioTiming* ratioTiming = nullptr,
     CompactDeviceBackwardTiming* backwardTiming = nullptr,
-    int cacheSlotBase = 0);
+    int cacheSlotBase = 0,
+    const std::function<io::CSRSubsetView()>& loadNext = {});
 /// Branch-batch compact sensitivity accumulator path.  Computes A^T W 1 for all
 /// symmetry branches in one SpMM call and scatters the results into the device
 /// backward accumulator.  symIds/zMirrors describe the branch symmetry for each

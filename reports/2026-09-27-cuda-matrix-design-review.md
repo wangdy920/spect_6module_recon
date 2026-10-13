@@ -723,3 +723,43 @@ N1 受保护的 Lu208 五床 MLEM50 已补测：同输入、PSF sieve/castor 1.3
 证据：同根目录 `psc5_validation/`、`sc12_validation/`、`validation_candidate.patch/exe`、`validation_suite.xml/log`、`metrics.json`。中间候选未经重新配置版本头，其 EXE banner 仍为基线 `5808455`，不能仅凭该 banner 区分；必须使用保存的候选补丁和对应 EXE 路径/大小/时间。交付构建须在最终提交后重新配置，不能将实验 EXE 当干净发布版。
 
 复现：`python recon_out/throughput_20261012/paired.py <psc5|sc12> --label <新目录> --iterations 3 --baseline recon_out/throughput_20261012/baseline_5808455/SPECT_recon.exe --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/<psc5|sc12>`。受保护 N1 使用 `psc5 --iterations 50 --subsets 1 --threads 16 --auto-host-cache`，其余参数相同。默认 ABBA，所有实际命令、输入轻量属性、逐轮与进程时间及数值差异均在对应目录。
+
+## 21. 2026-10-12 CSRB 读取、上传和计算重叠
+
+状态：通过回归和配对采用门，保留；未部署。控制为干净 `a635d10`，EXE/DLL 受保护副本在同一证据根的 `baseline_a635d10/`。继续使用第 20 节 PSC5/SC12 的矩阵、投影、N10、PSF 和 30/40 GiB 部分主机缓存；每臂 3 轮、ABBA、verbosity=1、分母命中。primary relL2 <=1e-5；新增调度沿用 >=5% 核心收益门，并检查 PSC 非退化、SC16 边界和受保护 PSC5 N1x50 自动缓存门。单臂 900 秒上限，失败停止对应比较；不改原始数据、精度、子集或配置，不计算 SHA，不覆盖设备包。
+
+### 21.1 正常路径时间线
+
+用 Nsight Systems 2025.6.3 对控制的 SC12 三轮重建采集 CUDA API、内核和传输；禁用 CPU 采样及线程切换跟踪，应用仍为 verbosity=1。以第 10 和第 30 个 `compact_mlem_update` 结束为边界，取稳态第 2、3 轮的事件区间并集，避免重叠时间重复相加。该受采集运行只定位机制，不进入无采集的性能采用比较。
+
+控制区间 76.1959 秒，GPU kernel 并集 22.2074 秒，H2D 并集 9.2822 秒，kernel/H2D 交集仅 0.02375 秒；所有记录的 GPU kernel/memcpy/memset 并集 31.5169 秒，无所列 GPU 活动的时间 44.6790 秒。主线程 memcpy API 区间并集 9.3483 秒。最后一项不是纯 DMA 时间，GPU 空闲也不全等于物理磁盘等待。证据 `sc12_timeline_a635d10/timeline.nsys-rep`、`timeline.sqlite`、`timeline_stats.json`。
+
+代码对应：numerator 的 `processChunk` 原先在提交当前块 GPU 工作之前同步调用下一块的 `loadSubset` 和预取，之后每块又等待 GPU 完成。即使名为 Async，pageable 源上传也可能阻塞主线程；这是 [CUDA 同步语义](https://docs.nvidia.com/cuda/cuda-runtime-api/api-sync-behavior.html) 允许的行为，不能仅凭 Async 后缀声称有重叠。
+
+候选仅把同一主线程的下一块加载/预取移到当前块所有计算提交之后、原完成等待之前。继续使用现有 GPU 槽、上传 stream、sourceOwner 和事件；不增加 CPU worker、预载缓存、锁页策略或内核。普通 CSRB 与 CTAC 共用该调度，CSRQ 不改。当前槽不能成为下一块上传目标；加载/上传异常先同步现有计算和上传，再抛出，不继续重建。内部 loader 回调仅做主机加载，不允许重入 sparse CUDA 状态。
+
+候选完整套件 351 项，347 通过、4 个原有条件跳过、0 失败；新增独立小矩阵检查正常预取与加载异常后当前 numerator，并检查异常出口流已完成；该检查及 ROT90 部分缓存 oracle 重复 5 次均通过。Nsight 采集驱动最初只检查采集器 stdout，误报缺少成功标志；实际 recon 独立日志、输出体和 Nsight 文件齐全，驱动已改为检查应用日志，没有把该检查错误描述成重建失败。任务脚本 `profile_io.py`、`timeline_stats.py` 属于可复现证据，不增加生产入口。
+
+### 21.2 无采集配对结果和长尾边界
+
+PSC5 的 ABBA 三轮比较一致：核心均值 59.160 -> 52.924 秒（-10.54%），稳态 7.778 -> 6.331 秒/轮（-18.61%），进程 72.857 -> 66.053 秒（-9.34%）。两对核心分别 58.180 -> 53.599、60.140 -> 52.249 秒，均超过 5% 门。最大保存体 relL2=1.162e-7；包括 primary 和 Butterworth，不只比较一张图。
+
+SC12 首轮 ABBA 三轮出现显著读取长尾：A 两次首轮 191.256/257.388 秒，B 为 66.999/177.534 秒；A 还有一个稳态样本 106.813 秒。全部样本保留在 `sc12_overlap/`，不把核心均值 339.213 -> 188.014 秒解释为稳定 44.57% 加速，也不宣称磁盘长尾被修复。为增加稳态观察，每臂改为 6 轮再做一次 ABBA，输入、参数及门限不变，见 `sc12_overlap_long/`。
+
+SC12 六轮两对核心为 261.263 -> 218.771 秒（-16.26%）、380.312 -> 229.259 秒（-39.72%）。后一对控制第 5 轮仍有 153.941 秒长尾，不能把均值降幅 30.17% 当稳定吞吐承诺。每臂的首轮之后共 10 个样本全部纳入：A 均值/中位数 50.488/38.786 秒，B 为 31.503/31.392 秒；中位数是观察到长尾后增加的描述性统计，**不是替换原 5% 核心采用门的事后标准**。核心两对均通过原门，较少长尾的第一对中 loader_work 158.857 -> 160.974 秒，并未变快，而核心减少 42.492 秒，与隐藏等待而非减少读取的干预方向相符。最大保存体 relL2=3.840e-7。
+
+SC16 仅作一次 AB 两轮边界检查：全部退出 0，核心 117.221 -> 99.921 秒，第二轮 41.441 -> 33.876 秒，最大保存体 relL2=4.662e-8。未重复，不单独宣称稳定加速。SC12/16 的矩阵 H2D 仍为 67,102,752,976 bytes/轮，应用读取字节和加载次数对应相等；没有用减少床位或截断矩阵换性能。
+
+PSC5 N1x50 自动缓存保护门 ABBA：A 核心 75.186/76.029 秒，B 76.272/76.146 秒，均低于 120 秒目标。均值 75.608 -> 76.209 秒（+0.60 秒，+0.80%），稳态 1.5011 -> 1.5052 秒/轮（+0.27%），进程 122.902 -> 124.280 秒。全量 6 块/33568 MiB 均锁页，迭代期零文件载荷重读、H2D 总量相等，最大保存体 relL2=1.655e-7。这里**没有全缓存加速结论，也不把轻微耗时增加写成零退化**；原保护性耗时和数值门均满足。为这一量级增加独立调度分支没有采用依据，保留一个共用实现。
+
+主机峰值工作集 A/B 基本相同：PSC 部分缓存约 30.04 GiB，SC12 41.03 GiB，SC16 41.19 GiB，PSC 全缓存约 33.21 GiB。稳态 GPU 总占用采样峰值分别为 PSC 5601/5580 MiB、SC12 六轮 8367/8363 MiB、SC16 8813/8801 MiB、PSC N1 14560/14607 MiB；含其他进程，以 5 秒间隔采样，不作为最低显存要求。其他 CPU 平均负载约 7.6%~10.3%，不宣称整机独占。未改变矩阵精度、PSF、子集、存储格式、默认值、wrapper 或 CLI；本机仍为 RTX 4070 Ti SUPER/64 GiB，不外推为 RTX 5060 Ti 实测。SC60 步进 8 mm 仍只是合成验证参数，真实多床标定和长轮次图像质量不由本轮关闭。
+
+### 21.3 重叠复核、采用与复现
+
+候选同条件 Nsight 稳态两轮区间 62.6884 秒：kernel 并集 22.6214 秒、H2D 9.7399 秒，两者交集 **5.9452 秒**；未记录到该进程 GPU kernel/memcpy/memset 的时间为 **36.2272 秒**。对应控制为 76.1959、22.2074、9.2822、0.02375、44.6790 秒。该窗口 H2D 字节相同（133,464,363,016 bytes）；kernel 和 DMA 本身并未变快，而其重叠增加。窗口以 update 完成为锚，跨子集预取可能落在边界外，不用它替代应用记录的整轮字节计数。两次受采集运行只证明调度干预确实增加了重叠，不替代无采集的配对采用门。
+
+保留此共用调度，不增加第二套内核、CPU 读线程、锁页缓存扩展或运行期开关。数值/格式/床位/能窗语义保持原合同；CSRQ 没有变更。既有小型独立 oracle 覆盖 ROT90/ROT90Z、部分缓存、CSRB/CSRQ、CTAC、双窗及多床；新增异常检查验证当前计算完成后才向上抛错。Compute Sanitizer memcheck 对新增检查和 ROT90 部分缓存 oracle 报告 0 errors；不能据此扩展成所有实机和长序列的绝对正确性证明。PSC N1 的轻微耗时增加、SC60 文件读取长尾和现场 5060 Ti 未测均保留为边界。
+
+复现：同根 `paired.py` 使用 `--baseline recon_out/throughput_20261012/baseline_a635d10/SPECT_recon.exe --reuse-cache D:/Projects/SPECT-recon/recon_out/throughput_20261012/<psc5|sc12|sc16>`；PSC5 3 轮 ABBA、SC12 6 轮 ABBA、SC16 2 轮 AB，PSC5 保护门加 `--iterations 50 --subsets 1 --threads 16 --auto-host-cache`。每次用新的 `--label`，不能覆盖已有样本。Nsight 用 `profile_io.py <新目录> --exe <EXE>`，随后 `nsys export --type sqlite` 和 `timeline_stats.py <SQLite>`。原始证据为 `psc5_overlap/`、`sc12_overlap/`、`sc12_overlap_long/`、`sc16_overlap/`、`psc5_overlap_n1/`、`sc12_timeline_*/`、`overlap_suite.xml/log`、`overlap_memcheck.log` 及 `metrics.json`。
+
+实验 EXE `overlap_candidate.exe` 及 `overlap_candidate.patch` 冻结候选；实验时未重新配置版本头，banner 仍为 `a635d10`，以实际路径/大小/时间和补丁区分，不将其当正式干净构建。最终提交后须重新配置并构建发布 EXE，复查完整套件和 `--version`；本轮不推送，也不修改 SPECT_Core ZIP 或现场部署。

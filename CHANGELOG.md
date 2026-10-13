@@ -8,6 +8,11 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-12: CSRB numerator queues current-chunk GPU work before loading and
+  prefetching the next slice, allowing reads and uploads to overlap computation.
+  Plain and CTAC passes share the scheduling change and retain existing slot,
+  ownership and completion checks. No reader thread, cache policy, kernel,
+  precision, format or public CLI/config change; CSRQ remains unchanged.
 - 2026-10-12: CSRB payload validation uses a vectorizable valid-data pass;
   invalid weights still fail with the original source index and diagnostic.
   Matrix values, cache policy, reconstruction kernels and defaults are unchanged.

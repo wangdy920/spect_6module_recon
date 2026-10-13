@@ -436,7 +436,8 @@ public:
       const uint16_t *const *bedAttFactors, size_t attCount, double attPower,
       cuda::CompactDeviceRatioTiming *ratioTimingOut,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorBaseIndex, int cacheSlotBase) {
+      int accumulatorBaseIndex, int cacheSlotBase,
+      const std::function<io::CSRSubsetView()> &loadNext) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     if (branchCount <= 0 || bedCount <= 0 || fullProjections == nullptr ||
@@ -552,6 +553,7 @@ public:
       }
       csrqReleaseAttenSlotLocked(slot);
     }
+    prefetchCompactAfterSubmitLocked(matrix, loadNext);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
     const size_t calls = stages * static_cast<size_t>(branchCount);
     const double forwardSeconds =
@@ -928,7 +930,8 @@ public:
       const int *symIds, const int *zMirrors, int branchCount, int bedCount,
       cuda::CompactDeviceRatioTiming *ratioTimingOut,
       cuda::CompactDeviceBackwardTiming *backwardTimingOut,
-      int accumulatorBaseIndex = 0, int cacheSlotBase = 0) {
+      int accumulatorBaseIndex, int cacheSlotBase,
+      const std::function<io::CSRSubsetView()> &loadNext) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     if (branchCount <= 0 || bedCount <= 0 || fullProjections == nullptr) {
@@ -1055,6 +1058,7 @@ public:
     }
     transformTiming.recordStop(nullptr);
 
+    prefetchCompactAfterSubmitLocked(matrix, loadNext);
     transformTiming.synchronizeStop();
     const double forwardSeconds = forwardTiming.elapsedSeconds();
     const double ratioSeconds = ratioTiming.elapsedSeconds();
@@ -3083,6 +3087,31 @@ public:
                                   const io::CSRSubsetView &current) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
+    prefetchCompactFloatMatrixLocked(next, current);
+  }
+
+private:
+  void prefetchCompactAfterSubmitLocked(
+      const io::CSRSubsetView &current,
+      const std::function<io::CSRSubsetView()> &loadNext) {
+    if (!loadNext)
+      return;
+    // Current kernels are queued; host I/O can overlap them without a reader
+    // thread. The prefetch target must exclude the still-active current slot.
+    try {
+      const auto next = loadNext();
+      if (!next.empty())
+        prefetchCompactFloatMatrixLocked(next, current);
+    } catch (...) {
+      // Failed I/O must not unwind while the current CSR is still in use.
+      CUDA_CHECK(cudaStreamSynchronize(nullptr));
+      CUDA_CHECK(cudaStreamSynchronize(compactUploadStream_.get()));
+      throw;
+    }
+  }
+
+  void prefetchCompactFloatMatrixLocked(const io::CSRSubsetView &next,
+                                        const io::CSRSubsetView &current) {
     validateIoCsrSubsetViewForUpload(next);
     validateIoCsrSubsetViewForUpload(current);
     const MatrixCacheKey nextKey = makeCacheKey(next);
@@ -3106,6 +3135,7 @@ public:
             .count());
   }
 
+public:
   void noteCompactCsrLocality(bool sortedHint) {
     std::lock_guard<std::mutex> lock(mutex_);
     compactSortedHint_ = sortedHint;

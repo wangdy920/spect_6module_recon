@@ -904,19 +904,19 @@ bool nextNonEmptyCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
   return false;
 }
 
-// Prefetch behind the slice being consumed: the next non-empty slice of this
+// Load behind the slice being consumed: the next non-empty slice of this
 // pass, or — after the last one — the first slice of the next pass, which
 // walks the chunks in the opposite order (the caller flips
 // reverseChunkOrder between passes) over `nextSubset`.
-void prefetchNextCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
-                              const spect::io::CompactSymmetryMetadata &meta,
-                              size_t chunkIndex, bool reverseChunkOrder,
-                              const CompactSubsetSelection &subset,
-                              const CompactSubsetSelection *nextSubset,
-                              const spect::io::CSRSubsetView &current) {
+spect::io::CSRSubsetView loadNextCompactSlice(
+    const spect::io::CompactChunkCSRDirectory &chunks,
+    const spect::io::CompactSymmetryMetadata &meta,
+    size_t chunkIndex, bool reverseChunkOrder,
+    const CompactSubsetSelection &subset,
+    const CompactSubsetSelection *nextSubset) {
   const size_t chunkCount = chunks.chunks().size();
   if (chunkCount == 0) {
-    return;
+    return {};
   }
   spect::io::CSRSubsetView next;
   const bool inPass = reverseChunkOrder ? chunkIndex > 0
@@ -925,15 +925,15 @@ void prefetchNextCompactSlice(const spect::io::CompactChunkCSRDirectory &chunks,
       nextNonEmptyCompactSlice(chunks, meta, subset,
                                reverseChunkOrder ? chunkIndex - 1 : chunkIndex + 1,
                                reverseChunkOrder, next)) {
-    prefetchCompactFloatMatrixCUDA(next, current);
-    return;
+    return next;
   }
   if (nextSubset != nullptr &&
       nextNonEmptyCompactSlice(chunks, meta, *nextSubset,
                                reverseChunkOrder ? 0 : chunkCount - 1,
                                !reverseChunkOrder, next)) {
-    prefetchCompactFloatMatrixCUDA(next, current);
+    return next;
   }
+  return {};
 }
 
 std::vector<CompactBranchDescriptor>
@@ -1766,9 +1766,11 @@ bool accumulatePoissonBackprojectedRatioCUDA(
       if (slice.empty()) {
         return true;
       }
-      prefetchNextCompactSlice(
-          chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
-          nextSubsetSelection ? &*nextSubsetSelection : nullptr, slice);
+      const auto loadNext = [&] {
+        return loadNextCompactSlice(
+            chunks, meta, chunkIndex, reverseChunkOrder, subsetSelection,
+            nextSubsetSelection ? &*nextSubsetSelection : nullptr);
+      };
       {
         CompactDeviceRatioTiming deviceTiming;
         CompactDeviceBackwardTiming backwardTiming;
@@ -1783,12 +1785,12 @@ bool accumulatePoissonBackprojectedRatioCUDA(
                       commonTransform, branchSymIds.data(), branchZMirrors.data(),
                       static_cast<int>(branchCount), bedCount, attFactors,
                       compactAttenTableCount(meta), attenPower, &deviceTiming,
-                      &backwardTiming, cacheSlotBase)
+                      &backwardTiming, cacheSlotBase, loadNext)
                 : compactDeviceRatioBedBranchBatchSpmvTAccumulateFloatCUDA(
                       slice, channelProjections, fullProjectionCount, commonRatio,
                       commonTransform, branchSymIds.data(), branchZMirrors.data(),
                       static_cast<int>(branchCount), bedCount, &deviceTiming,
-                      &backwardTiming, cacheSlotBase);
+                      &backwardTiming, cacheSlotBase, loadNext);
         if (!ok) {
           return false;
         }
