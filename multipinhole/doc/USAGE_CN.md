@@ -20,9 +20,9 @@
 # 先按方案的matrix_id部署矩阵；默认Tc OSEM50×10
 .\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -o recon_output
 # 显式方案替换默认方案，未写字段继承全局
-.\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
-# Lu joint通道1=208，通道2=113，默认原生CSRB OSEM50×10，无正则
-.\bin\SPECT_recon.exe -isotope Lu177 -df Bed1_208.bin -df2 Bed1_113.bin -o recon_joint
+.\bin\SPECT_recon.exe -isotope Tc99m -df proj.bin -algoConf bin/config/profiles/uniformity_Tc99m_BSREM_TV.conf -o recon_tv
+# Lu默认合并窗＋单矩阵，原生CSRB OSEM50×10，无正则
+.\bin\SPECT_recon.exe -isotope Lu177 -df Bed1.bin -o recon_lu
 ```
 
 Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D:/path/file.bin`。

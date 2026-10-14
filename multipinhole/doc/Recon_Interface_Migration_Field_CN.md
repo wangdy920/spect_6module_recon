@@ -10,7 +10,7 @@
 python .\tools\run_6module_preprocess.py --input-root "D:\data\case\SPECT" --output-root "D:\data\case\preprocess" --isotope Lu177
 python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" --output-root "D:\data\case\recon"
 # 可选显式完整方案；未传参数继续继承配置
-python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" --output-root "D:\data\case\recon03" --config .\bin\recon\config\profiles\03_mouse_rdp100.conf
+python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" --output-root "D:\data\case\recon03" --config .\bin\recon\config\profiles\mouse_Lu177_BSREM_RDP.conf
 ```
 
 独立重建RC的EXE为 `bin/SPECT_recon.exe`，6Module安装的EXE为 `bin/recon/SPECT_recon.exe`；配置均在各自EXE旁的 `config/`。预处理仍使用release `Spect_preprocess.exe`、资源及wrapper，不以其他ENG转换脚本替代。
@@ -32,7 +32,7 @@ python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" 
 
 ## 方案与CLI优先级
 
-全局 `default_config_Tc99m/default_config_Lu177` 分别选04 OSEM50×10与05 joint RDP30×10。不传配置用核素默认；显式 `--config recipe.conf`替换默认方案，不继承另一份默认方案；方案＋`--`后CLI按开关合并。
+全局 `default_config_Tc99m/default_config_Lu177` 分别选 `standard_Tc99m_OSEM.conf` 与 `standard_Lu177_OSEM.conf`，均为50×10、无正则；Lu采用合并窗＋单矩阵。不传配置用核素默认；显式 `--config recipe.conf`替换默认方案，不继承另一份默认方案；方案＋`--`后CLI按开关合并。
 
 - false：显式CLI > 所选方案 > 全局；源码默认。
 - true：所选方案 > 全局 > CLI，仅限已配置的重建字段；当前E260903部署保留此值。
@@ -42,7 +42,7 @@ python .\tools\run_6module_recon.py --preprocess-root "D:\data\case\preprocess" 
 
 ## 输入输出合同
 
-BIN保持8字节int32头＋float64数据，标准360×2304。Lu双窗共用固定标定，先得到合并与208，113=合并−208，检查有限非负与计数守恒。旧合并数据没有分窗身份时只能选03合并方案或重跑预处理；不能用复制/改名伪造第二窗。
+BIN保持8字节int32头＋float64数据，PSC标准360×2304。Lu正式方案读取每床合并 `BedN.bin`，只加载一份矩阵；预处理可继续保留 high/low 辅助文件，不参与默认重建。历史joint复现必须有真实分窗，不允许复制/改名合并BIN伪造第二窗。
 
 床号保持真实连续Bed1..Bed5，步进16.8mm，`z_bed_flip=1`；投影identity和metadata几何必须匹配，不复用旧108×108×80占位参数。输出几何从MHD读取，Mask/裁剪/拼接不由上位机重算。每床预处理之后一次多床重建，停止原按床重建后另跑Stitcher的主线。
 

@@ -39,9 +39,9 @@ Deploy the selected recipe's matrices first. From the package root:
 # Default Tc OSEM50 x 10
 .\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -o recon_tc
 # Explicit Tc TV recipe
-.\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -algoConf bin/config/profiles/02_uniform_tv75.conf -o recon_tv
-# Default Lu joint OSEM50 x 10, native CSRB; independent 208 and 113 projections
-.\bin\SPECT_recon.exe -isotope Lu177 -df "D:\scan\Bed1_208.bin" -df2 "D:\scan\Bed1_113.bin" -o recon_lu
+.\bin\SPECT_recon.exe -isotope Tc99m -df "D:\scan\Bed1.bin" -algoConf bin/config/profiles/uniformity_Tc99m_BSREM_TV.conf -o recon_tv
+# Default Lu OSEM50 x 10, native CSRB; merged projection and one matrix
+.\bin\SPECT_recon.exe -isotope Lu177 -df "D:\scan\Bed1.bin" -o recon_lu
 # Multi-bed Tc: retain real consecutive BedN identities; default physical step 16.8 mm
 .\bin\SPECT_recon.exe -isotope Tc99m -dfList "D:\scan\Bed1.bin;D:\scan\Bed2.bin" -o recon_multibed
 # Inspect the selected Lu model without reconstruction

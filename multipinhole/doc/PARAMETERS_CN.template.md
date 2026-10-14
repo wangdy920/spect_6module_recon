@@ -121,7 +121,7 @@ seam_xy_align = 0
 
 ```text
 # global_ini = ...\bin\config\spect_config.ini (loaded)
-# algo_conf  = ...\bin\config\profiles\04_standard_osem50.conf
+# algo_conf  = ...\bin\config\profiles\standard_Tc99m_OSEM.conf
 ```
 
 ## 核素、矩阵及归一化配置（2026-09-21）
@@ -138,18 +138,19 @@ Lu-177 joint 固定本批验证的通道顺序 **208、113 keV**，`energy_windo
 
 部署 wrapper 原来的 `--preprocess-root`、`--output-root`、`--config` 调用不变；`--config` 可传全局 INI 或完整方案，后者由内部转换为 `-algoConf`。可在 `--` 后追加 `-it 40:10` 等参数，其优先级遵守上述开关。日志中的配置来自实际重建 argv 加 `-dumpConf`。
 
-Lu-177 默认预处理保留合并 `BedN.bin`，新增 `BedN_208.bin` / `BedN_113.bin`，两次解码共用固定标定；113 由合并减 208 得到，检查非负与计数守恒。新增一遍固定标定解码会增加预处理时间，不改变原合并 BIN。旧合并输出缺少分窗身份时不能直接用 joint 方案，需重跑预处理或显式用 `03_mouse_rdp100.conf`。
+Lu-177 正式重建方案读取合并 `BedN.bin` 与单份系统矩阵；预处理仍可保存 `BedN_high.bin` / `BedN_low.bin` 辅助数据。历史joint方案不能用合并BIN冒充分窗输入。未来加权合并矩阵是模型更新，不能仅按相同profile名称继承旧正则参数的验证结论。
 
 ## 方案表与部署接口
 
 | 方案文件（config/profiles） | 模型 | 算法/正则化 | 迭代×子集 | BSREM α₀/γ |
 |---|---|---|---|---|
-| 01_detail_bsrem100.conf | Tc单141 SCALE2 CSRB | BSREM无正则 | 100×10 | 1.5/0 |
-| 02_uniform_tv75.conf | Tc单141 SCALE2 CSRB | BSREM TV β=0.0003 | 75×10 | 1/0.05 |
-| 03_mouse_rdp100.conf | Lu合并窗＋单208 CSRB | BSREM RDP β=0.1 | 100×10 | 1/0.05 |
-| 04_standard_osem50.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
-| 05_mouse_joint_rdp30.conf | Lu独立208/113＋各自CSRQ；显式实验选项 | BSREM RDP β=0.03 | 30×10 | 1/0.05 |
-| 06_standard_joint_osem50.conf | Lu独立208/113＋各自原生CSRB；Lu默认 | OSEM无正则 | 50×10 | — |
+| resolution_Tc99m_BSREM.conf | Tc单141 SCALE2 CSRB | BSREM无正则 | 100×10 | 1.5/0 |
+| uniformity_Tc99m_BSREM_TV.conf | Tc单141 SCALE2 CSRB | BSREM TV β=0.0003 | 75×10 | 1/0.05 |
+| mouse_Lu177_BSREM_RDP.conf | Lu合并窗＋单208 CSRB | BSREM RDP β=0.1 | 100×10 | 1/0.05 |
+| standard_Tc99m_OSEM.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
+| standard_Lu177_OSEM.conf | Lu合并窗＋单208 CSRB；Lu默认 | OSEM无正则 | 50×10 | — |
 | sc60_osem1000.conf | SC60单窗CSRB、完整矩阵网格；显式兼容验证方案 | OSEM无正则，PSF1.5 mm | 1000×10，每50轮保存 | — |
+
+正式命名为 `用途[_应用][_核素]_算法[_正则].conf`，不含编号、迭代次数、joint或detail。核素专用配方保留核素；mouse省略应用时指全身取向，bone/tumor仅用于独立验证的专用参数。通用名称仅用于不绑定核素的配方。历史分窗配方位于 `config/historical/05_mouse_joint_rdp30.conf`；SC60长迭代验证方案不随SPECT_Core发布。
 
 这些方案适用于原实验范围，不是所有系统或IQ标定下的全局最优。两种Lu模型的β不直接互换。源配置默认false；2026-09-14的E盘6Module部署保留true。6Module部署EXE位于 `bin/recon/`，独立重建RC位于 `bin/`，两者的相对配置规则相同。详细上位机迁移见 `Recon_Interface_Migration_Field_CN.md`（源码文档），部署包见其wrapper指南。
