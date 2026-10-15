@@ -15,7 +15,7 @@ cd D:\path\to\<package_root>
 2. `[Reconstruction] default_config_<核素>` 或 `default_config` 选择的一份 `profiles/*.conf`。
 3. 仅未配置默认方案的旧全局 INI 才按优化器选择 `algo_<alg>.conf`。
 
-配置采用全局 INI＋一份重建方案：`[Reconstruction] default_config` 指定默认方案，`-algoConf` 显式替换；`-opti` 不再另换方案。`recon_sections_override_cli=false` 时命令行 > 方案 > 全局；为 `true` 时方案 > 全局 > 命令行，仅保护配置中已填写的重建字段，输入/输出、设备和日志仍由调用方指定。方案可覆盖 Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix/Normalization 等完整参数。`-config` 若直接指向带 `[Algorithm]` 的方案文件，也会内部按显式方案处理并继承部署全局默认值。`-subset-mode`、`-subset-diagnostics`、`-iter` / `-iterations` / `-verbose` / `-verbosity` 及`-v <n>`会失败；其他未知参数打印`[NOTE]`并忽略。单独的`-v` / `--version`只打印版本后退出。
+配置采用全局 INI＋一份重建方案：`[Reconstruction] default_config` 指定默认方案，`-algoConf` 显式替换；`-opti` 不再另换方案。`recon_sections_override_cli=false` 时命令行 > 方案 > 全局；为 `true` 时方案 > 全局 > 命令行，仅保护配置中已填写的重建字段，输入/输出、设备和日志仍由调用方指定。空值 `key =` 在任何一层都等同未配置：继承下层或程序默认值，不清空全局值，也不压制 CLI。方案可覆盖 Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix 等参数；归一化是安装标定，只能写在全局 `[Normalization] factor_file_<核素>`。`-config` 若直接指向带 `[Algorithm]` 的方案文件，也会内部按显式方案处理并继承部署全局默认值。`-subset-mode`、`-subset-diagnostics`、`-iter` / `-iterations` / `-verbose` / `-verbosity` 及`-v <n>`会失败；其他未知参数打印`[NOTE]`并忽略。单独的`-v` / `--version`只打印版本后退出。
 
 只有在明确要覆盖发布包默认配置时才传：
 
@@ -47,7 +47,7 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 
 ## 多床位
 
-下述固定裁剪/ROI 是 PSC 默认。源码另支持 `[InputOutput] matrix_grid_output=true`：完整每床网格，最多 16 床，2026-10-11 起多床为联合全局体重建（重叠体素共同更新，不做 cosine 融合、不做床间 gain-fit，暂不支持 CTAC/AutoMu/`-maskFromAtt`）；多床必须显式给出正且整数体素层对齐的床步进。床多时可用 `-df <目录> -beds N`（或 `A:B`）代替逐个列出 `-dfList`。SC60 recipe 的 `bed_step_mm=0` 为未知，不能当作 PSC 16.8 mm；当前只有合成多床验证，部署须确认包内 EXE 是否包含该候选。完整边界见 `Format_Reader_Matrix_CN.md`，不变更已有发布默认。
+下述固定裁剪/ROI 是 PSC 默认。源码另支持 `[InputOutput] matrix_grid_output=true`：完整每床网格，最多 16 床，2026-10-11 起多床为联合全局体重建（重叠体素共同更新，不做 cosine 融合、不做床间 gain-fit，暂不支持 CTAC/AutoMu/`-maskFromAtt`）；多床必须显式给出正且整数体素层对齐的床步进。床多时可用 `-df <目录> -beds N`（或 `A:B`）代替逐个列出 `-dfList`。SC60 设备包全局配置写入 `bed_step_mm=12`（2026-10-13 五床线源实测，30 层），不能当作 PSC 16.8 mm。完整边界见 `Format_Reader_Matrix_CN.md`，不变更已有发布默认。
 
 ```powershell
 .\bin\SPECT_recon.exe `
@@ -58,7 +58,7 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 
 固定合同：
 - PSC 最多 5 个床位（`matrix_grid_output=true` 最多 16）；路径含 `BedN` 时按床号排序，且必须是连续子集。`Bed1` 是最小 physical-Z 床，床号每增加 1 向较大 physical Z 移动 `16.8 mm`。少床不补虚拟床。
-- `-bedOverlap` 表达重建空间的重叠层数；`-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，默认 `16.8`）声明扫描仪机械步进。输出步进由 `step = round(bed_step_mm / voxel_z)` 自动确定，**overlap 是派生值**：`overlap = baseNz - step`。不传 `-bedOverlap` 时自动推算；传错时自动纠正并打印 `[NOTE]`（`bed_step_mm` 是权威输入）。220 层 0.3 mm 床位为 `overlap = 220 - 56 = 164`（16.8 mm 步进）；其他步进/几何按同一关系换算。
+- `-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，PSC 默认 `16.8`）是唯一的多床几何输入：`step = round(bed_step_mm / voxel_z)`，每个床间 `overlap = baseNz - step`（220 层 0.3 mm 为 `220 - 56 = 164`）。所有床间使用同一步进；旧 `-bedOverlap` / `bed_overlap` 仍被接受但忽略，不再需要配置。
 - `[MultiBed] z_bed_flip=1` 是发布默认，只定义每床 local system-matrix Z 与 reconstruction-storage Z 的关系；`-attMap` 使用前者，`-regCT` 使用后者。不要通过逆序床号或整幅 Z 翻转二次补偿。
 - 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合（沿输出 Z，入口保持上一床；`z_bed_flip` 只反转存储与增益窗）。
 - 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床ROI为 `30 mm × 21.6 mm`，多床ROI为 `36 mm × 66 mm`；最终裁剪还受 `single_bed_step_aligned` 影响，尺寸以实际MHD为准，不固定假设72层。
@@ -70,14 +70,14 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 
 ```ini
 [MultiBed]
-bed_overlap = 164,164,164,164,0
-crop_end    = 0,0
+bed_step_mm = 16.8
 z_bed_flip  = 1
 z_out_flip  = 0
 x_out_flip  = 0
 xy_out_rotation_deg = 0
-seam_xy_align = 0
 ```
+
+`crop_end`、`seam_xy_align`、`detz_edge_censor` 默认关闭，部署配置不再列出；需要时用 CLI 或在全局 `[MultiBed]` 中显式写出。
 
 命令行只在确有坐标合同要求时覆盖。沿用现有优先级：若 `recon_sections_override_cli=true`，配置中已写出的同名设置优先，应修改选中配置；需 CLI 优先时设为 `false`：
 
@@ -132,7 +132,7 @@ seam_xy_align = 0
 
 Lu-177 joint 固定本批验证的通道顺序 **208、113 keV**，`energy_window_weights=0.1036,0.0617`。权重进入预测计数一次，并非人为给某张图加权平均，也不能凭权重大小认定某窗的信息量占比。
 
-`[Normalization] factor_file` / `factor_file2` 分别绑定这两个通道的投影校正因子 c；程序使用 1/c 构造灵敏度。Tc-99m 单窗只用第一个文件。joint 要么两份都指定，要么两份均关闭，不继承另一个核素或合并窗的 norm。相对路径以 EXE 为基准。当前方案 norm 留空，因为还没有验证并交付本批分窗标定文件；不代表两核素 norm 相同。CSRB/CSRQ 均允许同时提供 `-bProj/-bProjList`（第二窗用对应的 `2` 参数）：b 必须是同床/能窗/采集时间下的预计探测计数，不提前乘 c 或减出投影。程序内部一次性计算 b/e，残差仍使用原始 b，模型与数值下限见 [矩阵合同](Format_Reader_Matrix_CN.md)。
+投影校正因子 c 是安装标定，只在全局 `spect_config.ini` 的 `[Normalization]` 按核素绑定：`factor_file_Tc99m`、`factor_file_Lu177`（单窗/合并窗），joint 第二窗为 `factor_file2_Lu177`；程序使用 1/c 构造灵敏度。方案/profile、旧 `[MultiBed] normalization_factor_file` 与旧无后缀 `factor_file` 均被拒绝，未知键也失败。joint 要么两份都指定，要么两份均关闭；单窗/合并窗配置了第二窗即失败。相对路径以 EXE 为基准；显式 `-normFactorFile`（相对 CWD）替换整个绑定。当前部署 norm 留空，因为还没有验证并交付本批标定文件；不代表两核素 norm 相同。CSRB/CSRQ 均允许同时提供 `-bProj/-bProjList`（第二窗用对应的 `2` 参数）：b 必须是同床/能窗/采集时间下的预计探测计数，不提前乘 c 或减出投影。程序内部一次性计算 b/e，残差仍使用原始 b，模型与数值下限见 [矩阵合同](Format_Reader_Matrix_CN.md)。
 
 已有 denom 缓存同时绑定两矩阵、能窗权重、norm 数值、Mask/PSF 和子集；改迭代数、β 或仅输出滤波，不另造缓存层。
 
@@ -149,8 +149,7 @@ Lu-177 正式重建方案读取合并 `BedN.bin` 与单份系统矩阵；预处�
 | mouse_Lu177_BSREM_RDP.conf | Lu合并窗＋单208 CSRB | BSREM RDP β=0.1 | 100×10 | 1/0.05 |
 | standard_Tc99m_OSEM.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
 | standard_Lu177_OSEM.conf | Lu合并窗＋单208 CSRB；Lu默认 | OSEM无正则 | 50×10 | — |
-| sc60_osem1000.conf | SC60单窗CSRB、完整矩阵网格；显式兼容验证方案 | OSEM无正则，PSF1.5 mm | 1000×10，每50轮保存 | — |
 
-正式命名为 `用途[_应用][_核素]_算法[_正则].conf`，不含编号、迭代次数、joint或detail。核素专用配方保留核素；mouse省略应用时指全身取向，bone/tumor仅用于独立验证的专用参数。通用名称仅用于不绑定核素的配方。历史分窗配方位于 `config/historical/05_mouse_joint_rdp30.conf`；SC60长迭代验证方案不随SPECT_Core发布。
+正式命名为 `用途[_应用][_核素]_算法[_正则].conf`，不含编号、迭代次数、joint或detail。核素专用配方保留核素；mouse省略应用时指全身取向，bone/tumor仅用于独立验证的专用参数。通用名称仅用于不绑定核素的配方。历史分窗配方位于 `config/historical/05_mouse_joint_rdp30.conf`；SC60长迭代仿真验证方案 `sc60_osem1000.conf` 已移至 `config/historical/`。SC60 使用相同方案，设备差异写在 `scanners/SC60-MPH3.ini` 与 SC60 全局配置。
 
 这些方案适用于原实验范围，不是所有系统或IQ标定下的全局最优。两种Lu模型的β不直接互换。源配置默认false；2026-09-14的E盘6Module部署保留true。6Module部署EXE位于 `bin/recon/`，独立重建RC位于 `bin/`，两者的相对配置规则相同。详细上位机迁移见 `Recon_Interface_Migration_Field_CN.md`（源码文档），部署包见其wrapper指南。

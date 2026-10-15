@@ -174,7 +174,6 @@ TEST(ReconSetupTest, PrepareBedSetupPreservesExplicitCylinderRoi) {
   args.Nz = 220;
   args.dz = 0.3;
   args.projPaths = {"Bed1.bin", "Bed2.bin"};
-  args.bedOverlaps = {164, 164, 164, 164, 0};
   args.cylinderDiameterMM = 28.0f;
   args.cylinderHeightMM = 24.0f;
   args.cylinderDimsExplicit = true;
@@ -192,7 +191,6 @@ TEST(ReconSetupTest, PrepareBedSetupAcceptsCenter66FixedStepGeometry) {
   args.Vz = 0.3f;
   args.dz = 0.3;
   args.projPaths = {"Bed1.bin", "Bed2.bin", "Bed3.bin"};
-  args.bedOverlaps = {104, 104, 104, 104, 0};
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -205,7 +203,7 @@ TEST(ReconSetupTest, PrepareBedSetupAcceptsCenter66FixedStepGeometry) {
             std::string::npos);
 }
 
-TEST(ReconSetupTest, PrepareBedSetupAutoDerivesOverlapWhenNotProvided) {
+TEST(ReconSetupTest, PrepareBedSetupDerivesOverlapFromBedStep) {
   ReconArgs args;
   args.Nx = 108;
   args.Ny = 108;
@@ -215,41 +213,16 @@ TEST(ReconSetupTest, PrepareBedSetupAutoDerivesOverlapWhenNotProvided) {
 
   const BedSetupResult result = prepareBedSetup(args);
 
-  // No -bedOverlap given: derived from default 16.8 mm step -> 56 layers,
-  // overlap = 160 - 56 = 104 per joint (default 0s are re-derived).
+  // Default 16.8 mm step -> 56 layers, overlap = 160 - 56 = 104 per joint.
   EXPECT_EQ(result.baseNz, 160);
   EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{104, 104}));
   EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
   EXPECT_EQ(result.canonicalGeom.cropLayers, 66);
   EXPECT_EQ(result.canonicalGeom.blendOverlap, 10);
-  bool found = false;
-  for (const auto &w : result.warnings)
-    found = found || w.find("re-derived from the scanner bed step") !=
-                         std::string::npos;
-  EXPECT_TRUE(found);
+  EXPECT_TRUE(result.warnings.empty());
 }
 
-TEST(ReconSetupTest, PrepareBedSetupCorrectsWrongOverlapWithWarning) {
-  ReconArgs args;
-  args.Nx = 108;
-  args.Ny = 108;
-  args.Nz = 160;
-  args.dz = 0.3;
-  args.projPaths = {"Bed1.bin", "Bed2.bin"};
-  args.bedOverlaps = {103, 103, 103, 103, 0};
-
-  const BedSetupResult result = prepareBedSetup(args);
-
-  EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{104}));
-  EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
-  bool found = false;
-  for (const auto &w : result.warnings)
-    found = found || w.find("re-derived from the scanner bed step") !=
-                         std::string::npos;
-  EXPECT_TRUE(found);
-}
-
-TEST(ReconSetupTest, PrepareBedSetupReDerivesOverlapForDifferentVoxel) {
+TEST(ReconSetupTest, PrepareBedSetupDerivesOverlapForDifferentVoxel) {
   // 0.4 mm voxels + default 16.8 mm step -> 42 layers, overlap = 160 - 42.
   ReconArgs args;
   args.Nx = 108;
@@ -258,7 +231,6 @@ TEST(ReconSetupTest, PrepareBedSetupReDerivesOverlapForDifferentVoxel) {
   args.Vz = 0.4f;
   args.dz = 0.4;
   args.projPaths = {"Bed1.bin", "Bed2.bin"};
-  args.bedOverlaps = {104, 104, 104, 104, 0};
 
   const BedSetupResult result = prepareBedSetup(args);
 
@@ -396,29 +368,22 @@ TEST(ReconSetupTest, MatrixGridJointVolumeSupportsSixteenBeds) {
   EXPECT_THROW((void)prepareBedSetup(sixModule), std::runtime_error);
 }
 
-TEST(ReconSetupTest, PrepareBedSetupCorrectsLegacyOverlapForSmallMatrixNz) {
-  // Device scenario: sampling-system matrix with Nz=100 (metadata override),
-  // while the deployment config still carries the 220-layer overlap 164.
-  // The 164 is clamped to Nz-1 and must then be re-derived from the scanner
-  // step (56 layers) -> overlap 44, NOT fail with step=1.
+TEST(ReconSetupTest, PrepareBedSetupDerivesOverlapForSmallMatrixNz) {
+  // Device scenario: sampling-system matrix with Nz=100 (metadata override).
+  // The scanner step (56 layers) alone gives overlap 44 for any baseNz.
   ReconArgs args;
   args.Nx = 100;
   args.Ny = 100;
   args.Nz = 100;
   args.dz = 0.3;
   args.projPaths = {"Bed1.bin", "Bed2.bin"};
-  args.bedOverlaps = {164, 164, 164, 164, 0};
 
   const BedSetupResult result = prepareBedSetup(args);
 
   EXPECT_EQ(args.outputBedOverlaps, (std::vector<int>{44}));
   EXPECT_EQ(result.canonicalGeom.stepLayers, 56);
   EXPECT_EQ(result.canonicalGeom.cropLayers, 66);
-  bool found = false;
-  for (const auto &w : result.warnings)
-    found = found || w.find("re-derived from the scanner bed step") !=
-                         std::string::npos;
-  EXPECT_TRUE(found);
+  EXPECT_TRUE(result.warnings.empty());
 }
 
 TEST(ReconSetupTest, SharedBedPathParserHandlesSeparatorsAndCase) {

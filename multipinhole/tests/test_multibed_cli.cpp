@@ -115,7 +115,7 @@ TEST(IOTest, MatrixGridParserAllowsSixteenDfListBeds) {
     EXPECT_FALSE(parseWithBeds(17).first);
     std::filesystem::remove_all(dir);
 }
-TEST(IOTest, MultiBedParserRejectsMoreThanFiveBedOverlapSlots) {
+TEST(IOTest, MultiBedParserAcceptsAndIgnoresRetiredBedOverlap) {
     spect::cli::ReconArgs args;
     const std::vector<std::string> argv = {
         "SPECT_recon",
@@ -130,7 +130,8 @@ TEST(IOTest, MultiBedParserRejectsMoreThanFiveBedOverlapSlots) {
         "-ang", "360"
     };
 
-    EXPECT_FALSE(parseReconArgsForTest(argv, args));
+    ASSERT_TRUE(parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.bedOverlaps.empty());
 }
 TEST(IOTest, MultiBedParserParsesZFlipSwitches) {
     spect::cli::ReconArgs args;
@@ -193,7 +194,7 @@ TEST(IOTest, MultiBedParserAcceptsCompactChunkCtac) {
     EXPECT_TRUE(args.doCTAC);
     EXPECT_EQ(args.bedCount, 2);
 }
-TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
+TEST(IOTest, MultiBedConfigReadsCropAndZFlipAndIgnoresBedOverlap) {
     const auto dir = std::filesystem::temp_directory_path() /
                      "spect_multibed_config_tests";
     std::filesystem::create_directories(dir);
@@ -219,7 +220,7 @@ TEST(IOTest, MultiBedConfigReadsOverlapCropAndZFlipDefaults) {
         "-dim", "108,108,220", "-vox", "0.3", "-ang", "360"};
 
     ASSERT_TRUE(parseReconArgsForTest(argv, args));
-    EXPECT_EQ(args.bedOverlaps, (std::vector<int>{164}));
+    EXPECT_TRUE(args.bedOverlaps.empty());
     EXPECT_FALSE(args.singleBedStepAligned);
     EXPECT_EQ(args.cropEndStart, 2);
     EXPECT_EQ(args.cropEndEnd, 3);
@@ -448,14 +449,16 @@ TEST(IOTest, NormalizationFactorLoadsProjectionBinAndAlias) {
 TEST(IOTest, NormalizationRequiresPairedWindowsAndAcceptsBackground) {
     const auto factors = writeTempProjectionWeights("norm_contract.bin", 2, 6, 0.91);
     const auto config = factors.parent_path() / "norm_contract.ini";
+    const auto writeNorm = [&config, &factors](bool first, bool second) {
+        std::ofstream out(config);
+        out << "[Normalization]\n";
+        if (first) out << "factor_file_Lu177=" << factors.generic_string() << '\n';
+        if (second) out << "factor_file2_Lu177=" << factors.generic_string() << '\n';
+    };
     for (bool joint : {false, true}) {
-        {
-            std::ofstream out(config);
-            out << "[Normalization]\nfactor_file=" << factors.generic_string()
-                << "\nfactor_file2=" << (joint ? factors.generic_string() : "") << '\n';
-        }
+        writeNorm(true, joint);
         const std::vector<std::string> base = {
-            "SPECT_recon", "-config", config.string(), "-df", "Bed1.bin",
+            "SPECT_recon", "-config", config.string(), "-isotope", "Lu177", "-df", "Bed1.bin",
             "-chunkCSRDir", "chunks", "-opti", "mlem", "-it", "1",
             "-dim", "2,2,2", "-vox", "0.3", "-ang", "2", "-detN", "2,3"
         };
@@ -475,11 +478,10 @@ TEST(IOTest, NormalizationRequiresPairedWindowsAndAcceptsBackground) {
         if (joint) {
             spect::cli::ReconArgs secondWithoutJoint;
             EXPECT_FALSE(parseReconArgsForTest(base, secondWithoutJoint));
-            for (const auto* field : {"factor_file", "factor_file2"}) {
-                { std::ofstream out(config); out << "[Normalization]\n" << field << '='
-                                                 << factors.generic_string() << '\n'; }
+            for (bool first : {true, false}) {
+                writeNorm(first, !first);
                 spect::cli::ReconArgs incomplete;
-                EXPECT_FALSE(parseReconArgsForTest(argv, incomplete)) << field;
+                EXPECT_FALSE(parseReconArgsForTest(argv, incomplete)) << first;
             }
         }
     }

@@ -20,12 +20,19 @@ explicit BSREM/CSRQ experiment; CSRQ is not the default or a SC60 requirement.
 One isotope-selected recipe overlays the global INI; explicit `-algoConf`
 replaces that recipe. See [parameters](multipinhole/doc/PARAMETERS_CN.template.md).
 
-SC60 supports native CSRB ROT90 and full-matrix-grid output; no measured
-SC60 bed step or real multi-bed acquisition is available yet. The standalone
-`sc60_osem1000.conf` is the simulation-validation recipe, not a universal
-device default. In the 6Module universal package, SN selects resources and
-matrix bindings; bed step, masks, ROI and output orientation are manual
-deployment settings, not algorithm-profile copies.
+SC60 supports native CSRB/CSRQ and full-matrix-grid output. It uses the shared
+profiles with `config/scanners/SC60-MPH3.ini` and the SC60 device
+`spect_config.ini` (12 mm bed step from the 2026-10-13 five-bed scan); the
+former `sc60_osem1000.conf` simulation recipe is kept under `config/historical/`.
+In the 6Module universal package, SN selects resources and matrix bindings; bed
+step, masks, ROI, output orientation and normalization are deployment settings
+in the global INI, not algorithm-profile copies.
+
+Configuration layering: a blank value (`key =`) means "not configured" at every
+layer, so it never clears a lower layer or masks the CLI. The projection
+correction is bound only in the global INI as `[Normalization]
+factor_file_<isotope>` (`factor_file2_Lu177` for the joint second window);
+recipes may not set it, and an explicit `-normFactorFile` replaces it.
 
 Implementation, numerical checks, ROI long-run evidence and the immutable
 September21 release are recorded in the
@@ -94,7 +101,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 | `-bProj <file>` | Background/scatter projection term (MAT or BIN); added to forward model `yhat`. |
 | `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds (PSC) or 16 beds with `matrix_grid_output=true`. |
 | `-beds <N|A:B>` | Search `Bed1..BedN` or `BedA..BedB` (`BedK.bin`, case-insensitive) in the `-df` directory (or the directory of one `-df`/`-dfList` file); a missing bed in the range fails, beds outside it are ignored. Same rule for `-df2`. |
-| `-bedOverlap <b1,b2,b3,b4,b5>` | Fixed Bed1..Bed5 overlap table. `b1` maps `Bed1-Bed2`, `b2` maps `Bed2-Bed3`, etc.; one value is replicated across all fixed slots. |
+| `-bedStepMm <mm>` | Scanner bed step (INI `[MultiBed] bed_step_mm`, PSC default 16.8). The overlap is always `baseNz - round(step / voxel_z)`; the retired `-bedOverlap` / `bed_overlap` are accepted and ignored. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
 | `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window reconstruction shares an activity estimate: `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. Both windows must have compatible coordinates and the same beds. Native CSRB is supported; paired CSRQ remains experimental, and mixed CSRB/CSRQ is rejected. Default Lu channel order is 208/113 with weights 0.1036/0.0617. CTAC requires explicit per-window energies. CSRB and CSRQ have subset CTAC paths; CSRQ N>1 was added in the 2026-10-09 worktree candidate with unchanged CLI. Its GPU numerical regression is still pending; this is not a production release. |
@@ -113,7 +120,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 
 For repeated acquisitions of one case, set `[InputOutput] merge_time_segments=true` and pass one timestamp's `SPECT` directory, for example `-df D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT`. Immediate sibling directories named `YYYYMMDD_HHMMSS` are processed chronologically. Every included segment must contain the identical `BedN.bin` set with matching BIN size/header/geometry; mismatches and non-finite sums fail before reconstruction. The run manifest records every source path per bed.
 
-The shipped 220-layer 6module geometry uses `-bedOverlap 164,164,164,164,0`, but the overlap is a derived quantity: `step_layers = round(bed_step_mm / voxel_z)` (default `-bedStepMm 16.8`; INI `[MultiBed] bed_step_mm`) and `overlap = baseNz - step_layers`. Omitting `-bedOverlap` auto-derives it from the scanner bed step and the matrix geometry; a wrong value is corrected with a warning (`bed_step_mm` is authoritative). The per-bed center crop is `step + 10` layers (66 for the 260601 geometry). Reconstruction segments are non-overlapping in storage. At save time the only production stitch:
+The bed step is the only multi-bed geometry input: `step_layers = round(bed_step_mm / voxel_z)` (default `-bedStepMm 16.8`; INI `[MultiBed] bed_step_mm`) and every joint uses `overlap = baseNz - step_layers` (164 for the 220-layer 0.3 mm geometry). The retired `-bedOverlap` / `bed_overlap` are accepted and ignored. Beds must be one consecutive `BedN` run with a uniform step. The per-bed center crop is `step + 10` layers (66 for the 260601 geometry). Reconstruction segments are non-overlapping in storage. At save time the only production stitch:
 
 Single-bed output follows that same `step + 10` center-crop geometry when `[MultiBed] single_bed_step_aligned=true` (the default): `16.8 mm / 0.3 mm + 10 = 66` layers. Set it to `false`, or pass `-singleBedStepAligned 0`, only when the legacy fixed 72-layer output contract is required.
 

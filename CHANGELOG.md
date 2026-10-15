@@ -8,6 +8,24 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-15: configuration contract simplified. A blank value (`key =`) is
+  "not configured" at every layer: it no longer clears a lower layer or the
+  CLI, independent of `recon_sections_override_cli`. Projection normalization
+  is an installation calibration bound only in the global INI as
+  `[Normalization] factor_file_Tc99m`, `factor_file_Lu177` and joint
+  `factor_file2_Lu177`; a recipe `[Normalization]`, the legacy
+  `[MultiBed] normalization_factor_file`, unsuffixed `factor_file` or an
+  unknown key fails with a migration message, and an explicit
+  `-normFactorFile` replaces the binding. Multi-bed geometry comes only from
+  `bed_step_mm` (overlap = baseNz - round(step / voxel_z) for every joint);
+  `bed_overlap` / `-bedOverlap` are accepted and ignored, and the per-run
+  "bed_overlap re-derived" warning is gone. The shipped `spect_config.ini`
+  drops keys that were never enabled and equal the program defaults (in-recon
+  Butterworth/Gaussian, output Gaussian, global `[Regularization]`,
+  `detz_*`, `crop_end`, `seam_xy_align`); profiles drop their blank
+  `[Normalization]` blocks and `sc60_osem1000.conf` moves to
+  `config/historical/`. The build now mirrors `config/profiles` and
+  `config/scanners` exactly. Default reconstructions are unchanged.
 - 2026-10-15: streamed CSRQ (matrix larger than free GPU memory, e.g. SC60
   18.3 GiB on 16 GB cards) uploads only the chunks holding rows of the current
   subset, so uploads alternate the two device slots and overlap the previous

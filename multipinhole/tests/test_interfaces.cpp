@@ -165,13 +165,11 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_EQ(parser.getString("PSF", "mode", ""), "sieve");
         EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "fwhm", 0.0), 1.3);
         EXPECT_DOUBLE_EQ(parser.getDouble("PSF", "min_sigmas", 0.0), 3.0);
-        EXPECT_DOUBLE_EQ(
-            parser.getDouble("Filtering", "butterworth_cutoff", 0.0), 0.0);
-        EXPECT_EQ(parser.getInt("Filtering", "butterworth_order", 0), 2);
-        EXPECT_EQ(parser.getString("Filtering", "smooth_apply_stage", ""), "none");
+        // Disabled options at their program defaults are not listed.
+        for (const auto* key : {"butterworth_cutoff", "butterworth_order", "gaussian_sigma",
+                                "gaussian_kernel", "smooth_apply_stage", "output_smooth_fwhm_mm"})
+            EXPECT_FALSE(parser.hasKey("Filtering", key)) << key;
         EXPECT_EQ(parser.getString("Filtering", "butter_apply_stage", ""), "output");
-        EXPECT_DOUBLE_EQ(
-            parser.getDouble("Filtering", "output_smooth_fwhm_mm", 0.0), 0.30);
         EXPECT_DOUBLE_EQ(
             parser.getDouble("Filtering", "output_butter_cutoff_cpcm", 0.0), 5.0);
         EXPECT_TRUE(parser.getBool(
@@ -179,7 +177,13 @@ TEST(AppTest, ConfigParserIntegration) {
         EXPECT_FALSE(parser.getBool(
             "InputOutput", "output_filters_overwrite_primary", true));
 
-        EXPECT_EQ(parser.getString("Regularization", "type", ""), "None");
+        EXPECT_FALSE(parser.hasSection("Regularization"));
+        EXPECT_DOUBLE_EQ(parser.getDouble("MultiBed", "bed_step_mm", 0.0), 16.8);
+        for (const auto* key : {"bed_overlap", "normalization_factor_file", "detz_row_weights_file",
+                                "detz_edge_censor", "crop_end", "seam_xy_align"})
+            EXPECT_FALSE(parser.hasKey("MultiBed", key)) << key;
+        // Blank per-isotope normalization slots are not configured.
+        EXPECT_FALSE(parser.hasSection("Normalization"));
     } else {
         GTEST_SKIP() << "Config file not found: " << configPath;
     }

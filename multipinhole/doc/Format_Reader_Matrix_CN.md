@@ -37,7 +37,7 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 ## SC60 网格输出
 
-使用 `config/profiles/sc60_osem1000.conf`，显式指定实际矩阵目录或配置匹配的 matrix root。默认 OSEM 1000:10、PSF 1.5 mm、每 50 轮保存；短验证可用 CLI 覆盖迭代数。坏探测器/norm 清空，支持区为 36x96 mm，关闭 PSC 输出滤波和轴翻转。
+SC60 使用与 PSC 相同的方案（profiles），设备差异由 `scanners/SC60-MPH3.ini`（CSRQ 矩阵绑定）与 SC60 设备包的全局 `spect_config.ini` 承担：90x90x240、0.4 mm、PSF 1.5 mm、支持区 36x36 mm、无 PSC 坏探测器掩膜、关闭 PSC 输出滤波、`bed_step_mm=12`。旧的仿真验证方案 `sc60_osem1000.conf` 已移至 `config/historical/`；由于空值不再清空全局键，复跑它须搭配不含 `bad_detector_file` 的全局配置。
 
 `[InputOutput] matrix_grid_output=true` 保留完整矩阵网格，不执行 PSC 固定中心裁剪或固定 ROI 覆盖。默认 false，保持既有 PSC 行为。对称 profile 与输出裁剪分别配置，不把对称性当作系统型号。
 
@@ -45,7 +45,7 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 `-beds <N|A:B>` 可替代冗长的 `-dfList`：给 `-df`（或单项 `-dfList`）一个目录或目录内任一 `BedK.bin`，程序在该目录搜索 `Bed1..BedN` 或 `BedA..BedB`（文件名须为 `BedK.bin`，大小写不敏感）；范围内任一床缺失即报错，范围外的床被忽略。第二能窗 `-df2` 同规则。与 `merge_time_segments` 同用时只能选中目录中的全部床。
 
-早期 SC60 recipe 的 `bed_step_mm=0` 表示未指定，单床 manifest 保留 0，多床必须显式覆盖；测试夹具步进不是硬件推荐。现有实采记录需逐设备核对，不能自动改写通用配方或套用 PSC 步进。多床物理偏移以第一张选中床为零点，床号递增对应 +Z；轴翻转仍由配置声明，软件测试不能确定采集端的实际朝向。
+`bed_step_mm` 是唯一的床间几何输入（overlap = baseNz - step，旧 `bed_overlap` 被忽略）；未配置时单床 manifest 保留 0，多床必须显式给出；测试夹具步进不是硬件推荐。现有实采记录需逐设备核对，不能自动改写通用配方或套用 PSC 步进。多床物理偏移以第一张选中床为零点，床号递增对应 +Z；轴翻转仍由配置声明，软件测试不能确定采集端的实际朝向。
 
 ## 子集读取与计量
 

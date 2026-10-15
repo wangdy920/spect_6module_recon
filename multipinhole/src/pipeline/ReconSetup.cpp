@@ -64,41 +64,6 @@ std::vector<int> inferBedNumbers(const std::vector<std::string> &paths,
   return bedNumbers;
 }
 
-std::vector<int> normalizeFixedBedOverlapTable(
-    const std::vector<int> &input, std::vector<std::string> &warnings) {
-  std::vector<int> fixedTable(
-      static_cast<size_t>(spect::core::kSixModuleMaxBeds), 0);
-  if (input.empty())
-    return fixedTable;
-  if (input.size() == 1) {
-    std::fill(fixedTable.begin(), fixedTable.end(), input.front());
-    return fixedTable;
-  }
-  if (input.size() > fixedTable.size())
-    throw std::runtime_error("-bedOverlap supports at most " +
-                             std::to_string(spect::core::kSixModuleMaxBeds) +
-                             " fixed bed slots.");
-  std::copy(input.begin(), input.end(), fixedTable.begin());
-  if (input.size() < fixedTable.size()) {
-    warnings.emplace_back(
-        "bedOverlap fixed Bed1..Bed5 table shorter than 5 slots. Missing fixed slots use zero.");
-  }
-  return fixedTable;
-}
-
-std::vector<int> selectActualBedOverlaps(
-    const std::vector<int> &fixedTable, const std::vector<int> &bedNumbers) {
-  std::vector<int> overlaps;
-  if (bedNumbers.size() < 2)
-    return overlaps;
-  overlaps.reserve(bedNumbers.size() - 1);
-  for (size_t idx = 0; idx + 1 < bedNumbers.size(); ++idx) {
-    const int leftBed = bedNumbers[idx];
-    overlaps.push_back(fixedTable[static_cast<size_t>(leftBed - 1)]);
-  }
-  return overlaps;
-}
-
 void applyFixedSixModuleRoiDefaults(ReconArgs &args, int bedCount) {
   if (args.cylinderDimsExplicit)
     return;
@@ -271,33 +236,9 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
     return result;
   }
 
-  const std::vector<int> fixedOverlapTable =
-      normalizeFixedBedOverlapTable(args.bedOverlaps, result.warnings);
-  args.outputBedOverlaps =
-      selectActualBedOverlaps(fixedOverlapTable, result.bedNumbers);
-  if (static_cast<int>(args.outputBedOverlaps.size()) != joints)
-    throw std::runtime_error("Internal bed overlap normalization failed.");
-
-  bool clampedAnyOverlap = false;
-  for (int &overlap : args.outputBedOverlaps) {
-    const int clamped = std::max(0, std::min(overlap, std::max(0, result.baseNz - 1)));
-    if (clamped != overlap) {
-      overlap = clamped;
-      clampedAnyOverlap = true;
-    }
-  }
-  if (clampedAnyOverlap) {
-    result.warnings.emplace_back(
-        "bedOverlap values were clamped to the valid range [0, baseNz)."
-    );
-  }
-
-  // The bed overlap is a derived quantity: baseNz - step, where
-  // step = round(bed_step_mm / voxel_z) and bed_step_mm (CLI -bedStepMm /
-  // INI [MultiBed] bed_step_mm, default 16.8 mm) is the authoritative
-  // scanner property. When the user omits -bedOverlap the fixed table is all
-  // zeros; when it is wrong it disagrees with the derived step. In both
-  // cases we re-derive the overlap from the scanner step.
+  // Every joint uses the scanner bed step: step = round(bed_step_mm / voxel_z)
+  // (CLI -bedStepMm / INI [MultiBed] bed_step_mm, default 16.8 mm) and
+  // overlap = baseNz - step. There is no separate overlap setting.
   if (expectedOverlap <= 0 || expectedOverlap >= result.baseNz) {
     throw std::runtime_error(
         "Scanner bed step " + std::to_string(stepMm) +
@@ -306,21 +247,7 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
         " mm (derived overlap would be " + std::to_string(expectedOverlap) +
         "). Check -bedStepMm / [MultiBed] bed_step_mm.");
   }
-  bool overlapCorrected = false;
-  for (size_t i = 0; i < args.outputBedOverlaps.size(); ++i) {
-    if (args.outputBedOverlaps[i] != expectedOverlap) {
-      args.outputBedOverlaps[i] = expectedOverlap;
-      overlapCorrected = true;
-    }
-  }
-  if (overlapCorrected) {
-    result.warnings.emplace_back(
-        "bed_overlap re-derived from the scanner bed step: corrected to " +
-        std::to_string(expectedOverlap) + " (= baseNz " +
-        std::to_string(result.baseNz) + " - step " +
-        std::to_string(expectedStep) + " layers / " +
-        std::to_string(stepMm) + " mm).");
-  }
+  args.outputBedOverlaps.assign(static_cast<size_t>(joints), expectedOverlap);
 
   const auto canonicalGeom = computeCanonicalOutputGeometry(
       result.baseNz, args.outputBedOverlaps, voxelSizeZ, args.bedStepMm);

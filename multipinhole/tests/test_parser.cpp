@@ -90,6 +90,30 @@ TEST(CLITest, ConfigParserRejectsInvalidTypedValues) {
     std::filesystem::remove(path);
 }
 
+TEST(CLITest, ConfigParserTreatsBlankValuesAsNotConfigured) {
+    const auto dir = std::filesystem::temp_directory_path();
+    const auto lowerPath = dir / "spect_blank_lower.ini";
+    const auto upperPath = dir / "spect_blank_upper.ini";
+    {
+        std::ofstream lower(lowerPath);
+        lower << "[Detector]\nbad_detector_file = bad_dector\nangles = 360\n";
+        std::ofstream upper(upperPath);
+        upper << "[Detector]\nbad_detector_file =   ; comment only\nangles =\n"
+              << "[Blank]\nkey =\n";
+    }
+    ConfigParser lower;
+    ConfigParser upper;
+    ASSERT_TRUE(lower.load(lowerPath.string()));
+    ASSERT_TRUE(upper.load(upperPath.string()));
+    EXPECT_FALSE(upper.hasKey("Detector", "bad_detector_file"));
+    EXPECT_FALSE(upper.hasSection("Blank"));
+    lower.overlay(upper);
+    EXPECT_EQ(lower.getString("Detector", "bad_detector_file"), "bad_dector");
+    EXPECT_EQ(lower.getInt("Detector", "angles", 0), 360);
+    std::filesystem::remove(lowerPath);
+    std::filesystem::remove(upperPath);
+}
+
 std::filesystem::path frozenRegistrationIniPath() {
     return std::filesystem::path(__FILE__).parent_path().parent_path() /
            "config" / "ct_spect_registration.ini";
@@ -502,21 +526,23 @@ TEST(IOTest, ConfiguredIterationsProtectedButRuntimeOutputRemainsCli) {
     std::filesystem::remove_all(root);
 }
 
-TEST(IOTest, ProtectedRecipeBlankNormalizationKeepsCliFactorFile) {
+TEST(IOTest, NormalizationBindsPerIsotopeInGlobalConfigOnly) {
     const auto root = std::filesystem::temp_directory_path() /
-                      "spect_cli_blank_normalization_test";
+                      "spect_cli_global_normalization_test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     const auto config = root / "spect_config.ini";
-    const auto writeConfig = [&config](const std::string& factorFile) {
-        std::ofstream out(config, std::ios::trunc);
-        out << "[Compatibility]\nrecon_sections_override_cli = true\n"
-            << "[Normalization]\nfactor_file = " << factorFile << "\n";
+    const auto recipe = root / "recipe.conf";
+    const auto writeText = [](const std::filesystem::path& path, const std::string& text) {
+        std::ofstream out(path, std::ios::trunc);
+        out << text;
     };
-    writeConfig("");
+    const std::string protectedHeader = "[Compatibility]\nrecon_sections_override_cli = true\n";
+    writeText(config, protectedHeader);
 
     auto argv = spect::io::test::compactBaseArgs();
     argv[2] = config.string();
+    argv.insert(argv.end(), {"-isotope", "Tc99m"});
     spect::cli::ReconArgs probe;
     ASSERT_TRUE(parseReconArgsForTest(argv, probe));
     const std::uint32_t angles = static_cast<std::uint32_t>(probe.numAngles);
@@ -532,23 +558,54 @@ TEST(IOTest, ProtectedRecipeBlankNormalizationKeepsCliFactorFile) {
         out.write(reinterpret_cast<const char*>(ones.data()),
                   static_cast<std::streamsize>(ones.size() * sizeof(double)));
     };
+    const auto tcNorm = root / "tc_norm.bin";
+    const auto luNorm = root / "lu_norm.bin";
     const auto cliNorm = root / "cli_norm.bin";
-    const auto recipeNorm = root / "recipe_norm.bin";
-    writeNorm(cliNorm);
-    writeNorm(recipeNorm);
-    argv.push_back("-normFactorFile");
-    argv.push_back(cliNorm.string());
+    for (const auto& path : {tcNorm, luNorm, cliNorm})
+        writeNorm(path);
+    const auto same = [](const std::string& actual, const std::filesystem::path& expected) {
+        return std::filesystem::path(actual).lexically_normal() == expected.lexically_normal();
+    };
 
-    // Blank recipe value is not a configured field: the CLI file survives the protected reapply.
-    spect::cli::ReconArgs blankArgs;
-    ASSERT_TRUE(parseReconArgsForTest(argv, blankArgs));
-    EXPECT_EQ(std::filesystem::path(blankArgs.normFactorFile), cliNorm);
+    writeText(config, protectedHeader + "[Normalization]\nfactor_file_Tc99m = " +
+                          tcNorm.generic_string() + "\nfactor_file_Lu177 = " +
+                          luNorm.generic_string() + "\n");
+    spect::cli::ReconArgs tc;
+    ASSERT_TRUE(parseReconArgsForTest(argv, tc));
+    EXPECT_TRUE(same(tc.normFactorFile, tcNorm)) << tc.normFactorFile;
+    auto luArgv = argv;
+    luArgv.back() = "Lu177";
+    spect::cli::ReconArgs lu;
+    ASSERT_TRUE(parseReconArgsForTest(luArgv, lu));
+    EXPECT_TRUE(same(lu.normFactorFile, luNorm)) << lu.normFactorFile;
 
-    // A filled recipe value still takes priority over the CLI under protection.
-    writeConfig(recipeNorm.string());
-    spect::cli::ReconArgs filledArgs;
-    ASSERT_TRUE(parseReconArgsForTest(argv, filledArgs));
-    EXPECT_EQ(std::filesystem::path(filledArgs.normFactorFile), recipeNorm);
+    // An explicit CLI file replaces the configured binding, also under protection.
+    auto cliArgv = argv;
+    cliArgv.insert(cliArgv.end(), {"-normFactorFile", cliNorm.string()});
+    spect::cli::ReconArgs cli;
+    ASSERT_TRUE(parseReconArgsForTest(cliArgv, cli));
+    EXPECT_TRUE(same(cli.normFactorFile, cliNorm)) << cli.normFactorFile;
+
+    // A blank recipe key is not configured, so older packaged recipes still load.
+    auto recipeArgv = argv;
+    recipeArgv.insert(recipeArgv.end(), {"-algoConf", recipe.string()});
+    writeText(recipe, "[Algorithm]\nname = MLEM\n[Normalization]\nfactor_file =\n");
+    spect::cli::ReconArgs blankRecipe;
+    ASSERT_TRUE(parseReconArgsForTest(recipeArgv, blankRecipe));
+    EXPECT_TRUE(same(blankRecipe.normFactorFile, tcNorm)) << blankRecipe.normFactorFile;
+
+    writeText(recipe, "[Algorithm]\nname = MLEM\n[Normalization]\nfactor_file_Tc99m = " +
+                          tcNorm.generic_string() + "\n");
+    spect::cli::ReconArgs filledRecipe;
+    EXPECT_FALSE(parseReconArgsForTest(recipeArgv, filledRecipe));
+
+    for (const std::string misplaced : {"[Normalization]\nfactor_file = x.bin\n",
+                                        "[Normalization]\nfactor_file_Tc99 = x.bin\n",
+                                        "[MultiBed]\nnormalization_factor_file = x.bin\n"}) {
+        writeText(config, protectedHeader + misplaced);
+        spect::cli::ReconArgs rejected;
+        EXPECT_FALSE(parseReconArgsForTest(argv, rejected)) << misplaced;
+    }
 
     std::filesystem::remove_all(root);
 }

@@ -41,7 +41,7 @@ Windows 路径建议加引号或使用 `/`：`-df "D:\path\file.bin"` 或 `-df D
 
 全局 `[Reconstruction] default_config_<核素>` / `default_config` 选择一份方案，`-algoConf` 显式替换；`-config` 也可直接指向含 `[Algorithm]` 且无 `default_config` 的方案。缺失字段继承全局，不叠加另一份默认方案。`-opti`只改优化器，只有无默认方案的旧全局配置才按算法查找 `algo_<name>.conf`。
 
-`[Compatibility] recon_sections_override_cli=false`：CLI > 所选方案 > 全局；true：所选方案 > 全局 > CLI，保护配置已填写的Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix/Normalization等重建字段。输入输出、设备、线程和日志仍由调用方指定。源码默认false，当前6Module部署保留true。
+`[Compatibility] recon_sections_override_cli=false`：CLI > 所选方案 > 全局；true：所选方案 > 全局 > CLI，保护配置已填写的Algorithm/BSREM/Regularization/PSF/Mask/Filtering/SystemMatrix等重建字段。空值 `key =` 在任何一层都等同未配置：继承下层/默认值，不清空全局值，也不压制 CLI。归一化只在全局 `[Normalization] factor_file_<核素>` 绑定，显式 `-normFactorFile` 替换它。输入输出、设备、线程和日志仍由调用方指定。源码默认false，当前6Module部署保留true。
 
 矩阵以合并配置的 `root + matrix_id/matrix_id2` 精确查找 `root/id` 或 `root/isotope/id`，缺失或歧义失败；`root`相对EXE。显式矩阵/缓存CLI也服从优先级。旧配置无ID时才走 `default_chunk_csr_dir` 和唯一目录发现。完整方案表、norm和wrapper说明见 [参数说明](PARAMETERS_CN.template.md)。
 
@@ -274,18 +274,17 @@ python scripts/prepare_ct_mu_map.py `
 
 ## 多床位与输出变换
 
-下面的固定裁剪/gain-fit 是 **PSC 默认合同**。SC60 recipe 使用 `[InputOutput] matrix_grid_output=true`，完整保留每床矩阵网格及 ROI 设置，最多 16 床。多床为联合重建：各床网格按 `床序*step` 放入一个全局体（Z 为 `baseNz+(床数-1)*step`），重叠体素合并灵敏度与反投影后统一更新，直接保存该全局体，不做 cosine 融合，不拟合床间增益；暂不支持 CTAC、`-ctacAutoMu`、`-maskFromAtt`。多床必须给出有限正、整数体素层对齐的 `-bedStepMm`，不能有网格间隙；不支持 seam XY alignment。例如 `-df D:\scan\SPECT -beds 12 -bedStepMm 8`。SC60 系统尚未组装完成，recipe 的 `bed_step_mm=0` 表示未知，不继承 PSC 16.8 mm。详见 [现行格式合同](Format_Reader_Matrix_CN.md#sc60-网格输出)。该候选未替换已发布 EXE。
+下面的固定裁剪/gain-fit 是 **PSC 默认合同**。SC60 recipe 使用 `[InputOutput] matrix_grid_output=true`，完整保留每床矩阵网格及 ROI 设置，最多 16 床。多床为联合重建：各床网格按 `床序*step` 放入一个全局体（Z 为 `baseNz+(床数-1)*step`），重叠体素合并灵敏度与反投影后统一更新，直接保存该全局体，不做 cosine 融合，不拟合床间增益；暂不支持 CTAC、`-ctacAutoMu`、`-maskFromAtt`。多床必须给出有限正、整数体素层对齐的 `-bedStepMm`，不能有网格间隙；不支持 seam XY alignment。例如 `-df D:\scan\SPECT -beds 12 -bedStepMm 12`。SC60 设备包的 `spect_config.ini` 写入 `bed_step_mm=12`（2026-10-13 五床线源实测，12/0.4=30 层），不继承 PSC 16.8 mm。详见 [现行格式合同](Format_Reader_Matrix_CN.md#sc60-网格输出)。
 
 固定 6module 几何：单床 ROI `30 mm × 21.6 mm`、默认输出 `100×100×66`（`step+10`）；`-singleBedStepAligned 0` 恢复旧 `100×100×72`；多床 ROI `36 mm × 66 mm`，每床中心 `step+10` 层（0.3 mm 床位为 66），床位步进 `56×0.3=16.8 mm`。
 
 | 参数 | 说明 |
 |---|---|
-| `-bedOverlap <b1,b2,b3,b4,b5>` | 固定 `Bed1..Bed5` 物理 overlap 表；**派生值** `overlap = baseNz - round(bed_step_mm / voxel_z)`（当前220层、0.3mm、16.8mm步进时为164），可省略（自动推算）或传错（自动纠正 + warning） |
-| `-bedStepMm <mm>` / `[MultiBed] bed_step_mm` | 扫描仪机械床步进（默认 `16.8` mm，权威输入）；输出步进 `step = round(bed_step_mm / voxel_z)`，中心裁剪 `step+10` 层 |
+| `-bedStepMm <mm>` / `[MultiBed] bed_step_mm` | 扫描仪机械床步进（PSC 默认 `16.8` mm），多床几何的唯一输入：`step = round(bed_step_mm / voxel_z)`，每个床间 `overlap = baseNz - step`（220 层 0.3 mm 为 164），PSC 中心裁剪 `step+10` 层。旧 `-bedOverlap` / `bed_overlap` 仍被接受但忽略 |
 | `-detZRowWeightsFile <file>` / `[MultiBed] detz_row_weights_file` | 可选 detZ/per-bin/full-projection 效率 e；对 sensitivity 施加 e，有背景时内部转换为 b/e；默认空 |
-| `-normFactorFile <file>` / `[MultiBed] normalization_factor_file` | 全投影正校正因子 c，效率 e=1/c；支持同计数空间的背景；默认空 |
+| `-normFactorFile <file>` / 全局 `[Normalization] factor_file_<核素>` | 全投影正校正因子 c，效率 e=1/c；支持同计数空间的背景；默认空。显式 CLI 替换全局绑定 |
 
-归一化与背景均默认关闭；只在已有对应校正/背景数据时配置。双窗仍用现有 `[Normalization] factor_file/factor_file2` 分别绑定主窗/第二窗，不新增接口。背景按原始探测计数传入，不提前乘 c；完整模型及窗口/时间约定见 [矩阵合同](Format_Reader_Matrix_CN.md)。例如在已有双窗、两床重建命令上增加：
+归一化与背景均默认关闭；只在已有对应校正/背景数据时配置。归一化是安装标定，只在全局 `spect_config.ini` 的 `[Normalization]` 中按核素绑定：`factor_file_Tc99m`、`factor_file_Lu177`，joint 第二窗为 `factor_file2_Lu177`；recipe/profile、旧 `[MultiBed] normalization_factor_file` 或旧无后缀 `factor_file` 都会被拒绝。相对路径以 EXE 为基准；显式 `-normFactorFile`（相对 CWD）替换该绑定，且不带第二窗。背景按原始探测计数传入，不提前乘 c；完整模型及窗口/时间约定见 [矩阵合同](Format_Reader_Matrix_CN.md)。例如在已有双窗、两床重建命令上增加：
 
 ```text
 -bProjList "D:/case/Bed1_high_bg.bin;D:/case/Bed2_high_bg.bin" -bProjList2 "D:/case/Bed1_low_bg.bin;D:/case/Bed2_low_bg.bin"
@@ -301,7 +300,7 @@ python scripts/prepare_ct_mu_map.py `
 
 物理合同固定为 `Bed1=min physical z`，后续 Bed 向较大 physical Z 移动；路径含 `BedN` 时 parser 先按床号排序并拒绝非连续床号。不要逆序文件或整幅翻转地图来补偿 `z_bed_flip=1`。
 
-多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；`-bedOverlap` 须满足 `baseNz - bedOverlap = step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。cosine 沿**输出 Z** 淡入：融合入口继续用上一床，再淡入下一床；`z_bed_flip=1` 不反转这组权重。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
+多床迭代体按非重叠床段存储。保存时从每床取中心 `step+10` 层（`step = round(bed_step_mm / voxel_z)`，默认 `-bedStepMm 16.8`；overlap 恒为 `baseNz - step`；260601 为 56 层 → 中心 66 层），在相邻的 10 层配准区域按原型 log-ratio median/MAD 估计标量 gain（Bed1 锚定；始终应用原型 log-ratio 链），随后以固定 `step` 层步进和归一化 cosine 权重融合。cosine 沿**输出 Z** 淡入：融合入口继续用上一床，再淡入下一床；`z_bed_flip=1` 不反转这组权重。最终 `Z = crop + (bed_count - 1) * step`，再做整体 Z/X 翻转、`cropEnd` 和固定 XYZ 中心裁剪。
 
 `crop_method`、`sigmoid`、`direct`、seam/profile 后处理、输出 FOV mask 与对象分类均已退场。Mouse/EP/Derenzo 共用相同生产输出路径，不按对象选择算法。
 

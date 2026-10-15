@@ -64,7 +64,8 @@ def run_case(exe, directory, mat, joint, censor, subsets, background, weighted, 
     config = ("[InputOutput]\nmatrix_grid_output=true\n[Mask]\nuse_cylinder=false\n"
               "[PSF]\nmode=none\n[Filtering]\nbutter_apply_stage=none\n"
               "smooth_apply_stage=none\n[MultiBed]\nz_bed_flip=0\n"
-              "z_out_flip=0\nx_out_flip=0\nbed_step_mm=4\n[Normalization]\n")
+              "z_out_flip=0\nx_out_flip=0\nbed_step_mm=4\n")
+    norms = ""
     for channel, weight in enumerate(weights):
         efficiency = 0.4 + (index % (7 + channel)) * 0.13 if weighted else np.ones(64)
         b = np.array([2.0 + index % 5 + bed for bed in range(beds)]) if background else np.zeros((beds, 64))
@@ -79,10 +80,13 @@ def run_case(exe, directory, mat, joint, censor, subsets, background, weighted, 
         if weighted:
             norm = directory / f"norm{channel}.bin"
             projection(norm, 1.0 / efficiency)
-            config += f"factor_file{'2' if channel else ''}={norm.as_posix()}\n"
+            norms += f"factor_file{'2' if channel else ''}_Lu177={norm.as_posix()}\n"
+    # Normalization is bound only by the global config, never by the recipe.
     conf = directory / "input.ini"
-    conf.write_text(config, encoding="utf-8")
-    command = [str(exe), "-config", str(conf), "-algoConf", str(conf),
+    conf.write_text(config + ("[Normalization]\n" + norms if norms else ""), encoding="utf-8")
+    recipe = directory / "recipe.ini"
+    recipe.write_text(config, encoding="utf-8")
+    command = [str(exe), "-config", str(conf), "-algoConf", str(recipe), "-isotope", "Lu177",
                "-chunkCSRDir", str(mat), "-dfList",
                ";".join(str(directory / f"Bed{b + 1}_0.bin") for b in range(beds)),
                "-opti", "mlem", "-it", f"2:{subsets}", "-dim", "4,4,4",

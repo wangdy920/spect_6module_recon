@@ -54,6 +54,27 @@ std::string canonicalIsotope(std::string value) {
     throw std::runtime_error("Unsupported isotope: " + value);
 }
 
+// The projection correction c is an installation calibration per isotope. It is
+// bound only in the global config: [Normalization] factor_file_<isotope>, plus
+// factor_file2_Lu177 for the second joint window.
+void checkNormalizationOwner(const ConfigParser& cfg, const std::string& path,
+                             bool global) {
+    if (cfg.hasKey("MultiBed", "normalization_factor_file"))
+        throw std::runtime_error(path + ": [MultiBed] normalization_factor_file is replaced by "
+                                 "global [Normalization] factor_file_<isotope>.");
+    const auto& sections = cfg.getSections();
+    const auto section = sections.find("Normalization");
+    if (section == sections.end()) return;
+    if (!global)
+        throw std::runtime_error(path + ": reconstruction recipes must not set [Normalization]; "
+                                 "bind it in spect_config.ini as factor_file_<isotope>.");
+    for (const auto& entry : section->second)
+        if (entry.first != "factor_file_Tc99m" && entry.first != "factor_file_Lu177" &&
+            entry.first != "factor_file2_Lu177")
+            throw std::runtime_error(path + ": unknown [Normalization] key '" + entry.first +
+                                     "'; use factor_file_Tc99m, factor_file_Lu177 or factor_file2_Lu177.");
+}
+
 } // namespace
 
 std::filesystem::path ArgumentParser::executableDir(char** argv) {
@@ -351,6 +372,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         args.configFound = true;
         if (cfg.load(configPath)) {
             args.configLoaded = true;
+            checkNormalizationOwner(cfg, configPath, true);
             applyConfig(args, cfg);
         } else if (args.configExplicit) {
             std::cerr << "Error: Cannot load explicit config file '"
@@ -397,6 +419,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         ConfigParser recipe;
         if (!recipe.load(algoConfPath))
             throw std::runtime_error("Cannot load reconstruction recipe: " + algoConfPath);
+        checkNormalizationOwner(recipe, algoConfPath, false);
         if (recipe.hasKey("SystemMatrix", "matrix_id") ||
             recipe.hasKey("SystemMatrix", "chunk_csr_dir") ||
             recipe.hasKey("SystemMatrix", "default_chunk_csr_dir") || recipe.hasKey("Matrix", "chunk_csr_dir")) {
@@ -460,15 +483,6 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             protectedConfig.erase("InputOutput", key);
         for (const auto* key : {"threads", "verbosity"})
             protectedConfig.erase("Basic", key);
-        // A blank value (e.g. "factor_file =") is not a configured field; it must not
-        // erase the matching CLI option such as -normFactorFile.
-        std::vector<std::pair<std::string, std::string>> blankKeys;
-        for (const auto& [section, entries] : protectedConfig.getSections())
-            for (const auto& [key, value] : entries)
-                if (value.find_first_not_of(" \t\r\n") == std::string::npos)
-                    blankKeys.emplace_back(section, key);
-        for (const auto& [section, key] : blankKeys)
-            protectedConfig.erase(section, key);
         applyConfig(args, protectedConfig);
     }
 
@@ -476,6 +490,13 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         if (!args.isotope.empty() && args.isotope != requestedIsotope)
             throw std::runtime_error("Acquisition isotope disagrees with selected reconstruction recipe.");
         args.isotope = requestedIsotope;
+    }
+    // An explicit -normFactorFile replaces the configured per-isotope binding.
+    if (args.normFactorFileExplicit) {
+        args.normFactorFile2.clear();
+    } else if (!args.isotope.empty()) {
+        args.normFactorFile = cfg.getString("Normalization", "factor_file_" + args.isotope);
+        args.normFactorFile2 = cfg.getString("Normalization", "factor_file2_" + args.isotope);
     }
     // 4. Resolve matrix defaults after all config/CLI layers are known.
     if (!configuredScannerConfig.empty()) {
@@ -1090,14 +1111,9 @@ void ArgumentParser::registerHandlers() {
             ArgumentParser::getRequiredArg(i, argc, argv, "-maskFromAtt"));
         return true;
     }, {"-maskFromAtt"});
-    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
-        auto parts =
-            split(ArgumentParser::getRequiredArg(i, argc, argv, "-bedOverlap"), ',');
-        a.bedOverlaps.clear();
-        for (auto& p : parts) {
-            if (!p.empty())
-                a.bedOverlaps.push_back(std::stoi(p));
-        }
+    // Retired: the overlap is derived from the bed step. Old callers stay valid.
+    bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs&) {
+        (void)ArgumentParser::getRequiredArg(i, argc, argv, "-bedOverlap");
         return true;
     }, {"-bedOverlap"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
@@ -1687,15 +1703,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
 
     // MultiBed
     if (cfg.hasSection("MultiBed")) {
-        std::string overlap = cfg.getString("MultiBed", "bed_overlap");
-        if (!overlap.empty()) {
-            a.bedOverlaps.clear();
-            auto op = split(overlap, ',');
-            for (auto& p : op) {
-                if (!p.empty())
-                    a.bedOverlaps.push_back(std::stoi(p));
-            }
-        }
         std::string cropEnd = cfg.getString("MultiBed", "crop_end");
         if (!cropEnd.empty()) {
             auto ce = split(cropEnd, ',');
@@ -1712,8 +1719,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             "MultiBed", "detz_edge_censor", a.detZEdgeCensor);
         a.detZRowWeightsFile = cfg.getString(
             "MultiBed", "detz_row_weights_file", a.detZRowWeightsFile);
-        a.normFactorFile = cfg.getString(
-            "MultiBed", "normalization_factor_file", a.normFactorFile);
         a.zBedFlip = cfg.getBool("MultiBed", "z_bed_flip", a.zBedFlip);
         const double iniStepMm = cfg.getDouble("MultiBed", "bed_step_mm", 0.0);
         if (cfg.hasKey("MultiBed", "bed_step_mm")) {
@@ -1731,11 +1736,6 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
             throw std::runtime_error("[MultiBed] xy_out_rotation_deg must be finite.");
         a.seamXyAlign = cfg.getBool("MultiBed", "seam_xy_align", a.seamXyAlign);
     }
-    if (cfg.hasKey("Normalization", "factor_file") || cfg.hasKey("MultiBed", "normalization_factor_file"))
-        a.normFactorFileExplicit = false;
-    a.normFactorFile = cfg.getString("Normalization", "factor_file", a.normFactorFile);
-    a.normFactorFile2 = cfg.getString("Normalization", "factor_file2", a.normFactorFile2);
-
 }
 
 
@@ -1933,11 +1933,6 @@ bool ArgumentParser::validateIoArgs(const ReconArgs& args) {
         std::cerr << "Error: -bProjList supports at most " << maxBeds << " beds.\n";
         return false;
     }
-    if (args.bedOverlaps.size() > static_cast<size_t>(spect::core::kSixModuleMaxBeds)) {
-        std::cerr << "Error: -bedOverlap supports at most "
-                  << spect::core::kSixModuleMaxBeds << " fixed bed slots.\n";
-        return false;
-    }
     if (args.csrqResidency != "auto" && args.csrqResidency != "streamed") {
         std::cerr << "Error: -csrqResidency expects auto|streamed, got '"
                   << args.csrqResidency << "'.\n";
@@ -2096,7 +2091,8 @@ bool ArgumentParser::validateAlgorithmArgs(const ReconArgs& args) {
     }
     if ((args.dualWindow() && (args.normFactorFile.empty() != args.normFactorFile2.empty())) ||
         (!args.dualWindow() && !args.normFactorFile2.empty())) {
-        std::cerr << "Error: joint normalization requires both factor_file and factor_file2; single-window uses factor_file only.\n";
+        std::cerr << "Error: joint normalization requires factor_file_<isotope> and factor_file2_<isotope>; "
+                     "single/merged input and an explicit -normFactorFile use one window only.\n";
         return false;
     }
     if (!args.normFactorFile2.empty()) {
@@ -2510,16 +2506,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
 
     std::cout << "[MultiBed]\n";
     std::cout << "bed_count    = " << a.getEffectiveBedCount() << "\n";
-    std::cout << "bed_overlap  = ";
-    if (a.bedOverlaps.empty()) {
-        std::cout << "0";
-    } else {
-        for (size_t idx = 0; idx < a.bedOverlaps.size(); ++idx) {
-            if (idx > 0) std::cout << ",";
-            std::cout << a.bedOverlaps[idx];
-        }
-    }
-    std::cout << "\n";
     std::cout << "stitch_method = "
               << (a.matrixGridOutput ? "joint_global_volume" : "center66_cosine10") << "\n";
     std::cout << "bed_step_mm   = "
@@ -2534,9 +2520,6 @@ void ArgumentParser::dumpMergedConfig(const ReconArgs& a) {
     std::cout << "detz_row_weights_file = "
               << (a.detZRowWeightsFile.empty() ? "(none)" : a.detZRowWeightsFile)
               << "  # detZ efficiency weights (detNz or detNz*detNx floats); sensitivity only\n";
-    std::cout << "normalization_factor_file = "
-              << (a.normFactorFile.empty() ? "(none)" : a.normFactorFile)
-              << "  # full projection correction c; reciprocal 1/c enters sensitivity\n";
     std::cout << "crop_end     = " << a.cropEndStart << "," << a.cropEndEnd << "  # top,end slices zeroed\n";
     std::cout << "z_bed_flip   = " << (a.zBedFlip ? 1 : 0) << "\n";
     std::cout << "z_out_flip   = " << (a.zOutFlip ? 1 : 0) << "\n";
@@ -2654,12 +2637,11 @@ void ArgumentParser::printUsage() {
     std::cout << "  -badDetectorFile <file>  Skip global 0..95 or link/FPGA/dector blocks in compact identity reconstruction\n\n";
 
     std::cout << "=== Multi-Bed ===\n";
-    std::cout << "  -bedOverlap <b1,b2,b3,b4,b5> Fixed Bed1..Bed5 overlap table; slot b1=Bed1-Bed2\n";
-    std::cout << "  -bedStepMm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z)\n";
+    std::cout << "  -bedStepMm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z), overlap = baseNz - stride\n";
     std::cout << "  -singleBedStepAligned <0|1>  Single-bed crop = step+10 (default 1); 0 keeps legacy 72 layers\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";
-    std::cout << "  -normFactorFile <f>       Correction c: efficiency e=1/c; measured-count model e*H*x+b\n";
+    std::cout << "  -normFactorFile <f>       Correction c (e=1/c, model e*H*x+b); replaces global [Normalization] factor_file_<isotope>\n";
     std::cout << "  -cropEnd <top[,end]>      Zero final Z top/end slices after output flips\n";
     std::cout << "  -zbedflip <0|1>           Reverse local dfList bed Z (default 1; inside compact joint mapping for multi-bed)\n";
     std::cout << "  -zoutflip <0|1>           Flip whole output volume on Z after per-bed flip (default 0)\n";

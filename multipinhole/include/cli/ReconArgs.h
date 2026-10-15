@@ -201,12 +201,12 @@ struct ReconArgs {
 
     // ========== Multi-Bed ==========
     int bedCount = 1;
-    std::vector<int> bedOverlaps;  ///< Fixed Bed1..Bed5 overlap table before setup; actual joints after setup
-    std::vector<int> outputBedOverlaps; ///< Physical overlaps retained for output hard-cut
+    std::vector<int> bedOverlaps;  ///< Per-joint reconstruction overlaps set by bed setup from bed_step_mm
+    std::vector<int> outputBedOverlaps; ///< Per-joint output overlaps (baseNz - step) for stitching
     int detZEdgeCensor = 0;    ///< Censor k detZ edge rows per side in compact numerator+denominator (0 = off)
     std::string detZRowWeightsFile; ///< Detector efficiency weights applied to compact sensitivity only (empty = off)
     bool normFactorFileExplicit = false;
-    std::string normFactorFile; ///< Projection correction c; reciprocal 1/c is applied to compact sensitivity
+    std::string normFactorFile; ///< Projection correction c (CLI, or global [Normalization] factor_file_<isotope>)
     bool zBedFlip = false;         ///< Reverse local bed Z; compact multi-bed applies it in joint mapping
     double bedStepMm = 0.0;        ///< Bed step in mm; 0 = PSC default, or unknown for matrix-grid output.
     bool singleBedStepAligned = true; ///< Single-bed crop follows step+blend;

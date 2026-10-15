@@ -16,7 +16,9 @@ namespace cli {
  * @brief Simple INI-style configuration file parser.
  * 
  * Supports section-based configuration files with key=value pairs.
- * Comments starting with ';' or '#' are ignored.
+ * Comments starting with ';' or '#' are ignored. A blank value ("key =") is
+ * not stored: at every layer it means "not configured", exactly like an
+ * absent line, so it neither clears a lower layer nor overrides the CLI.
  * 
  * Example INI file:
  * @code
@@ -61,7 +63,7 @@ public:
                     trimInPlace(key);
                     trimInPlace(val);
 
-                    if (!currentSection.empty()) {
+                    if (!currentSection.empty() && !val.empty()) {
                         sections[currentSection][key] = val;
                     }
                 }
