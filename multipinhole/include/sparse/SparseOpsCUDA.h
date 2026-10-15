@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -305,13 +306,28 @@ struct CsrqChunkShape {
 struct CsrqDeviceMemoryError : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+/// Host side of a streamed matrix. Chunks are page-locked in chunk order while
+/// their run/value payload fits pinnedBudgetBytes and the driver grants the
+/// allocation; the remaining chunks keep only row pointers and row maxima
+/// page-locked and read the run/value spans a pass needs through readPayload
+/// (two page-locked staging buffers of stagingBytes each). readPayload copies
+/// count elements from firstElement of chunk chunkIndex's runs (u32, runs =
+/// true) or values (u16) array into dst. Null plan: page-lock everything.
+struct CsrqHostPlan {
+    uint64_t pinnedBudgetBytes = std::numeric_limits<uint64_t>::max();
+    uint64_t stagingBytes = 256ull << 20;
+    std::function<void(size_t chunkIndex, bool runs, uint64_t firstElement,
+                       uint64_t count, void* dst)>
+        readPayload;
+};
 /// Announces the matrix; *streamed reports whether it will be streamed
 /// rather than resident (forceStreamed skips the fit test). Drops whatever
 /// slot matrixIndex held.
 bool csrqWarmupBeginCUDA(int matrixIndex, int cols, int branchCount,
                          const std::vector<CsrqChunkShape>& shapes,
                          uint64_t reserveBytes, bool forceStreamed = false,
-                         bool* streamed = nullptr);
+                         bool* streamed = nullptr,
+                         const CsrqHostPlan* hostPlan = nullptr);
 /// Hands over one chunk (uploaded or pinned before returning).
 bool csrqWarmupChunkCUDA(int matrixIndex, size_t chunkIndex,
                          const io::CompactRunU16View& view);
@@ -345,8 +361,6 @@ bool csrqRunNumerCUDA(int matrixIndex, int bedCount, int branchCount,
                       const double* const* fullBackgrounds,
                       size_t fullProjectionCount, double weight,
                       int accumulatorBase, int cacheSlotBase,
-                      CompactDeviceRatioTiming* ratioTiming = nullptr,
-                      CompactDeviceBackwardTiming* backwardTiming = nullptr,
                       const uint16_t* const* bedAttFactors = nullptr,
                       size_t attCount = 0, double attPower = 1.0,
                             int subsetCount = 1, int subsetIndex = 0);
@@ -360,7 +374,6 @@ bool csrqRunSensitivityCUDA(int matrixIndex, int branchCount, double weight,
                             const int* symIds, const int* zMirrors,
                             int accumulatorIndex, size_t fullProjectionCount,
                             const double* rowWeights = nullptr,
-                            CompactDeviceBackwardTiming* backwardTiming = nullptr,
                             const uint16_t* attFactors = nullptr,
                             size_t attCount = 0, double attPower = 1.0,
                             int subsetCount = 1, int subsetIndex = 0);

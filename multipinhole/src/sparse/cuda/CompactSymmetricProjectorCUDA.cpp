@@ -490,6 +490,9 @@ struct CsrqResidentLease {
 std::atomic<bool> g_csrqForceStreaming{false};
 std::atomic<int> g_csrqTestFitSkips{0};
 std::atomic<int> g_csrqTestFitFailures{0};
+// Test overrides of the streamed host plan (negative = production default).
+std::atomic<int64_t> g_csrqTestHostPinBudget{-1};
+std::atomic<int64_t> g_csrqTestStagingBytes{-1};
 
 bool isCsrqDirectory(const spect::io::CompactChunkCSRDirectory &chunks) {
   return chunks.format() == spect::io::CompactChunkFormat::CsrqRunU16;
@@ -532,9 +535,39 @@ void warmCsrqResident(const spect::io::CompactChunkCSRDirectory &chunks,
           "CSRQ matrix does not fit on the device even streamed (test hook).");
     }
   }
+  // Streamed host side: page-lock what the RAM headroom allows, read the rest
+  // of the run/value payload from the (already validated) files per pass.
+  CsrqHostPlan hostPlan;
+  {
+    uint64_t payloadBytes = 0;
+    for (const auto &info : chunks.chunks()) {
+      payloadBytes += sizeof(uint32_t) * info.runCount + sizeof(uint16_t) * info.nnz;
+    }
+    const int64_t testBudget = g_csrqTestHostPinBudget.load();
+    hostPlan.pinnedBudgetBytes =
+        testBudget >= 0 ? static_cast<uint64_t>(testBudget)
+                        : spect::io::defaultCsrqHostPinBudgetBytes(payloadBytes);
+    const int64_t testStaging = g_csrqTestStagingBytes.load();
+    if (testStaging > 0) {
+      hostPlan.stagingBytes = static_cast<uint64_t>(testStaging);
+    }
+    auto infos = std::make_shared<std::vector<spect::io::CompactChunkCSRInfo>>(
+        chunks.chunks());
+    auto writeTimes =
+        std::make_shared<std::vector<std::filesystem::file_time_type>>();
+    for (const auto &info : *infos) {
+      writeTimes->push_back(std::filesystem::last_write_time(info.path));
+    }
+    hostPlan.readPayload = [infos, writeTimes](size_t chunkIndex, bool runs,
+                                               uint64_t first, uint64_t count,
+                                               void *dst) {
+      spect::io::readCsrqPayloadSpan((*infos)[chunkIndex], (*writeTimes)[chunkIndex],
+                                     runs, first, count, dst);
+    };
+  }
   if (!csrqWarmupBeginCUDA(matrixIndex, chunks.cols(), chunks.branchCount(), shapes,
                            kCsrqResidentDeviceReserveBytes, forced,
-                           &streamed)) {
+                           &streamed, &hostPlan)) {
     throw std::runtime_error(
         "CSRQ compact matrix requires the CUDA sparse backend.");
   }
@@ -1118,26 +1151,17 @@ bool runCsrqMlemNumerMultiBed(
         fullBackgrounds == nullptr
             ? nullptr
             : fullBackgrounds + channel * static_cast<size_t>(bedCount);
-    CompactDeviceRatioTiming deviceTiming;
-    CompactDeviceBackwardTiming backwardTiming;
     if (!csrqRunNumerCUDA(csrqMatrixIndexOf(*channels[channel].chunks),
                           bedCount, static_cast<int>(branchCount), commonRatio,
                           commonTransform, symIds.data(), zMirrors.data(),
                           channelProjections, channelBackgrounds,
                           fullProjectionCount, channels[channel].weight, 0,
                           csrqProjectionSlot(static_cast<int>(channel), 0),
-                          &deviceTiming, &backwardTiming, attFactors,
+                          attFactors,
                           attFactors == nullptr ? 0
                                                 : compactAttenTableCount(meta),
                           channels[channel].attenPower, subset.count, subset.index)) {
       return false;
-    }
-    if (timing) {
-      timing->forwardSeconds += deviceTiming.forwardSeconds;
-      timing->ratioSeconds += deviceTiming.ratioSeconds;
-      timing->backwardSeconds += deviceTiming.backwardSeconds;
-      timing->transformBackwardSeconds +=
-          backwardTiming.transformBackwardSeconds;
     }
   }
   if (downloadBackwardOutputs) {
@@ -1180,7 +1204,6 @@ bool computePoissonSensitivityCUDA(
       return false;
     }
     for (size_t channel = 0; channel < channels.size(); ++channel) {
-      CompactDeviceBackwardTiming backwardTiming;
       if (!csrqRunSensitivityCUDA(
               csrqMatrixIndexOf(*channels[channel].chunks),
               static_cast<int>(branches.size()), channels[channel].weight,
@@ -1189,16 +1212,11 @@ bool computePoissonSensitivityCUDA(
               zMirrors.data(), 0, fullProjectionCount,
               channels[channel].sensitivityRowWeights != nullptr
                   ? channels[channel].sensitivityRowWeights : rowWeights,
-              &backwardTiming, attFactors,
+              attFactors,
               attFactors == nullptr ? 0 : compactAttenTableCount(meta),
               channels[channel].attenPower, subsetSelection.count,
               subsetSelection.index)) {
         return false;
-      }
-      if (timing) {
-        timing->backwardSeconds += backwardTiming.backwardSeconds;
-        timing->transformBackwardSeconds +=
-            backwardTiming.transformBackwardSeconds;
       }
     }
     if (!compactDeviceBackwardDownloadCUDA(denom, nvox, 0)) {
@@ -1299,6 +1317,11 @@ void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count) {
 
 void setCompactHostPinRefusalForTestsCUDA(int allowedRegistrations) {
   g_compactHostPinTestRegistrations.store(std::max(-1, allowedRegistrations));
+}
+
+void setCsrqHostPlanForTestsCUDA(int64_t pinBudgetBytes, int64_t stagingBytes) {
+  g_csrqTestHostPinBudget.store(pinBudgetBytes < 0 ? -1 : pinBudgetBytes);
+  g_csrqTestStagingBytes.store(stagingBytes <= 0 ? -1 : stagingBytes);
 }
 
 bool csrqForceStreamingCUDA() { return g_csrqForceStreaming.load(); }

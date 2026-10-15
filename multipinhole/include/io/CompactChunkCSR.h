@@ -156,4 +156,19 @@ uint64_t recommendCompactChunkHostCacheBudgetBytes(
 // System-memory recommendation plus the explicit environment override.
 uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes);
 
+// Page-locked host bytes a streamed CSRQ matrix may keep for its run/value
+// payload: SPECT_CSRQ_HOST_PIN_BYTES (auto | bytes with K/M/G/T) or the same
+// RAM headroom rule as the CSRB host cache. Chunks beyond it are re-read from
+// their files on every pass.
+uint64_t defaultCsrqHostPinBudgetBytes(uint64_t payloadBytes);
+
+// Reads count elements starting at firstElement of a CSRQ chunk's runs (u32,
+// runs = true) or values (u16) array straight from the file into dst. The
+// chunk must have been validated by loadChunk; the file must still have the
+// size from its header scan and the modification time given here.
+void readCsrqPayloadSpan(const CompactChunkCSRInfo &info,
+                         std::filesystem::file_time_type expectedWriteTime,
+                         bool runs, uint64_t firstElement, uint64_t count,
+                         void *dst);
+
 } // namespace spect::io

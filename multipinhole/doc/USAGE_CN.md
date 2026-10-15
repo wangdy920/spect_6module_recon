@@ -132,7 +132,8 @@ MLEM加角度子集即OSEM，BSREM共用划分；单/双窗同格式CSRB和实�
 
 | 环境变量 | 发布默认 | 说明 |
 |---|---|---|
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 主机端矩阵缓存预算；接受 auto、非负字节数及 K/M/G/T 后缀（1024 倍数），0 关闭永久 host cache；非法/非有限值报错。CSRB auto 按可用内存保留余量，CSRQ auto 不启用 host cache。仅完整覆盖矩阵的 CSRB host cache 会逐块锁页；驱动拒绝锁页时，已锁页分块保留，其余分块留在 host cache 中走普通内存上传（结果不变、传输变慢），`.log` 记录 `[WARNING] compact host cache page-lock refused ... page-locked k / n chunks`，不再因此报 `out of memory` 退出 |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | 主机端矩阵缓存预算；接受 auto、非负字节数及 K/M/G/T 后缀（1024 倍数），0 关闭永久 host cache；非法/非有限值报错。CSRB auto 按可用内存保留余量；CSRQ 不使用此缓存（设置也不生效，其分块在显存或锁页副本中，见下一行）。仅完整覆盖矩阵的 CSRB host cache 会逐块锁页；驱动拒绝锁页时，已锁页分块保留，其余分块留在 host cache 中走普通内存上传（结果不变、传输变慢），`.log` 记录 `[WARNING] compact host cache page-lock refused ... page-locked k / n chunks`，不再因此报 `out of memory` 退出 |
+| `SPECT_CSRQ_HOST_PIN_BYTES` | `auto` | 显存放不下、走流式的 CSRQ 矩阵最多锁页多少主存（auto 或字节数，K/M/G/T 后缀）。auto 与 CSRB host cache 同一余量规则：总内存保留 max(8 GiB, 25%)，启动时可用内存再保留 8 GiB。超出预算或被驱动拒绝锁页的分块只锁页行指针/行最大值（驱动拒绝时先归还已锁页分块，保证行指针与中转缓冲可用），run/值每轮从已校验且未改动的原文件按需读回（两块 256 MiB 锁页中转），结果不变；`.log` 的 `[NOTE] CSRQ matrix ... re-read from file` 与 `[MATRIX_IO] scope=run csrq_file_reread_bytes=` 记录其规模。显存驻留的矩阵不受影响 |
 | 已退役实验开关 | 不设置 | `SPECT_COMPACT_BRANCH_BATCH` / `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 不再接受；历史实验使用对应冻结 EXE |
 
 实测低时延部署为 16 GB 显存、64 GB 主存和 SSD/NVMe 矩阵；程序为临时 CUDA 工作保留 6 GiB。host cache 默认按已发现矩阵总量与启动时可用内存自动选择，至少为系统保留 8 GiB 且总内存保留不低于 25%；32 GB 主存通常只缓存部分矩阵，不承诺同等吞吐。共享 GPU 或磁盘上的任务可能改变单次耗时，应交错重复基线/候选并用中位数判断。

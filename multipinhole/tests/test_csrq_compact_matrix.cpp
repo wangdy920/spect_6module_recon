@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -291,8 +292,7 @@ void expectCsrqMatchesCsrb(const MatrixPair &pair,
   std::vector<std::vector<double>> twoBed, twoBedResident;
   runAll(pair.csrq, denom, numer, forward, twoBed, twoBedResident);
   const auto timing = spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
-  EXPECT_GT(timing.csrqForwardCalls, 0u);
-  EXPECT_GT(timing.csrqBackwardCalls, 0u);
+  EXPECT_GT(timing.csrqPassCalls, 0u);
   EXPECT_EQ(timing.cusparseForwardCalls, 0u);
   EXPECT_EQ(timing.cusparseBackwardCalls, 0u);
   EXPECT_EQ(timing.compactMatrixUploadCalls, 1u);
@@ -468,16 +468,56 @@ TEST_F(CsrqCompactMatrixTest, MultiTileRunsMatchDequantizedCsrb) {
 
   // Same matrix in three chunks, forced through the streamed path (pinned
   // host copies, two device slots, double-buffered uploads). Numerics must
-  // match the resident path.
+  // match the resident path. The pin budget is explicit: the automatic one
+  // follows the host's free RAM and may legitimately be 0 on a busy machine.
   const auto pair3 = makeMatrixPair("spect_csrq_multitile3_test", meta, src, 3);
   ASSERT_EQ(pair3.csrq.chunks().size(), 3u);
+  constexpr int64_t kUnlimitedPin = int64_t{1} << 50;
   spect::cuda::setCsrqForceStreamingCUDA(true);
+  spect::cuda::setCsrqHostPlanForTestsCUDA(kUnlimitedPin, -1);
   testing::internal::CaptureStderr();
   expectCsrqMatchesCsrb(pair3, meta, 1e-5);
   const std::string log = testing::internal::GetCapturedStderr();
+  spect::cuda::setCsrqHostPlanForTestsCUDA(-1, -1);
   spect::cuda::setCsrqForceStreamingCUDA(false);
   EXPECT_NE(log.find("streaming forced"), std::string::npos) << log;
-  EXPECT_NE(log.find("streamed (pinned host)"), std::string::npos) << log;
+  EXPECT_NE(log.find("pinned host 3/3 chunks"), std::string::npos) << log;
+
+  // Host page-lock budget for the first chunk only: chunks 1 and 2 are read
+  // back from their files every pass through 4 KiB staging pieces (several
+  // pieces per span). Numerics must not change.
+  {
+    const auto &first = pair3.csrq.chunks().front();
+    const int64_t firstPayload = static_cast<int64_t>(
+        4u * first.runCount + 2u * first.nnz);
+    spect::cuda::setCsrqForceStreamingCUDA(true);
+    spect::cuda::setCsrqHostPlanForTestsCUDA(firstPayload, 4096);
+    testing::internal::CaptureStderr();
+    expectCsrqMatchesCsrb(pair3, meta, 1e-5);
+    const std::string diskLog = testing::internal::GetCapturedStderr();
+    spect::cuda::setCsrqHostPlanForTestsCUDA(-1, -1);
+    spect::cuda::setCsrqForceStreamingCUDA(false);
+    EXPECT_NE(diskLog.find("pinned host 1/3 chunks"), std::string::npos) << diskLog;
+    EXPECT_NE(diskLog.find("re-read from file"), std::string::npos) << diskLog;
+  }
+
+  // The driver refuses page-locked memory part way through warmup (at most 11
+  // live allocations: 5 per pinned chunk, 3 per file-read chunk, 2 staging
+  // buffers): already pinned payloads are handed back so the row pointers and
+  // staging buffers still fit, and numerics stay unchanged.
+  {
+    spect::cuda::setCsrqForceStreamingCUDA(true);
+    spect::cuda::setCsrqHostPlanForTestsCUDA(kUnlimitedPin, 4096);
+    spect::cuda::setPinnedAllocationLimitForTestsCUDA(11);
+    testing::internal::CaptureStderr();
+    expectCsrqMatchesCsrb(pair3, meta, 1e-5);
+    const std::string refusedLog = testing::internal::GetCapturedStderr();
+    spect::cuda::setPinnedAllocationLimitForTestsCUDA(-1);
+    spect::cuda::setCsrqHostPlanForTestsCUDA(-1, -1);
+    spect::cuda::setCsrqForceStreamingCUDA(false);
+    EXPECT_NE(refusedLog.find("page-lock refused"), std::string::npos) << refusedLog;
+    EXPECT_NE(refusedLog.find("pinned host 0/3 chunks"), std::string::npos) << refusedLog;
+  }
 
   // Packed [voxel][8] backward (float4 atomics on sm_90+, scalar fallback
   // here): same sums through a different scatter layout and consumer.
@@ -734,13 +774,18 @@ TEST_P(CsrqProfileTest, JointSubsetsWithAndWithoutCtacMatchDecodedCsrb) {
     ASSERT_TRUE(spect::cuda::computeCompactChunkForwardProjectionCUDA(
         a.csrb, meta, x0.data(), 1, expectedForward.data(), ctac ? att0.data() : nullptr));
     ASSERT_TRUE(spect::cuda::releaseCompactExecutionCUDA());
-    for (bool streamed : {false,true}) for (bool packed : {false,true}) {
+    // Modes: resident, streamed from page-locked host copies, and streamed
+    // with every chunk re-read from its file through 64-byte staging pieces.
+    for (int mode : {0,1,2}) for (bool packed : {false,true}) {
+      const bool streamed = mode > 0;
       spect::cuda::setCsrqForceStreamingCUDA(streamed);
+      spect::cuda::setCsrqHostPlanForTestsCUDA(mode == 2 ? 0 : int64_t{1} << 50,
+                                               mode == 2 ? 64 : -1);
       ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(packed));
       for (int count : {10,5,2,1,10}) {
         std::vector<double> sumS(n,0.0), fullS(n,0.0);
         for (int index : spect::compactSubsetOrder(count)) {
-          SCOPED_TRACE(::testing::Message() << "CTAC=" << ctac << " stream=" << streamed
+          SCOPED_TRACE(::testing::Message() << "CTAC=" << ctac << " mode=" << mode
               << " packed=" << packed << " N=" << count << " index=" << index);
           const spect::CompactSubsetSpec spec{count,index};
           const auto key = std::make_pair(count, index);
@@ -790,6 +835,7 @@ TEST_P(CsrqProfileTest, JointSubsetsWithAndWithoutCtacMatchDecodedCsrb) {
     }
   }
   spect::cuda::setCsrqForceStreamingCUDA(false);
+  spect::cuda::setCsrqHostPlanForTestsCUDA(-1, -1);
   ASSERT_TRUE(spect::cuda::setCsrqPackedBackwardCUDA(false));
   std::filesystem::remove_all(a.csrqDir.parent_path());
   std::filesystem::remove_all(b.csrqDir.parent_path());
@@ -1538,6 +1584,77 @@ TEST(CsrqCompactMatrixFormat, CacheInputsDoNotReadPayloadAndPaddingDoesNotChange
   EXPECT_EQ(loaded->runs, original->runs);
   EXPECT_EQ(loaded->valuesQ, original->valuesQ);
   std::filesystem::remove_all(pair.csrqDir.parent_path());
+}
+
+// Streamed chunks beyond the host page-lock budget are read back per pass
+// straight from the file: the spans must equal the validated chunk arrays,
+// and a file rewritten after validation must be rejected, not decoded.
+TEST(CsrqCompactMatrixFormat, PayloadSpanReadsMatchLoadedChunkAndRejectChangedFile) {
+  const auto meta = makeToySym90ZMeta();
+  const auto toy = makeToyCompactCSR();
+  HostCsr src;
+  src.rows = meta.totalRows;
+  src.cols = meta.totalVoxels;
+  src.rowPtr = toy.rowPtr;
+  src.colIdx = toy.colIdx;
+  src.values = toy.values;
+  const auto pair = makeMatrixPair("spect_csrq_payload_span", meta, src);
+  const auto &info = pair.csrq.chunks()[0];
+  const auto chunk = pair.csrq.loadChunk(0);
+  const auto writeTime = std::filesystem::last_write_time(info.path);
+  ASSERT_GT(info.nnz, 3u);
+  ASSERT_GT(info.runCount, 2u);
+  std::vector<uint16_t> values(info.nnz - 1);
+  spect::io::readCsrqPayloadSpan(info, writeTime, false, 1, values.size(), values.data());
+  EXPECT_TRUE(std::equal(values.begin(), values.end(), chunk->valuesQ.begin() + 1));
+  std::vector<uint32_t> runs(info.runCount - 2);
+  spect::io::readCsrqPayloadSpan(info, writeTime, true, 2, runs.size(), runs.data());
+  EXPECT_TRUE(std::equal(runs.begin(), runs.end(), chunk->runs.begin() + 2));
+  EXPECT_THROW(spect::io::readCsrqPayloadSpan(info, writeTime, true, 1, info.runCount,
+                                              runs.data()),
+               std::runtime_error);
+  std::filesystem::last_write_time(info.path, writeTime + std::chrono::seconds(5));
+  EXPECT_THROW(spect::io::readCsrqPayloadSpan(info, writeTime, false, 0, 1, values.data()),
+               std::runtime_error);
+  std::filesystem::remove_all(pair.csrqDir.parent_path());
+}
+
+// Spans of 32 MiB and more are read as concurrent ranges; every element must
+// land at its own offset (values and runs, unaligned first element).
+TEST(CsrqCompactMatrixFormat, LargePayloadSpansReadInParallelRanges) {
+  const auto path = std::filesystem::temp_directory_path() / "spect_csrq_parallel_span.csrq";
+  spect::io::CompactChunkCSRInfo info;
+  info.path = path;
+  info.format = spect::io::CompactChunkFormat::CsrqRunU16;
+  info.rows = 3;
+  info.nnz = 20'000'001;  // odd: two padding bytes before the runs
+  info.runCount = 12'000'000;
+  {
+    std::ofstream out(path, std::ios::binary);
+    std::vector<char> head(48 + 12 * info.rows + 8, 0);
+    out.write(head.data(), static_cast<std::streamsize>(head.size()));
+    std::vector<uint16_t> values(info.nnz);
+    for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<uint16_t>(i * 7u);
+    out.write(reinterpret_cast<const char *>(values.data()),
+              static_cast<std::streamsize>(values.size() * 2));
+    out.write("\0\0", 2);
+    std::vector<uint32_t> runs(info.runCount);
+    for (size_t i = 0; i < runs.size(); ++i) runs[i] = static_cast<uint32_t>(i * 2654435761u);
+    out.write(reinterpret_cast<const char *>(runs.data()),
+              static_cast<std::streamsize>(runs.size() * 4));
+  }
+  info.fileSizeBytes = std::filesystem::file_size(path);
+  ASSERT_EQ(info.fileSizeBytes, 48u + 12u * 3u + 8u + 2u * info.nnz + 2u + 4u * info.runCount);
+  const auto writeTime = std::filesystem::last_write_time(path);
+  std::vector<uint16_t> values(info.nnz - 3);
+  spect::io::readCsrqPayloadSpan(info, writeTime, false, 3, values.size(), values.data());
+  for (size_t i = 0; i < values.size(); ++i)
+    ASSERT_EQ(values[i], static_cast<uint16_t>((i + 3) * 7u)) << i;
+  std::vector<uint32_t> runs(info.runCount - 1);
+  spect::io::readCsrqPayloadSpan(info, writeTime, true, 1, runs.size(), runs.data());
+  for (size_t i = 0; i < runs.size(); ++i)
+    ASSERT_EQ(runs[i], static_cast<uint32_t>((i + 1) * 2654435761u)) << i;
+  std::filesystem::remove(path);
 }
 
 TEST(CsrqCompactMatrixFormat, RejectsMixedAndTruncatedDirectories) {

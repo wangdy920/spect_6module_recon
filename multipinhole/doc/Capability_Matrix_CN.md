@@ -17,7 +17,7 @@
 | 决策 | 结论 |
 |---|---|
 | 生产矩阵输入 | **`-chunkCSRDir`**（或 `bin/matrix` 唯一目录自动发现）；v4 `metadata.bin`（88B 标准或已校验的 92B legacy）+ `chunk_*.csrb`，SYM_90Z compact-symmetric |
-| SC60 适配候选 | 同一 CSRB 入口支持 124B SMMD v3、ROT90 无 Z 镜像；`matrix_grid_output=true` 保留完整网格，最多 16 床联合全局体重建（2026-10-11，暂不支持 CTAC/AutoMu/`-maskFromAtt`），多床需显式整数层步进，可用 `-beds N|A:B` 从目录选床；原生双窗 CSRB 已有软件验证。2026-10-09 CSRQ ROT90 共用内核 CUDA 回归通过，非生产签收 |
+| SC60 适配候选 | 同一 CSRB 入口支持 124B SMMD v3、ROT90 无 Z 镜像；`matrix_grid_output=true` 保留完整网格，最多 16 床联合全局体重建（2026-10-11，暂不支持 CTAC/AutoMu/`-maskFromAtt`），多床需显式整数层步进，可用 `-beds N|A:B` 从目录选床；原生双窗 CSRB 已有软件验证。2026-10-15 起 SC60 设备包默认 CSRQ ROT90（单窗 Tc99m，真实 8 床 50×10 与 CSRB 图像 relL2 约 7e-7）；CSRB 保留为权威格式和回退 |
 | 唯一布局 | compact-symmetric；standard 布局与单文件 CSRB/MAT 矩阵入口已整体退场 |
 | 算法 | **MLEM / OSEM / BSREM**；`-it A:B` 表示 A 个完整迭代、B 个子集；B=1 为全量更新，保存间隔独立。OSEM 使用 MLEM 数据项的子集更新；ADMM 不支持 |
 | 公开正则 | 仅 **TV / RDP**；可选 registered CT 边权，无 CT 时 activity-only |
@@ -56,7 +56,7 @@
 - 共享输入检查覆盖尺寸、间距、有限值；μ 非负而 CT HU 可负。AutoMu 只接收带兼容标记的未变换内部体，旧无标记显示体拒绝。
 - CTAC 缓存同时跟踪头文件和 RAW/IMG 的路径/大小/时间，不做内容 SHA；SC60 CT 准备使用运行 manifest，入口和限制见 `USAGE_CN.md`。
 - 生产模型仍为 `effective = value * att[fullAngle, voxel] / 65535`；实现把因子移到前向输入与反投收口，按角度处理，避免逐 nnz 重复加载因子。
-- CSRQ、双窗联合重建与 packed backward 仍为实验能力；CSRB 生产默认不变。
+- CSRQ（SC60 单窗 Tc99m 除外，见上）、双窗联合重建与 packed backward 仍为实验能力；PSC 的 CSRB 生产默认不变。
 - factor 生成仅保留 CUDA line-integral；16-angle batch，临时显存约 29 MiB。
 - Validation-only：`scripts/validate_ctac_pinhole_reference.py` 等抽样对照；不进入生产路径。
 - 调试 gate：`doc/CTAC_AutoMu_Validation_CN.md`。

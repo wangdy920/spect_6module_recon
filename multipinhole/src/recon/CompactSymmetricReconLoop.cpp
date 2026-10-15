@@ -2028,18 +2028,34 @@ std::vector<double> runCompactSymmetricReconstruction(
                     << compactTiming.fullCommandWallSeconds;
         logInfo(perfSummary.str());
         const auto reads = matrixReadStats();
-        logInfo("[MATRIX_IO] scope=iterations csrb_matrix_h2d_bytes=" +
-                std::to_string(spect::cuda::getCudaChunkStageTimingSnapshotCUDA().csrbMatrixH2DBytes -
-                               h2dBeforeIterations));
-        logInfo("[MATRIX_IO] scope=iterations application_payload_read_bytes=" +
-                std::to_string(reads.payloadReadBytes - readsBeforeIterations.payloadReadBytes) +
-                " payload_loads=" + std::to_string(reads.payloadLoads - readsBeforeIterations.payloadLoads) +
-                " host_reuse_bytes=" + std::to_string(reads.hostReuseBytes - readsBeforeIterations.hostReuseBytes) +
-                " empty_slices_skipped=" + std::to_string(reads.emptySlicesSkipped - readsBeforeIterations.emptySlicesSkipped) +
-                " loader_work_s=" + std::to_string(reads.loaderWorkSeconds - readsBeforeIterations.loaderWorkSeconds));
+        // CSRQ chunks are read once at warmup; its per-iteration traffic is the
+        // file re-read line below, so the CSRB iteration counters stay quiet.
+        if (compactChunks.format() == spect::io::CompactChunkFormat::CsrbFloat32) {
+          logInfo("[MATRIX_IO] scope=iterations csrb_matrix_h2d_bytes=" +
+                  std::to_string(spect::cuda::getCudaChunkStageTimingSnapshotCUDA().csrbMatrixH2DBytes -
+                                 h2dBeforeIterations));
+          logInfo("[MATRIX_IO] scope=iterations application_payload_read_bytes=" +
+                  std::to_string(reads.payloadReadBytes - readsBeforeIterations.payloadReadBytes) +
+                  " payload_loads=" + std::to_string(reads.payloadLoads - readsBeforeIterations.payloadLoads) +
+                  " host_reuse_bytes=" + std::to_string(reads.hostReuseBytes - readsBeforeIterations.hostReuseBytes) +
+                  " empty_slices_skipped=" + std::to_string(reads.emptySlicesSkipped - readsBeforeIterations.emptySlicesSkipped) +
+                  " loader_work_s=" + std::to_string(reads.loaderWorkSeconds - readsBeforeIterations.loaderWorkSeconds));
+        }
         logInfo("[MATRIX_IO] scope=run application_payload_read_bytes=" +
                 std::to_string(reads.payloadReadBytes) +
                 " payload_loads=" + std::to_string(reads.payloadLoads));
+        {
+          const auto cudaTiming = spect::cuda::getCudaChunkStageTimingSnapshotCUDA();
+          if (cudaTiming.csrqDiskReadCalls > 0) {
+            std::ostringstream csrqIo;
+            csrqIo << std::fixed << std::setprecision(3)
+                   << "[MATRIX_IO] scope=run csrq_file_reread_bytes="
+                   << cudaTiming.csrqDiskReadBytes
+                   << " csrq_file_reread_s=" << cudaTiming.csrqDiskReadSeconds
+                   << " reads=" << cudaTiming.csrqDiskReadCalls;
+            logInfo(csrqIo.str());
+          }
+        }
 
         logDebug(formatProfileEntry("projection_load",
                                    compactTiming.projectionLoadSeconds, 1));

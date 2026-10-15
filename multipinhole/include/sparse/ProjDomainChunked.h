@@ -55,11 +55,12 @@ struct CudaChunkStageTimingSnapshot {
   uint64_t compactBackwardOutputD2HBytes = 0;
   // P3-D: device-side chunk cache hit counter
   size_t deviceCacheHitCalls = 0;
-  // CSRQ resident-matrix custom kernels (per chunk pass).
-  double csrqForwardSeconds = 0.0;
-  double csrqBackwardSeconds = 0.0;
-  size_t csrqForwardCalls = 0;
-  size_t csrqBackwardCalls = 0;
+  // CSRQ passes (numerator, sensitivity or forward calls).
+  size_t csrqPassCalls = 0;
+  // Streamed CSRQ chunks that are not page-locked are re-read from the file.
+  double csrqDiskReadSeconds = 0.0;
+  uint64_t csrqDiskReadBytes = 0;
+  size_t csrqDiskReadCalls = 0;
 };
 
 #if defined(SPECT_ENABLE_CUDA_SPARSEOPS)

@@ -10,6 +10,7 @@
 #include "io/CompactChunkCSR.h"
 #include "sparse/SparseOpsCUDA.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -21,6 +22,15 @@ constexpr uint64_t kProjDomainChunkMinNnz = cuda::kProjDomainChunkMinNnz;
 constexpr uint64_t kProjDomainChunkDefaultNnz = cuda::kProjDomainChunkDefaultNnz;
 constexpr uint64_t kProjDomainChunkMaxNnz = cuda::kProjDomainChunkMaxNnz;
 
+// Test hook (setPinnedAllocationLimitForTestsCUDA): while limit >= 0,
+// PinnedHostArray::tryAllocate refuses once `limit` arrays it allocated are
+// alive, like a driver that has run out of page-lockable memory; releasing an
+// array frees its slot. allocate() is not affected.
+struct PinnedTryAllocateTestLimit {
+    static inline std::atomic<int> limit{-1};
+    static inline std::atomic<int> live{0};
+};
+
 template <typename T> class PinnedHostArray {
 public:
     PinnedHostArray() = default;
@@ -28,14 +38,16 @@ public:
         if (ptr_ != nullptr) {
             cudaFreeHost(ptr_);
         }
+        uncount();
     }
 
     PinnedHostArray(const PinnedHostArray &) = delete;
     PinnedHostArray &operator=(const PinnedHostArray &) = delete;
     PinnedHostArray(PinnedHostArray &&other) noexcept
-            : ptr_(other.ptr_), capacity_(other.capacity_) {
+            : ptr_(other.ptr_), capacity_(other.capacity_), counted_(other.counted_) {
         other.ptr_ = nullptr;
         other.capacity_ = 0;
+        other.counted_ = false;
     }
     PinnedHostArray &operator=(PinnedHostArray &&other) noexcept {
         if (this == &other) {
@@ -44,10 +56,13 @@ public:
         if (ptr_ != nullptr) {
             cudaFreeHost(ptr_);
         }
+        uncount();
         ptr_ = other.ptr_;
         capacity_ = other.capacity_;
+        counted_ = other.counted_;
         other.ptr_ = nullptr;
         other.capacity_ = 0;
+        other.counted_ = false;
         return *this;
     }
 
@@ -68,6 +83,41 @@ public:
         capacity_ = count;
     }
 
+    // Like allocate, but a refused page-locked allocation leaves the array
+    // empty and returns false instead of throwing.
+    bool tryAllocate(size_t count) {
+        if (count == 0 || count <= capacity_) {
+            return true;
+        }
+        release();
+        const int limit = PinnedTryAllocateTestLimit::limit.load();
+        if (limit >= 0 && PinnedTryAllocateTestLimit::live.load() >= limit) {
+            return false;
+        }
+        T *ptr = nullptr;
+        if (cudaMallocHost(reinterpret_cast<void **>(&ptr), count * sizeof(T)) !=
+            cudaSuccess) {
+            (void)cudaGetLastError();
+            return false;
+        }
+        ptr_ = ptr;
+        capacity_ = count;
+        if (limit >= 0) {
+            counted_ = true;
+            ++PinnedTryAllocateTestLimit::live;
+        }
+        return true;
+    }
+
+    void release() {
+        if (ptr_ != nullptr) {
+            CUDA_CHECK(cudaFreeHost(ptr_));
+            ptr_ = nullptr;
+            capacity_ = 0;
+        }
+        uncount();
+    }
+
     void copyFromHost(const T *host, size_t count) {
         allocate(count);
         if (count == 0) {
@@ -77,8 +127,16 @@ public:
     }
 
 private:
+    void uncount() {
+        if (counted_) {
+            --PinnedTryAllocateTestLimit::live;
+            counted_ = false;
+        }
+    }
+
     T *ptr_ = nullptr;
     size_t capacity_ = 0;
+    bool counted_ = false;
 };
 
 // Identity of an uploaded CSRB matrix: the host arrays it was copied from
@@ -118,10 +176,10 @@ struct CudaChunkStageTimingState {
   double compactOutputD2HSeconds = 0.0;
   double compactForwardOutputD2HSeconds = 0.0;
   double compactBackwardOutputD2HSeconds = 0.0;
-  double csrqForwardSeconds = 0.0;
-  double csrqBackwardSeconds = 0.0;
-  size_t csrqForwardCalls = 0;
-  size_t csrqBackwardCalls = 0;
+  size_t csrqPassCalls = 0;
+  double csrqDiskReadSeconds = 0.0;
+  uint64_t csrqDiskReadBytes = 0;
+  size_t csrqDiskReadCalls = 0;
   size_t chunkBuildCalls = 0;
   size_t h2dChunkCalls = 0;
   size_t uploadWaitOnComputeCalls = 0;
@@ -157,8 +215,8 @@ void noteCudaRatio(double seconds, size_t calls);
 void noteCudaCusparseBackward(double seconds, size_t calls);
 void noteCudaCusparseBackwardHost(double seconds);
 void noteCudaTransformBackward(double seconds, size_t calls);
-void noteCudaCsrqForward(double seconds, size_t calls);
-void noteCudaCsrqBackward(double seconds, size_t calls);
+void noteCudaCsrqPass();
+void noteCudaCsrqDiskRead(double seconds, uint64_t bytes);
 void noteCudaCompactMatrixUpload(double seconds);
 void noteCudaCompactMatrixReuseHit();
 void noteCudaCompactInputH2D(double seconds);

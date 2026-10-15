@@ -314,13 +314,16 @@ private:
       return p;
     }
   };
-  // Pinned host mirror of one chunk of a streamed matrix.
+  // Pinned host mirror of one chunk of a streamed matrix. A disk-backed chunk
+  // pins only its row pointers and row maxima; its runs/values are read from
+  // the file into the staging buffers on every pass that needs them.
   struct CsrqHostChunk {
     PinnedHostArray<uint32_t> rowNnzPtr;
     PinnedHostArray<uint32_t> rowRunPtr;
     PinnedHostArray<float> rowMax;
     PinnedHostArray<uint32_t> runs;
     PinnedHostArray<uint16_t> valuesQ;
+    bool diskBacked = false;
   };
   // CTAC plan of one matrix/subset (see csrqEnsureAttenPlanLocked): per chunk
   // the absolute compact angles, the offset of its [angle][K] slice-id table inside
@@ -336,7 +339,6 @@ private:
     std::vector<size_t> chunkSliceIndexOffset;
     std::vector<std::vector<int>> chunkFullAngles;
     size_t maxSlices = 0;
-    size_t maxAngles = 1;
     DeviceArray<int> dSliceIndex;
   };
   // One energy window's matrix. Resident: chunks[i] holds chunk i. Streamed:
@@ -357,6 +359,14 @@ private:
     int cols = 0;
     size_t totalRows = 0;
     uint64_t bytes = 0;
+    // Streamed host side (see cuda::CsrqHostPlan).
+    std::string streamReason;
+    uint64_t streamSlotBytes = 0;
+    cuda::CsrqHostPlan hostPlan;
+    uint64_t pinnedPayloadBytes = 0;
+    uint64_t diskPayloadBytes = 0;
+    size_t diskChunks = 0;
+    bool pinRefused = false;
     std::map<std::pair<int, int>, CsrqAttenPlan> attenPlans;
   };
   // A caller-owned CTAC table page-locked for asynchronous slice copies.
@@ -2306,7 +2316,8 @@ public:
   // two chunk slots do, error otherwise. Returns true when streamed.
   bool beginCsrqWarmup(int matrixIndex, int cols, int branchCount,
                        const std::vector<cuda::CsrqChunkShape> &shapes,
-                       uint64_t reserveBytes, bool forceStreamed) {
+                       uint64_t reserveBytes, bool forceStreamed,
+                       const cuda::CsrqHostPlan *hostPlan = nullptr) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
     if (shapes.empty() || cols <= 0) {
@@ -2374,14 +2385,12 @@ public:
       target.streamed = false;
     } else if (freeBytes >= needStreamed) {
       target.streamed = true;
-      std::cerr << "[NOTE] CSRQ matrix " << matrixIndex << " ("
-                << (matrixBytes / kMiB) << " MiB) "
-                << (forceStreamed ? "streaming forced"
-                                  : "exceeds free device memory")
-                << " (free " << (freeBytes / kMiB) << " MiB, reserve "
-                << (reserveBytes / kMiB) << " MiB); streaming it through "
-                << kCsrqStreamSlots << " chunk slots of "
-                << (maxChunkBytes / kMiB) << " MiB from pinned host memory.\n";
+      target.streamReason =
+          forceStreamed ? std::string("streaming forced")
+                        : "free " + std::to_string(freeBytes / kMiB) + " MiB < " +
+                              std::to_string(needResident / kMiB) +
+                              " MiB resident need incl. reserve";
+      target.streamSlotBytes = maxChunkBytes;
     } else {
       target = CsrqResidentMatrix{};
       throw cuda::CsrqDeviceMemoryError(
@@ -2396,6 +2405,9 @@ public:
     target.totalRows = static_cast<size_t>(totalRows);
     target.bytes = matrixBytes;
     target.shapes = shapes;
+    if (hostPlan != nullptr) {
+      target.hostPlan = *hostPlan;
+    }
     if (target.streamed) {
       target.host.resize(shapes.size());
       for (int slot = 0; slot < kCsrqStreamSlots; ++slot) {
@@ -2438,11 +2450,49 @@ public:
     const size_t ptrCount = static_cast<size_t>(view.rows) + 1u;
     if (target.streamed) {
       CsrqHostChunk &host = target.host[chunkIndex];
+      // Row pointers and maxima are small and drive the per-pass span
+      // selection, so they are always page-locked.
+      csrqPinOrDemoteLocked(target, [&] {
+        return host.rowNnzPtr.tryAllocate(ptrCount) &&
+               host.rowRunPtr.tryAllocate(ptrCount) &&
+               host.rowMax.tryAllocate(static_cast<size_t>(view.rows));
+      });
       host.rowNnzPtr.copyFromHost(view.rowNnzPtr, ptrCount);
       host.rowRunPtr.copyFromHost(view.rowRunPtr, ptrCount);
       host.rowMax.copyFromHost(view.rowMax, static_cast<size_t>(view.rows));
-      host.runs.copyFromHost(view.runs, static_cast<size_t>(view.runCount));
-      host.valuesQ.copyFromHost(view.valuesQ, static_cast<size_t>(view.nnz));
+      const uint64_t payload = sizeof(uint32_t) * view.runCount +
+                               sizeof(uint16_t) * view.nnz;
+      const uint64_t budget = target.hostPlan.pinnedBudgetBytes;
+      bool pinned = !target.pinRefused &&
+                    payload <= budget - std::min(budget, target.pinnedPayloadBytes);
+      if (pinned && !(host.runs.tryAllocate(static_cast<size_t>(view.runCount)) &&
+                      host.valuesQ.tryAllocate(static_cast<size_t>(view.nnz)))) {
+        // The driver refused more page-locked memory: keep what is pinned
+        // and read the remaining chunks from the file.
+        host.runs.release();
+        host.valuesQ.release();
+        target.pinRefused = true;
+        pinned = false;
+      }
+      if (pinned) {
+        host.runs.copyFromHost(view.runs, static_cast<size_t>(view.runCount));
+        host.valuesQ.copyFromHost(view.valuesQ, static_cast<size_t>(view.nnz));
+        target.pinnedPayloadBytes += payload;
+      } else {
+        csrqMarkDiskBackedLocked(target, chunkIndex);
+      }
+      if (target.diskChunks > 0) {
+        // Reserve the staging buffers as soon as a chunk needs them, before
+        // further chunks take the remaining page-lockable memory.
+        const size_t stagingBytes = static_cast<size_t>(std::max<uint64_t>(
+            4u, target.hostPlan.stagingBytes & ~uint64_t{3}));
+        csrqPinOrDemoteLocked(target, [&] {
+          for (auto &staging : csrqStaging_) {
+            if (!staging.tryAllocate(stagingBytes)) return false;
+          }
+          return true;
+        });
+      }
     } else {
       auto dev = std::make_unique<CsrqDeviceChunk>();
       dev->branchCount = csrqBranchCount_;
@@ -2477,13 +2527,25 @@ public:
                                       csrqWarmupStart_)
             .count());
     constexpr uint64_t kMiB = 1024ull * 1024ull;
+    std::ostringstream where;
+    if (!target.streamed) {
+      where << "resident";
+    } else {
+      where << "streamed through " << kCsrqStreamSlots << " x "
+            << (target.streamSlotBytes / kMiB) << " MiB device slots ("
+            << target.streamReason << "), pinned host "
+            << (target.shapes.size() - target.diskChunks) << '/'
+            << target.shapes.size() << " chunks, "
+            << (target.pinnedPayloadBytes / kMiB) << " MiB";
+      if (target.diskChunks > 0) {
+        where << "; " << (target.diskPayloadBytes / kMiB)
+              << " MiB re-read from file per full pass"
+              << (target.pinRefused ? " (page-lock refused by the driver)" : "");
+      }
+    }
     std::cerr << "[NOTE] CSRQ matrix " << matrixIndex << ": "
               << target.shapes.size() << " chunks, " << (target.bytes / kMiB)
-              << " MiB " << (target.streamed ? "streamed (pinned host)" : "resident")
-              << ", " << target.totalRows << " compact rows"
-              << ", K=" << csrqBranchCount_
-              << ", scratch_bytes=" << (dCsrqX_.size() + dCsrqY_.size() +
-                                          dCsrqRatio_.size()) * sizeof(float)
+              << " MiB " << where.str() << ", K=" << csrqBranchCount_
               << (csrqPackedBackward_
                       ? ", packed [voxel][K] backward (float4 atomics on "
                         "sm_90+, scalar fallback below)"
@@ -2508,8 +2570,6 @@ public:
                     const double *const *fullBackgrounds,
                     size_t fullProjectionCount, double weight,
                     int accumulatorBase, int cacheSlotBase,
-                    cuda::CompactDeviceRatioTiming *ratioTimingOut,
-                    cuda::CompactDeviceBackwardTiming *backwardTimingOut,
                     const uint16_t *const *bedAttFactors, size_t attCount,
                     double attPower, int subsetCount, int subsetIndex) {
     ensureCudaRuntimeAvailable();
@@ -2570,17 +2630,25 @@ public:
     csrqEnsureBranchMetadataLocked(symIds, zMirrors);
     ensureProjDomainKernelsLoaded();
 
-    // Timer slots: one per (chunk, bed) pass, or per (chunk, bed, compact
-    // angle) launch group on the attenuated path.
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams,
                                              subsetCount, subsetIndex) : nullptr;
-    const size_t maxAngles = plan ? plan->maxAngles : 1u;
-    const size_t passes = matrix.shapes.size() * static_cast<size_t>(bedCount);
-    const size_t timerSlots = passes * maxAngles;
-    csrqEnsureTimersLocked(timerSlots);
-    size_t pass = 0;
-    size_t usedTimers = 0;
+    // Without CTAC every bed keeps its packed input and backward target for
+    // the whole pass, so each bed is packed and transformed into its
+    // accumulator once instead of once per chunk (the backward sums of the
+    // chunks then add up in fp32 before reaching the double accumulator).
+    const size_t bedStride = static_cast<size_t>(csrqBranchCount_) * nvox;
+    const bool bedScratch = !hasAtten && csrqEnsureBedScratchLocked(bedCount, nvox);
+    if (bedScratch) {
+      for (int bed = 0; bed < bedCount; ++bed) {
+        launchCsrqPackBranchKernel(dBatchInput_.get() + bed * bedStride,
+                                   dCsrqXBeds_.get() + bed * bedStride, nvox,
+                                   csrqBranchCount_);
+      }
+      CUDA_CHECK(cudaMemsetAsync(dCsrqYBeds_.get(), 0,
+                                 static_cast<size_t>(bedCount) * bedStride * sizeof(float),
+                                 nullptr));
+    }
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       const auto selected = csrqSubsetRows(chunk.ptrs(), chunk.compactRowBase,
           commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
@@ -2588,29 +2656,31 @@ public:
       cuda::CompactDeviceRatioParams ratioParams = commonRatioParams;
       ratioParams.compactRowBase = chunk.compactRowBase;
       float *ratio = dCsrqRatio_.get();
-      for (int bed = 0; bed < bedCount; ++bed, ++pass) {
+      for (int bed = 0; bed < bedCount; ++bed) {
         const float *bedInput =
             dBatchInput_.get() +
             static_cast<size_t>(bed) * static_cast<size_t>(csrqBranchCount_) * nvox;
         const uint16_t *bedAtt =
             hasAtten ? bedAttFactors[bed] : nullptr;
         if (bedAtt == nullptr) {
-          launchCsrqPackBranchKernel(bedInput, dCsrqX_.get(), nvox, csrqBranchCount_);
+          float *x = bedScratch ? dCsrqXBeds_.get() + bed * bedStride : dCsrqX_.get();
+          if (!bedScratch) {
+            launchCsrqPackBranchKernel(bedInput, dCsrqX_.get(), nvox, csrqBranchCount_);
+          }
 
           // Forward and Poisson ratio in one kernel: the row's active branch
           // sums never leave the block.
-          const size_t t = usedTimers++;
-          csrqForwardTimers_[t].recordStart(nullptr);
           launchCsrqForwardRatioKernel(
-              selected, dCsrqX_.get(), ratio, dProjections[bed],
+              selected, x, ratio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, ratioParams,
               dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
-          csrqForwardTimers_[t].recordStop(nullptr);
-
-          csrqBackwardTimers_[t].recordStart(nullptr);
-          csrqBackwardChunkLocked(selected, ratio, nvox, commonTransformParams,
-                                  accums[bed]->get());
-          csrqBackwardTimers_[t].recordStop(nullptr);
+          if (bedScratch) {
+            csrqScatterBackwardIntoLocked(selected, ratio,
+                                          dCsrqYBeds_.get() + bed * bedStride, nvox);
+          } else {
+            csrqBackwardChunkLocked(selected, ratio, nvox, commonTransformParams,
+                                    accums[bed]->get());
+          }
           continue;
         }
         // CTAC: stage this subset's factor slices for the chunk (overlapping the
@@ -2630,8 +2700,6 @@ public:
           cuda::CompactDeviceRatioParams angleParams = ratioParams;
           angleParams.compactRowBase = chunk.compactRowBase + rowBase;
           float *angleRatio = ratio + static_cast<size_t>(rowBase) * csrqBranchCount_;
-          const size_t t = usedTimers++;
-          csrqForwardTimers_[t].recordStart(nullptr);
           launchCsrqPackBranchAttenKernel(
               bedInput, dSlices, dSlice, dCsrqX_.get(), nvox, csrqBranchCount_,
               commonTransformParams, dBatchSymIds_.get(),
@@ -2640,34 +2708,21 @@ public:
               rows, dCsrqX_.get(), angleRatio, dProjections[bed],
               dBackgrounds[bed], fullProjectionCount, weight, angleParams,
               dBatchSymIds_.get(), dBatchZMirrors_.get(), 1e-10);
-          csrqForwardTimers_[t].recordStop(nullptr);
-
-          csrqBackwardTimers_[t].recordStart(nullptr);
           csrqAttenBackwardAngleLocked(rows, angleRatio, nvox,
                                        commonTransformParams, dSlices, dSlice,
                                        power, accums[bed]->get());
-          csrqBackwardTimers_[t].recordStop(nullptr);
         }
         csrqReleaseAttenSlotLocked(slot);
       }
     }, commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
+    if (bedScratch) {
+      for (int bed = 0; bed < bedCount; ++bed) {
+        csrqTransformBackwardAddLocked(dCsrqYBeds_.get() + bed * bedStride, nvox,
+                                       commonTransformParams, accums[bed]->get());
+      }
+    }
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    const double forwardSeconds =
-        accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers);
-    const double backwardSeconds =
-        accumulateTimedCudaPairs(csrqBackwardTimers_, usedTimers);
-    noteCudaCsrqForward(forwardSeconds, passes);
-    noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
-    if (ratioTimingOut != nullptr) {
-      // The ratio is fused into the forward kernel; report it there.
-      ratioTimingOut->forwardSeconds += forwardSeconds;
-      ratioTimingOut->backwardSeconds += backwardSeconds;
-    }
-    if (backwardTimingOut != nullptr) {
-      // The backward here includes the symmetry transform-add into the
-      // accumulator.
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-    }
+    noteCudaCsrqPass();
   }
 
   // weight * H^T W 1 of matrix matrixIndex restricted to (row, branch) pairs
@@ -2682,7 +2737,6 @@ public:
       const int *symIds, const int *zMirrors, int accumulatorIndex,
       const double *rowWeights, size_t rowWeightCount,
       size_t fullProjectionCount,
-      cuda::CompactDeviceBackwardTiming *backwardTimingOut,
       const uint16_t *attFactors, size_t attCount, double attPower, int subsetCount, int subsetIndex) {
     ensureCudaRuntimeAvailable();
     std::lock_guard<std::mutex> lock(mutex_);
@@ -2716,10 +2770,6 @@ public:
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, commonRatioParams,
                                              subsetCount, subsetIndex) : nullptr;
-    const size_t maxAngles = plan ? plan->maxAngles : 1u;
-    const size_t passes = matrix.shapes.size();
-    csrqEnsureTimersLocked(passes * maxAngles);
-    size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       const auto selected = csrqSubsetRows(chunk.ptrs(), chunk.compactRowBase,
           commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
@@ -2733,11 +2783,8 @@ public:
                                   dBatchSymIds_.get(), dBatchZMirrors_.get(),
                                   chunk.rows, csrqBranchCount_);
       if (!hasAtten) {
-        const size_t t = usedTimers++;
-        csrqBackwardTimers_[t].recordStart(nullptr);
         csrqBackwardChunkLocked(selected, ratio, nvox, commonTransformParams,
                                 accum.get());
-        csrqBackwardTimers_[t].recordStop(nullptr);
         return;
       }
       const int slot = csrqStageAttenSlicesLocked(*plan, chunkIndex, attFactors,
@@ -2749,24 +2796,16 @@ public:
       const int rpa = commonRatioParams.compactRaysPerAngle;
       for (size_t i = 0; i < angles.size(); ++i) {
         const int rowBase = angles[i] * rpa - chunk.compactRowBase;
-        const size_t t = usedTimers++;
-        csrqBackwardTimers_[t].recordStart(nullptr);
         csrqAttenBackwardAngleLocked(
             csrqRowRange(chunk, rowBase, rpa),
             ratio + static_cast<size_t>(rowBase) * csrqBranchCount_, nvox,
             commonTransformParams, dSlices, dSliceIndex + i * csrqBranchCount_, power,
             accum.get());
-        csrqBackwardTimers_[t].recordStop(nullptr);
       }
       csrqReleaseAttenSlotLocked(slot);
     }, commonRatioParams.compactRaysPerAngle, subsetCount, subsetIndex);
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    const double backwardSeconds =
-        accumulateTimedCudaPairs(csrqBackwardTimers_, usedTimers);
-    noteCudaCsrqBackward(backwardSeconds, passes * csrqBackwardPassCount());
-    if (backwardTimingOut != nullptr) {
-      backwardTimingOut->backwardSeconds += backwardSeconds;
-    }
+    noteCudaCsrqPass();
   }
 
   // Forward projection of matrix matrixIndex over the single-bed branch
@@ -2813,10 +2852,6 @@ public:
 
     const CsrqAttenPlan *plan =
         hasAtten ? &csrqEnsureAttenPlanLocked(matrix, *attenRatioParams) : nullptr;
-    const size_t maxAngles = plan ? plan->maxAngles : 1u;
-    const size_t passes = matrix.shapes.size();
-    csrqEnsureTimersLocked(passes * maxAngles);
-    size_t usedTimers = 0;
     csrqForEachChunkLocked(matrix, [&](CsrqDeviceChunk &chunk, size_t chunkIndex) {
       float *out = dCsrqRatio_.get();
       // Diagnostics return a full host projection, but device scratch stays
@@ -2831,10 +2866,7 @@ public:
             elements * sizeof(float), false);
       };
       if (!hasAtten) {
-        const size_t t = usedTimers++;
-        csrqForwardTimers_[t].recordStart(nullptr);
         launchCsrqForwardKernel(chunk.ptrs(), dCsrqX_.get(), out);
-        csrqForwardTimers_[t].recordStop(nullptr);
         download();
         return;
       }
@@ -2847,8 +2879,6 @@ public:
       const int rpa = attenRatioParams->compactRaysPerAngle;
       for (size_t i = 0; i < angles.size(); ++i) {
         const int rowBase = angles[i] * rpa - chunk.compactRowBase;
-        const size_t t = usedTimers++;
-        csrqForwardTimers_[t].recordStart(nullptr);
         launchCsrqPackBranchAttenKernel(
             dBatchInput_.get(), dSlices, dSliceIndex + i * csrqBranchCount_,
             dCsrqX_.get(), nvox, csrqBranchCount_, *attenTransformParams, dBatchSymIds_.get(),
@@ -2856,15 +2886,12 @@ public:
         launchCsrqForwardKernel(csrqRowRange(chunk, rowBase, rpa),
                                   dCsrqX_.get(),
                                   out + static_cast<size_t>(rowBase) * csrqBranchCount_);
-        csrqForwardTimers_[t].recordStop(nullptr);
       }
       csrqReleaseAttenSlotLocked(slot);
       download();
     });
     CUDA_CHECK(cudaStreamSynchronize(nullptr));
-    noteCudaCsrqForward(
-        accumulateTimedCudaPairs(csrqForwardTimers_, usedTimers), passes);
-
+    noteCudaCsrqPass();
   }
 
   void prefetchCompactFloatMatrix(const io::CSRSubsetView &next,
@@ -3021,14 +3048,24 @@ private:
     // Pending slice uploads must finish before their pinned sources are
     // unregistered and the slots freed.
     if (std::any_of(csrqAttSlotUsed_.begin(), csrqAttSlotUsed_.end(),
+                    [](bool used) { return used; }) ||
+        std::any_of(csrqStagingUsed_.begin(), csrqStagingUsed_.end(),
                     [](bool used) { return used; })) {
       CUDA_CHECK(cudaStreamSynchronize(csrqUploadStream_.get()));
       CUDA_CHECK(cudaStreamSynchronize(nullptr));
     }
     csrqMatrices_.clear();
+    for (auto &staging : csrqStaging_) {
+      staging.release();
+    }
+    csrqStagingUsed_.fill(false);
+    csrqStagingNext_ = 0;
     dCsrqX_.reset();
     dCsrqY_.reset();
     dCsrqRatio_.reset();
+    dCsrqXBeds_.reset();
+    dCsrqYBeds_.reset();
+    csrqBedScratchRefused_ = 0;
     for (auto &slices : dCsrqAttSlices_) {
       slices.reset();
     }
@@ -3037,8 +3074,6 @@ private:
     }
     csrqAttNextSlot_ = 0;
     csrqReleasePinnedTablesLocked();
-    csrqForwardTimers_.clear();
-    csrqBackwardTimers_.clear();
     for (auto &used : csrqSlotUsed_) {
       used = false;
     }
@@ -3152,7 +3187,6 @@ private:
       std::vector<int> fullAngles;
       plan.chunkSliceIndexOffset.push_back(sliceIndex.size());
       buildAttenSliceTableLocked(p, angles, sliceIndex, fullAngles);
-      plan.maxAngles = std::max(plan.maxAngles, angles.size());
       plan.chunkAngles.push_back(std::move(angles));
       plan.maxSlices = std::max(plan.maxSlices, fullAngles.size());
       plan.chunkFullAngles.push_back(std::move(fullAngles));
@@ -3607,6 +3641,49 @@ private:
     return csrqMatrices_[static_cast<size_t>(matrixIndex)];
   }
 
+  // A streamed chunk whose run/value payload is read from its file each pass.
+  void csrqMarkDiskBackedLocked(CsrqResidentMatrix &target, size_t chunkIndex) {
+    if (!target.hostPlan.readPayload) {
+      throw std::runtime_error(
+          "CSRQ streamed chunk " + std::to_string(chunkIndex) +
+          " cannot be page-locked and no file reader was provided.");
+    }
+    const cuda::CsrqChunkShape &shape = target.shapes[chunkIndex];
+    CsrqHostChunk &host = target.host[chunkIndex];
+    host.runs.release();
+    host.valuesQ.release();
+    host.diskBacked = true;
+    target.diskPayloadBytes +=
+        sizeof(uint32_t) * shape.runCount + sizeof(uint16_t) * shape.nnz;
+    ++target.diskChunks;
+  }
+
+  // Retries a page-locked allocation after handing the most recently pinned
+  // chunk payload of this matrix back to the OS (that chunk is then read from
+  // its file). Warmup copies only host to host, so nothing is in flight.
+  template <typename TryPin>
+  void csrqPinOrDemoteLocked(CsrqResidentMatrix &target, TryPin &&tryPin) {
+    while (!tryPin()) {
+      size_t victim = target.host.size();
+      for (size_t i = target.host.size(); i-- > 0;) {
+        if (!target.host[i].diskBacked && target.host[i].valuesQ.capacity() > 0) {
+          victim = i;
+          break;
+        }
+      }
+      if (victim == target.host.size()) {
+        throw std::runtime_error(
+            "CSRQ streaming cannot page-lock its row pointers and file "
+            "staging buffers; free host memory or use the CSRB directory.");
+      }
+      const cuda::CsrqChunkShape &shape = target.shapes[victim];
+      target.pinnedPayloadBytes -=
+          sizeof(uint32_t) * shape.runCount + sizeof(uint16_t) * shape.nnz;
+      target.pinRefused = true;
+      csrqMarkDiskBackedLocked(target, victim);
+    }
+  }
+
   // The warmup fixes K for the task; all buffers and kernels use that stride.
   CsrqResidentMatrix &csrqRequireReadyLocked(int matrixIndex, int branchCount) {
     if (matrixIndex < 0 ||
@@ -3625,16 +3702,6 @@ private:
     return csrqMatrices_[static_cast<size_t>(matrixIndex)];
   }
 
-  void csrqEnsureTimersLocked(size_t passes) {
-    auto grow = [passes](std::vector<TimedCudaStagePair> &timers) {
-      while (timers.size() < passes) {
-        timers.emplace_back();
-      }
-    };
-    grow(csrqForwardTimers_);
-    grow(csrqBackwardTimers_);
-  }
-
   // A^T of one chunk added into accum (unrotated frame): scatter into the
   // branch-major dCsrqY_ ([K][nvox]) a few branches per pass so the atomic
   // target stays L2-resident, then the symmetry transform-add kernel. (A
@@ -3648,14 +3715,22 @@ private:
                                const cuda::CompactDeviceTransformParams &tp,
                                double *accum) {
     csrqScatterBackwardLocked(chunk, ratio, nvox);
+    csrqTransformBackwardAddLocked(dCsrqY_.get(), nvox, tp, accum);
+  }
+
+  // Symmetry transform-add of one backward target ([K][nvox], or [nvox][K]
+  // in packed mode) into the unrotated double accumulator.
+  void csrqTransformBackwardAddLocked(const float *y, size_t nvox,
+                                      const cuda::CompactDeviceTransformParams &tp,
+                                      double *accum) {
     if (csrqPackedBackward_) {
       launchCompactTransformBackwardAddPackedKernel(
-          dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
+          y, accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
           dBatchZMirrors_.get());
       return;
     }
     launchCompactTransformBackwardAddBatchKernel(
-        dCsrqY_.get(), accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
+        y, accum, nvox, csrqBranchCount_, tp, dBatchSymIds_.get(),
         dBatchZMirrors_.get());
   }
 
@@ -3665,31 +3740,77 @@ private:
                                  const float *ratio, size_t nvox) {
     CUDA_CHECK(cudaMemsetAsync(dCsrqY_.get(), 0, nvox * csrqBranchCount_ * sizeof(float),
                                nullptr));
+    csrqScatterBackwardIntoLocked(rows, ratio, dCsrqY_.get(), nvox);
+  }
+
+  // Same scatter, accumulating into an existing target y.
+  void csrqScatterBackwardIntoLocked(const CsrqDeviceChunkPtrs &rows,
+                                     const float *ratio, float *y, size_t nvox) {
     if (csrqPackedBackward_) {
-      launchCsrqBackwardPackedKernel(rows, ratio, dCsrqY_.get());
+      launchCsrqBackwardPackedKernel(rows, ratio, y);
       return;
     }
     for (int kFirst = 0; kFirst < csrqBranchCount_;
          kFirst += kCsrqBackwardBranchesPerPass) {
       const int kCount = std::min(kCsrqBackwardBranchesPerPass, csrqBranchCount_ - kFirst);
-      launchCsrqBackwardKernel(rows, ratio, dCsrqY_.get(), nvox, kFirst,
-                                 kCount);
+      launchCsrqBackwardKernel(rows, ratio, y, nvox, kFirst, kCount);
     }
   }
 
-  size_t csrqBackwardPassCount() const {
-    return csrqPackedBackward_
-               ? 1u
-               : static_cast<size_t>((csrqBranchCount_ + kCsrqBackwardBranchesPerPass - 1) /
-                                     kCsrqBackwardBranchesPerPass);
+  // Per-bed numerator scratch (packed X and backward Y of every bed, 2 x
+  // beds x K x nvox floats). Used only while it leaves 1 GiB of device memory
+  // free; otherwise the numerator keeps the shared per-chunk scratch.
+  bool csrqEnsureBedScratchLocked(int bedCount, size_t nvox) {
+    const size_t need = static_cast<size_t>(bedCount) *
+                        static_cast<size_t>(csrqBranchCount_) * nvox;
+    if (dCsrqXBeds_.size() >= need && dCsrqYBeds_.size() >= need) {
+      return true;
+    }
+    if (csrqBedScratchRefused_ != 0 && need >= csrqBedScratchRefused_) {
+      return false;
+    }
+    constexpr uint64_t kMiB = 1024ull * 1024ull;
+    const uint64_t growBytes =
+        2ull * sizeof(float) *
+        (need - std::min(need, std::min(dCsrqXBeds_.size(), dCsrqYBeds_.size())));
+    uint64_t freeBytes = 0;
+    try {
+      freeBytes = static_cast<uint64_t>(cuda::getMemoryInfo().free);
+    } catch (const std::exception &) {
+      freeBytes = 0;
+    }
+    bool ok = freeBytes >= growBytes + 1024ull * kMiB;
+    if (ok) {
+      try {
+        dCsrqXBeds_.allocate(need);
+        dCsrqYBeds_.allocate(need);
+      } catch (const std::exception &) {
+        (void)cudaGetLastError();
+        ok = false;
+      }
+    }
+    if (!ok) {
+      dCsrqXBeds_.reset();
+      dCsrqYBeds_.reset();
+      csrqBedScratchRefused_ = need;
+      std::cerr << "[NOTE] CSRQ per-bed numerator scratch ("
+                << (2ull * sizeof(float) * need / kMiB)
+                << " MiB) does not fit (free " << (freeBytes / kMiB)
+                << " MiB); packing and transforming per chunk instead.\n";
+    }
+    return ok;
   }
 
   // Visits every chunk of a matrix in compact row order on the default
   // stream. Resident chunks are handed over directly; streamed chunks are
-  // copied from their pinned host mirror into one of kCsrqStreamSlots device
-  // slots on the upload stream, double-buffered: the copy of chunk c+1 runs
-  // while chunk c computes, and a slot is refilled only after the default
-  // stream has finished reading it.
+  // copied from their pinned host mirror (or, for disk-backed chunks, read
+  // from the file through two page-locked staging buffers) into one of
+  // kCsrqStreamSlots device slots on the upload stream, double-buffered: the
+  // copy of chunk c+1 runs while chunk c computes, and a slot is refilled only
+  // after the default stream has finished reading it. Streamed passes skip
+  // chunks without rows in the subset; the callers ignore those anyway, and
+  // letting them take a slot would make every second selected upload wait for
+  // the previous selected chunk's kernels.
   template <typename Fn>
   void csrqForEachChunkLocked(CsrqResidentMatrix &matrix, Fn &&fn,
                               int raysPerAngle = 1, int subsetCount = 1,
@@ -3700,9 +3821,73 @@ private:
       }
       return;
     }
+    std::vector<size_t> visit;
+    visit.reserve(matrix.shapes.size());
+    for (size_t chunkIndex = 0; chunkIndex < matrix.shapes.size(); ++chunkIndex) {
+      if (subsetCount > 1) {
+        CsrqDeviceChunkPtrs rows;
+        rows.rows = matrix.shapes[chunkIndex].rows;
+        if (csrqSubsetRows(rows, matrix.shapes[chunkIndex].compactRowBase,
+                           raysPerAngle, subsetCount, subsetIndex)
+                .selectedRows() == 0) {
+          continue;
+        }
+      }
+      visit.push_back(chunkIndex);
+    }
+    if (visit.empty()) {
+      return;
+    }
     cudaStream_t upload = csrqUploadStream_.get();
-    auto enqueueUpload = [&](size_t chunkIndex) {
-      const int slot = static_cast<int>(chunkIndex % kCsrqStreamSlots);
+    // Copies count elements of a disk-backed chunk's runs or values array to
+    // the same offsets in the device slot, one staging buffer at a time.
+    auto copyFromFile = [&](size_t chunkIndex, bool runs, uint64_t first,
+                            uint64_t count, void *deviceBase) {
+      const size_t elem = runs ? sizeof(uint32_t) : sizeof(uint16_t);
+      const uint64_t perPiece = csrqStaging_[0].capacity() / elem;
+      uint64_t done = 0;
+      while (done < count) {
+        const uint64_t n = std::min<uint64_t>(count - done, perPiece);
+        const int s = csrqStagingNext_;
+        csrqStagingNext_ = (csrqStagingNext_ + 1) % kCsrqStreamSlots;
+        if (csrqStagingUsed_[s]) {
+          CUDA_CHECK(cudaEventSynchronize(csrqStagingDone_[s].get()));
+        }
+        const auto readStart = std::chrono::steady_clock::now();
+        matrix.hostPlan.readPayload(chunkIndex, runs, first + done, n,
+                                    csrqStaging_[s].data());
+        noteCudaCsrqDiskRead(std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - readStart)
+                                 .count(),
+                             n * elem);
+        CUDA_CHECK(cudaMemcpyAsync(
+            static_cast<char *>(deviceBase) + (first + done) * elem,
+            csrqStaging_[s].data(), n * elem, cudaMemcpyHostToDevice, upload));
+        csrqStagingDone_[s].record(upload);
+        csrqStagingUsed_[s] = true;
+        done += n;
+      }
+    };
+    auto copySpan = [&](const CsrqHostChunk &host, size_t chunkIndex,
+                        CsrqDeviceChunk &dev, bool runs, uint64_t first,
+                        uint64_t count) {
+      if (count == 0) return;
+      if (host.diskBacked) {
+        copyFromFile(chunkIndex, runs, first, count,
+                     runs ? static_cast<void *>(dev.dRuns.get())
+                          : static_cast<void *>(dev.dValuesQ.get()));
+      } else if (runs) {
+        CUDA_CHECK(cudaMemcpyAsync(dev.dRuns.get() + first, host.runs.data() + first,
+                                   count * sizeof(uint32_t),
+                                   cudaMemcpyHostToDevice, upload));
+      } else {
+        CUDA_CHECK(cudaMemcpyAsync(dev.dValuesQ.get() + first,
+                                   host.valuesQ.data() + first,
+                                   count * sizeof(uint16_t),
+                                   cudaMemcpyHostToDevice, upload));
+      }
+    };
+    auto enqueueUpload = [&](size_t chunkIndex, int slot) {
       if (csrqSlotUsed_[slot]) {
         CUDA_CHECK(cudaStreamWaitEvent(upload, csrqSlotFree_[slot].get(), 0));
       }
@@ -3715,10 +3900,8 @@ private:
       dev.dRowMax.copyFromHostAsync(host.rowMax.data(),
                                     static_cast<size_t>(shape.rows), upload);
       if (subsetCount == 1) {
-        dev.dRuns.copyFromHostAsync(host.runs.data(),
-                                    static_cast<size_t>(shape.runCount), upload);
-        dev.dValuesQ.copyFromHostAsync(host.valuesQ.data(),
-                                       static_cast<size_t>(shape.nnz), upload);
+        copySpan(host, chunkIndex, dev, true, 0, shape.runCount);
+        copySpan(host, chunkIndex, dev, false, 0, shape.nnz);
       } else {
         CsrqDeviceChunkPtrs rows;
         rows.rows = shape.rows;
@@ -3729,37 +3912,43 @@ private:
         for (int row = selected.rowOffset; row < shape.rows;
              row += raysPerAngle * subsetCount) {
           const int end = row + raysPerAngle;
-          const size_t runBegin = host.rowRunPtr.data()[row];
-          const size_t runCount = host.rowRunPtr.data()[end] - runBegin;
-          const size_t valBegin = host.rowNnzPtr.data()[row];
-          const size_t valCount = host.rowNnzPtr.data()[end] - valBegin;
-          if (runCount != 0) CUDA_CHECK(cudaMemcpyAsync(
-              dev.dRuns.get() + runBegin, host.runs.data() + runBegin,
-              runCount * sizeof(uint32_t), cudaMemcpyHostToDevice, upload));
-          if (valCount != 0) CUDA_CHECK(cudaMemcpyAsync(
-              dev.dValuesQ.get() + valBegin, host.valuesQ.data() + valBegin,
-              valCount * sizeof(uint16_t), cudaMemcpyHostToDevice, upload));
+          const uint64_t runBegin = host.rowRunPtr.data()[row];
+          const uint64_t valBegin = host.rowNnzPtr.data()[row];
+          copySpan(host, chunkIndex, dev, true, runBegin,
+                   host.rowRunPtr.data()[end] - runBegin);
+          copySpan(host, chunkIndex, dev, false, valBegin,
+                   host.rowNnzPtr.data()[end] - valBegin);
         }
       }
       csrqUploadReady_[slot].record(upload);
       csrqSlotUsed_[slot] = true;
     };
-    const size_t chunkCount = matrix.shapes.size();
-    enqueueUpload(0);
-    for (size_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-      const int slot = static_cast<int>(chunkIndex % kCsrqStreamSlots);
-      if (chunkIndex + 1 < chunkCount) {
-        enqueueUpload(chunkIndex + 1);
+    try {
+      enqueueUpload(visit.front(), 0);
+      for (size_t i = 0; i < visit.size(); ++i) {
+        const size_t chunkIndex = visit[i];
+        const int slot = static_cast<int>(i % kCsrqStreamSlots);
+        CsrqDeviceChunk &dev = *matrix.chunks[slot];
+        const cuda::CsrqChunkShape &shape = matrix.shapes[chunkIndex];
+        dev.rows = shape.rows;
+        dev.compactRowBase = shape.compactRowBase;
+        dev.nnz = shape.nnz;
+        dev.runCount = shape.runCount;
+        csrqUploadReady_[slot].wait(nullptr);
+        fn(dev, chunkIndex);
+        csrqSlotFree_[slot].record(nullptr);
+        // Queued after this chunk's kernels so a file read for the next chunk
+        // overlaps them instead of delaying their launch.
+        if (i + 1 < visit.size()) {
+          enqueueUpload(visit[i + 1], static_cast<int>((i + 1) % kCsrqStreamSlots));
+        }
       }
-      CsrqDeviceChunk &dev = *matrix.chunks[slot];
-      const cuda::CsrqChunkShape &shape = matrix.shapes[chunkIndex];
-      dev.rows = shape.rows;
-      dev.compactRowBase = shape.compactRowBase;
-      dev.nnz = shape.nnz;
-      dev.runCount = shape.runCount;
-      csrqUploadReady_[slot].wait(nullptr);
-      fn(dev, chunkIndex);
-      csrqSlotFree_[slot].record(nullptr);
+    } catch (...) {
+      // Drain queued copies and kernels before the caller unwinds; staging
+      // buffers and slots may still be in flight.
+      cudaStreamSynchronize(upload);
+      cudaStreamSynchronize(nullptr);
+      throw;
     }
   }
 
@@ -3852,15 +4041,23 @@ private:
   DeviceArray<float> dCsrqX_;
   DeviceArray<float> dCsrqY_;
   DeviceArray<float> dCsrqRatio_;
+  // Per-bed numerator scratch (csrqEnsureBedScratchLocked); refused size
+  // remembered so a too-small device is not re-probed every subset.
+  DeviceArray<float> dCsrqXBeds_;
+  DeviceArray<float> dCsrqYBeds_;
+  size_t csrqBedScratchRefused_ = 0;
   // Streaming: upload stream plus per-slot ready/free events (shared by all
   // streamed matrices; passes run one matrix at a time).
   CudaStreamGuard csrqUploadStream_;
   std::array<CudaEventGuard, kCsrqStreamSlots> csrqUploadReady_;
   std::array<CudaEventGuard, kCsrqStreamSlots> csrqSlotFree_;
   std::array<bool, kCsrqStreamSlots> csrqSlotUsed_{};
-  // Per-(chunk, bed) stage timers reused across passes.
-  std::vector<TimedCudaStagePair> csrqForwardTimers_;
-  std::vector<TimedCudaStagePair> csrqBackwardTimers_;
+  // Page-locked staging for disk-backed streamed chunks: a buffer is refilled
+  // by the host only after its previous copy on the upload stream finished.
+  std::array<PinnedHostArray<uint8_t>, kCsrqStreamSlots> csrqStaging_;
+  std::array<CudaEventGuard, kCsrqStreamSlots> csrqStagingDone_;
+  std::array<bool, kCsrqStreamSlots> csrqStagingUsed_{};
+  int csrqStagingNext_ = 0;
   std::chrono::steady_clock::time_point csrqWarmupStart_{};
   // CSRQ CTAC staging: two device slots holding the factor slices of the
   // full angles one chunk reaches ([slice][nvox] uint16, a few hundred MB

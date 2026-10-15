@@ -9,12 +9,14 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #ifdef _WIN32
@@ -128,7 +130,8 @@ uint64_t fileSize(const std::filesystem::path &path) {
   return static_cast<uint64_t>(size);
 }
 
-uint64_t parseByteBudget(const char *text, uint64_t fallback);
+uint64_t parseByteBudget(const char *text, uint64_t fallback,
+                         const char *name = "SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES");
 
 
 ChunkColIdxValidationMode chunkColIdxValidationMode() {
@@ -154,7 +157,7 @@ void warnChunkValidationOffOnce() {
 }
 
 
-uint64_t parseByteBudget(const char *text, uint64_t fallback) {
+uint64_t parseByteBudget(const char *text, uint64_t fallback, const char *name) {
   if (text == nullptr || *text == '\0')
     return fallback;
   std::string s(text);
@@ -174,7 +177,7 @@ uint64_t parseByteBudget(const char *text, uint64_t fallback) {
   const double value = std::strtod(s.c_str(), &end);
   if (end == s.c_str() || *end != '\0' || !std::isfinite(value) || value < 0.0 ||
       (suffix != '\0' && suffix != 'k' && suffix != 'm' && suffix != 'g' && suffix != 't'))
-    throw std::runtime_error("Invalid SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES: " +
+    throw std::runtime_error(std::string("Invalid ") + name + ": " +
                              std::string(text) + "; expected auto or nonnegative bytes with optional K/M/G/T.");
 
   double scale = 1.0;
@@ -889,6 +892,81 @@ uint64_t defaultCompactChunkHostCacheBudgetBytes(uint64_t matrixBytes) {
           matrixBytes, memory.totalBytes, memory.availableBytes));
 }
 
+uint64_t defaultCsrqHostPinBudgetBytes(uint64_t payloadBytes) {
+  const SystemMemoryInfo memory = querySystemMemoryInfo();
+  return parseByteBudget(std::getenv("SPECT_CSRQ_HOST_PIN_BYTES"),
+      recommendCompactChunkHostCacheBudgetBytes(
+          payloadBytes, memory.totalBytes, memory.availableBytes),
+      "SPECT_CSRQ_HOST_PIN_BYTES");
+}
+
+void readCsrqPayloadSpan(const CompactChunkCSRInfo &info,
+                         std::filesystem::file_time_type expectedWriteTime,
+                         bool runs, uint64_t firstElement, uint64_t count,
+                         void *dst) {
+  if (info.format != CompactChunkFormat::CsrqRunU16)
+    throw std::runtime_error("Not a CSRQ chunk: " + info.path.string());
+  const uint64_t total = runs ? info.runCount : info.nnz;
+  if (firstElement > total || count > total - firstElement)
+    throw std::runtime_error("CSRQ payload span out of range in " + info.path.string());
+  if (count == 0)
+    return;
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(info.path, ec);
+  const auto time = std::filesystem::last_write_time(info.path, ec);
+  if (ec || size != info.fileSizeBytes || time != expectedWriteTime)
+    throw std::runtime_error("Matrix file changed or became unreadable during "
+                             "reconstruction: " + info.path.string());
+  const uint64_t rows = static_cast<uint64_t>(info.rows);
+  const uint64_t valuesOffset = kChunkCSRQHeaderBytes + 12ull * rows + 8ull;
+  const uint64_t elem = runs ? 4ull : 2ull;
+  const uint64_t offset =
+      runs ? valuesOffset + 2ull * info.nnz + csrqValuesPadBytes(info.nnz) +
+                 4ull * firstElement
+           : valuesOffset + 2ull * firstElement;
+  const uint64_t bytes = count * elem;
+  auto readRange = [&](uint64_t begin, uint64_t length) {
+    std::ifstream in(info.path, std::ios::binary);
+    if (!in)
+      throw std::runtime_error("Cannot open compact chunk CSRQ: " + info.path.string());
+    in.seekg(static_cast<std::streamoff>(offset + begin), std::ios::beg);
+    in.read(static_cast<char *>(dst) + begin, static_cast<std::streamsize>(length));
+    if (!in)
+      throw std::runtime_error(std::string("Failed to read csrq ") +
+                               (runs ? "runs" : "values") + " from " +
+                               info.path.string());
+  };
+  // Large spans are read as a few concurrent ranges: one sequential read
+  // leaves both the NVMe queue and the OS cache copy single-threaded.
+  constexpr uint64_t kParallelReadMinBytes = 32ull << 20;
+  constexpr unsigned kReadThreads = 4;
+  if (bytes < kParallelReadMinBytes) {
+    readRange(0, bytes);
+    return;
+  }
+  const uint64_t part = (bytes / kReadThreads + 4095ull) & ~uint64_t{4095};
+  std::vector<std::thread> workers;
+  std::vector<std::exception_ptr> errors(kReadThreads);
+  for (unsigned t = 0; t < kReadThreads; ++t) {
+    const uint64_t begin = std::min<uint64_t>(bytes, t * part);
+    const uint64_t length = std::min<uint64_t>(bytes - begin, part);
+    if (length == 0)
+      break;
+    workers.emplace_back([&, t, begin, length] {
+      try {
+        readRange(begin, length);
+      } catch (...) {
+        errors[t] = std::current_exception();
+      }
+    });
+  }
+  for (auto &worker : workers)
+    worker.join();
+  for (const auto &error : errors)
+    if (error)
+      std::rethrow_exception(error);
+}
+
 namespace {
 
 CompactChunkCSRDirectory makeCompactChunkCSRDirectory(
@@ -953,12 +1031,12 @@ CompactChunkCSRDirectory openCompactChunkCSRDirectory(
                       ? std::numeric_limits<uint64_t>::max()
                       : matrixBytes + info.fileSizeBytes;
   }
-  // Keep the CSRQ host cache opt-in; residency and streaming own its uploads.
+  // CSRQ chunks are read once into the device or page-locked copies; a
+  // pageable host cache would only duplicate them.
   const bool csrq = !infos.empty() &&
                     infos.front().format == CompactChunkFormat::CsrqRunU16;
   const uint64_t cacheBudget =
-      csrq ? parseByteBudget(std::getenv("SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES"), 0)
-           : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
+      csrq ? 0 : defaultCompactChunkHostCacheBudgetBytes(matrixBytes);
   return makeCompactChunkCSRDirectory(dir, meta, std::move(infos), cacheBudget);
 }
 

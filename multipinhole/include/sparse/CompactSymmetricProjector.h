@@ -123,6 +123,15 @@ void setCsrqWarmupFitFailuresForTestsCUDA(int skip, int count);
 // page locks (two per non-empty chunk), then one refusal; the hook disables
 // itself after that refusal. -1 disables it.
 void setCompactHostPinRefusalForTestsCUDA(int allowedRegistrations);
+// Test hook for streamed CSRQ host memory: pinBudgetBytes replaces the
+// SPECT_CSRQ_HOST_PIN_BYTES/RAM-derived page-lock budget (chunks beyond it are
+// re-read from their files every pass) and stagingBytes the size of each of
+// the two file staging buffers. Negative values restore the defaults. Applies
+// to matrices warmed after the call.
+void setCsrqHostPlanForTestsCUDA(int64_t pinBudgetBytes, int64_t stagingBytes);
+// Test hook: while limit >= 0 the CSRQ host page-lock allocations refuse once
+// `limit` of them are alive (a driver out of page-lockable memory); -1 disables.
+void setPinnedAllocationLimitForTestsCUDA(int limit);
 
 
 // --- Single-directory forms -------------------------------------------------

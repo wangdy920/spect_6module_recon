@@ -23,9 +23,9 @@
 
 当前 6module 矩阵对称码为 **SYM_90Z**（90° 旋转 + Z 对称）。程序按文件实际大小解析，进入 compact 路径后用 metadata 几何覆盖 CLI/INI 的 `dim` / `vox` / `detN` / `ang`（见 `ReconDataLoader.cpp::applyCompactMetadataGeometry`）。
 
-SC60 使用 `ROT90`，即 4 个 XY 分支、无 Z 镜像，要求 `detNz == compactDetZ`；PSC `ROT90_Z` 要求 `detNz == 2*compactDetZ`。两者要求方形 XY 网格和四分之一 compact angles。其他 profile 与 SMMD v4/TLV 尚不支持；不能仅根据 branchCount 决定变换。CSRQ 共用 4/8 分支实现；2026-10-09 已通过两种 profile 的 CUDA 算子、驻留/流式、多子集 CTAC 回归，仍不是生产采用。
+SC60 使用 `ROT90`，即 4 个 XY 分支、无 Z 镜像，要求 `detNz == compactDetZ`；PSC `ROT90_Z` 要求 `detNz == 2*compactDetZ`。两者要求方形 XY 网格和四分之一 compact angles。其他 profile 与 SMMD v4/TLV 尚不支持；不能仅根据 branchCount 决定变换。CSRQ 共用 4/8 分支实现；2026-10-09 已通过两种 profile 的 CUDA 算子、驻留/流式、多子集 CTAC 回归。2026-10-15 起 SC60 设备包默认使用 CSRQ（真实线性管 8 床 50×10 与 CSRB 同输入图像 relL2 约 7e-7，见 `reports/2026-10-15-sc60-csrq-deployment.md`）；CSRB 仍是权威格式和回退路径，PSC 默认不变。
 
-离线 `tools/convert_csrb_to_csrq.py` 支持 88/92/124B metadata，转换后原样保留 metadata。2026-09-28 的已验证转换版本仍在运行时拒绝 CSRQ ROT90；2026-10-08 候选补齐分支步长、缓冲和算子参数，不能将这次编译通过等同于真实重建通过。不能靠开启 Z 对称或改写 metadata 改变矩阵物理语义。
+离线 `tools/convert_csrb_to_csrq.py` 支持 88/92/124B metadata，转换后原样保留 metadata。2026-09-28 的转换记录 `conversion_validation.json` 中“运行时拒绝 ROT90”的状态描述是当时的状态，ROT90 执行路径已于 2026-10-08/09 补齐。不能靠开启 Z 对称或改写 metadata 改变矩阵物理语义。
 
 SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计算使用的 float32 voxelSize，与 SC60 生成端的 float32 计算约定一致。文件不足、未知版本、非有限或非正 voxel、索引维度溢出直接报错。
 
@@ -56,6 +56,16 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 分段读取校验完整 row_ptr 及实际读取的列索引，沿用原有 strict/sample/off 设置；未读取的 payload 不在当次校验范围。正常打开目录仍检查全部 chunk 的头、文件长度及角度覆盖。`MATRIX_IO` 日志区分应用层 payload 读取字节（包含 row_ptr）、payload 加载次数、仍存活的 host 数据复用字节、跳过的空切片和 CSRB H2D 字节。分段读取的 bytes 仅计实际读入的区间；应用层读取字节不是物理磁盘流量，host 复用字节也不代表同量 memcpy。计量 scope=iterations 不含 sensitivity 准备。N1/full-cache 路径不因本改动自动获得提速。
 
 2026-10-09 配对计时后，删除此前部分 host cache 的逐块 async 前读候选，所有 CSRB 分子计算复用已有双槽预取；SC60 2 GiB/3×N10 的 core 两次由 65.573/83.013 s 降至 58.129/59.942 s，读取量不变，数值 relL2<=1e-5。`loader_work_s` 为累计读取和校验工作时间，不应加到迭代墙钟上。未增加第三个 GPU 矩阵槽、整矩阵锁页策略或新 CLI 开关；收益仅限已测条件。CSRQ 的 X/Y 按实际 K 分配，比值工作区按最大 chunk 行数分配，普通/CTAC 打包复用同一内核，前投影/Poisson 比值继续融合。
+
+## CSRQ 流式执行与主机内存（2026-10-15）
+
+矩阵放不下显存（SC60 18.3 GiB 对 16 GB 卡）时走流式：两个设备分块槽交替上传，计算当前块时上传下一块。
+
+- 子集遍历只访问含本子集行的分块。此前未选中的分块也占用一个槽，使下一个选中块的上传总要等上一个选中块算完；Nsight 中上传与计算的重叠仅 0.03 s/2 轮。修正后上传隐藏在计算之后。
+- 无 CTAC 时，每床打包输入和反投目标在一个子集遍历内常驻（2×床数×K×nvox float，需保留 1 GiB 空余显存，否则退回逐块路径并打印 NOTE），每床只打包、对称回写一次；各块反投先在 fp32 内累加再进入 double 累加器。CTAC 与灵敏度路径不变。
+- 主存锁页预算 `SPECT_CSRQ_HOST_PIN_BYTES`（auto 与 CSRB host cache 余量规则相同）。超出预算或被驱动拒绝锁页的分块只锁页行指针/行最大值（驱动拒绝时先归还最近锁页分块的载荷，保证行指针与中转缓冲可用），每次遍历按所选角度区间从原文件读回 run/值（≥32 MiB 的区间分 4 段并发读），经两块 256 MiB 锁页中转上传；文件大小或修改时间与启动校验时不同即报错。预热阶段仍完整读取并校验每块一次。CSRQ 不使用 `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` 的可分页缓存。
+
+数值：同输入、同配置时与上一构建 relL2 6.3e-7（50 轮），从文件读回与全锁页 5.4e-8（原子加次序差）。本节计时与条件见 `reports/2026-10-15-sc60-csrq-deployment.md`。
 
 ## 读取端
 
@@ -151,7 +161,7 @@ S_m = sum_k H_(k,m)^T e_(k,m)
 | 单窗 / 双窗 CSRQ + ROT90_Z | 2026-10-09 共用内核 CUDA 回归通过，含驻留/流式、多床、多子集 CTAC；仍为实验格式 |
 | 双窗 CSRB + ROT90 / ROT90_Z | 2026-09-21 原生候选；CUDA q/S oracle、合成双窗两床入口、实际 SC60 ROI 矩阵拆窗等价检查通过，不需转换 CSRQ；非物理校准或生产采用 |
 | 混合 CSRB/CSRQ | 显式拒绝 |
-| CSRQ + ROT90 | 2026-10-09 的 4 分支算子/子集/CTAC/BSREM CUDA 回归通过；真实数据/量化质量与部署仍分别验收 |
+| CSRQ + ROT90 | 2026-10-09 的 4 分支算子/子集/CTAC/BSREM CUDA 回归通过；2026-10-15 SC60 真实 8 床 50×10 与 CSRB 图像 relL2 约 7e-7，SC60 设备包默认采用（单窗 Tc99m）；CTAC 多床联合、双窗 CSRQ 未做真实数据签收 |
 | 任意新角度/Z profile、SMMD v4/TLV、list-mode | 未实现；不得按相似维度降级套用现有 profile |
 
 原生 CSRB 双窗复用同一 q/S 数据项：逐窗累加 `H_k^T[y_k/(H_k x+b_k/e_k)]` 和 `H_k^T e_k` 后更新，其中 H 含窗权重、PSF/ROI 与 CTAC；零效率行屏蔽，窗口权重不乘背景，逐窗效率与 CTAC 指数保持独立。最多两窗，共享坐标检查、成对 norm 规则保持，norm/background 可共用。CSRB 与 CSRQ 的 subset+CTAC 路径均已实现。2026-10-09 CSRQ 候选按矩阵/子集复用角度映射，只暂存选中角度的因子切片，复用原有 K4/K8 内核和双槽传输；N1 全量诊断仍独立于当前子集。无格式/CLI 变更；GPU 数值回归已通过，不可据此直接生产采用。

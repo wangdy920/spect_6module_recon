@@ -8,6 +8,28 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-15: streamed CSRQ (matrix larger than free GPU memory, e.g. SC60
+  18.3 GiB on 16 GB cards) uploads only the chunks holding rows of the current
+  subset, so uploads alternate the two device slots and overlap the previous
+  chunk's kernels; without CTAC each bed's packed input and backward target live
+  for the whole subset pass (one pack and one symmetry transform per bed instead
+  of per chunk). SC60 linxinguan 8 beds, OSEM 10 subsets, RTX 4070 Ti SUPER:
+  2.72 -> 1.79 s/iteration (ABBA), 50-iteration image relL2 6.3e-7 vs the
+  previous CSRQ build and 7.4e-7 vs CSRB. Page-locked host memory for a
+  streamed CSRQ matrix now follows `SPECT_CSRQ_HOST_PIN_BYTES` (auto: the CSRB
+  host-cache headroom rule); chunks beyond it, or refused by the driver, are
+  re-read from their unchanged files every pass through two pinned staging
+  buffers instead of failing, reported by `[MATRIX_IO] csrq_file_reread_bytes`.
+  SC60 scanner binding defaults to the CSRQ matrix directory; CSRB remains the
+  documented fallback. Formats, kernels' arithmetic and public CLI unchanged.
+  Convergence: a driver refusal of page-locked memory hands back already pinned
+  CSRQ payloads so row pointers and staging still fit (previously the staging
+  request came last and could abort); CSRQ ignores
+  `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` (it only duplicated chunks in pageable
+  RAM); per-(chunk, bed) CUDA event timers of the CSRQ passes and their
+  `-vb 2` `cuda.csrq_fwd/bwd` entries are removed (wall-clock stage times stay);
+  CSRQ warmup prints one NOTE instead of two and CSRQ runs no longer print the
+  CSRB-only `[MATRIX_IO] scope=iterations` zero lines.
 - 2026-10-15: with `recon_sections_override_cli=true`, blank configured values
   (for example a recipe's `[Normalization] factor_file =`) no longer erase the
   matching CLI option; only filled reconstruction fields override the CLI, as

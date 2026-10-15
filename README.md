@@ -168,18 +168,21 @@ sorted per row and stored as run-length words (`start << 6 | len-1`, runs of at
 most 64 voxels), values are u16 sqrt-companded against one fp32 row maximum
 (`v = rowmax * (q/65535)^2`). The Tc99m 120×120×220 matrix shrinks from
 24.3 GiB to 6.74 GiB (2.2 B/nnz). At load time the whole matrix is uploaded
-once and stays resident; forward/ratio/backward run with custom K=8 kernels
-(`cuda.csrq_fwd` / `cuda.csrq_bwd` in `[PROFILE]`) instead of cuSPARSE, so no
-matrix bytes cross PCIe during iterations and the host matrix cache is not
-used (`hostCacheBudgetBytes=0`). Requirements and limits:
+once and stays resident; forward/ratio/backward run with custom K=4/8 kernels
+instead of cuSPARSE, so no matrix bytes cross PCIe during iterations and the
+host matrix cache is not used (`hostCacheBudgetBytes=0`). Requirements and limits:
 
 - CUDA only. A matrix stays resident when it fits next to a 2 GiB reserve
   (Tc99m 6.9 GiB → ~9 GB peak on a 16 GB card); otherwise it is streamed
   from pinned host memory through two device chunk slots, uploaded once per
   iteration and overlapped with compute (`-csrqResidency streamed` forces
-  this, e.g. on a shared GPU). With two windows the larger matrix is kept
-  resident first and the rest streamed. Startup fails only when even two
-  chunk slots plus the reserve do not fit.
+  this, e.g. on a shared GPU). Subset passes upload only the chunks holding
+  rows of the subset, so consecutive uploads alternate slots and hide behind
+  the previous chunk's kernels. When host RAM is short, the page-locked copy
+  is limited by `SPECT_CSRQ_HOST_PIN_BYTES` and the remaining chunks are
+  re-read from their (validated, unchanged) files every pass. With two windows
+  the larger matrix is kept resident first and the rest streamed. Startup fails
+  only when even two chunk slots plus the reserve do not fit.
 - CTAC (`-ctac -attMap`) and background projections (`-bProj`) work on the
   CSRQ path. Attenuation is applied in the image domain, one compact angle
   at a time (`csrq_pack_branch8_atten` before the forward,
@@ -232,11 +235,12 @@ used (`hostCacheBudgetBytes=0`). Requirements and limits:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Host matrix cache budget: auto or nonnegative bytes, optional K/M/G/T (powers of 1024); malformed/nonfinite values fail. CSRB auto leaves RAM headroom; CSRQ auto leaves host caching off |
+| `SPECT_COMPACT_CHUNK_HOST_CACHE_BYTES` | `auto` | Host matrix cache budget: auto or nonnegative bytes, optional K/M/G/T (powers of 1024); malformed/nonfinite values fail. CSRB auto leaves RAM headroom; CSRQ ignores it (its chunks live on the device or in the page-locked copy, see `SPECT_CSRQ_HOST_PIN_BYTES`) |
 | `SPECT_CSRB_SCATTER_BACKWARD` | auto | CSRB numerator backward (plain and CTAC per-angle). Auto picks the zero-row pair scatter transpose when >= 40 % of the beds' bins are zero counts (Lu-177 mouse: 74-90 %), else per-RHS cuSPARSE CSR_ALG2; `1`/`0` force either path for A/B on one binary. Sensitivity always uses cuSPARSE. Numerically equivalent (fp32 atomic order only) |
 | `SPECT_CHUNK_VALIDATE` | `sample` | CSRB column-index range checks: `strict`/`full` checks all loaded indices; `off` skips only these checks. Structure and finite/nonnegative weight checks remain active |
 | `SPECT_CUDA_DEVICE` | unset | Select CUDA device at startup; `-cudaDevice <id>` overrides it |
 | `SPECT_CSRQ_BACKWARD_PACKED` | off | Experimental packed backward layout. The current shared K=4/8 candidate still needs CUDA regression and paired timing before changing this default |
+| `SPECT_CSRQ_HOST_PIN_BYTES` | `auto` | Page-locked host bytes a *streamed* CSRQ matrix may keep (auto, or bytes with K/M/G/T). Auto uses the CSRB host-cache headroom rule (keep max(8 GiB, RAM/4) and 8 GiB of the currently available RAM free). Chunks beyond the budget, or refused by the driver, keep only row pointers/maxima pinned and are re-read from their files every pass through two 256 MiB pinned staging buffers; `[MATRIX_IO] scope=run csrq_file_reread_bytes=` reports the traffic. Resident matrices ignore it |
 
 `SPECT_COMPACT_CHUNK_MMAP_MIN_BYTES` 和 `SPECT_COMPACT_BRANCH_BATCH` 已退役，设置时明确报错。CSRB 使用完整块缓存或按子集分段读取，CSRQ 使用自身驻留/流式路径。主机缓存预算不等于实际占用或 GPU 驻留量；性能结论需要同输入、同缓存状态下的重复测量。
 
