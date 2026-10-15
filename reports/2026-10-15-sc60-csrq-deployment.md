@@ -69,7 +69,7 @@ CSRB 自身浮点次序噪声基线（同 EXE、同矩阵，`SPECT_CSRB_SCATTER_
 
 ## 7. 部署说明与剩余风险
 
-- 设备包：`E:/Xiang_Project/SPECT/6Module/release/devices_20261015/SC60-MPH3/SPECT_Core.zip`（及 PSC 同 EXE 包），由 6Module 分支 `sc60-csrq-deploy-20261015`（基于 `eb0ea45`，不含当天他人预处理实验提交）组装；`verify_deployment.py` 允许 CSRQ 目录的 `conversion_validation.json`，并按分块头与该记录核对文件大小（防截断，非内容哈希）。
+- 设备包：`E:/Xiang_Project/SPECT/6Module/release/devices_20261015/SC60-MPH3/SPECT_Core.zip`（及 PSC 同 EXE 包），由 6Module 分支 `sc60-csrq-deploy-20261015`（基于 `eb0ea45`，不含当天他人预处理实验提交）组装；`verify_deployment.py` 允许 CSRQ 目录的 `conversion_validation.json`，并按分块头与该记录核对文件大小（防截断，非内容哈希）。详见第 9 节。
 - `conversion_validation.json` 的 status 文本仍写着 9-28 时的“runtime unsupported”，已过时；保留原文件。
 - 主存：流式全锁页需约 18.3 GiB 不可换页内存。启动时可用内存不足 26 GiB 左右时自动部分读回；矩阵须在 SSD/NVMe 上，HDD 上读回会很慢。
 - 未覆盖：RTX 5060 Ti/sm_120 实测；CSRQ 多床 CTAC（联合多床本身尚不支持 CTAC）；双窗 CSRQ 真实数据；packed backward（sm_120 原子 float4）未启用。
@@ -93,9 +93,23 @@ CSRB 自身浮点次序噪声基线（同 EXE、同矩阵，`SPECT_CSRB_SCATTER_
 
 验证：CSRQ 18 项及全套 361 项（357 通过、4 项原有条件跳过）；Compute Sanitizer memcheck 对流式子集/读回/拒绝锁页用例 0 错误。收敛版本的配对计时与 50 轮真实数据结果见第 9 节。
 
-## 9. 补记
+## 9. 补记：收敛版本与可部署包
 
-（收敛版本配对计时、原生观测模型、最终干净构建与设备包校验结果在完成后追加。）
+| 检查 | 结果 |
+|---|---|
+| 收敛前后配对（v2 / v3，ABBA，5×10） | 1.719/1.711 vs 1.747/1.700 s/轮，无可测差异（收敛以简化为目的） |
+| v3 真实数据 50×10 | 1.709 s/轮，core 85.4 s（冻结基线 CSRQ 139.5 s、2.79 s/轮）；vs CSRB relL2 7.41e-7，vs v1 5.4e-8 |
+| 原生观测模型（无/有背景） | 64 组 + 2 组 operator PSF+ROI 闭合全部 PASS |
+| 设备包端到端（解包 + 矩阵硬链接 + `verify_deployment` + 包内 `run_6module_recon.py`） | 校验 PASS；单条 NOTE `streamed through 2 x 1073 MiB device slots ..., pinned host 18/18 chunks`；1.73 s/轮，含冷分母 106 s；与直接运行 relL2 1.8e-7，与 CSRB 7.4e-7 |
+
+可部署包（重建 `20261015+4e89651`，由独立干净 worktree 构建；6Module 工具 `3f64148`，分支 `sc60-csrq-deploy-20261015`，基于 `eb0ea45`，未合入 main）：
+
+- `E:/Xiang_Project/SPECT/6Module/release/devices_20261015/SC60-MPH3/SPECT_Core.zip`
+- `E:/Xiang_Project/SPECT/6Module/release/devices_20261015/PSC30-MPH6/SPECT_Core.zip`（同一 EXE，PSC 配置不变）
+
+本地 CSRQ 矩阵目录中有百度网盘上传临时文件 `chunk_012.csrq.baiduyun.uploading.cfg`，校验器与包装器都会正确拒绝含该文件的目录；设备端下载的目录不应包含它。
+
+本机运行期间他人会话也在使用 GPU（EXE 自带独占锁）；所有计时臂均在确认无其他重建进程后启动，运行中未出现他人进程。
 
 ## 复现
 
