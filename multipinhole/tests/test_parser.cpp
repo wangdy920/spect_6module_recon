@@ -502,6 +502,57 @@ TEST(IOTest, ConfiguredIterationsProtectedButRuntimeOutputRemainsCli) {
     std::filesystem::remove_all(root);
 }
 
+TEST(IOTest, ProtectedRecipeBlankNormalizationKeepsCliFactorFile) {
+    const auto root = std::filesystem::temp_directory_path() /
+                      "spect_cli_blank_normalization_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto config = root / "spect_config.ini";
+    const auto writeConfig = [&config](const std::string& factorFile) {
+        std::ofstream out(config, std::ios::trunc);
+        out << "[Compatibility]\nrecon_sections_override_cli = true\n"
+            << "[Normalization]\nfactor_file = " << factorFile << "\n";
+    };
+    writeConfig("");
+
+    auto argv = spect::io::test::compactBaseArgs();
+    argv[2] = config.string();
+    spect::cli::ReconArgs probe;
+    ASSERT_TRUE(parseReconArgsForTest(argv, probe));
+    const std::uint32_t angles = static_cast<std::uint32_t>(probe.numAngles);
+    // Without a geometry config the detector size stays 0 and any per-bin count is accepted.
+    const std::uint32_t rays = probe.detNz > 0 && probe.detNx > 0
+        ? static_cast<std::uint32_t>(probe.detNz * probe.detNx) : 4u;
+    ASSERT_GT(angles, 0u);
+    const auto writeNorm = [&](const std::filesystem::path& path) {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(&angles), sizeof(angles));
+        out.write(reinterpret_cast<const char*>(&rays), sizeof(rays));
+        const std::vector<double> ones(static_cast<size_t>(angles) * rays, 1.0);
+        out.write(reinterpret_cast<const char*>(ones.data()),
+                  static_cast<std::streamsize>(ones.size() * sizeof(double)));
+    };
+    const auto cliNorm = root / "cli_norm.bin";
+    const auto recipeNorm = root / "recipe_norm.bin";
+    writeNorm(cliNorm);
+    writeNorm(recipeNorm);
+    argv.push_back("-normFactorFile");
+    argv.push_back(cliNorm.string());
+
+    // Blank recipe value is not a configured field: the CLI file survives the protected reapply.
+    spect::cli::ReconArgs blankArgs;
+    ASSERT_TRUE(parseReconArgsForTest(argv, blankArgs));
+    EXPECT_EQ(std::filesystem::path(blankArgs.normFactorFile), cliNorm);
+
+    // A filled recipe value still takes priority over the CLI under protection.
+    writeConfig(recipeNorm.string());
+    spect::cli::ReconArgs filledArgs;
+    ASSERT_TRUE(parseReconArgsForTest(argv, filledArgs));
+    EXPECT_EQ(std::filesystem::path(filledArgs.normFactorFile), recipeNorm);
+
+    std::filesystem::remove_all(root);
+}
+
 TEST(IOTest, ParserAcceptsCtacFactorCacheDir) {
     spect::cli::ReconArgs args;
     auto argv = compactBaseArgs();

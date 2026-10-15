@@ -460,6 +460,15 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
             protectedConfig.erase("InputOutput", key);
         for (const auto* key : {"threads", "verbosity"})
             protectedConfig.erase("Basic", key);
+        // A blank value (e.g. "factor_file =") is not a configured field; it must not
+        // erase the matching CLI option such as -normFactorFile.
+        std::vector<std::pair<std::string, std::string>> blankKeys;
+        for (const auto& [section, entries] : protectedConfig.getSections())
+            for (const auto& [key, value] : entries)
+                if (value.find_first_not_of(" \t\r\n") == std::string::npos)
+                    blankKeys.emplace_back(section, key);
+        for (const auto& [section, key] : blankKeys)
+            protectedConfig.erase(section, key);
         applyConfig(args, protectedConfig);
     }
 

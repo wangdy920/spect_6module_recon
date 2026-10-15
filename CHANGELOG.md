@@ -8,6 +8,11 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-15: with `recon_sections_override_cli=true`, blank configured values
+  (for example a recipe's `[Normalization] factor_file =`) no longer erase the
+  matching CLI option; only filled reconstruction fields override the CLI, as
+  documented. Fixes `-normFactorFile` being silently dropped by the packaged
+  recipes. Filled values keep their priority; formats and defaults unchanged.
 - 2026-10-13: numerator and sensitivity share one branch-metadata cache update,
   fixing stale GPU symmetry tables when ROT90 and ROT90Z calls are interleaved.
   Removed unused internal paths, redundant preparation/copies and covered event
