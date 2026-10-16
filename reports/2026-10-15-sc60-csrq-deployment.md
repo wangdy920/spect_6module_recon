@@ -139,6 +139,8 @@ CSRB 自身浮点次序噪声基线（同 EXE、同矩阵，`SPECT_CSRB_SCATTER_
 - `E:/Xiang_Project/SPECT/6Module/release/devices_20261015_cfg/SC60-MPH3/SPECT_Core.zip`
 - `E:/Xiang_Project/SPECT/6Module/release/devices_20261015_cfg/PSC30-MPH6/SPECT_Core.zip`
 
+2026-10-16 清理：`devices_20261015` 与 `devices_20261015_cfg` 已从 `release/` 删除。留下的设备包是同日稍后组装的 `release/devices/SC60-MPH3/SPECT_Core.zip` 与 `release/devices/PSC30-MPH6/SPECT_Core.zip`（重建仍是 `20261015+b2a4970`，预处理 `20261015-pixel-cache`，工具 `fa5950a`，SC60 仍指向 CSRQ、`bed_step_mm=12`）。此前已部署的 10 月 13 日包（重建 `20261013+ce87397`）在 `release/history/20261016_before_sigma1p6/devices/`。
+
 兼容性：上位机仍可传 `-bedOverlap`（被忽略）。若现场任务 CONF 自带 `[Normalization]` 且填了值，新 EXE 会拒绝运行，需把路径移到全局 `factor_file_<核素>`；留空的旧 `[Normalization] factor_file =` 不受影响。本地 SC60 CSRQ 目录当前有百度网盘上传临时文件（`chunk_007…011.csrq.baiduyun.uploading.cfg`），wrapper 会拒绝该目录；本次端到端使用仅含矩阵文件的硬链接目录。复现脚本：`recon_out/csrq_deploy_20261015/sequence5.py`，结果 `config_contract/summary.json`。
 
 ## 复现
