@@ -111,6 +111,36 @@ CSRB 自身浮点次序噪声基线（同 EXE、同矩阵，`SPECT_CSRB_SCATTER_
 
 本机运行期间他人会话也在使用 GPU（EXE 自带独占锁）；所有计时臂均在确认无其他重建进程后启动，运行中未出现他人进程。
 
+## 10. 补记：配置合同简化（`b2a4970`）
+
+审查结论与修改：
+
+| 问题 | 处理 |
+|---|---|
+| 空值语义不一致：字符串键 `key =` 会清空下层（profile 的 `factor_file =` 清掉全局 norm），数值键空值继承，受保护重放时又让位 CLI | `ConfigParser` 不再存储空值：任何一层的 `key =` 都等同未配置，不清空下层、不压制 CLI；取代 826e3f7 仅在重放阶段过滤空值的做法 |
+| norm 位置分散：6 份共享 profile 的 `[Normalization] factor_file`、全局 `[MultiBed] normalization_factor_file`、CLI；共享 profile 无法表达“设备×核素”标定 | 只在全局 INI 绑定 `[Normalization] factor_file_Tc99m / factor_file_Lu177`（joint 第二窗 `factor_file2_Lu177`），按本次核素在全部层合并后选取；profile 中的 `[Normalization]`、旧键、未知键直接报错并给出迁移提示；显式 `-normFactorFile` 替换绑定 |
+| `bed_overlap` 与 `bed_step_mm` 冗余：重建总是按 step 重算 overlap 并告警，SC60 联合网格完全忽略 overlap | 只保留 `bed_step_mm`；所有床间 `overlap = baseNz - round(step/voxel_z)`；`bed_overlap` / `-bedOverlap` 仍被接受但忽略，不输出信息；删除固定 5 槽表、钳位与“re-derived”告警 |
+| 全局 INI 中从不开启、且等于程序默认值的键 | 删除 in-recon Butterworth/Gaussian、输出 Gaussian、全局 `[Regularization]`、`detz_*`、`crop_end`、`seam_xy_align` 及注释掉的旧键 |
+| `profiles/sc60_osem1000.conf` 过时（SC60 已改为共享 profile + 扫描仪 INI + 设备全局 INI），且依赖空值清空全局键 | 移至 `config/historical/`；构建改为镜像 `config/profiles`、`config/scanners`，旧文件不再残留在 `bin/Release/config` |
+
+验证：
+
+| 检查 | 结果 |
+|---|---|
+| ctest（`-j 1`） | 361 通过，4 项原有数据条件跳过；`-j 4` 时两项 CSRQ joint 用例因共用临时目录偶发冲突，串行重跑均通过 |
+| `-dumpConf`：旧 EXE+旧配置 vs 新 EXE+新配置，5 份 profile、Tc/Lu、单/多床，以及 20261015 两个设备包配置 | 除删除的 `bed_overlap`、`normalization_factor_file` 两行外完全一致 |
+| 原生观测模型（无/有背景，norm 经全局 `factor_file_Lu177` 绑定） | 64 组 + 2 组 operator PSF+ROI 闭合全部 PASS |
+| PSC Lu177 两床（208 ZFOLD CSRB，5×10，center66_cosine10 拼接） | 新旧 EXE 输出均为 122 层；relL2 1.96e-7（primary）/ 2.33e-7（butter），mask 完全一致 |
+| SC60 新包端到端（`--require-matrix` 校验 + 包内 wrapper，8 床 50×10） | 校验 PASS；输出 450 层（240+7×30）；与 4e89651 包结果 relL2 1.8e-7；含冷分母总计约 109 s |
+| `test_release_tooling.py`、两个新设备包 `verify_deployment` | 全部 PASS |
+
+可部署包（重建 `20261015+b2a4970`，干净 worktree `D:/Projects/SPECT-recon-release-b2a4970`；6Module 工具 `4fb2536`，分支 `sc60-csrq-deploy-20261015`，未合入 main）：
+
+- `E:/Xiang_Project/SPECT/6Module/release/devices_20261015_cfg/SC60-MPH3/SPECT_Core.zip`
+- `E:/Xiang_Project/SPECT/6Module/release/devices_20261015_cfg/PSC30-MPH6/SPECT_Core.zip`
+
+兼容性：上位机仍可传 `-bedOverlap`（被忽略）。若现场任务 CONF 自带 `[Normalization]` 且填了值，新 EXE 会拒绝运行，需把路径移到全局 `factor_file_<核素>`；留空的旧 `[Normalization] factor_file =` 不受影响。本地 SC60 CSRQ 目录当前有百度网盘上传临时文件（`chunk_007…011.csrq.baiduyun.uploading.cfg`），wrapper 会拒绝该目录；本次端到端使用仅含矩阵文件的硬链接目录。复现脚本：`recon_out/csrq_deploy_20261015/sequence5.py`，结果 `config_contract/summary.json`。
+
 ## 复现
 
 ```powershell
