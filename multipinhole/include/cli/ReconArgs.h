@@ -111,6 +111,12 @@ struct ReconArgs {
     float cylinderDiameterMM = 30.0f;
     float cylinderHeightMM = 21.6f;
     bool cylinderDimsExplicit = false;
+    bool cylinderDimsSingleConfigured = false;
+    float cylinderDiameterSingleMM = 30.0f;
+    float cylinderHeightSingleMM = 21.6f;
+    bool cylinderDimsMultiConfigured = false;
+    float cylinderDiameterMultiMM = 36.0f;
+    float cylinderHeightMultiMM = 66.0f;
     double cylCenterX = std::numeric_limits<double>::quiet_NaN();
     double cylCenterY = std::numeric_limits<double>::quiet_NaN();
     double cylCenterZ = std::numeric_limits<double>::quiet_NaN();

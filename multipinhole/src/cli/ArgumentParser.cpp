@@ -21,6 +21,20 @@ int parseInteger(const std::string& value, int minimum, const char* option) {
     return result;
 }
 
+void parseCylinderDims(const std::string& value, const char* key,
+                        float& diameterMm, float& heightMm) {
+    const auto parts = split(value, ',');
+    if (parts.size() < 2)
+        throw std::runtime_error(std::string(key) + " must be diameter,height");
+    const double diameter = std::stod(parts[0]);
+    const double height = std::stod(parts[1]);
+    if (!std::isfinite(diameter) || !std::isfinite(height) ||
+        diameter <= 0.0 || height <= 0.0)
+        throw std::runtime_error(std::string(key) + " must contain two positive finite values");
+    diameterMm = static_cast<float>(diameter);
+    heightMm = static_cast<float>(height);
+}
+
 bool isPublicRegularizer(RegType type) {
     return type == RegType::None || type == RegType::TVIsotropic ||
            type == RegType::RDP;
@@ -1698,12 +1712,20 @@ void ArgumentParser::applyConfig(ReconArgs& a, const ConfigParser& cfg) {
 
     std::string cylD = cfg.getString("Mask", "cylinder_dims");
     if (!cylD.empty()) {
-        auto cd = split(cylD, ',');
-        if (cd.size() >= 2) {
-            a.cylinderDiameterMM = (float)std::stod(cd[0]);
-            a.cylinderHeightMM = (float)std::stod(cd[1]);
-            a.cylinderDimsExplicit = true;
-        }
+        parseCylinderDims(cylD, "Mask.cylinder_dims", a.cylinderDiameterMM, a.cylinderHeightMM);
+        a.cylinderDimsExplicit = true;
+    }
+    std::string cylSingle = cfg.getString("Mask", "cylinder_dims_single");
+    if (!cylSingle.empty()) {
+        parseCylinderDims(cylSingle, "Mask.cylinder_dims_single",
+                          a.cylinderDiameterSingleMM, a.cylinderHeightSingleMM);
+        a.cylinderDimsSingleConfigured = true;
+    }
+    std::string cylMulti = cfg.getString("Mask", "cylinder_dims_multi");
+    if (!cylMulti.empty()) {
+        parseCylinderDims(cylMulti, "Mask.cylinder_dims_multi",
+                          a.cylinderDiameterMultiMM, a.cylinderHeightMultiMM);
+        a.cylinderDimsMultiConfigured = true;
     }
     std::string cylCenter = cfg.getString("Mask", "cylinder_center");
     if (!cylCenter.empty()) {

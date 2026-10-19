@@ -8,6 +8,12 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-19: mask dimensions are explicit in `spect_config.ini`.
+  `[Mask] cylinder_dims_single` and `cylinder_dims_multi` select the
+  bed-count-specific ROI; a generic `cylinder_dims` overrides both and remains
+  the per-run `-cyl` equivalent. PSC ships 30x21.6 mm / 36x66 mm, while the
+  SC60 device package removes those defaults and sets 36x36 mm. Deployment
+  comments were reduced to the necessary ownership and option notes.
 - 2026-10-19: configuration ownership is now explicit. Shared algorithm profiles
   no longer contain matrix IDs, matrix paths or `[MultiBed]`; matrix resources
   (`input_mode`, `chunk_format`, `sysmat_high`, `sysmat_low`) come only from

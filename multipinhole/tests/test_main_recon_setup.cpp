@@ -167,6 +167,46 @@ TEST(ReconSetupTest, PrepareBedSetupCanKeepLegacySingleBedCrop) {
   EXPECT_NE(result.summary.find("legacy 72-layer"), std::string::npos);
 }
 
+TEST(ReconSetupTest, PrepareBedSetupUsesConfiguredSingleBedRoi) {
+  ReconArgs args;
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.dz = 0.3;
+  args.projPath = "Bed1.bin";
+  args.cylinderDimsSingleConfigured = true;
+  args.cylinderDiameterSingleMM = 28.0f;
+  args.cylinderHeightSingleMM = 20.0f;
+  args.cylinderDimsMultiConfigured = true;
+  args.cylinderDiameterMultiMM = 40.0f;
+  args.cylinderHeightMultiMM = 60.0f;
+
+  (void)prepareBedSetup(args);
+
+  EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 28.0f);
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 20.0f);
+}
+
+TEST(ReconSetupTest, PrepareBedSetupUsesConfiguredMultiBedRoi) {
+  ReconArgs args;
+  args.Nx = 120;
+  args.Ny = 120;
+  args.Nz = 220;
+  args.dz = 0.3;
+  args.projPaths = {"Bed1.bin", "Bed2.bin"};
+  args.cylinderDimsSingleConfigured = true;
+  args.cylinderDiameterSingleMM = 28.0f;
+  args.cylinderHeightSingleMM = 20.0f;
+  args.cylinderDimsMultiConfigured = true;
+  args.cylinderDiameterMultiMM = 40.0f;
+  args.cylinderHeightMultiMM = 60.0f;
+
+  (void)prepareBedSetup(args);
+
+  EXPECT_FLOAT_EQ(args.cylinderDiameterMM, 40.0f);
+  EXPECT_FLOAT_EQ(args.cylinderHeightMM, 60.0f);
+}
+
 TEST(ReconSetupTest, PrepareBedSetupPreservesExplicitCylinderRoi) {
   ReconArgs args;
   args.Nx = 120;

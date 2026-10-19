@@ -68,10 +68,20 @@ void applyFixedSixModuleRoiDefaults(ReconArgs &args, int bedCount) {
   if (args.cylinderDimsExplicit)
     return;
   if (bedCount == 1) {
+    if (args.cylinderDimsSingleConfigured) {
+      args.cylinderDiameterMM = args.cylinderDiameterSingleMM;
+      args.cylinderHeightMM = args.cylinderHeightSingleMM;
+      return;
+    }
     args.cylinderDiameterMM = static_cast<float>(
         spect::core::sixmodule::kSingleBedRoiDiameterMm);
     args.cylinderHeightMM = static_cast<float>(
         spect::core::sixmodule::kSingleBedRoiHeightMm);
+    return;
+  }
+  if (args.cylinderDimsMultiConfigured) {
+    args.cylinderDiameterMM = args.cylinderDiameterMultiMM;
+    args.cylinderHeightMM = args.cylinderHeightMultiMM;
     return;
   }
   args.cylinderDiameterMM = static_cast<float>(

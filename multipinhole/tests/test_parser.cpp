@@ -1229,6 +1229,26 @@ TEST(IOTest, SharedProfileCannotOwnBedGeometryOrMatrixResources) {
     std::filesystem::remove_all(root);
 }
 
+TEST(IOTest, MaskModeSpecificCylinderDimensionsAreParsed) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_mask_dims";
+    std::filesystem::create_directories(root);
+    const auto config = root / "mask.ini";
+    { std::ofstream f(config); f << "[Mask]\nuse_cylinder=true\n"
+        "cylinder_dims_single=28,20\ncylinder_dims_multi=40,60\n"; }
+    auto argv = spect::io::test::compactBaseArgs();
+    argv[2] = config.string();
+    spect::cli::ReconArgs args;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(argv, args));
+    EXPECT_TRUE(args.useCylindricalMask);
+    EXPECT_TRUE(args.cylinderDimsSingleConfigured);
+    EXPECT_FLOAT_EQ(args.cylinderDiameterSingleMM, 28.0f);
+    EXPECT_FLOAT_EQ(args.cylinderHeightSingleMM, 20.0f);
+    EXPECT_TRUE(args.cylinderDimsMultiConfigured);
+    EXPECT_FLOAT_EQ(args.cylinderDiameterMultiMM, 40.0f);
+    EXPECT_FLOAT_EQ(args.cylinderHeightMultiMM, 60.0f);
+    std::filesystem::remove_all(root);
+}
+
 TEST(IOTest, JointEnergyWeightsMustBeFiniteAndPositive) {
     for (const auto &weights : {"inf,1", "1,inf", "nan,1", "1,nan", "0,1", "-1,1", "0.1036,0.0617"}) {
         auto argv = spect::io::test::compactBaseArgs();
