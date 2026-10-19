@@ -75,6 +75,14 @@ void checkNormalizationOwner(const ConfigParser& cfg, const std::string& path,
                                      "'; use factor_file_Tc99m, factor_file_Lu177 or factor_file2_Lu177.");
 }
 
+// Geometry/output policy belongs to the deployment config. In particular a
+// shared recipe must never override the measured bed step or output flips.
+void checkRecipeOwnership(const ConfigParser& cfg, const std::string& path) {
+    if (cfg.hasSection("MultiBed"))
+        throw std::runtime_error(path + ": reconstruction recipes must not set [MultiBed]; "
+                                 "bed_step_mm and output flips belong in spect_config.ini.");
+}
+
 } // namespace
 
 std::filesystem::path ArgumentParser::executableDir(char** argv) {
@@ -208,14 +216,40 @@ void ArgumentParser::applyScannerMatrices(ReconArgs& a, char** argv) {
     a.scannerName = settings.getString("Scanner", "name");
     if (a.scannerName != file.stem().string())
         throw std::runtime_error("Scanner identity disagrees with config filename");
-    if (a.scannerName.empty() || !settings.hasSection(a.isotope))
+    if (a.scannerName.empty())
+        throw std::runtime_error("Scanner config has no [Scanner] name");
+    // Legacy/test invocations may pass an explicit matrix without selecting an
+    // isotope. There is no scanner binding to apply in that case.
+    if (a.isotope.empty())
+        return;
+    if (!settings.hasSection(a.isotope))
         throw std::runtime_error("Scanner config has no binding for isotope " + a.isotope);
-    a.projectionInputMode = settings.getString(a.isotope, "input_mode");
-    if (a.projectionInputMode != "single" && a.projectionInputMode != "merged" && a.projectionInputMode != "prefer_split")
-        throw std::runtime_error("input_mode must be single, merged or prefer_split");
+
+    const std::string inputMode = settings.getString(a.isotope, "input_mode");
+    if (inputMode != "single" && inputMode != "merged" &&
+        inputMode != "joint" && inputMode != "prefer_split")
+        throw std::runtime_error("input_mode must be single, merged, joint or prefer_split");
+    a.projectionInputMode = inputMode;
+
+    const std::string configuredModel = a.projectionModel;
+    if (!configuredModel.empty() && configuredModel != "single" &&
+        configuredModel != "merged" && configuredModel != "joint")
+        throw std::runtime_error("projection_model must be single, merged or joint.");
+
     const bool secondInput = !a.projPath2.empty() || !a.projPaths2.empty();
     const bool firstInput = !a.projPath.empty() || !a.projPaths.empty();
-    if (a.projectionInputMode == "prefer_split" && firstInput && !secondInput && a.projectionModel != "merged") {
+    if (!configuredModel.empty()) {
+        const bool compatible =
+            (configuredModel == "single" && inputMode == "single") ||
+            (configuredModel == "merged" && (inputMode == "merged" || inputMode == "prefer_split")) ||
+            (configuredModel == "joint" && (inputMode == "joint" || inputMode == "prefer_split"));
+        if (!compatible)
+            throw std::runtime_error(
+                "projection_model=" + configuredModel + " conflicts with scanner input_mode=" +
+                inputMode + " for " + a.isotope + " (" + a.scannerName +
+                "); the shared profile and scanner binding must agree.");
+    }
+    if (inputMode == "prefer_split" && firstInput && !secondInput && configuredModel != "merged") {
         auto paths = a.projPaths;
         if (paths.empty()) paths.push_back(a.projPath);
         for (const auto& path : paths) {
@@ -225,11 +259,30 @@ void ArgumentParser::applyScannerMatrices(ReconArgs& a, char** argv) {
                     throw std::runtime_error("Split projection requires both input lists; cannot use it as merged data");
         }
     }
-    if (a.projectionModel == "merged" || a.projectionInputMode == "merged") a.projectionModel = "merged";
-    else if (a.projectionInputMode == "single") a.projectionModel = "single";
-    else a.projectionModel = (secondInput || !firstInput) ? "joint" : "merged";
+
+    if (!configuredModel.empty())
+        a.projectionModel = configuredModel;
+    else if (inputMode == "merged")
+        a.projectionModel = "merged";
+    else if (inputMode == "single")
+        a.projectionModel = "single";
+    else if (inputMode == "joint")
+        a.projectionModel = "joint";
+    else
+        a.projectionModel = secondInput ? "joint" : "merged";
+
+    if (a.projectionModel == "joint" && !secondInput)
+        throw std::runtime_error("joint projection model requires a second projection input (-df2/-dfList2).");
     if (a.projectionModel != "joint" && secondInput)
         throw std::runtime_error("Single/merged input mode cannot consume a second projection list");
+
+    // A scanner binding is the single authority for matrix resources. Keep the
+    // legacy profile-owned matrix_id path only for configs without a scanner INI.
+    if (!a.matrixId.empty() || !a.matrixId2.empty())
+        throw std::runtime_error(
+            "Scanner config is authoritative for matrix resources; remove matrix_id/matrix_id2 "
+            "from the shared profile. Use -chunkCSRDir only for an explicit per-run override.");
+
     auto matrix = [&](const char* key) {
         const auto value = settings.getString(a.isotope, key);
         if (value.empty()) throw std::runtime_error(std::string("Selected projection requires ") + key);
@@ -242,7 +295,7 @@ void ArgumentParser::applyScannerMatrices(ReconArgs& a, char** argv) {
         if (!a.chunkCSRDir2Explicit) a.chunkCSRDir2 = matrix("sysmat_low");
     } else {
         if (a.chunkCSRDir2Explicit || !a.normFactorFile2.empty() ||
-            (a.projectionInputMode == "prefer_split" && !a.normFactorFile.empty()))
+            (inputMode == "prefer_split" && !a.normFactorFile.empty()))
             throw std::runtime_error("Merged input cannot reuse a second matrix or split-window normalization");
         a.chunkCSRDir2.clear();
         a.energyWindowWeights.clear();
@@ -419,6 +472,7 @@ ArgumentParser::ParseResult ArgumentParser::parse(int argc, char** argv,
         ConfigParser recipe;
         if (!recipe.load(algoConfPath))
             throw std::runtime_error("Cannot load reconstruction recipe: " + algoConfPath);
+        checkRecipeOwnership(recipe, algoConfPath);
         checkNormalizationOwner(recipe, algoConfPath, false);
         if (recipe.hasKey("SystemMatrix", "matrix_id") ||
             recipe.hasKey("SystemMatrix", "chunk_csr_dir") ||
@@ -1118,14 +1172,14 @@ void ArgumentParser::registerHandlers() {
     }, {"-bedOverlap"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         const double stepMm = std::stod(
-            ArgumentParser::getRequiredArg(i, argc, argv, "-bedStepMm"));
+            ArgumentParser::getRequiredArg(i, argc, argv, "-bedStepmm"));
         if (!std::isfinite(stepMm) || stepMm <= 0.0) {
-            std::cerr << "Error: -bedStepMm must be finite and positive.\n";
+            std::cerr << "Error: -bedStepmm must be finite and positive.\n";
             return false;
         }
         a.bedStepMm = stepMm;
         return true;
-    }, {"-bedStepMm"});
+    }, {"-bedStepmm", "-bedStepMm"});
     bindHandlerAliases([](int& i, int argc, char** argv, ReconArgs& a) {
         return ArgumentParser::parseOnOffOptional(
             i, argc, argv, a.singleBedStepAligned);
@@ -2637,7 +2691,7 @@ void ArgumentParser::printUsage() {
     std::cout << "  -badDetectorFile <file>  Skip global 0..95 or link/FPGA/dector blocks in compact identity reconstruction\n\n";
 
     std::cout << "=== Multi-Bed ===\n";
-    std::cout << "  -bedStepMm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z), overlap = baseNz - stride\n";
+    std::cout << "  -bedStepmm <mm>              Scanner bed step in mm (default 16.8); stride = round(mm/voxel_z), overlap = baseNz - stride\n";
     std::cout << "  -singleBedStepAligned <0|1>  Single-bed crop = step+10 (default 1); 0 keeps legacy 72 layers\n";
     std::cout << "  -detZEdgeCensor <k>       Censor k detZ edge rows per side in compact numerator+denominator (default 0)\n";
     std::cout << "  -detZRowWeightsFile <f>   Efficiency weights: text detZ/per-bin/full projection; sensitivity only\n";

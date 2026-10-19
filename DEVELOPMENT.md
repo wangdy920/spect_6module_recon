@@ -115,7 +115,7 @@ python tools/verify_deployment.py --release-root release/SPECT_Core
 python tools/test_universal_release.py --release-root release/SPECT_Core --reconstruct
 ```
 每条成功才继续。打包器负责复制二进制/依赖/模板/两设备资源、生成README及manifest，不编译EXE，也不包括矩阵和原始数据。
-六份算法CONF从指定重建输入复制；通用包会移除设备matrix_id，按重建config/scanners/<SN>.ini的核素节绑定，05/06都用原生CSRB。SN模板源在recon/multipinhole/config/scanners；预处理核素JSON只维护资源。构建负责复制SN模板，打包检查路径与资产清单一致；外部矩阵路径在部署时配置。
+五份正式算法CONF只含算法、核素和projection_model，不写matrix_id、设备几何或[MultiBed]；矩阵资源只由重建config/scanners/<SN>.ini的核素节绑定，设备包按当前SN设置scanner_config，通用包由wrapper传入-scannerConf。SN模板源在recon/multipinhole/config/scanners；预处理核素JSON只维护资源。构建负责复制SN模板，打包从scanner INI派生资产清单并检查projection_model/input_mode一致；外部矩阵路径在部署时配置。
 不要把独立RC的历史05 CSRQ绑定当成通用包05。CSRQ仍实验性。
 test_universal_release用合成矩阵验证PSC Tc、PSC Lu、SC60 Tc的实际一轮GPU入口/几何，不证明实采质量。
 默认完整矩阵未安装时verify的4个WARN允许用于“包完整性”交付；现场须加require-matrix。

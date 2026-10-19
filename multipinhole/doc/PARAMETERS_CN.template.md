@@ -24,13 +24,13 @@ cd D:\path\to\<package_root>
 -algoConf D:\custom\algo_mlem.conf
 ```
 
-系统矩阵按合并配置解析：`[SystemMatrix] root` 相对 EXE，`matrix_id/matrix_id2` 精确匹配 `root/id` 或 `root/isotope/id`，缺失或歧义均失败。显式 `-chunkCSRDir/-chunkCSRDir2` 服从上述优先级；旧配置无 ID 时才使用 `default_chunk_csr_dir` 或唯一目录发现。不要为多个核素保留一个无身份的默认矩阵。
+矩阵资源按设备绑定解析：`scanners/<SN>.ini` 的 `sysmat_high/sysmat_low` 是该设备/核素的唯一真值，路径相对重建 EXE。共享 `profiles/*.conf` 不写 `matrix_id`、矩阵路径或 `chunk_format`；`projection_model` 只声明算法模型，必须与 scanner 的 `input_mode` 相容。显式 `-chunkCSRDir/-chunkCSRDir2` 服从部署优先级；不要把矩阵 ID 再复制回 profile。
 
 denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为固定文件，否则在 `compact_denom_cache_dir` 下按 manifest hash 选择 `auto_<hash>.mhd`；配置相对路径按 EXE 解析，默认 `.\bin\cache\compact_denom\`。CLI 显式相对缓存路径按 CWD 解析。身份绑定实际两矩阵、能窗权重、norm/行权重、PSF、Mask、床位及子集；改迭代数、β、仅输出滤波不要求清缓存。
 
 ## 默认 Tc OSEM 与基础 MLEM
 
-先按所选方案的 matrix_id 放置矩阵。默认 Tc OSEM 为50×10；以下显式演示全数据 MLEM，需确认优先级允许 CLI 覆盖：
+先按 `scanners/<SN>.ini` 的 `sysmat_high/sysmat_low` 放置矩阵。默认 Tc OSEM 为50×10；以下显式演示全数据 MLEM，需确认优先级允许 CLI 覆盖：
 
 ```powershell
 .\bin\SPECT_recon.exe `
@@ -42,7 +42,7 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 说明：
 - `-opti mlem` 默认使用10个角度子集（OSEM），BSREM共用这套划分。`-it A:1`恢复完整数据更新；子集数必须整除矩阵的compact角度数。同格式双窗CSRB及实验CSRQ均有N10和子集CTAC路径；CSRQ N>1 CTAC为2026-10-09工作树候选，尚待GPU数值回归、未发布。旧POSEM像素划分已退出当前接口。
 - `-config` 不需要显式传。
-- 多矩阵用所选方案的精确 `matrix_id/matrix_id2`；CLI覆盖受优先级开关控制。
+- 多矩阵由 scanner INI 的 `sysmat_high/sysmat_low` 绑定；profile 只声明 `projection_model=single/merged/joint`，CLI覆盖受优先级开关控制。
 - 投影路径仍需要按实际数据传入。
 
 ## 多床位
@@ -58,7 +58,7 @@ denom cache 也服从配置优先级。配置的 `compact_denom_cache_path` 为�
 
 固定合同：
 - PSC 最多 5 个床位（`matrix_grid_output=true` 最多 16）；路径含 `BedN` 时按床号排序，且必须是连续子集。`Bed1` 是最小 physical-Z 床，床号每增加 1 向较大 physical Z 移动 `16.8 mm`。少床不补虚拟床。
-- `-bedStepMm <mm>`（INI `[MultiBed] bed_step_mm`，PSC 默认 `16.8`）是唯一的多床几何输入：`step = round(bed_step_mm / voxel_z)`，每个床间 `overlap = baseNz - step`（220 层 0.3 mm 为 `220 - 56 = 164`）。所有床间使用同一步进；旧 `-bedOverlap` / `bed_overlap` 仍被接受但忽略，不再需要配置。
+- `-bedStepmm <mm>`（INI `[MultiBed] bed_step_mm`，PSC 默认 `16.8`）是唯一的多床几何输入：`step = round(bed_step_mm / voxel_z)`，每个床间 `overlap = baseNz - step`（220 层 0.3 mm 为 `220 - 56 = 164`）。所有床间使用同一步进；旧 `-bedOverlap` / `bed_overlap` 仍被接受但忽略，不再需要配置。
 - `[MultiBed] z_bed_flip=1` 是发布默认，只定义每床 local system-matrix Z 与 reconstruction-storage Z 的关系；`-attMap` 使用前者，`-regCT` 使用后者。不要通过逆序床号或整幅 Z 翻转二次补偿。
 - 保存阶段只保留一条路径：每床中心 `step + 10` 层（260601 为 66 层）-> prototype log-ratio median/MAD gain-fit（Bed1 锚定，始终应用原型 log-ratio 链（无可靠性门））-> `step` 层步进 -> 10 层归一化 cosine 融合（沿输出 Z，入口保持上一床；`z_bed_flip` 只反转存储与增益窗）。
 - 输出尺寸为 `100×100×[crop + (床数 - 1)×step]`（260601 为 `[66 + (床数 - 1)×56]`）。单床ROI为 `30 mm × 21.6 mm`，多床ROI为 `36 mm × 66 mm`；最终裁剪还受 `single_bed_step_aligned` 影响，尺寸以实际MHD为准，不固定假设72层。
@@ -128,7 +128,7 @@ xy_out_rotation_deg = 0
 
 `-isotope Tc99m|Lu177` 是可选的采集身份断言；部署 wrapper 自动从预处理记录传入。全局配置用 `default_config_Tc99m` / `default_config_Lu177` 选择核素默认方案。已有显式 `-algoConf` 始终替换默认方案，方案核素与采集不符时失败。
 
-`[SystemMatrix] root` 相对 EXE，`matrix_id` / `matrix_id2` 精确查找 `root/id` 或 `root/isotope/id`；找不到或同时存在两份均失败。旧 `-chunkCSRDir` / `-chunkCSRDir2` 继续支持；配置优先模式下以配置为准。几何仍由矩阵 metadata 检查。
+`[SystemMatrix] root` 相对 EXE；具体矩阵目录由 `scanners/<SN>.ini` 的 `sysmat_high/sysmat_low` 绑定。旧 `-chunkCSRDir` / `-chunkCSRDir2` 继续支持；配置优先模式下以 scanner 绑定和优先级策略为准。几何仍由矩阵 metadata 检查。
 
 Lu-177 joint 固定本批验证的通道顺序 **208、113 keV**，`energy_window_weights=0.1036,0.0617`。权重进入预测计数一次，并非人为给某张图加权平均，也不能凭权重大小认定某窗的信息量占比。
 
@@ -150,6 +150,6 @@ Lu-177 正式重建方案读取合并 `BedN.bin` 与单份系统矩阵；预处�
 | standard_Tc99m_OSEM.conf | Tc单141 SCALE2 CSRB；Tc默认 | OSEM无正则 | 50×10 | — |
 | standard_Lu177_OSEM.conf | Lu合并窗＋单208 CSRB；Lu默认 | OSEM无正则 | 50×10 | — |
 
-正式命名为 `用途[_应用][_核素]_算法[_正则].conf`，不含编号、迭代次数、joint或detail。核素专用配方保留核素；mouse省略应用时指全身取向，bone/tumor仅用于独立验证的专用参数。通用名称仅用于不绑定核素的配方。历史分窗配方位于 `config/historical/05_mouse_joint_rdp30.conf`；SC60长迭代仿真验证方案 `sc60_osem1000.conf` 已移至 `config/historical/`。SC60 使用相同方案，设备差异写在 `scanners/SC60-MPH3.ini` 与 SC60 全局配置。
+正式命名为 `用途[_应用][_核素]_算法[_正则].conf`，不含编号、迭代次数、joint或detail。核素专用配方保留核素；mouse省略应用时指全身取向，bone/tumor仅用于独立验证的专用参数。通用名称仅用于不绑定核素的配方。历史分窗配方 `config/historical/05_mouse_joint_rdp30.conf` 与 SC60 长迭代快照 `sc60_osem1000.conf` 仅用于来源追溯；它们不再拥有设备几何或矩阵资源。当前 SC60 使用相同算法 profiles，设备差异只写在 `scanners/SC60-MPH3.ini` 与 SC60 全局配置。
 
 这些方案适用于原实验范围，不是所有系统或IQ标定下的全局最优。两种Lu模型的β不直接互换。源配置默认false；2026-09-14的E盘6Module部署保留true。6Module部署EXE位于 `bin/recon/`，独立重建RC位于 `bin/`，两者的相对配置规则相同。详细上位机迁移见 `Recon_Interface_Migration_Field_CN.md`（源码文档），部署包见其wrapper指南。

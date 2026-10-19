@@ -492,11 +492,21 @@ TEST(IOTest, NormalizationRequiresPairedWindowsAndAcceptsBackground) {
 TEST(IOTest, BedStepMustBeFiniteAndPositiveOnCli) {
     for (const auto *step : {"0", "-1", "nan", "inf", "8.0"}) {
         auto argv = compactBaseArgs();
-        argv.insert(argv.end(), {"-bedStepMm", step});
+        argv.insert(argv.end(), {"-bedStepmm", step});
         spect::cli::ReconArgs args;
         EXPECT_EQ(parseReconArgsForTest(argv, args), std::string(step) == "8.0");
     }
 }
+TEST(IOTest, BedStepCanonicalSpellingAndLegacyAlias) {
+    for (const auto *flag : {"-bedStepmm", "-bedStepMm"}) {
+        auto argv = compactBaseArgs();
+        argv.insert(argv.end(), {flag, "8.0"});
+        spect::cli::ReconArgs args;
+        EXPECT_TRUE(parseReconArgsForTest(argv, args)) << flag;
+        EXPECT_DOUBLE_EQ(args.bedStepMm, 8.0) << flag;
+    }
+}
+
 TEST(IOTest, DetZRowWeightsReadsFromMultiBedConfig) {
     const auto weightsPath = writeTempDetZWeights("cfg48.txt", 48, 1.0f);
     const auto dir = std::filesystem::temp_directory_path() / "spect_multibed_config_tests";

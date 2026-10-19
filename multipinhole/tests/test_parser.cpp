@@ -1205,6 +1205,30 @@ TEST(IOTest, MatrixIdsSelectUniqueNuclideResourcesAndRejectMismatch) {
     std::filesystem::remove_all(root);
 }
 
+TEST(IOTest, SharedProfileCannotOwnBedGeometryOrMatrixResources) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_profile_ownership";
+    std::filesystem::create_directories(root);
+    const auto config = root / "global.ini";
+    const auto recipe = root / "recipe.conf";
+    const auto scanner = root / "PSC30-MPH6.ini";
+    { std::ofstream f(scanner); f << "[Scanner]\nname=PSC30-MPH6\n[Tc99m]\ninput_mode=single\n"
+        "chunk_format=csrb\nsysmat_high=" << (root / "high").generic_string() << "\nsysmat_low=\n"; }
+    { std::ofstream f(config); f << "[Reconstruction]\ndefault_config=recipe.conf\n"
+        "[SystemMatrix]\nscanner_config=" << scanner.generic_string() << "\n"; }
+    { std::ofstream f(recipe); f << "[Algorithm]\nname=MLEM\niterations=1:1\n"
+        "[Acquisition]\nisotope=Tc99m\nprojection_model=single\n"
+        "[MultiBed]\nbed_step_mm=12\n"; }
+    const std::vector<std::string> base = {"SPECT_recon", "-config", config.string(), "-df", "proj.bin"};
+    spect::cli::ReconArgs geometry;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, geometry));
+    { std::ofstream f(recipe); f << "[Algorithm]\nname=MLEM\niterations=1:1\n"
+        "[Acquisition]\nisotope=Tc99m\nprojection_model=single\n"
+        "[SystemMatrix]\nmatrix_id=profile_owned_matrix\n"; }
+    spect::cli::ReconArgs matrix;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, matrix));
+    std::filesystem::remove_all(root);
+}
+
 TEST(IOTest, JointEnergyWeightsMustBeFiniteAndPositive) {
     for (const auto &weights : {"inf,1", "1,inf", "nan,1", "1,nan", "0,1", "-1,1", "0.1036,0.0617"}) {
         auto argv = spect::io::test::compactBaseArgs();
@@ -1241,6 +1265,9 @@ TEST(IOTest, ScannerMatricesPreserveChannelOrderAndSkipUnusedSlots) {
     base.resize(7);
     spect::cli::ReconArgs partial;
     EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, partial));
+    // Legacy configs without projection_model keep the prefer_split fallback.
+    { std::ofstream f(config); f << "[Acquisition]\nisotope=Lu177\n"
+        "[SystemMatrix]\nenergy_window_weights=0.1036,0.0617\n"; }
     base.back() = "Bed2.bin";
     spect::cli::ReconArgs merged;
     ASSERT_TRUE(spect::io::test::parseReconArgsForTest(base, merged));
@@ -1248,6 +1275,46 @@ TEST(IOTest, ScannerMatricesPreserveChannelOrderAndSkipUnusedSlots) {
     EXPECT_TRUE(merged.chunkCSRDir2.empty());
     EXPECT_TRUE(merged.energyWindowWeights.empty());
     EXPECT_EQ(std::filesystem::path(merged.chunkCSRDir), root / "high");
+    std::filesystem::remove_all(root);
+}
+
+TEST(IOTest, ProjectionModelMustMatchScannerInputMode) {
+    const auto root = std::filesystem::temp_directory_path() / "spect_projection_contract";
+    std::filesystem::create_directories(root);
+    const auto config = root / "global.ini";
+    const auto scanner = root / "PSC30-MPH6.ini";
+    { std::ofstream f(scanner); f << "[Scanner]\nname=PSC30-MPH6\n[Lu177]\ninput_mode=merged\n"
+        "chunk_format=csrb\nsysmat_high=" << (root / "high").generic_string() << "\nsysmat_low=\n"; }
+    const std::vector<std::string> base = {"SPECT_recon", "-config", config.string(),
+        "-scannerConf", scanner.string(), "-df", "Bed1.bin"};
+    { std::ofstream f(config); f << "[Compatibility]\nrecon_sections_override_cli=true\n"
+        "[Acquisition]\nisotope=Lu177\nprojection_model=joint\n";
+    }
+    spect::cli::ReconArgs mismatch;
+    EXPECT_FALSE(spect::io::test::parseReconArgsForTest(base, mismatch));
+    { std::ofstream f(config); f << "[Compatibility]\nrecon_sections_override_cli=true\n"
+        "[Acquisition]\nisotope=Lu177\nprojection_model=merged\n";
+    }
+    spect::cli::ReconArgs merged;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(base, merged));
+    EXPECT_EQ(merged.projectionModel, "merged");
+    EXPECT_EQ(merged.projectionInputMode, "merged");
+    EXPECT_EQ(std::filesystem::path(merged.chunkCSRDir), root / "high");
+    // Explicit joint is a first-class scanner mode, not a silent merged rewrite.
+    { std::ofstream f(scanner); f << "[Scanner]\nname=PSC30-MPH6\n[Lu177]\ninput_mode=joint\n"
+        "chunk_format=csrb\nsysmat_high=" << (root / "high").generic_string()
+        << "\nsysmat_low=" << (root / "low").generic_string() << "\n"; }
+    { std::ofstream f(config); f << "[Compatibility]\nrecon_sections_override_cli=true\n"
+        "[Acquisition]\nisotope=Lu177\nprojection_model=joint\n"
+        "[SystemMatrix]\nenergy_window_weights=0.1036,0.0617\n";
+    }
+    auto jointArgv = base;
+    jointArgv.insert(jointArgv.end(), {"-df2", "Bed1_113.bin"});
+    spect::cli::ReconArgs joint;
+    ASSERT_TRUE(spect::io::test::parseReconArgsForTest(jointArgv, joint));
+    EXPECT_EQ(joint.projectionModel, "joint");
+    EXPECT_EQ(joint.projectionInputMode, "joint");
+    EXPECT_EQ(std::filesystem::path(joint.chunkCSRDir2), root / "low");
     std::filesystem::remove_all(root);
 }
 
@@ -1266,7 +1333,7 @@ TEST(IOTest, ConfiguredScannerOverridesCliAndFailsClosed) {
     auto writeConfig = [&](const char* policy, const char* binding) {
         std::ofstream f(config);
         f << "[Compatibility]\nrecon_sections_override_cli=" << policy
-          << "\n[Acquisition]\nisotope=Lu177\nprojection_model=joint\n"
+          << "\n[Acquisition]\nisotope=Lu177\nprojection_model=merged\n"
              "[SystemMatrix]\nenergy_window_weights=0.1036,0.0617\nscanner_config=" << binding << '\n';
     };
     for (const char* policy : {"true", "false"}) {

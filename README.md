@@ -70,7 +70,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 
 ## Typical workflow
 
-1. **Deploy the matrix**: install the exact `matrix_id` selected by the isotope recipe under the EXE-local `matrix/` root, keeping metadata and chunks together.
+1. **Deploy the matrix**: install the exact matrix directory named by `config/scanners/<SN>.ini` (`sysmat_high`/`sysmat_low`) under the EXE-local `matrix/` root, keeping metadata and chunks together.
 
 2. **Reconstruct** (from a standalone RC package root):
 
@@ -85,7 +85,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 
 | Option | Description |
 | --- | --- |
-| `-chunkCSRDir` / `[SystemMatrix] matrix_id` | Compact CSRB or CSRQ directory. Recipe IDs resolve uniquely under the EXE-relative matrix root; missing/ambiguous IDs fail. Explicit CLI overrides follow `recon_sections_override_cli`, not unconditional CLI precedence. |
+| `-chunkCSRDir` / scanner `sysmat_high` | Compact CSRB or CSRQ directory. The installation binding lives in `config/scanners/<SN>.ini`; shared profiles do not carry matrix IDs. Explicit CLI overrides follow `recon_sections_override_cli`, not unconditional CLI precedence. |
 | `-df <file>` | Projection input can be MAT or the BIN layout written by `6module_bak_src/mat_convert_bin.m`; BIN stores only `num_angles` and `rays_per_angle`, so keep `-detN <detZ,detX>` when detector shape matters. |
 | `[InputOutput] merge_time_segments=true` | With `-df <case/YYYYMMDD_HHMMSS/SPECT>`, scan sibling timestamp directories, require the same `BedN.bin` set and geometry in each, then sum matching beds in memory before reconstruction. Default is `false`; no merged projection files are written. |
 | `[InputOutput] output_filters_overwrite_primary=true` | Write enabled output-stage filters to `<fout>_it<N>.mhd/.raw` in Smooth→Butterworth order. Default `false` preserves the unfiltered primary; `_smooth` and `_butter` remain independent audit copies in both modes. |
@@ -101,7 +101,7 @@ tracks the fresh build and invocation checks separately from image-quality claim
 | `-bProj <file>` | Background/scatter projection term (MAT or BIN); added to forward model `yhat`. |
 | `-dfList <a;b;...>` | Multi-bed projection list (MAT/BIN, comma/semicolon separated); paths containing `BedN` are sorted by numeric bed order; max 5 beds (PSC) or 16 beds with `matrix_grid_output=true`. |
 | `-beds <N|A:B>` | Search `Bed1..BedN` or `BedA..BedB` (`BedK.bin`, case-insensitive) in the `-df` directory (or the directory of one `-df`/`-dfList` file); a missing bed in the range fails, beds outside it are ignored. Same rule for `-df2`. |
-| `-bedStepMm <mm>` | Scanner bed step (INI `[MultiBed] bed_step_mm`, PSC default 16.8). The overlap is always `baseNz - round(step / voxel_z)`; the retired `-bedOverlap` / `bed_overlap` are accepted and ignored. |
+| `-bedStepmm <mm>` | Scanner bed step (INI `[MultiBed] bed_step_mm`, PSC default 16.8). The overlap is always `baseNz - round(step / voxel_z)`; the former `-bedStepMm` spelling is accepted as an alias; the retired `-bedOverlap` / `bed_overlap` are accepted and ignored. |
 | `-bProjList <a;b;...>` | Multi-bed background projections (MAT/BIN), sorted by `BedN` when present; list length must match beds. |
 | `-singleBedStepAligned <0|1>` | Single-bed output uses the same `step + 10` center crop as a multi-bed segment (default `1`); `0` restores the legacy fixed 72-layer crop. |
 | `-chunkCSRDir2 <dir>` / `-df2` / `-dfList2` / `-bProj2` / `-bProjList2` / `-energyWeights <w1,w2>` | Joint dual-window reconstruction shares an activity estimate: `x ← x·Σₖ wₖAₖᵀ(pₖ/(wₖAₖx+bₖ)) / Σₖ wₖAₖᵀ1`. Both windows must have compatible coordinates and the same beds. Native CSRB is supported; paired CSRQ remains experimental, and mixed CSRB/CSRQ is rejected. Default Lu channel order is 208/113 with weights 0.1036/0.0617. CTAC requires explicit per-window energies. CSRB and CSRQ have subset CTAC paths; CSRQ N>1 was added in the 2026-10-09 worktree candidate with unchanged CLI. Its GPU numerical regression is still pending; this is not a production release. |
@@ -114,13 +114,25 @@ tracks the fresh build and invocation checks separately from image-quality claim
 | `-v` / `--version` | `-v` prints the exact build identity and complete embedded changelog; `--version` prints only the machine-readable build identity. |
 
 
+## Configuration ownership
+
+| Owner | Must contain | Must not contain |
+| --- | --- | --- |
+| `bin/recon/config/spect_config.ini` | geometry, detector gate, PSF, CTAC, filtering, mask, normalization, cache root, `[MultiBed]` bed step/flips/rotation | matrix IDs, per-isotope input mode |
+| `bin/recon/config/scanners/<SN>.ini` | `input_mode`, `chunk_format`, `sysmat_high`, `sysmat_low` | bed step, output flips, algorithm parameters |
+| `bin/recon/config/profiles/*.conf` | isotope, `projection_model`, optimizer, iterations, regularization, BSREM parameters | `[MultiBed]`, matrix IDs or paths, device geometry/output policy |
+
+A shared profile's `projection_model` and the scanner's `input_mode` must agree. `single` requires `single`; `merged` requires `merged` or legacy `prefer_split`; `joint` requires `joint` or `prefer_split`. A mismatch is a hard error and is never silently rewritten. `input_mode=joint` is the explicit two-window resource binding.
+
+The source/development `spect_config.ini` binds `scanners/PSC30-MPH6.ini`. Device packages replace it with the installed SN; the universal overlay omits it and the wrapper passes `-scannerConf` from the active preprocessor SN.
+
 ## Multi-bed reconstruction
 
-`-dfList` accepts 1–5 projection files (1–16 with `matrix_grid_output=true`) and sorts paths containing `BedN` by bed number. The software coordinate contract is `Bed1=min_physical_z`, with increasing bed number toward +Z, as recorded in the manifest. PSC uses a 16.8 mm step. `[MultiBed] z_bed_flip=1` is the PSC default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list. This is a software coordinate convention, not a validated patient orientation.
+`-dfList` accepts 1–5 projection files (1–16 with `matrix_grid_output=true`) and sorts paths containing `BedN` by bed number. The software coordinate contract is `Bed1=min_physical_z`, with increasing bed number toward +Z, as recorded in the manifest. PSC uses a 16.8 mm step. `[MultiBed] z_bed_flip=1` is the PSC default and reverses each local bed inside the compact multi-bed mapping; do not compensate by reversing the file list. `bed_step_mm` and all flips/rotation are deployment fields in `spect_config.ini`; shared profiles cannot override them. This is a software coordinate convention, not a validated patient orientation.
 
 For repeated acquisitions of one case, set `[InputOutput] merge_time_segments=true` and pass one timestamp's `SPECT` directory, for example `-df D:\data\predata\260810_dedenzo_mdp_6\20260810_210556\SPECT`. Immediate sibling directories named `YYYYMMDD_HHMMSS` are processed chronologically. Every included segment must contain the identical `BedN.bin` set with matching BIN size/header/geometry; mismatches and non-finite sums fail before reconstruction. The run manifest records every source path per bed.
 
-The bed step is the only multi-bed geometry input: `step_layers = round(bed_step_mm / voxel_z)` (default `-bedStepMm 16.8`; INI `[MultiBed] bed_step_mm`) and every joint uses `overlap = baseNz - step_layers` (164 for the 220-layer 0.3 mm geometry). The retired `-bedOverlap` / `bed_overlap` are accepted and ignored. Beds must be one consecutive `BedN` run with a uniform step. The per-bed center crop is `step + 10` layers (66 for the 260601 geometry). Reconstruction segments are non-overlapping in storage. At save time the only production stitch:
+The bed step is the only multi-bed geometry input: `step_layers = round(bed_step_mm / voxel_z)` (default `-bedStepmm 16.8`; INI `[MultiBed] bed_step_mm`) and every joint uses `overlap = baseNz - step_layers` (164 for the 220-layer 0.3 mm geometry). The retired `-bedOverlap` / `bed_overlap` are accepted and ignored. Beds must be one consecutive `BedN` run with a uniform step. The per-bed center crop is `step + 10` layers (66 for the 260601 geometry). Reconstruction segments are non-overlapping in storage. At save time the only production stitch:
 
 Single-bed output follows that same `step + 10` center-crop geometry when `[MultiBed] single_bed_step_aligned=true` (the default): `16.8 mm / 0.3 mm + 10 = 66` layers. Set it to `false`, or pass `-singleBedStepAligned 0`, only when the legacy fixed 72-layer output contract is required.
 
@@ -160,7 +172,7 @@ SPECT_recon_<version>/
   SHA256SUMS.txt
 ```
 
-Deploy the selected recipe's exact matrix IDs under `bin/matrix/<isotope>/<matrix_id>/`. The global INI chooses one recipe; `-algoConf` replaces it. Source `recon_sections_override_cli=false` allows explicit CLI overrides, while true protects all configured reconstruction fields. See the linked parameter guide for defaults and norm/cache identity.
+Deploy the matrix directories named by `bin/config/scanners/<SN>.ini` under `bin/matrix/<isotope>/<matrix_id>/`. Shared recipes contain only algorithm intent; scanner INIs own matrix IDs, chunk format and input mode. `spect_config.ini` owns geometry, bed step, flips and output policy. The global INI chooses one recipe; `-algoConf` replaces it. Source `recon_sections_override_cli=false` allows explicit CLI overrides, while true protects all configured reconstruction fields.
 
 ### CSRQ: GPU-resident compressed matrix (derived from CSRB) — experimental
 

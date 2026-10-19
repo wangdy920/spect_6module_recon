@@ -237,7 +237,7 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
   }
 
   // Every joint uses the scanner bed step: step = round(bed_step_mm / voxel_z)
-  // (CLI -bedStepMm / INI [MultiBed] bed_step_mm, default 16.8 mm) and
+  // (CLI -bedStepmm / INI [MultiBed] bed_step_mm, default 16.8 mm) and
   // overlap = baseNz - step. There is no separate overlap setting.
   if (expectedOverlap <= 0 || expectedOverlap >= result.baseNz) {
     throw std::runtime_error(
@@ -245,7 +245,7 @@ BedSetupResult prepareBedSetup(ReconArgs &args) {
         " mm is incompatible with baseNz=" + std::to_string(result.baseNz) +
         " at voxel_z=" + std::to_string(voxelSizeZ) +
         " mm (derived overlap would be " + std::to_string(expectedOverlap) +
-        "). Check -bedStepMm / [MultiBed] bed_step_mm.");
+        "). Check -bedStepmm / [MultiBed] bed_step_mm.");
   }
   args.outputBedOverlaps.assign(static_cast<size_t>(joints), expectedOverlap);
 

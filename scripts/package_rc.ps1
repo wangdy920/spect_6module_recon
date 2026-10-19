@@ -159,6 +159,7 @@ Get-ChildItem -LiteralPath (Join-Path $repo "multipinhole\config") -File | ForEa
 }
 
 Copy-Item -LiteralPath (Join-Path $repo "multipinhole/config/profiles") -Destination $packageConfig -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $repo "multipinhole/config/scanners") -Destination $packageConfig -Recurse -Force
 
 Write-Step "generate docs/SPECT_recon_help.txt and version.txt"
 $helpPath = Join-Path $packageDocs "SPECT_recon_help.txt"

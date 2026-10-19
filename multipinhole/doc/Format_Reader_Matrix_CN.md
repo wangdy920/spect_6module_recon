@@ -37,7 +37,7 @@ SMMD v3 十进制按 locale-independent 规则严格解析，再转为现有计�
 
 ## SC60 网格输出
 
-SC60 使用与 PSC 相同的方案（profiles），设备差异由 `scanners/SC60-MPH3.ini`（CSRQ 矩阵绑定）与 SC60 设备包的全局 `spect_config.ini` 承担：90x90x240、0.4 mm、PSF 1.5 mm、支持区 36x36 mm、无 PSC 坏探测器掩膜、关闭 PSC 输出滤波、`bed_step_mm=12`。旧的仿真验证方案 `sc60_osem1000.conf` 已移至 `config/historical/`；由于空值不再清空全局键，复跑它须搭配不含 `bad_detector_file` 的全局配置。
+SC60 使用与 PSC 相同的方案（profiles），设备差异由 `scanners/SC60-MPH3.ini`（CSRQ 矩阵绑定）与 SC60 设备包的全局 `spect_config.ini` 承担：90x90x240、0.4 mm、PSF 1.5 mm、支持区 36x36 mm、无 PSC 坏探测器掩膜、关闭 PSC 输出滤波、`bed_step_mm=12`。旧的 `sc60_osem1000.conf` 已移至 `config/historical/`，现仅保留算法快照；矩阵、探测器几何、PSF/Mask/Filtering 和输出策略必须由当前 scanner INI 与 SC60 全局配置提供，不能从该历史文件继承。
 
 `[InputOutput] matrix_grid_output=true` 保留完整矩阵网格，不执行 PSC 固定中心裁剪或固定 ROI 覆盖。默认 false，保持既有 PSC 行为。对称 profile 与输出裁剪分别配置，不把对称性当作系统型号。
 
@@ -143,7 +143,7 @@ S_m = sum_k H_(k,m)^T e_(k,m)
 
 | 属性 | 当前承载位置 / 边界 |
 |---|---|
-| 核素、matrix ID、两窗次序 | recipe/CLI；名称校验是选择约束，不是矩阵物理内容证明 |
+| 核素、matrix ID、两窗次序 | `scanners/<SN>.ini` 按核素绑定；profile 只声明 `projection_model`。名称校验是选择约束，不是矩阵物理内容证明 |
 | 能窗边界、发射谱、跨窗散射/穿透贡献 | 旧 metadata 未表达；需要生成记录，不从 113/208 等文件名推定 |
 | 每发射光子/每衰变/每单位活度、是否包含效率与时间 | 旧 metadata 未表达；权重与单位必须由生成记录和标定共同确认 |
 | CTAC | 运行时独立因子；每窗能量缩放是现行近似模型，不代表矩阵已存储完整散射路径 |

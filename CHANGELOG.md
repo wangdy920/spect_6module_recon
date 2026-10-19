@@ -8,6 +8,20 @@ experiment commits are intentionally omitted.
 
 ## Current build
 
+- 2026-10-19: configuration ownership is now explicit. Shared algorithm profiles
+  no longer contain matrix IDs, matrix paths or `[MultiBed]`; matrix resources
+  (`input_mode`, `chunk_format`, `sysmat_high`, `sysmat_low`) come only from
+  `config/scanners/<SN>.ini`, while bed step, flips, rotation, PSF, mask,
+  filtering and normalization remain deployment settings in `spect_config.ini`.
+  A profile `projection_model` must agree with scanner `input_mode`
+  (`single/merged/joint/prefer_split`); mismatch is a hard error, not a silent
+  model rewrite. Development `spect_config.ini` binds PSC30-MPH6; device packages
+  bind their installation SN and the universal package is wrapper-driven.
+  Historical `sc60_osem1000.conf` no longer owns `[MultiBed]`.
+- 2026-10-19: the command-line spelling is now `-bedStepmm`. The former
+  `-bedStepMm` spelling remains accepted as a compatibility alias. The INI
+  key, bed geometry, defaults, and reconstruction numerics are unchanged.
+
 - 2026-10-15: configuration contract simplified. A blank value (`key =`) is
   "not configured" at every layer: it no longer clears a lower layer or the
   CLI, independent of `recon_sections_override_cli`. Projection normalization

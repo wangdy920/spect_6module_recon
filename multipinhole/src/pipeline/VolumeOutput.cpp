@@ -89,7 +89,7 @@ CanonicalOutputGeometry computeCanonicalOutputGeometry(
         std::to_string(stepMm) + " mm (" + std::to_string(stepLayers) +
         " layers at voxel_z=" + std::to_string(voxelSizeZmm) +
         " mm) deviates from the scanner bed step " +
-        std::to_string(bedStepMm) + " mm. Set -bedStepMm / [MultiBed] "
+        std::to_string(bedStepMm) + " mm. Set -bedStepmm / [MultiBed] "
         "bed_step_mm to the actual scanner step.");
 
   const int cropLayers =
